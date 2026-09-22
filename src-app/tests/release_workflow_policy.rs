@@ -22,9 +22,8 @@
 //!    `releases/generate-notes` endpoint is classified under "Contents"
 //!    write for the `GITHUB_TOKEN`.
 //!
-//! A third pin covers the summariser sidecar (issue #586): the Xcode 16.4
-//! pin stays, the sidecar alone compiles with a macOS 26 SDK, and the run
-//! fails before bundling when the built sidecar cannot reach the model.
+//! The Xcode 16.4 pin stays for the Metal / GPUI build. A release must not
+//! build, verify, or bundle the removed on-device fleet sidecar.
 
 use std::path::{Path, PathBuf};
 
@@ -181,44 +180,64 @@ fn offset_of_single(workflow: &str, needle: &str) -> usize {
 }
 
 #[test]
-fn the_sidecar_gets_a_macos_26_sdk_and_is_verified_before_bundling() {
+fn a_release_does_not_require_the_removed_fleet_sidecar() {
     let workflow = release_workflow();
 
-    // The pin the Metal / GPUI build depends on is not what #586 changes.
+    // The Metal / GPUI build still pins Xcode 16.4. That pin is independent
+    // of the removed sidecar.
     offset_of_single(
         &workflow,
         "DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer",
     );
+    offset_of_single(&workflow, "cargo build --release -p paneflow-app");
+    offset_of_single(&workflow, "bash scripts/bundle-macos.sh");
 
-    let select = offset_of_single(&workflow, "bash scripts/select-summarizer-sdk.sh");
-    let export = offset_of_single(
-        &workflow,
-        "echo \"PANEFLOW_SUMMARIZER_DEVELOPER_DIR=$sidecar_developer_dir\" >> \"$GITHUB_ENV\"",
-    );
-    let build = offset_of_single(&workflow, "cargo build --release -p paneflow-app");
-    let verify = offset_of_single(&workflow, "bash scripts/verify-summarizer-sidecar.sh");
-    let bundle = offset_of_single(&workflow, "bash scripts/bundle-macos.sh");
+    for banned in [
+        "select-summarizer-sdk.sh",
+        "verify-summarizer-sidecar.sh",
+        "PANEFLOW_SUMMARIZER_DEVELOPER_DIR",
+        "paneflow-summarize",
+        "FoundationModels",
+    ] {
+        assert!(
+            !workflow.contains(banned),
+            "release.yml must not build or require the removed fleet sidecar ({banned})"
+        );
+    }
 
-    assert!(
-        select < export && export < build,
-        "release.yml must export PANEFLOW_SUMMARIZER_DEVELOPER_DIR before the release \
-         build, or src-app/build.rs compiles the sidecar against the Xcode 16.4 SDK, \
-         which has no FoundationModels (issue #586)"
-    );
-    assert!(
-        build < verify && verify < bundle,
-        "release.yml must run scripts/verify-summarizer-sidecar.sh between the release \
-         build and bundle-macos.sh, so a sidecar without FoundationModels is never \
-         signed and shipped (issue #586)"
-    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    for rel in [
+        "scripts/select-summarizer-sdk.sh",
+        "scripts/verify-summarizer-sidecar.sh",
+        "native/agent-summary",
+        "src-app/src/app/agent_summary",
+    ] {
+        assert!(
+            !root.join(rel).exists(),
+            "{rel} must stay removed; a release does not require it"
+        );
+    }
 
-    // The override name is a contract between the workflow and the build
-    // script; a rename on one side silently restores the old SDK.
     let build_script = Path::new(env!("CARGO_MANIFEST_DIR")).join("build.rs");
-    let build_script = std::fs::read_to_string(&build_script)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", build_script.display()));
-    assert!(
-        build_script.contains("\"PANEFLOW_SUMMARIZER_DEVELOPER_DIR\""),
-        "src-app/build.rs no longer reads PANEFLOW_SUMMARIZER_DEVELOPER_DIR (issue #586)"
-    );
+    let build_script = std::fs::read_to_string(&build_script).expect("src-app/build.rs");
+    for banned in [
+        "PANEFLOW_SUMMARIZER_DEVELOPER_DIR",
+        "paneflow-summarize",
+        "swiftc",
+    ] {
+        assert!(
+            !build_script.contains(banned),
+            "src-app/build.rs must not compile the removed fleet sidecar ({banned})"
+        );
+    }
+
+    for script in ["../scripts/bundle-macos.sh", "../scripts/sign-macos.sh"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(script);
+        let text = std::fs::read_to_string(&path).expect("bundle or sign script");
+        assert!(
+            !text.contains("paneflow-summarize"),
+            "{} must not install or sign the removed fleet sidecar",
+            path.display()
+        );
+    }
 }

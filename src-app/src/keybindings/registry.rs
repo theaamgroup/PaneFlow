@@ -573,13 +573,6 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         group: ShortcutGroup::Panes,
     },
     ActionMeta {
-        name: "open_agent_summary",
-        factory: || Box::new(crate::OpenAgentSummary),
-        context: "",
-        description: "Summarise what every agent is doing",
-        group: ShortcutGroup::Agents,
-    },
-    ActionMeta {
         name: "open_work_review",
         factory: || Box::new(crate::OpenWorkReview),
         context: "",

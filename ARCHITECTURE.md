@@ -25,7 +25,7 @@ without Electron.
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 82 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 81 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
@@ -53,10 +53,6 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │                                         + IPC banner (no Settings affordance at all)
 │   ├── agent_status.rs                ← hookless agent state: pane OSC observations + Claude session-registry sweep
 │   ├── broadcast.rs / composer.rs     ← multi-pane prompt fan-out, prompt composer
-│   ├── agent_summary/                 ← Cmd+Shift+I: what every agent pane is doing, one line each,
-│                                         generated on-device by Apple Foundation Models through the
-│                                         Swift sidecar in `native/agent-summary/` (`summarize.rs` is the
-│                                         pure prompt/parse core; `model.rs` spawns the sidecar off-thread)
 │   ├── pane_overview/                 ← Cmd+Shift+P expose: every terminal pane across every
 │                                         workspace in a compact grid; tabs stay adjacent with
 │                                         split-pane labels and eight-row previews (rows.rs: packing/navigation)

@@ -265,6 +265,22 @@ fn leftover_workspace_editor_menu_keys_still_load() {
 }
 
 #[test]
+fn leftover_agent_summary_enabled_still_loads() {
+    // Older paneflow.json files carry the removed fleet agent-summary switch.
+    // Unknown keys are ignored; the rest of the file must still load, and the
+    // retired key must not round-trip.
+    let config = parse_and_validate(
+        r#"{
+            "theme": "Cursor Dark",
+            "agent_summary_enabled": false
+        }"#,
+    );
+    assert_eq!(config.theme.as_deref(), Some("Cursor Dark"));
+    let json = serde_json::to_value(&config).unwrap();
+    assert!(json.get("agent_summary_enabled").is_none(), "{json}");
+}
+
+#[test]
 fn test_leftover_telemetry_key_is_ignored_and_rest_of_config_is_used() {
     // Existing paneflow.json files may still contain a telemetry block
     // after the subsystem was removed. Unknown keys are ignored; the

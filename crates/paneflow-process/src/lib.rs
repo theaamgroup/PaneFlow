@@ -780,8 +780,7 @@ mod tests {
     }
 
     /// A child cancelled mid-run returns `Cancelled` and is terminated, not left
-    /// to run out its full deadline. This is the contract the agent-summary
-    /// overlay relies on to kill a sidecar when the overlay is dismissed.
+    /// to run out its full deadline.
     #[test]
     fn sleeping_child_is_killed_when_cancelled() {
         let cancel = std::sync::Arc::new(AtomicBool::new(false));

@@ -110,7 +110,6 @@ mod tests {
             option_as_meta: Some(true),
             shell_integration: Some(true),
             agent_stall_detection: Some(true),
-            agent_summary_enabled: Some(true),
             agent_stall_threshold_secs: Some(300),
             crash_reporting: Some(true),
             review_enabled: Some(true),

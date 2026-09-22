@@ -6,7 +6,6 @@ pub mod about_dialog;
 pub mod actions;
 pub(crate) mod agent_context;
 pub(crate) mod agent_status;
-pub mod agent_summary;
 pub mod bootstrap;
 pub mod broadcast;
 pub mod cli_diff_dock;
