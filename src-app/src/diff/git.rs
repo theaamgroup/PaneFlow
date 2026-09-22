@@ -1863,7 +1863,7 @@ pub(crate) mod tests {
             "config alias.rev-parse"
         );
 
-        assert_eq!(is_git_worktree(&repo).unwrap(), true);
+        assert!(is_git_worktree(&repo).unwrap());
         assert!(
             !marker.exists(),
             "alias.rev-parse ran during repository discovery"
