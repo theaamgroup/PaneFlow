@@ -70,26 +70,6 @@ pub struct PaneFlowConfig {
     /// New-tab branch overrides keyed by workspace cwd. Empty uses that workspace's checkout.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub workspace_new_tab_branches: HashMap<String, String>,
-    /// Show the built-in "Open in Zed" workspace context-menu row.
-    /// Explicit booleans override; `None` shows it only when the `zed` CLI is
-    /// installed. This affects menu chrome only, not the global keybinding.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub workspace_zed_menu_visible: Option<bool>,
-    /// Show the built-in "Open in Cursor" workspace context-menu row.
-    /// Explicit booleans override; `None` shows it only when the `cursor` CLI
-    /// is installed. This affects menu chrome only, not the global keybinding.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub workspace_cursor_menu_visible: Option<bool>,
-    /// Show the built-in "Open in VS Code" workspace context-menu row.
-    /// Explicit booleans override; `None` shows it only when the `code` CLI is
-    /// installed. This affects menu chrome only, not the global keybinding.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub workspace_vscode_menu_visible: Option<bool>,
-    /// Show the built-in "Open in Windsurf" workspace context-menu row.
-    /// Explicit booleans override; `None` shows it only when the `windsurf`
-    /// CLI is installed. This affects menu chrome only, not the global keybinding.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub workspace_windsurf_menu_visible: Option<bool>,
     /// Terminal line height, as a multiplier of the font's own line height
     /// (default: 1.0, valid range: 0.8-2.5).
     #[serde(default, deserialize_with = "lenient_value_or_default")]
@@ -205,9 +185,10 @@ pub struct PaneFlowConfig {
     /// larger value never blocks the UI.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub submit_paste_delay_ms: Option<u64>,
-    /// External editor for terminal file links. An explicit command takes
-    /// precedence over `$VISUAL` and `$EDITOR`; a failed launch falls through
-    /// to those variables, CLI probes, then the macOS file handler.
+    /// External editor for terminal file links and the workspace Open in editor
+    /// action. An explicit command takes precedence over `$VISUAL` and
+    /// `$EDITOR`; a failed file-link launch falls through to those variables,
+    /// CLI probes, then the macOS file handler.
     /// `auto` (or an absent value) starts with the environment variables.
     /// `system` uses only the macOS handler, without a line/column target.
     /// Commands may include quoted paths and flags; no shell is invoked.

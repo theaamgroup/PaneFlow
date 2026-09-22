@@ -48,22 +48,7 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
     },
     DefaultBinding {
         key: "ctrl-alt-z",
-        action_name: "open_workspace_in_zed",
-        context: None,
-    },
-    DefaultBinding {
-        key: "ctrl-alt-c",
-        action_name: "open_workspace_in_cursor",
-        context: None,
-    },
-    DefaultBinding {
-        key: "ctrl-alt-v",
-        action_name: "open_workspace_in_vscode",
-        context: None,
-    },
-    DefaultBinding {
-        key: "ctrl-alt-w",
-        action_name: "open_workspace_in_windsurf",
+        action_name: "open_workspace_in_editor",
         context: None,
     },
     DefaultBinding {

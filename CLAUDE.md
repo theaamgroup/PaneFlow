@@ -24,7 +24,7 @@ dependency sources, and command examples. Use [keybindings](docs/user/keybinding
 and [configuration runtime behavior](docs/user/configuration/runtime.md) for their
 reference tables. Read [DESIGN.md](DESIGN.md) before UI changes and update it in the same PR.
 
-The registry currently declares **86 GPUI action types**, **86 actions total**.
+The registry currently declares **83 GPUI action types**, **83 actions total**.
 Update both counts when changing `app/actions.rs`; its drift test reads this file.
 
 ## Verify before claiming

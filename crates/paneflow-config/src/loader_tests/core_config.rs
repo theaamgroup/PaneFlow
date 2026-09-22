@@ -240,6 +240,31 @@ fn leftover_files_tree_and_editor_keys_still_load() {
 }
 
 #[test]
+fn leftover_workspace_editor_menu_keys_still_load() {
+    // The per-editor workspace menu toggles are gone. An old paneflow.json
+    // that still carries them must load, and the keys must not round-trip.
+    let config = parse_and_validate(
+        r#"{
+            "theme": "Cursor Dark",
+            "workspace_zed_menu_visible": true,
+            "workspace_cursor_menu_visible": false,
+            "workspace_vscode_menu_visible": true,
+            "workspace_windsurf_menu_visible": false
+        }"#,
+    );
+    assert_eq!(config.theme.as_deref(), Some("Cursor Dark"));
+    let json = serde_json::to_value(&config).unwrap();
+    for key in [
+        "workspace_zed_menu_visible",
+        "workspace_cursor_menu_visible",
+        "workspace_vscode_menu_visible",
+        "workspace_windsurf_menu_visible",
+    ] {
+        assert!(json.get(key).is_none(), "{key} must not round-trip: {json}");
+    }
+}
+
+#[test]
 fn test_leftover_telemetry_key_is_ignored_and_rest_of_config_is_used() {
     // Existing paneflow.json files may still contain a telemetry block
     // after the subsystem was removed. Unknown keys are ignored; the

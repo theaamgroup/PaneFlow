@@ -150,26 +150,6 @@
       "description": "Order the workspace sidebar automatically: pinned first, then workspaces with something running, then idle ones, alphabetically within each group. Sibling git worktrees stay contiguous. Drag-to-reorder is disabled while this is on. Default false (manual, drag-ordered).",
       "default": false
     },
-    "workspace_zed_menu_visible": {
-      "type": ["boolean", "null"],
-      "description": "Show the 'Open in Zed' row in workspace context menus. True always shows it, false always hides it, and null/omitted shows it only when the Zed CLI is installed. This does not affect keybindings.",
-      "default": null
-    },
-    "workspace_cursor_menu_visible": {
-      "type": ["boolean", "null"],
-      "description": "Show the 'Open in Cursor' row in workspace context menus. True always shows it, false always hides it, and null/omitted shows it only when the Cursor CLI is installed. This does not affect keybindings.",
-      "default": null
-    },
-    "workspace_vscode_menu_visible": {
-      "type": ["boolean", "null"],
-      "description": "Show the 'Open in VS Code' row in workspace context menus. True always shows it, false always hides it, and null/omitted shows it only when the VS Code CLI is installed. This does not affect keybindings.",
-      "default": null
-    },
-    "workspace_windsurf_menu_visible": {
-      "type": ["boolean", "null"],
-      "description": "Show the 'Open in Windsurf' row in workspace context menus. True always shows it, false always hides it, and null/omitted shows it only when the Windsurf CLI is installed. This does not affect keybindings.",
-      "default": null
-    },
     "window_backdrop": {
       "type": ["string", "null"],
       "description": "Native window backdrop. 'auto' uses a transparent surface on macOS; 'blurred' opts into blur; 'transparent' keeps a transparent surface; 'opaque'/'off' disables native transparency. Read once at startup; PANEFLOW_WINDOW_BACKDROP overrides it for one launch.",
@@ -244,7 +224,7 @@
     },
     "external_editor": {
       "type": ["string", "null"],
-      "description": "Editor command for terminal file links, before VISUAL and EDITOR. 'auto' or null tries VISUAL, EDITOR, then code, cursor, zed, subl, code-insiders, windsurf, hx, nvim, vim, emacs, and the OS opener. Failed commands fall through. 'system' uses only the OS opener (no line/column). Commands may include quoted paths and flags; no shell is invoked.",
+      "description": "Editor command for terminal file links and for opening a workspace in the configured editor, before VISUAL and EDITOR. 'auto' or null tries VISUAL, EDITOR, then code, cursor, zed, subl, code-insiders, windsurf, hx, nvim, vim, emacs, and the OS opener. Failed file-link commands fall through. 'system' uses only the OS opener (no line/column). Commands may include quoted paths and flags; no shell is invoked.",
       "default": "auto"
     },
     "shortcuts": {
