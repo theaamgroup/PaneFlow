@@ -68,21 +68,85 @@ pub fn codex_config_toml() -> Option<PathBuf> {
 ///    checkout's - whose parent is the root returned.
 ///
 /// Every path is canonicalized before comparison, so `..` segments and
-/// symlinks cannot smuggle a mismatch past the backlink check. The whole
-/// verification is a handful of stats and two small reads, which keeps it
-/// inside the shim's ~15 ms launch budget where a `git rev-parse` subprocess
-/// would not.
+/// symlinks cannot smuggle a mismatch past the backlink check. On a local
+/// disk the verification is a handful of stats and two small reads, which
+/// keeps a healthy checkout inside the shim's ~15 ms launch budget where a
+/// `git rev-parse` subprocess would not.
+///
+/// A stalled `stat` is not bounded by that budget. `exists` and
+/// `canonicalize` block in the kernel for the mount's own timeout on a
+/// wedged SMB, NFS, or iCloud volume (the failure `find_git_dir` was
+/// bounded for, issue #403). The walk therefore runs on a helper thread
+/// abandoned after [`LINKED_WORKTREE_PROBE_TIMEOUT`]. A late answer, or a
+/// helper that could not be spawned, is `None`: the caller keeps the
+/// cwd-relative `.claude` path, and the worker is left to unwind once the
+/// filesystem finally answers.
 ///
 /// Returns `None` for an ordinary checkout (`.git` is a directory), a cwd
 /// outside any repository, a bare-repo worktree (its common dir is not named
-/// `.git`, so there is no main checkout to redirect to), and any pointer
-/// failing a check above - in every one of those cases the caller keeps its
-/// existing cwd-relative behaviour.
+/// `.git`, so there is no main checkout to redirect to), a walk that does
+/// not finish in time, and any pointer failing a check above - in every one
+/// of those cases the caller keeps its existing cwd-relative behaviour.
 pub fn linked_worktree_main_checkout(cwd: &Path) -> Option<PathBuf> {
+    let cwd = cwd.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("worktree-probe".to_string())
+        .spawn(move || {
+            let _ = tx.send(linked_worktree_main_checkout_blocking(&cwd));
+        });
+    if spawned.is_err() {
+        // The closure was dropped with the error, so nothing is left running.
+        return None;
+    }
+    // A timeout and a worker that never sends are both "not a linked worktree".
+    rx.recv_timeout(LINKED_WORKTREE_PROBE_TIMEOUT)
+        .unwrap_or_default()
+}
+
+/// Longest [`linked_worktree_main_checkout`] may hold its caller. A local
+/// checkout answers in microseconds; only a dead network or cloud mount runs
+/// this out. Same bound as the git-dir probe: a cwd that cannot answer
+/// `stat` in time is not a linked worktree for this launch.
+const LINKED_WORKTREE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Test-only stand-in for a dead network mount: probing `.git` inside any
+/// directory listed here stalls for [`STALLED_WORKTREE_PROBE_DELAY`] before
+/// answering "absent".
+#[cfg(test)]
+static STALLED_WORKTREE_PROBE_DIRS: std::sync::Mutex<Vec<PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+const STALLED_WORKTREE_PROBE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// `Path::exists` on a `.git` candidate as the walk sees it. Under test a
+/// candidate whose parent is registered in [`STALLED_WORKTREE_PROBE_DIRS`]
+/// behaves like an entry on an unmounted volume.
+fn worktree_git_entry_exists(candidate: &Path) -> bool {
+    #[cfg(test)]
+    {
+        let parent = candidate.parent();
+        let stalled = STALLED_WORKTREE_PROBE_DIRS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|dir| Some(dir.as_path()) == parent);
+        if stalled {
+            std::thread::sleep(STALLED_WORKTREE_PROBE_DELAY);
+            return false;
+        }
+    }
+    candidate.exists()
+}
+
+/// The blocking half of [`linked_worktree_main_checkout`]: every `stat` in
+/// the walk happens here.
+fn linked_worktree_main_checkout_blocking(cwd: &Path) -> Option<PathBuf> {
     let pointer = cwd
         .ancestors()
         .map(|ancestor| ancestor.join(".git"))
-        .find(|candidate| candidate.exists())?;
+        .find(|candidate| worktree_git_entry_exists(candidate))?;
     // A symlinked `.git` is an alias, not membership. Pointed at another
     // worktree's real `.git` file it passes every check below - reading
     // follows the link and canonicalizing collapses the alias onto the
@@ -363,6 +427,38 @@ mod tests {
         let loose = temp.path().join("loose");
         std::fs::create_dir_all(&loose).unwrap();
         assert_eq!(linked_worktree_main_checkout(&loose), None);
+    }
+
+    /// Issue #693: an ancestor `.git` stat on a dead mount must not pin the
+    /// shim. The walk answers within the probe bound and yields `None`, so
+    /// the caller keeps the cwd-relative `.claude` path.
+    #[test]
+    fn linked_worktree_probe_returns_within_bound_when_stat_stalls() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stalled = tmp.path().join("unmounted-volume");
+        STALLED_WORKTREE_PROBE_DIRS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(stalled.clone());
+        let bound = STALLED_WORKTREE_PROBE_DELAY / 2;
+
+        let started = std::time::Instant::now();
+        let result = linked_worktree_main_checkout(&stalled);
+        let elapsed = started.elapsed();
+
+        STALLED_WORKTREE_PROBE_DIRS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|dir| dir != &stalled);
+
+        assert!(
+            elapsed < bound,
+            "linked_worktree_main_checkout blocked the caller for {elapsed:?} (bound {bound:?})"
+        );
+        assert_eq!(
+            result, None,
+            "a stalled cwd must keep the cwd-relative path"
+        );
     }
 
     /// A `.git` file is project-controlled data, and accepting it unverified
