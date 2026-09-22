@@ -32,13 +32,17 @@ else
 fi
 [[ -f "${ZDOTDIR:-$HOME}/.zshenv" ]] && source "${ZDOTDIR:-$HOME}/.zshenv"
 __paneflow_osc7() {
+    # Index UTF-8 bytes. MULTIBYTE subscripting stays on if `LC_ALL=C` does not retune it,
+    # and a low-byte mask then turns U+4E2D into '-'.
+    emulate -L zsh
+    setopt localoptions nomultibyte
     local LC_ALL=C
     local encoded='' byte hex code i
     for ((i=0; i<${#PWD}; i++)); do
         byte="${PWD:$i:1}"
         case "$byte" in
             [a-zA-Z0-9/._~-]) encoded+="$byte" ;;
-            * ) printf -v code '%d' "'$byte"; printf -v hex '%%%02X' "$((code & 255))"; encoded+="$hex" ;;
+            *) printf -v code '%d' "'$byte"; printf -v hex '%%%02X' "$code"; encoded+="$hex" ;;
         esac
     done
     printf '\e]7;file://%s%s\a' "${HOST}" "$encoded"
@@ -80,13 +84,20 @@ __paneflow_path_prepend
 const BASH_OSC7: &str = r#"# PaneFlow shell integration - OSC 7 CWD reporting
 [[ -f ~/.bashrc ]] && source ~/.bashrc
 __paneflow_osc7() {
+    # `LC_ALL=C` makes `${PWD:$i:1}` one byte. bash 3.2 still reports 128..=255 as a
+    # negative code; `%02X` would widen that. A low-byte mask turns U+4E2D into '-'.
     local LC_ALL=C
     local encoded='' byte hex code i
     for ((i=0; i<${#PWD}; i++)); do
         byte="${PWD:$i:1}"
         case "$byte" in
             [a-zA-Z0-9/._~-]) encoded+="$byte" ;;
-            * ) printf -v code '%d' "'$byte"; printf -v hex '%%%02X' "$((code & 255))"; encoded+="$hex" ;;
+            *)
+                printf -v code '%d' "'$byte"
+                code=$((code < 0 ? code + 256 : code))
+                printf -v hex '%%%02X' "$code"
+                encoded+="$hex"
+                ;;
         esac
     done
     printf '\e]7;file://%s%s\a' "${HOSTNAME}" "$encoded"
@@ -516,6 +527,139 @@ mod tests {
                 frame.ends_with("/percent%2520%20space%23%3F%C3%A9%07%1B%0A\u{7}"),
                 "{shell}: {frame:?}"
             );
+        }
+    }
+
+    /// U+4E2D is one character and three UTF-8 bytes. Character subscripting plus
+    /// `code & 255` reports that directory as `-`, which the session then stores.
+    #[cfg(unix)]
+    #[test]
+    fn osc7_emitters_encode_cjk_directory_as_utf8_bytes() {
+        assert!(
+            super::ZSH_OSC7.contains("emulate -L zsh"),
+            "zsh must enter zsh emulation before subscripting"
+        );
+        assert!(
+            super::ZSH_OSC7.contains("setopt localoptions nomultibyte"),
+            "zsh must index PWD as bytes even when MULTIBYTE is on"
+        );
+        assert!(
+            !super::ZSH_OSC7.contains("& 255")
+                && !super::ZSH_OSC7.contains("&255")
+                && !super::BASH_OSC7.contains("& 255")
+                && !super::BASH_OSC7.contains("&255"),
+            "masking a codepoint with 255 encodes U+4E2D as '-'"
+        );
+
+        let marker = "\u{4E2D}";
+        for (shell, source) in [
+            ("/bin/bash", super::BASH_OSC7),
+            ("/bin/zsh", super::ZSH_OSC7),
+        ] {
+            let start = source.find("__paneflow_osc7() {").unwrap();
+            let end = start + source[start..].find("\n}").unwrap() + 2;
+            let mut script = String::new();
+            if shell.ends_with("zsh") {
+                script.push_str("setopt multibyte\n");
+            }
+            script.push_str(&source[start..end]);
+            script.push_str("\n__paneflow_osc7");
+
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = dir.path().join(marker);
+            std::fs::create_dir(&cwd).unwrap();
+            let output = std::process::Command::new(shell)
+                .args(["-f", "-c", &script])
+                .env("LC_ALL", "C.UTF-8")
+                .current_dir(&cwd)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{shell}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let frame = String::from_utf8(output.stdout).unwrap();
+            assert_eq!(frame.matches('\u{1b}').count(), 1, "{shell}: {frame:?}");
+            assert_eq!(frame.matches('\u{7}').count(), 1, "{shell}: {frame:?}");
+            assert!(
+                frame.contains("%E4%B8%AD"),
+                "{shell}: U+4E2D must be UTF-8 percent-encoding, got {frame:?}"
+            );
+            assert!(
+                !frame.contains("%2D"),
+                "{shell}: U+4E2D must not encode as '-', got {frame:?}"
+            );
+            let decoded = percent_decode_osc7_path(&frame);
+            assert!(
+                decoded.ends_with(marker) && !decoded.ends_with('-'),
+                "{shell}: decoded {decoded:?} from {frame:?}"
+            );
+            assert_eq!(
+                std::fs::canonicalize(&decoded).unwrap(),
+                std::fs::canonicalize(&cwd).unwrap(),
+                "{shell}: stdout path {decoded:?}"
+            );
+
+            let mut state = super::super::TerminalState::new_display_only(6, 80);
+            state.write_output(frame.as_bytes());
+            state.sync();
+            let stored = state
+                .current_cwd
+                .clone()
+                .expect("OSC 7 should set the session cwd");
+            assert!(
+                stored.ends_with(marker) && !stored.ends_with('-'),
+                "{shell}: session cwd {stored:?} from {frame:?}"
+            );
+            assert_eq!(
+                std::fs::canonicalize(&stored).unwrap(),
+                std::fs::canonicalize(&cwd).unwrap(),
+                "{shell}: session cwd {stored:?}"
+            );
+        }
+    }
+
+    /// Path from one BEL-terminated OSC 7 frame. Stdout is checked on its own so a
+    /// `%2D` encoding fails even when the session drops the frame.
+    #[cfg(unix)]
+    fn percent_decode_osc7_path(frame: &str) -> String {
+        let marker = "]7;file://";
+        let start = frame.find(marker).expect("OSC 7 file URI");
+        let rest = &frame[start + marker.len()..];
+        let path_at = rest.find('/').expect("absolute OSC 7 path");
+        let encoded = rest[path_at..]
+            .split(['\u{7}', '\u{1b}'])
+            .next()
+            .expect("OSC 7 path");
+        let bytes = encoded.as_bytes();
+        let mut output = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' {
+                assert!(
+                    index + 2 < bytes.len(),
+                    "truncated percent escape in {encoded:?}"
+                );
+                let high = hex_digit(bytes[index + 1]).expect("percent high digit");
+                let low = hex_digit(bytes[index + 2]).expect("percent low digit");
+                output.push((high << 4) | low);
+                index += 3;
+            } else {
+                output.push(bytes[index]);
+                index += 1;
+            }
+        }
+        String::from_utf8(output).expect("OSC 7 path must be UTF-8 after percent-decoding")
+    }
+
+    #[cfg(unix)]
+    fn hex_digit(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
         }
     }
 
