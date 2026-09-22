@@ -1,13 +1,12 @@
 use super::{
-    cleanup_hook_config_file, config_dir_is_symlink, install_hook_config_file,
-    is_paneflow_hook_command, is_paneflow_matcher_group, merge_paneflow_hooks,
-    paneflow_hook_program_token, paneflow_ipc_reachable, refuse_symlinked_project_hook_file,
-    remove_paneflow_hooks, safe_log_text, safe_path_display, sweep_orphan_hook_config, HookInstall,
-    HookInstallResult, HookInstallSkip, HookLease, InvalidJsonPolicy, CLAUDE_HOOK_EVENTS,
+    cleanup_hook_config_file, install_hook_config_file, is_paneflow_hook_command,
+    is_paneflow_matcher_group, merge_paneflow_hooks, paneflow_hook_program_token,
+    paneflow_ipc_reachable, refuse_symlinked_project_hook_file, remove_paneflow_hooks,
+    safe_log_text, safe_path_display, sweep_orphan_hook_config, HookInstall, HookInstallResult,
+    HookInstallSkip, HookLease, InvalidJsonPolicy, CLAUDE_HOOK_EVENTS,
 };
 use paneflow_agent_config::{
-    claude_settings_json, linked_worktree_main_checkout, read_optional_text, with_config_lock,
-    write_json_atomic,
+    claude_settings_json, linked_worktree_main_checkout, read_optional_text,
 };
 use std::env;
 use std::path::{Path, PathBuf};
@@ -163,29 +162,11 @@ fn claude_project_dir(cwd: &Path) -> PathBuf {
 /// Remove managed groups from the project-local settings whose hook program is
 /// gone (#544). Best-effort: unreadable, unparseable, and symlinked files are
 /// left exactly as they are, and the file itself is never deleted - ownership
-/// is unknown here, only the dead groups are.
+/// is unknown here, only the dead groups are. The walk that covers every
+/// wrapped agent lives in [`paneflow_agent_config::reap_dead_project_hooks`];
+/// this remains the Claude installer's own pass (#662).
 fn prune_dead_project_hooks(path: &Path) {
-    // #234: the same two symlink refusals `sweep_orphan_hook_config` makes.
-    // A project-local link is under the checkout's control, not the user's.
-    if path.parent().is_some_and(config_dir_is_symlink) || config_dir_is_symlink(path) {
-        return;
-    }
-    let pruned = with_config_lock(path, || {
-        let Some(content) = read_optional_text(path)? else {
-            return Ok(false);
-        };
-        let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&content) else {
-            return Ok(false);
-        };
-        if !paneflow_agent_config::claude_hooks::remove_dead_hooks(&mut root, &|program| {
-            !program_exists(program)
-        }) {
-            return Ok(false);
-        }
-        write_json_atomic(path, &root)?;
-        Ok(true)
-    });
-    match pruned {
+    match paneflow_agent_config::prune_dead_hook_file(path) {
         Ok(true) => crate::diagnose(&format!(
             "claude: removed stale managed hooks from {}",
             safe_path_display(path)
