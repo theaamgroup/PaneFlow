@@ -366,6 +366,45 @@ pub fn save_config_values_checked<const N: usize>(values: [(&str, serde_json::Va
     write_config_checked(&path, &json)
 }
 
+/// Save `theme_mode` and `theme` together. `None` removes that key, which is
+/// how Settings → Appearance resets to the built-in default. One
+/// read-modify-write so the pair cannot land apart and a sibling key stays.
+pub(crate) fn save_theme_selection(theme_mode: Option<&str>, theme: Option<&str>) -> bool {
+    let Some(path) = paneflow_config::loader::config_path() else {
+        log::warn!("config: cannot determine config path, not saving");
+        return false;
+    };
+    write_theme_selection_at(&path, theme_mode, theme)
+}
+
+/// [`save_theme_selection`] against an explicit path, so a test can prove the
+/// write without touching the user's `paneflow.json`.
+pub(crate) fn write_theme_selection_at(
+    path: &Path,
+    theme_mode: Option<&str>,
+    theme: Option<&str>,
+) -> bool {
+    let _guard = config_write_guard();
+    let Ok(mut json) = load_raw_config(path) else {
+        return false;
+    };
+    apply_theme_selection(&mut json, theme_mode, theme);
+    write_config_checked(path, &json)
+}
+
+fn apply_theme_selection(
+    json: &mut serde_json::Value,
+    theme_mode: Option<&str>,
+    theme: Option<&str>,
+) {
+    let field = |value: Option<&str>| match value {
+        Some(text) => serde_json::Value::String(text.to_string()),
+        None => serde_json::Value::Null,
+    };
+    apply_top_level_field(json, "theme_mode", field(theme_mode));
+    apply_top_level_field(json, "theme", field(theme));
+}
+
 /// Pure read-modify-write of the `shortcuts` map. Extracted from
 /// [`save_shortcut`] so the dedupe + collision semantics can be unit-tested
 /// without touching the real config path (mirrors [`apply_terminal_field`]).

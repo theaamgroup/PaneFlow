@@ -963,7 +963,7 @@ impl PaneFlowApp {
     }
 
     /// Close every open popover. Menus and only menus, deliberately: not one
-    /// of these five fields tracks focus, which is why this needs no `Window`
+    /// of these fields tracks focus, which is why this needs no `Window`
     /// and why its ~17 call sites - several of which have no `Window` to give
     /// it - are safe by construction.
     ///
@@ -994,7 +994,6 @@ impl PaneFlowApp {
         self.workspace_menu_open = None;
         self.tab_menu_open = None;
         self.pane_menu_open = None;
-        self.profile_menu_open = None;
         self.review.dismiss_popovers();
         self.agent_sessions.sessions_menu_open = None;
         // Issue #349: the rail header's Customize Sidebar popover is a menu

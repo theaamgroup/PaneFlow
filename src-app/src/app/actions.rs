@@ -81,8 +81,8 @@ actions!(
         Paste,
         SelectAll,
         OpenHelp,
-        // Issue #105: Settings is reachable from the menu bar (PaneFlow >
-        // Settings...), not only from the title-bar profile menu. Deliberately
+        // Issue #105: Settings is reachable only from the menu bar (PaneFlow >
+        // Settings...). Deliberately
         // absent from `keybindings::registry::ACTIONS`, exactly like `About`
         // and `OpenHelp`: a menu-only action with no default chord would
         // otherwise show up as a permanently `Unassigned` row in Settings >

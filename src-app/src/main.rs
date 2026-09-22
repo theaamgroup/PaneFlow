@@ -1423,10 +1423,6 @@ struct PaneFlowApp {
     /// (issue #521): a repeat click or held `Cmd+N` on a mount that is not
     /// responding coalesces instead of spawning another probe thread.
     recent_probes: crate::app::workspace_ops::RecentProbes,
-    /// Profile menu currently open at the right of the title bar.
-    /// Stores the click position so the menu can anchor near the profile
-    /// button. `None` = closed.
-    profile_menu_open: Option<Point<Pixels>>,
     /// US-053: agent-sessions sidebar state (see `AgentSessionsState`).
     agent_sessions: AgentSessionsState,
     /// Ephemeral bottom-right toast.
@@ -1476,21 +1472,9 @@ struct PaneFlowApp {
     /// Focus handle routing key events to the System Info dialog while open
     /// (issue #244).
     system_info_dialog_focus: FocusHandle,
-    /// Whether the command-palette-style theme picker is visible.
-    show_theme_picker: bool,
-    /// Typeahead filter for the theme picker (case-insensitive substring).
-    theme_picker_query: String,
-    /// Index into the *filtered* theme list for the currently highlighted row.
-    theme_picker_selected_idx: usize,
-    /// Focus handle routing key events to the theme picker while it's open.
-    theme_picker_focus: FocusHandle,
-    /// Scroll state for the theme picker list (visible scrollbar overlay).
-    theme_picker_scroll: gpui::ScrollHandle,
-    theme_picker_drag: Option<crate::widgets::scrollbar::ScrollDragState>,
-
-    /// Issue #523: the command palette (`app/command_palette.rs`), the theme
-    /// picker's shell over every context-free action. Rows are derived from
-    /// `effective_shortcuts` on every render, never stored.
+    /// Issue #523: the command palette (`app/command_palette.rs`) over every
+    /// context-free action. Rows are derived from `effective_shortcuts` on
+    /// every render, never stored.
     command_palette_open: bool,
     command_palette_query: String,
     command_palette_selected: usize,
@@ -1508,10 +1492,9 @@ struct PaneFlowApp {
     /// editor, the sidebar, the empty-workspace placeholder.
     command_palette_return_focus: Option<FocusHandle>,
     /// The pane each open overlay was opened from, keyed by overlay (#584:
-    /// theme picker, broadcast picker, Pane
-    /// Overview, pane palette). An overlay's own close
-    /// returns the focus to its entry; the command palette reads the
-    /// outermost one when it folds them (#523).
+    /// broadcast picker, Pane Overview, pane palette, agent summary). An
+    /// overlay's own close returns the focus to its entry; the command
+    /// palette reads the outermost one when it folds them (#523).
     overlay_origins: app::overlay_origin::OverlayOrigins,
     /// EP-001 US-001/US-003 (cli-cockpit): live Composer session, `None` =
     /// closed. The target pane renders the pushed slot snapshot.
@@ -1519,7 +1502,7 @@ struct PaneFlowApp {
     /// EP-001 US-002/US-003 (cli-cockpit): broadcast groups + active index +
     /// per-terminal queued-prompt buffers. Volatile by design (v1).
     broadcast: app::broadcast::BroadcastState,
-    /// Broadcast-group picker modal (theme-picker scaffold): visibility,
+    /// Broadcast-group picker modal: visibility,
     /// name-input buffer (create/rename), keyboard cursor, in-place rename
     /// target, inline validation error, and the key-routing focus handle.
     broadcast_picker_open: bool,
@@ -1859,8 +1842,7 @@ impl PaneFlowApp {
 }
 
 // Issue #533: live New Workspace entry points (DESIGN.md §5.2); no sidebar
-// `+` since #105. The title-bar profile menu is reachable but carries no New
-// Workspace row, so it is not named here. The Open folder button is the
+// `+` since #105. The Open folder button is the
 // sidebar's `empty-new-ws` row, not part of this block, and the sidebar can be
 // collapsed (Cmd+Alt+B, persisted), so the copy says where the button lives.
 const EMPTY_APP_WORKSPACE_HINT: &str = "Create your first workspace with Cmd+Shift+N, Window ▸ New Workspace, \
@@ -2499,13 +2481,6 @@ impl Render for PaneFlowApp {
             app_content = app_content.child(self.render_toast(toast, ui, cx));
         }
 
-        if let Some(anchor) = self.profile_menu_open {
-            app_content = app_content.child(self.render_profile_menu(anchor, window, cx));
-        }
-
-        if self.show_theme_picker {
-            app_content = app_content.child(self.render_theme_picker(cx));
-        }
         // Issue #523: the command palette. Not mode-gated: it lists only
         // context-free actions, and each of those already decides for itself
         // what it does outside the CLI cockpit.

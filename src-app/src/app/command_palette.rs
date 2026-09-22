@@ -3,9 +3,9 @@
 //! and its live binding, filtered on whole words, dispatched on Enter.
 //!
 //! Bound to `secondary-shift-o` (Cmd+Shift+O) in this fork: upstream's
-//! `secondary-shift-p` is Pane Overview here (issue #339). The overlay is the
-//! theme picker's shell (`menu_surface`, 544 wide, docked 96 px from the top
-//! over the 0.4 scrim) and reads `effective_shortcuts`, so a user override in
+//! `secondary-shift-p` is Pane Overview here (issue #339). The overlay is a
+//! `menu_surface` 544 wide, docked 96 px from the top over the 0.4 scrim,
+//! and reads `effective_shortcuts`, so a user override in
 //! `paneflow.json` shows up on the row without a second source of truth. The
 //! palette never lists itself: opening it from itself is a toggle, not a
 //! command.
@@ -80,8 +80,8 @@ impl PaneFlowApp {
             return;
         }
         // Stacking: the chord can arrive while another overlay owns the
-        // focus (Pane Overview, the theme picker, the
-        // broadcast picker, pane search). None of those is a
+        // focus (Pane Overview, the broadcast picker, the
+        // agent summary). None of those is a
         // descendant of a pane, so capturing focus now would hand it back to
         // the overlay before dispatch and leave Split / Close pane without a
         // target. Fold each one first, through its own focus-restoring close
@@ -113,10 +113,6 @@ impl PaneFlowApp {
         // inherited one; the outermost origin read above still wins.
         if self.pane_overview.is_some() {
             self.close_pane_overview_and_restore_focus(window, cx);
-            folded_without_restore = true;
-        }
-        if self.show_theme_picker {
-            self.close_theme_picker(cx);
             folded_without_restore = true;
         }
         if self.broadcast_picker_open {
@@ -669,7 +665,6 @@ mod tests {
             // Issue #584: the split pane palette folds like its siblings.
             "self.close_pane_palette(window, cx);",
             "self.close_pane_overview_and_restore_focus(window, cx);",
-            "self.close_theme_picker(cx);",
             "self.close_broadcast_picker(cx);",
             "self.close_agent_summary(cx);",
             "let origin_pane = self.outermost_open_overlay_origin();",
@@ -710,7 +705,6 @@ mod tests {
         for closer in [
             "self.close_pane_palette(window, cx);",
             "self.close_pane_overview_and_restore_focus(window, cx);",
-            "self.close_theme_picker(cx);",
             "self.close_broadcast_picker(cx);",
             "self.close_agent_summary(cx);",
         ] {

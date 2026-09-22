@@ -1,11 +1,11 @@
 //! Per-overlay focus origin (issue #584).
 //!
-//! Every overlay that takes the focus (theme picker, broadcast picker,
-//! Pane Overview, the pane palette, the agent summary)
-//! records the pane it was opened from, keyed by the overlay, so that:
+//! Every overlay that takes the focus (broadcast picker, Pane Overview, the
+//! pane palette, the agent summary) records the pane it was opened from,
+//! keyed by the overlay, so that:
 //!
 //! - its own close hands focus back to that pane, not to the first leaf;
-//! - an inner overlay closed over an outer one (theme picker from pane B,
+//! - an inner overlay closed over an outer one (broadcast picker from pane B,
 //!   then Pane Overview, then Escape) takes only its own entry, so the outer
 //!   overlay's origin survives for its close or for a command palette fold;
 //! - the command palette, which folds every open overlay before it captures
@@ -25,7 +25,6 @@ use crate::pane::Pane;
 /// The overlays that take the focus and remember where it came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlayKind {
-    ThemePicker,
     BroadcastPicker,
     PaneOverview,
     PanePalette,
@@ -119,7 +118,6 @@ impl PaneFlowApp {
     /// Whether `kind`'s overlay is open right now.
     pub(crate) fn overlay_is_open(&self, kind: OverlayKind) -> bool {
         match kind {
-            OverlayKind::ThemePicker => self.show_theme_picker,
             OverlayKind::BroadcastPicker => self.broadcast_picker_open,
             OverlayKind::PaneOverview => self.pane_overview.is_some(),
             OverlayKind::PanePalette => self.pane_palette.is_some(),
@@ -131,7 +129,6 @@ impl PaneFlowApp {
     /// borrowed immutably here; the callers apply the result to the stack.
     fn open_overlay_kinds(&self) -> Vec<OverlayKind> {
         [
-            OverlayKind::ThemePicker,
             OverlayKind::BroadcastPicker,
             OverlayKind::PaneOverview,
             OverlayKind::PanePalette,
@@ -267,40 +264,40 @@ mod tests {
         cx.new(|cx| Pane::new(terminal, 1, cx))
     }
 
-    /// Issue #584 case 1: theme picker from pane B, then Pane Overview over
-    /// it, then Escape on Pane Overview. The inner close takes only its own
-    /// entry; the outer overlay's origin, and the palette's outermost read,
-    /// still name B.
+    /// Issue #584 case 1: an outer overlay from pane B, then Pane Overview
+    /// over it, then Escape on Pane Overview. The inner close takes only its
+    /// own entry; the outer overlay's origin, and the palette's outermost
+    /// read, still name B.
     #[gpui::test]
     fn an_inner_close_leaves_the_outer_origin_in_place(cx: &mut gpui::TestAppContext) {
         let cx = cx.add_empty_window();
         let b = make_pane(cx);
         let mut origins = OverlayOrigins::default();
 
-        origins.remember(OverlayKind::ThemePicker, Some(b.downgrade()));
-        // Pane Overview opens while the theme picker owns the focus: no pane
-        // does, so it inherits the innermost origin.
+        origins.remember(OverlayKind::BroadcastPicker, Some(b.downgrade()));
+        // Pane Overview opens while the broadcast picker owns the focus: no
+        // pane does, so it inherits the innermost origin.
         let inherited = origins.innermost();
         origins.remember(OverlayKind::PaneOverview, inherited);
         assert_eq!(
             origins.kinds(),
-            vec![OverlayKind::ThemePicker, OverlayKind::PaneOverview]
+            vec![OverlayKind::BroadcastPicker, OverlayKind::PaneOverview]
         );
 
         assert_eq!(origins.take(OverlayKind::PaneOverview), Some(b.clone()));
         assert_eq!(
             origins.kinds(),
-            vec![OverlayKind::ThemePicker],
-            "Escape on Pane Overview must not clear the theme picker's origin"
+            vec![OverlayKind::BroadcastPicker],
+            "Escape on Pane Overview must not clear the broadcast picker's origin"
         );
         assert_eq!(
             origins.outermost(|_| true),
             Some(b.clone()),
             "a palette command after that still targets pane B"
         );
-        assert_eq!(origins.take(OverlayKind::ThemePicker), Some(b));
+        assert_eq!(origins.take(OverlayKind::BroadcastPicker), Some(b));
         assert!(origins.kinds().is_empty());
-        assert_eq!(origins.take(OverlayKind::ThemePicker), None);
+        assert_eq!(origins.take(OverlayKind::BroadcastPicker), None);
     }
 
     #[gpui::test]
@@ -390,12 +387,6 @@ mod tests {
         // between them, so it is read whole.
         let main = include_str!("../main.rs");
         for (module, src, kind, escape) in [
-            (
-                "theme_picker.rs",
-                production(include_str!("theme_picker.rs")),
-                "OverlayKind::ThemePicker",
-                "\"escape\" => self.close_theme_picker_and_restore_focus(window, cx),",
-            ),
             (
                 "broadcast.rs",
                 production(include_str!("broadcast.rs")),

@@ -196,7 +196,7 @@ is not rendered at all — one reachable mode is not a choice — and
 Every overlay is deferred at an explicit priority, and that ladder is itself
 part of the contract: **1** settings selects · **2** toasts · **3** menus
 (branch, new tab, dock options, Customize Sidebar, palette branch) · **4**
-profile menu, Composer, dock options, the diff feedback flash
+Composer, the dock layout submenu, the diff feedback flash
 (`diff/view/interaction.rs`) · **6** full-surface overlays · **8**
 Custom Buttons and the Review-with-agent popover · **10** dialogs ·
 **11** close confirm. A new overlay picks the rung that matches its kind rather
@@ -215,7 +215,6 @@ explicit priority.
 | Pane Overview | Horizontally centered, top-anchored at 24 (`OVERVIEW_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; 312.5 by 192.5 cards, gap 10, radius 8, grid padding 16 | `app/pane_overview/mod.rs:36-41,486-559` |
 | Agent Summary | Horizontally centered, top-anchored at 24 (`OVERLAY_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; width capped at 920 (`MAX_OVERLAY_WIDTH`); rows padded 16 by 8, gap 2, with a 2 px accent left border on the selected row | `app/agent_summary/view.rs:16-17,101-176` |
 | Broadcast groups | Horizontally centered, top-anchored at 96 | 420 wide, radius 8, black 0.4 scrim | `app/broadcast.rs:432-439` |
-| Theme picker | Horizontally centered, top-anchored at 96 | 520 wide, black 0.4 scrim | `app/theme_picker.rs:343-375` |
 | Custom Buttons | Horizontally centered, top-anchored at 72 | 560 wide, radius 10, black 0.45 scrim | `app/custom_buttons_modal.rs:489-543` |
 | Close confirm | Centered | 360 wide, radius 10, padding 16, gap 10 | `app/close_confirm.rs:922-931` |
 | Menus and selects | Deferred, anchored under the trigger | Squircle 18, list padding 4, item height 28 | `settings/components.rs:482,551,627` |
@@ -537,10 +536,11 @@ window menu. **The left rail carries exactly one control**: the sidebar toggle
 `icons/sidebar.svg` in `muted`, a `Role::Button` with an accessible name and a
 delayed `Show sidebar` / `Hide sidebar` tooltip).
 
-There are no Files or Help menus in the title bar. A regression test forbids
-them end to end across six files
-(`title_bar_files_and_help_popovers_are_removed_end_to_end`,
-`window_chrome/title_bar.rs:421-477`). Help lives on the native macOS menu bar,
+There are no Files or Help menus in the title bar, and no avatar. Settings
+and About stay on the PaneFlow menu; themes stay in Settings → Appearance.
+A regression test forbids the removed title-bar menus end to end across five
+files (`title_bar_files_and_help_popovers_are_removed_end_to_end`,
+`window_chrome/title_bar.rs`). Help lives on the native macOS menu bar,
 whose four menus are PaneFlow, Edit, Window, and Help.
 
 The workspace-name breadcrumb (a 3 px `muted` dot plus the name at 12 px
@@ -1053,10 +1053,9 @@ a single default action — System Info is the standing exception, with two
 footer buttons and no default (7.4).
 
 Not every overlay has an opening chord, and the table below is the whole set
-that does. Custom Buttons opens only from the workspace context menu; About,
+that does. Custom Buttons opens only from the workspace context menu. About,
 System Info, and Check for Updates are menu-bar only (6.1's list of twelve
-unassignable actions); and the theme picker is reachable only through
-`render_profile_menu`, which nothing opens (11). A **new** overlay SHOULD take
+unassignable actions). A **new** overlay SHOULD take
 a chord or a menu item, and MUST NOT rely on a surface that has neither.
 
 | Surface | Default |
@@ -1209,7 +1208,7 @@ row washes carry no floor today.
 ### 7.4 Keyboard-operable surfaces
 
 These answer arrows, Enter, and Escape in full: Pane Overview
-(two-dimensional), sessions rail, theme picker, pane palette, work review, and broadcast groups. The diff branch menu, close confirm, and About answer Escape and Enter
+(two-dimensional), sessions rail, pane palette, work review, and broadcast groups. The diff branch menu, close confirm, and About answer Escape and Enter
 only. **System Info is Escape-only** — it carries
 two footer buttons, Close and Copy, and neither is the default, so Enter is
 deliberately ignored. The pane palette's one exception is the last-surface case
@@ -1220,8 +1219,8 @@ A new overlay MUST at minimum dismiss on Escape, and MUST confirm on Enter
 when it has a single default action. A new list surface SHOULD be
 arrow-navigable.
 
-This paragraph covers the five origin-tracked overlays, the `OverlayKind`
-variants in `app/overlay_origin.rs`: theme picker, broadcast picker, Pane Overview, the pane palette, and
+This paragraph covers the four origin-tracked overlays, the `OverlayKind`
+variants in `app/overlay_origin.rs`: broadcast picker, Pane Overview, the pane palette, and
 the agent summary. The
 modal dialogs (About, System Info, Custom Buttons, close confirm, Work
 Review), and the diff branch menu keep their own
@@ -1394,9 +1393,7 @@ behavior.
   instead of the squircle card that System Info already uses. Its CRT credit
   plate keeps its own fixed hexes on purpose and is **Contextual**.
 - The title bar still carries dead breadcrumb and IPC-pill code behind
-  `!cockpit`, and `render_profile_menu` is unreachable because nothing ever
-  sets `profile_menu_open`. All three are **Migration**; delete rather than
-  revive.
+  `!cockpit`. Both are **Migration**; delete rather than revive.
 - The app's own context menus use plain 4 px and 7 px rounds instead of
   `ROW_RADIUS`, and there is no `menu_item` primitive to unify them.
 - `tool_card_header_bg`, `vc_word_added`, and `vc_word_deleted` are defined by

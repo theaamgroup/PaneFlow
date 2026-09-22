@@ -401,6 +401,49 @@ impl PaneFlowApp {
             .into_any_element()
     }
 
+    /// Resolve the theme currently persisted in config (or the built-in
+    /// default), canonicalized: a `paneflow.json` written before presets
+    /// existed still names `One Dark`, which is now `PaneFlow Dark`.
+    /// Reads the cached config, not a per-call `load_config()`.
+    pub(crate) fn current_theme_name(&self) -> String {
+        self.cached_config
+            .theme
+            .as_deref()
+            .and_then(crate::theme::canonical_theme_name)
+            .unwrap_or(crate::theme::DEFAULT_THEME)
+            .to_string()
+    }
+
+    /// The preset owning the active theme. The Light/Dark/System tiles switch
+    /// variants *inside* this preset.
+    pub(crate) fn current_theme_preset(&self) -> &'static crate::theme::ThemePreset {
+        crate::theme::preset_for_theme(&self.current_theme_name())
+    }
+
+    /// Write the Light/Dark/System choice and the concrete theme name together.
+    /// Returns false, and toasts, when the config path cannot be resolved or
+    /// the file write fails.
+    pub(crate) fn persist_theme_selection(
+        &mut self,
+        mode: crate::ThemeMode,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let ok = crate::config_writer::save_theme_selection(Some(mode.as_config_str()), Some(name));
+        if !ok {
+            self.show_toast("Could not save theme", cx);
+            return false;
+        }
+        self.theme_mode = mode;
+        self.cached_config.theme_mode = Some(mode.as_config_str().to_string());
+        self.cached_config.theme = Some(name.to_string());
+        crate::config_writer::publish_config_snapshot(cx, &self.cached_config);
+        crate::theme::invalidate_theme_cache();
+        crate::theme::publish_theme_generation(cx);
+        cx.notify();
+        true
+    }
+
     /// Apply a Light/Dark/System selection from the Themes page.
     pub(crate) fn apply_theme_mode(
         &mut self,
@@ -427,6 +470,35 @@ impl PaneFlowApp {
             return;
         }
         self.persist_theme_selection(crate::ThemeMode::System, name, cx);
+    }
+
+    /// Apply a preset while keeping the current Light/Dark/System mode: the
+    /// two axes are independent, so switching identity must not flip the
+    /// light/dark choice.
+    pub(crate) fn apply_theme_preset(
+        &mut self,
+        preset: &crate::theme::ThemePreset,
+        window: &gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mode = self.theme_mode;
+        let name = mode.resolved_theme_name(preset, window.appearance());
+        self.persist_theme_selection(mode, name, cx)
+    }
+
+    pub(crate) fn reset_theme_selection(&mut self, cx: &mut Context<Self>) {
+        let ok = crate::config_writer::save_theme_selection(None, None);
+        if !ok {
+            self.show_toast("Could not reset theme", cx);
+            return;
+        }
+        self.theme_mode = crate::ThemeMode::Dark;
+        self.cached_config.theme_mode = None;
+        self.cached_config.theme = None;
+        crate::config_writer::publish_config_snapshot(cx, &self.cached_config);
+        crate::theme::invalidate_theme_cache();
+        crate::theme::publish_theme_generation(cx);
+        cx.notify();
     }
 }
 
@@ -772,4 +844,95 @@ fn preview_diff_column(
     }
 
     column
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::source_probe::source_slice;
+
+    /// Settings → Appearance writes `theme_mode` and `theme` together and
+    /// leaves unrelated keys in place. Reset removes both keys. `PaneFlowApp`
+    /// cannot be built in a unit test, so the file write is the persistence
+    /// proof and the source slice pins the page's handlers to that writer.
+    #[test]
+    fn a_theme_selection_is_persisted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("paneflow.json");
+        std::fs::write(
+            &path,
+            r#"{"font_size":14.0,"theme":"PaneFlow Dark","theme_mode":"dark"}"#,
+        )
+        .unwrap();
+
+        assert!(crate::config_writer::write_theme_selection_at(
+            &path,
+            Some("light"),
+            Some("PaneFlow Light"),
+        ));
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["theme_mode"], "light");
+        assert_eq!(saved["theme"], "PaneFlow Light");
+        assert_eq!(
+            saved["font_size"], 14.0,
+            "a theme write must keep sibling keys"
+        );
+
+        assert!(crate::config_writer::write_theme_selection_at(
+            &path, None, None
+        ));
+        let reset: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(
+            reset.get("theme_mode").is_none(),
+            "reset removes theme_mode"
+        );
+        assert!(reset.get("theme").is_none(), "reset removes theme");
+        assert_eq!(reset["font_size"], 14.0);
+
+        std::fs::write(&path, "{").unwrap();
+        assert!(
+            !crate::config_writer::write_theme_selection_at(
+                &path,
+                Some("dark"),
+                Some("PaneFlow Dark"),
+            ),
+            "invalid JSON must not be overwritten with a theme selection"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{");
+
+        let src = include_str!("appearance.rs")
+            .split("\n#[cfg(test)]\n")
+            .next()
+            .expect("production half of appearance.rs");
+        let persist = source_slice(src, "fn persist_theme_selection(", "fn apply_theme_mode(");
+        assert!(
+            persist.contains("save_theme_selection(Some(mode.as_config_str()), Some(name))"),
+            "persist_theme_selection must write the mode and the theme name"
+        );
+        let apply = source_slice(
+            src,
+            "fn apply_theme_mode(",
+            "fn sync_system_theme_from_window(",
+        );
+        assert!(apply.contains("self.persist_theme_selection(mode, name, cx)"));
+        let preset = source_slice(src, "fn apply_theme_preset(", "fn reset_theme_selection(");
+        assert!(preset.contains("self.persist_theme_selection(mode, name, cx)"));
+        let reset_fn = source_slice(src, "fn reset_theme_selection(", "\n}\n");
+        assert!(reset_fn.contains("save_theme_selection(None, None)"));
+        assert!(src.contains("this.apply_theme_mode(mode, window, cx)"));
+        assert!(src.contains("this.apply_theme_preset("));
+        assert!(src.contains("this.reset_theme_selection(cx)"));
+
+        let writer = include_str!("../../config_writer.rs");
+        let save = source_slice(
+            writer,
+            "fn save_theme_selection(",
+            "fn write_theme_selection_at(",
+        );
+        assert!(
+            save.contains("write_theme_selection_at(&path, theme_mode, theme)"),
+            "the settings writer must be the path-taking persist function"
+        );
+    }
 }

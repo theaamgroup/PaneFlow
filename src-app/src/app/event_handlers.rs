@@ -684,7 +684,7 @@ impl PaneFlowApp {
             }
             pane::PaneEvent::OpenPaneMenu { position } => {
                 // EP-002 US-007: open the pane header menu. Mutually exclusive
-                // with the other popovers, matching the workspace/profile/
+                // with the other popovers, matching the workspace and
                 // sessions menu pattern.
                 self.dismiss_transient_surfaces();
                 self.pane_menu_open = Some(crate::PaneContextMenu {

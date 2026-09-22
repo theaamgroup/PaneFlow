@@ -1,6 +1,6 @@
 //! Bottom-of-sidebar mode tabs. The Agents and Review sidebars share one
 //! persistent mode switch. There is no Settings affordance here: it moved to
-//! the macOS menu bar and the title-bar profile menu, finishing issue #105.
+//! the macOS menu bar, finishing issue #105.
 //! The strip itself disappears when `review_enabled` is off, because one
 //! reachable mode is not a choice.
 
@@ -182,10 +182,9 @@ impl PaneFlowApp {
     /// selection so the footer reads as primary navigation.
     ///
     /// There is no Settings affordance here any more (issue #105 finished the
-    /// job it started): Settings lives on the macOS menu bar under
-    /// `PaneFlow ▸ Settings…` and in the title-bar profile menu. A rail footer
-    /// is navigation between surfaces; a global preferences window is not one
-    /// of those surfaces.
+    /// job it started): Settings lives only on the macOS menu bar under
+    /// `PaneFlow ▸ Settings…`. A rail footer is navigation between surfaces; a
+    /// global preferences window is not one of those surfaces.
     pub(crate) fn render_sidebar_settings_footer(&self, cx: &mut Context<Self>) -> AnyElement {
         use paneflow_config::schema::AppMode;
 
