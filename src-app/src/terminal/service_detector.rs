@@ -284,9 +284,9 @@ pub(super) fn parse_service_line(line: &str) -> Option<ServiceInfo> {
     // loopback service exists on the line, but `extract_url` independently
     // grabs the first http(s) token - a hostile pane printing
     // `localhost:5173 http://evil.example` would otherwise arm a clickable
-    // badge to an attacker URL. Only keep a loopback URL; anything else
-    // degrades to a synthesized localhost URL so legitimate frontends stay
-    // clickable.
+    // badge to an attacker URL. Only keep a loopback URL on that same port;
+    // anything else degrades to a synthesized localhost URL so legitimate
+    // frontends stay clickable.
     let url = extract_url(line)
         .and_then(|u| normalize_loopback_url(&u, port))
         .or_else(|| Some(format!("http://localhost:{port}")));
@@ -299,19 +299,26 @@ pub(super) fn parse_service_line(line: &str) -> Option<ServiceInfo> {
     })
 }
 
-/// Whether a URL's host is a loopback/unspecified local address. Tiny
-/// scheme-then-host parse - no URL crate; conservative `false` on anything
-/// unrecognized (the caller then substitutes a synthesized localhost URL).
+/// Whether a URL's host is a loopback or unspecified local address.
+/// Scheme-then-host parse only; the port is ignored so host-class tests do
+/// not depend on `normalize_loopback_url`'s anchor-port check.
 #[cfg(test)]
 fn is_loopback_url(url: &str) -> bool {
-    normalize_loopback_url(url, 0).is_some()
+    parsed_http_url(url).is_some_and(|parsed| is_loopback_host(parsed.host))
 }
 
-fn normalize_loopback_url(url: &str, port: u16) -> Option<String> {
+struct ParsedHttpUrl<'a> {
+    scheme: &'a str,
+    host: &'a str,
+    /// `:` plus the raw port text, or empty when the URL omits a port.
+    port_suffix: &'a str,
+    suffix: &'a str,
+}
+
+fn parsed_http_url(url: &str) -> Option<ParsedHttpUrl<'_>> {
     let rest = url
         .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"));
-    let rest = rest?;
+        .or_else(|| url.strip_prefix("https://"))?;
     let scheme = if url.starts_with("https://") {
         "https"
     } else {
@@ -323,36 +330,82 @@ fn normalize_loopback_url(url: &str, port: u16) -> Option<String> {
         return None;
     }
     let suffix = &rest[authority_end..];
-
-    let (host, host_tail) = if authority.starts_with('[') {
+    let (host, port_suffix) = if authority.starts_with('[') {
         let close = authority.find(']')?;
         (&authority[..=close], &authority[close + 1..])
     } else {
         let host_end = authority.find(':').unwrap_or(authority.len());
         (&authority[..host_end], &authority[host_end..])
     };
+    Some(ParsedHttpUrl {
+        scheme,
+        host,
+        port_suffix,
+        suffix,
+    })
+}
 
+fn normalize_loopback_url(url: &str, port: u16) -> Option<String> {
+    let ParsedHttpUrl {
+        scheme,
+        host,
+        port_suffix,
+        suffix,
+    } = parsed_http_url(url)?;
     if !is_loopback_host(host) {
         return None;
     }
+    // No implicit 80/443. A URL with no port, or a different one, must not be
+    // the click target; the caller synthesizes `http://localhost:{port}`.
+    let url_port = explicit_decimal_port(port_suffix)?;
+    if url_port != port {
+        return None;
+    }
     if host == "0.0.0.0" {
-        let tail = if host_tail.is_empty() {
-            format!(":{port}")
-        } else {
-            host_tail.to_string()
-        };
-        return Some(format!("{scheme}://localhost{tail}{suffix}"));
+        return Some(format!("{scheme}://localhost{port_suffix}{suffix}"));
     }
     Some(url.to_string())
+}
+
+fn explicit_decimal_port(port_suffix: &str) -> Option<u16> {
+    let digits = port_suffix.strip_prefix(':')?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 fn is_loopback_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
         || host == "0.0.0.0"
         || host == "[::1]"
-        || host
-            .strip_prefix("127.")
-            .is_some_and(|tail| tail.split('.').all(|seg| seg.parse::<u8>().is_ok()))
+        || is_dotted_decimal_loopback(host)
+}
+
+/// Two to four decimal octets in `127.0.0.0/8`. Bare `127` is not an address,
+/// and a fifth label (`127.0.0.1.2`) is a DNS name that only looks numeric.
+fn is_dotted_decimal_loopback(host: &str) -> bool {
+    let mut labels = host.split('.');
+    let Some("127") = labels.next() else {
+        return false;
+    };
+    let mut extra_octets = 0u8;
+    for label in labels {
+        if !is_decimal_octet(label) {
+            return false;
+        }
+        extra_octets += 1;
+        if extra_octets > 3 {
+            return false;
+        }
+    }
+    extra_octets >= 1
+}
+
+fn is_decimal_octet(label: &str) -> bool {
+    !label.is_empty()
+        && label.bytes().all(|byte| byte.is_ascii_digit())
+        && label.parse::<u8>().is_ok()
 }
 
 /// Extract a port number from localhost:PORT, 127.0.0.1:PORT, 0.0.0.0:PORT,
@@ -556,6 +609,27 @@ mod tests {
     }
 
     #[test]
+    fn multi_label_127_host_is_not_loopback() {
+        let info = parse_service_line("localhost:5173 http://127.0.0.1.2/phish").unwrap();
+        assert_eq!(info.port, 5173);
+        assert_eq!(info.url.as_deref(), Some("http://localhost:5173"));
+    }
+
+    #[test]
+    fn url_port_must_match_the_anchor_port() {
+        let info = parse_service_line("localhost:3000 http://127.0.0.1:3001/").unwrap();
+        assert_eq!(info.port, 3000);
+        assert_eq!(info.url.as_deref(), Some("http://localhost:3000"));
+    }
+
+    #[test]
+    fn unspecified_host_with_a_different_port_is_not_kept() {
+        let info = parse_service_line("localhost:3000 http://0.0.0.0:3001/app").unwrap();
+        assert_eq!(info.port, 3000);
+        assert_eq!(info.url.as_deref(), Some("http://localhost:3000"));
+    }
+
+    #[test]
     fn url_userinfo_cannot_smuggle_a_remote_host() {
         let info =
             parse_service_line("vite ready at http://localhost:5173@evil.example/path").unwrap();
@@ -617,12 +691,16 @@ mod tests {
         assert!(is_loopback_url("http://LOCALHOST:3000/x"));
         assert!(is_loopback_url("https://127.0.0.1:8443/"));
         assert!(is_loopback_url("http://127.1.2.3:80"));
+        assert!(is_loopback_url("http://127.1/"));
         assert!(is_loopback_url("http://0.0.0.0:5173"));
         assert!(is_loopback_url("http://[::1]:5173/app"));
         assert!(!is_loopback_url("http://evil.example/x"));
         assert!(!is_loopback_url("http://localhost.evil.example:3000"));
         assert!(!is_loopback_url("http://localhost:3000@evil.example"));
         assert!(!is_loopback_url("http://127.evil.example/"));
+        assert!(!is_loopback_url("http://127/"));
+        assert!(!is_loopback_url("http://127./"));
+        assert!(!is_loopback_url("http://127.0.0.1.2/"));
         assert!(!is_loopback_url("file:///etc/passwd"));
         assert!(!is_loopback_url("http://192.168.1.10:3000"));
     }
