@@ -32,6 +32,9 @@ pub(crate) struct Toast {
     /// action button plus a close glyph, and ignores `hold_ms`. An action the
     /// user has to reach for cannot sit behind a timer.
     pub(crate) action: Option<ToastAction>,
+    /// Assigned by `show_next_toast` (never 0 once shown). Part of both
+    /// animation ids so a replacement does not reuse a finished exit.
+    pub(crate) serial: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,6 +75,7 @@ impl PaneFlowApp {
                 message,
                 hold_ms,
                 action: None,
+                serial: 0,
             },
             cx,
         );
@@ -87,6 +91,7 @@ impl PaneFlowApp {
                 action: Some(ToastAction::OpenReleaseNotes(
                     crate::release_notes::release_notes_url(version),
                 )),
+                serial: 0,
             },
             cx,
         );
@@ -101,7 +106,10 @@ impl PaneFlowApp {
         }
     }
 
-    fn show_next_toast(&mut self, toast: Toast, cx: &mut Context<Self>) {
+    fn show_next_toast(&mut self, mut toast: Toast, cx: &mut Context<Self>) {
+        // Skip 0, the construction sentinel, including after wrap.
+        self.toast_serial = self.toast_serial.checked_add(1).unwrap_or(1);
+        toast.serial = self.toast_serial;
         let lifetime_ms = toast.lifetime_ms();
         self.toast = Some(toast);
         cx.notify();
@@ -179,9 +187,10 @@ impl PaneFlowApp {
             );
 
         let hold_ms = toast.hold_ms;
+        let (element_id, animation_id) = toast_animation_identity("copy-toast", toast.serial);
         deferred(
             div()
-                .id("copy-toast")
+                .id(SharedString::from(element_id))
                 .absolute()
                 .right(px(18.))
                 .bottom(px(18.))
@@ -202,7 +211,7 @@ impl PaneFlowApp {
                         .child(header),
                 )
                 .with_animations(
-                    SharedString::from("copy-toast-anim"),
+                    SharedString::from(animation_id),
                     vec![
                         Animation::new(std::time::Duration::from_millis(TOAST_ENTER_MS))
                             .with_easing(ease_in_out),
@@ -210,15 +219,18 @@ impl PaneFlowApp {
                         Animation::new(std::time::Duration::from_millis(TOAST_EXIT_MS))
                             .with_easing(ease_in_out),
                     ],
-                    |toast_el, stage, delta| match stage {
-                        0 => {
-                            let lift = 8.0 * (1.0 - delta);
-                            toast_el.opacity(delta).bottom(px(20.0 + lift))
-                        }
-                        1 => toast_el.opacity(1.0).bottom(px(20.0)),
-                        _ => {
-                            let drop = 8.0 * delta;
-                            toast_el.opacity(1.0 - delta).bottom(px(20.0 + drop))
+                    |toast_el, stage, delta| {
+                        let opacity = toast_stage_opacity(stage, delta);
+                        match stage {
+                            0 => {
+                                let lift = 8.0 * (1.0 - delta);
+                                toast_el.opacity(opacity).bottom(px(20.0 + lift))
+                            }
+                            1 => toast_el.opacity(opacity).bottom(px(20.0)),
+                            _ => {
+                                let drop = 8.0 * delta;
+                                toast_el.opacity(opacity).bottom(px(20.0 + drop))
+                            }
                         }
                     },
                 ),
@@ -283,6 +295,7 @@ impl PaneFlowApp {
             cx.stop_propagation();
         }));
 
+        let (element_id, animation_id) = toast_animation_identity("sticky-toast", toast.serial);
         let row = div()
             .flex()
             .flex_row()
@@ -311,7 +324,7 @@ impl PaneFlowApp {
 
         deferred(
             div()
-                .id("sticky-toast")
+                .id(SharedString::from(element_id))
                 .absolute()
                 .right(px(18.))
                 .bottom(px(18.))
@@ -337,19 +350,41 @@ impl PaneFlowApp {
                         .child(row),
                 )
                 .with_animations(
-                    SharedString::from("sticky-toast-anim"),
+                    SharedString::from(animation_id),
                     vec![
                         Animation::new(std::time::Duration::from_millis(TOAST_ENTER_MS))
                             .with_easing(ease_in_out),
                     ],
                     |toast_el, _, delta| {
                         let lift = 8.0 * (1.0 - delta);
-                        toast_el.opacity(delta).bottom(px(20.0 + lift))
+                        toast_el
+                            .opacity(toast_stage_opacity(0, delta))
+                            .bottom(px(20.0 + lift))
                     },
                 ),
         )
         .priority(2)
         .into_any_element()
+    }
+}
+
+/// Element id and animation id for one shown toast. The serial is in both:
+/// GPUI stores `AnimationState` on the animation element id and would reuse a
+/// finished exit (opacity 0) if the next toast kept the same id.
+fn toast_animation_identity(prefix: &str, serial: u64) -> (String, String) {
+    (
+        format!("{prefix}-{serial}"),
+        format!("{prefix}-anim-{serial}"),
+    )
+}
+
+/// Opacity of the timed toast at `stage` and animation `delta`.
+/// Stage 0 enters (`delta`), stage 1 holds at 1, later stages exit (`1 - delta`).
+fn toast_stage_opacity(stage: usize, delta: f32) -> f32 {
+    match stage {
+        0 => delta,
+        1 => 1.0,
+        _ => 1.0 - delta,
     }
 }
 
@@ -382,6 +417,7 @@ mod tests {
             message: "Copied".into(),
             hold_ms,
             action: None,
+            serial: 0,
         }
     }
 
@@ -392,6 +428,7 @@ mod tests {
             action: Some(ToastAction::OpenReleaseNotes(
                 crate::release_notes::release_notes_url("0.6.1"),
             )),
+            serial: 0,
         }
     }
 
@@ -415,5 +452,39 @@ mod tests {
         assert!(arrival_replaces_active(None));
         assert!(arrival_replaces_active(Some(&sticky())));
         assert!(!arrival_replaces_active(Some(&timed(TOAST_HOLD_MS))));
+    }
+
+    #[test]
+    fn a_queued_toast_restarts_its_enter_animation() {
+        // 1 then 2 are the serials `show_next_toast` assigns to successive toasts.
+        let (first_element, first_animation) = toast_animation_identity("copy-toast", 1);
+        let (second_element, second_animation) = toast_animation_identity("copy-toast", 2);
+        assert_ne!(first_element, second_element);
+        assert_ne!(first_animation, second_animation);
+        assert!(first_element.contains('1'));
+        assert!(first_animation.contains('1'));
+        assert!(second_element.contains('2'));
+        assert!(second_animation.contains('2'));
+        assert_eq!(first_element, "copy-toast-1");
+        assert_eq!(first_animation, "copy-toast-anim-1");
+        assert_eq!(second_element, "copy-toast-2");
+        assert_eq!(second_animation, "copy-toast-anim-2");
+
+        let (sticky_element, sticky_animation) = toast_animation_identity("sticky-toast", 1);
+        let (next_sticky_element, next_sticky_animation) =
+            toast_animation_identity("sticky-toast", 2);
+        assert_ne!(sticky_element, next_sticky_element);
+        assert_ne!(sticky_animation, next_sticky_animation);
+        assert!(sticky_element.contains('1'));
+        assert!(sticky_animation.contains('1'));
+        assert!(next_sticky_element.contains('2'));
+        assert!(next_sticky_animation.contains('2'));
+
+        // A fresh serial starts GPUI at stage 0. Reusing the finished exit is
+        // stage 2 at delta 1.0, which this formula maps to opacity 0.
+        let enter_opacity = toast_stage_opacity(0, 0.5);
+        assert!(enter_opacity > 0.0);
+        assert_eq!(enter_opacity, 0.5);
+        assert_eq!(toast_stage_opacity(2, 1.0), 0.0);
     }
 }

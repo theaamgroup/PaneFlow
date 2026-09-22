@@ -1040,6 +1040,7 @@ mod tests {
                 files_changed: 1,
                 insertions,
                 deletions: 0,
+                ..GitDiffStats::default()
             },
         }
     }
