@@ -8,8 +8,8 @@
 
 use gpui::{
     AnyElement, AppContext, ClickEvent, Context, Entity, FocusHandle, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, SharedString, StatefulInteractiveElement, Styled,
-    Window, deferred, div, prelude::FluentBuilder, px, svg,
+    IntoElement, MouseButton, ParentElement, Role, SharedString, StatefulInteractiveElement,
+    Styled, Window, deferred, div, prelude::FluentBuilder, px, svg,
 };
 
 use crate::PaneFlowApp;
@@ -200,6 +200,10 @@ pub(super) fn render_diff_branch_chip(
     let menu_open = menu.is_some_and(|menu| menu.cwd == cwd);
     let current = branch.clone();
     let chip_cwd = cwd.clone();
+    // Both listeners are `move` closures, so the keyboard arm keeps its own
+    // copies of the folder and branch the press handler already captures.
+    let key_branch = current.clone();
+    let key_cwd = chip_cwd.clone();
 
     // The rail's row skin: `ROW_RADIUS` superellipse instead of GPUI's circular
     // `rounded()`, the rail's own hover tint, and its 26 px row box. While the
@@ -239,6 +243,27 @@ pub(super) fn render_diff_branch_chip(
             }
         }),
     )
+    // Keyboard / VoiceOver (issue #676). The pointer still toggles on press
+    // above, so this arm returns unless GPUI synthesized the click from
+    // unmodified Space / Enter on the focused chip. It uses the same
+    // render-time snapshot. The listener is also what advertises
+    // `accesskit::Action::Click`; VoiceOver's Click arrives as the mouse
+    // pair and is ignored here so it cannot reopen the menu.
+    .role(Role::ComboBox)
+    .aria_label(format!("Branch, {branch}"))
+    .aria_expanded(menu_open)
+    .tab_index(0)
+    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+        if !matches!(event, ClickEvent::Keyboard(_)) {
+            return;
+        }
+        cx.stop_propagation();
+        if menu_open {
+            this.close_diff_branch_menu(window, cx);
+        } else {
+            this.open_diff_branch_menu(key_cwd.clone(), key_branch.clone(), window, cx);
+        }
+    }))
     .child(
         svg()
             .size(px(13.))
@@ -542,5 +567,46 @@ fn git_output_error(output: &paneflow_process::BoundedOutput) -> String {
         format!("git exited with {}", output.status)
     } else {
         message.lines().next().unwrap_or(message).to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::source_probe::source_slice;
+
+    /// Issue #676: the diff branch chip opened only from a mouse press.
+    /// Space, Enter, and VoiceOver need a named combobox tab stop whose
+    /// click arm accepts only the keyboard click. Pointer press stays.
+    #[test]
+    fn diff_branch_chip_opens_from_keyboard() {
+        let chip = source_slice(
+            include_str!("branch.rs"),
+            "fn render_diff_branch_chip(",
+            "fn render_diff_branch_menu(",
+        );
+        for needle in [
+            ".role(Role::ComboBox)",
+            ".aria_label(format!(\"Branch, {branch}\"))",
+            ".aria_expanded(menu_open)",
+            ".tab_index(0)",
+            ".on_mouse_down(",
+        ] {
+            assert!(
+                chip.contains(needle),
+                "diff branch chip lost `{needle}`; keyboard and VoiceOver activation need it"
+            );
+        }
+        let click_at = chip
+            .find(".on_click(")
+            .expect("diff branch chip keyboard arm");
+        let arm = &chip[click_at..];
+        assert!(
+            arm.contains("matches!(event, ClickEvent::Keyboard(_))"),
+            "the click arm must accept only ClickEvent::Keyboard so a pointer release does not reopen the menu"
+        );
+        assert!(
+            arm.contains("if menu_open {"),
+            "the keyboard arm must open and close from the render-time menu_open snapshot"
+        );
     }
 }
