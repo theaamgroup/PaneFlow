@@ -13,6 +13,7 @@ pub mod io;
 pub mod jsonc;
 pub mod lease;
 pub mod lock;
+mod project_hooks;
 
 pub use agent_dirs::{
     claude_config_dir, claude_config_dir_from, claude_settings_json, codex_config_dir,
@@ -21,3 +22,4 @@ pub use agent_dirs::{
 pub use io::{config_dir, home_dir, read_optional_text, write_json_atomic, write_text_atomic};
 pub use lease::{ConfigLease, LastConfigLease};
 pub use lock::{lock_config, with_config_lock, ConfigLock};
+pub use project_hooks::{prune_dead_hook_file, reap_dead_project_hooks, ProjectHookReap};
