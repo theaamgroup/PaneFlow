@@ -9,16 +9,27 @@ use gpui::{
 };
 
 use super::super::geometry::CellGeometry;
-use super::super::{CursorInfo, LayoutState};
+use super::super::{CursorInfo, LayoutState, MIN_APCA_CONTRAST, ensure_minimum_contrast};
 use crate::terminal::types::CursorShape;
 
-fn cursor_text_color(cursor: &CursorInfo, layout: &LayoutState) -> gpui::Hsla {
-    if cursor.cell_bg.a > 0.01 {
-        cursor.cell_bg
-    } else if layout.background_color.a > 0.01 {
-        layout.background_color
+/// Glyph colour for a block cursor.
+///
+/// An opaque cell or layout background is the inverted colour and is used
+/// as-is. Both are transparent when the pane card paints the ground, so the
+/// glyph takes that opaque theme background and must clear
+/// `MIN_APCA_CONTRAST` against the cursor (#677).
+fn cursor_text_color(
+    cell_bg: gpui::Hsla,
+    layout_bg: gpui::Hsla,
+    pane_bg: gpui::Hsla,
+    cursor_color: gpui::Hsla,
+) -> gpui::Hsla {
+    if cell_bg.a > 0.01 {
+        cell_bg
+    } else if layout_bg.a > 0.01 {
+        layout_bg
     } else {
-        gpui::hsla(0.0, 0.0, 0.08, 1.0)
+        ensure_minimum_contrast(pane_bg, cursor_color, MIN_APCA_CONTRAST)
     }
 }
 
@@ -65,7 +76,12 @@ fn paint_cursor_info(
                 }
                 let cursor_font = super::display_font_for_intensity(&cursor_font, base_font.weight);
                 let text = SharedString::from(ch.to_string());
-                let text_color = cursor_text_color(cursor, layout);
+                let text_color = cursor_text_color(
+                    cursor.cell_bg,
+                    layout.background_color,
+                    layout.exit_overlay_background,
+                    cursor.color,
+                );
                 let shaped = window.text_system().shape_line(
                     text.clone(),
                     font_size,
@@ -152,4 +168,41 @@ pub fn paint_anchor_cursor(
     };
 
     paint_cursor_info(anchor, layout, geom, base_font, font_size, window, cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::{MIN_APCA_CONTRAST, apca_contrast};
+    use super::cursor_text_color;
+    use gpui::hsla;
+
+    /// Issue #677: a black block cursor on Vercel Light used to paint the
+    /// glyph in `hsla(0, 0, 0.08, 1)` because both stored backgrounds are
+    /// transparent. The glyph has to clear the APCA floor against the cursor.
+    #[test]
+    fn cursor_text_on_transparent_backgrounds_contrasts_with_a_black_cursor() {
+        let cursor = hsla(0.0, 0.0, 0.0, 1.0);
+        let pane = crate::theme::vercel_light().background;
+        let transparent = hsla(0.0, 0.0, 0.0, 0.0);
+        let result = cursor_text_color(transparent, transparent, pane, cursor);
+
+        assert_ne!(result, hsla(0.0, 0.0, 0.08, 1.0));
+        let lc = apca_contrast(result, cursor).abs();
+        assert!(
+            lc >= MIN_APCA_CONTRAST,
+            "block cursor glyph Lc {lc} is below {MIN_APCA_CONTRAST}"
+        );
+    }
+
+    #[test]
+    fn cursor_text_keeps_an_opaque_cell_or_layout_background() {
+        let cursor = hsla(0.0, 0.0, 0.0, 1.0);
+        let pane = hsla(0.0, 0.0, 1.0, 1.0);
+        let transparent = hsla(0.0, 0.0, 0.0, 0.0);
+        let cell = hsla(0.2, 0.4, 0.3, 1.0);
+        let layout = hsla(0.55, 0.2, 0.7, 1.0);
+
+        assert_eq!(cursor_text_color(cell, transparent, pane, cursor), cell);
+        assert_eq!(cursor_text_color(transparent, layout, pane, cursor), layout);
+    }
 }
