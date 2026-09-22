@@ -1968,6 +1968,14 @@ impl PaneFlowApp {
             self.show_toast("Unzoom before splitting panes", cx);
             return;
         }
+        // Same transient refusal as split: the record was already popped, so
+        // put it back. Creating the surface first would spawn a PTY the cap
+        // then has to leak.
+        if !self.workspaces[idx].active_tab().can_add_pane() {
+            self.push_closed_record(ClosedRecord::Pane(record), cx);
+            self.show_toast(format!("Maximum pane count reached ({MAX_PANES})"), cx);
+            return;
+        }
         self.active_idx = idx;
         let ws_id = record.workspace_id;
         let surface = restore_closed_surface_record(&record.surface, ws_id, cx);
@@ -2957,6 +2965,39 @@ mod tests {
             refusal.contains("push_closed_record(ClosedRecord::Pane(record)")
                 && refusal.contains("Unzoom before splitting panes"),
             "the popped record must be restored before the zoom toast: {refusal}"
+        );
+    }
+
+    /// Issue #702: undo-close splits a pane back in without `can_add_pane`.
+    /// Closing a pane in a full tab, splitting back to the cap, then undoing
+    /// must refuse before `restore_closed_surface_record` spawns a PTY.
+    #[test]
+    fn undo_close_pane_refuses_restore_at_the_pane_cap() {
+        let src = include_str!("mod.rs");
+        let restore = source_slice(
+            src,
+            "fn restore_closed_pane(",
+            "fn restore_closed_tab_record(",
+        );
+        let cap_guard = restore
+            .find("can_add_pane()")
+            .expect("undo-close must inspect the destination tab's pane cap");
+        let surface_restore = restore
+            .find("restore_closed_surface_record(")
+            .expect("closed surface reconstruction site");
+        assert!(
+            cap_guard < surface_restore,
+            "pane-cap refusal must happen before recreating a PTY or pane: {restore}"
+        );
+        let refusal_end = restore[cap_guard..]
+            .find("return;")
+            .map(|offset| cap_guard + offset + "return;".len())
+            .expect("pane-cap refusal return");
+        let refusal = &restore[cap_guard..refusal_end];
+        assert!(
+            refusal.contains("push_closed_record(ClosedRecord::Pane(record)")
+                && refusal.contains("Maximum pane count reached"),
+            "the popped record must be restored before the pane-cap toast: {refusal}"
         );
     }
 
