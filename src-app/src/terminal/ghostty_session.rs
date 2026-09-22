@@ -2132,10 +2132,15 @@ fn reject_input(inner: &SessionInner, input_kind: &'static str, error: impl std:
 ///
 /// `pending` is the unsent tail from a `try_send` that found the channel
 /// full. The runtime loop flushes it without blocking so output, resize, and
-/// exit keep running while stdin is wedged.
+/// exit keep running while stdin is wedged. Bytes in that tail stay charged
+/// to `queued_input_bytes` (`pending_reserved`) until the channel accepts
+/// them or the tail is dropped, so a wedged stdin cannot grow it past
+/// [`MAX_QUEUED_INPUT_BYTES`]. The channel itself is bounded by
+/// `PTY_WRITER_CHANNEL_CAPACITY` × `PTY_WRITER_CHUNK_BYTES`.
 struct PtyInputQueue {
     tx: SyncSender<Vec<u8>>,
     pending: Vec<u8>,
+    pending_reserved: usize,
     closed: bool,
 }
 
@@ -2145,24 +2150,28 @@ struct PtyWriterThread {
     queue: Option<PtyInputQueue>,
     worker: Option<std::thread::JoinHandle<()>>,
     failed: Arc<AtomicBool>,
+    inner: Arc<SessionInner>,
 }
 
 impl PtyWriterThread {
     fn spawn(writer: Box<dyn Write + Send>, inner: Arc<SessionInner>) -> std::io::Result<Self> {
         let failed = Arc::new(AtomicBool::new(false));
         let failed_thread = Arc::clone(&failed);
+        let writer_inner = Arc::clone(&inner);
         let (tx, rx) = sync_channel(PTY_WRITER_CHANNEL_CAPACITY);
         let worker = std::thread::Builder::new()
             .name("paneflow-ghostty-pty-writer".into())
-            .spawn(move || write_pty_input(writer, rx, inner, failed_thread))?;
+            .spawn(move || write_pty_input(writer, rx, writer_inner, failed_thread))?;
         Ok(Self {
             queue: Some(PtyInputQueue {
                 tx,
                 pending: Vec::new(),
+                pending_reserved: 0,
                 closed: false,
             }),
             worker: Some(worker),
             failed,
+            inner,
         })
     }
 
@@ -2177,21 +2186,30 @@ impl PtyWriterThread {
     }
 
     /// Drop the sender so the writer stops after its current `write_all`.
-    /// Does not join: a full stdin buffer would pin the caller.
+    /// Does not join: a full stdin buffer would pin the caller. Any tail the
+    /// writer will not take is uncharged from the input cap.
     fn stop_sending(&mut self) {
-        self.queue.take();
+        self.discard_unsent();
     }
 
-    /// Flush any tail that still fits, drop the sender, and join the writer.
-    /// Call only once nothing else will send and a blocked `write_all` cannot
-    /// outlive the child (after the runtime loop, or before it has sent).
+    /// Flush any tail that still fits, drop the rest, drop the sender, and
+    /// join the writer. Call only once nothing else will send and a blocked
+    /// `write_all` cannot outlive the child (after the runtime loop, or
+    /// before it has sent).
     fn join(mut self) {
         if let Some(queue) = self.queue.as_mut() {
-            flush_pending_pty_input(queue);
+            flush_pending_pty_input(&self.inner, queue);
         }
-        self.queue.take();
+        // Drop the sender before joining, or the writer blocks in `recv`.
+        self.discard_unsent();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
+        }
+    }
+
+    fn discard_unsent(&mut self) {
+        if let Some(queue) = self.queue.take() {
+            release_queued_input_bytes(&self.inner, queue.pending_reserved);
         }
     }
 }
@@ -2202,33 +2220,80 @@ impl Drop for PtyWriterThread {
         // this runtime thread is the one that used to be stuck there: the
         // child guard that unblocks the write may drop later in the same
         // unwind. `join` runs after the runtime loop instead.
-        self.queue.take();
+        self.discard_unsent();
     }
 }
 
-fn write_input_bytes(queue: &mut Option<PtyInputQueue>, bytes: &[u8]) {
+/// Hand `bytes` to the writer thread.
+///
+/// `reserved` is the `queued_input_bytes` charge for this input. It is
+/// released when the bytes are in the bounded channel, dropped, or rejected.
+/// A tail left in `pending` keeps the charge.
+fn write_input_bytes(
+    inner: &SessionInner,
+    queue: &mut Option<PtyInputQueue>,
+    bytes: &[u8],
+    reserved: usize,
+) {
     if bytes.is_empty() {
+        release_queued_input_bytes(inner, reserved);
         return;
     }
     let Some(queue) = queue.as_mut() else {
+        release_queued_input_bytes(inner, reserved);
         return;
     };
     if queue.closed {
+        queue.pending.clear();
+        release_queued_input_bytes(inner, std::mem::take(&mut queue.pending_reserved));
+        release_queued_input_bytes(inner, reserved);
+        return;
+    }
+    let pending_before = queue.pending.len();
+    if !queue.pending.is_empty() {
+        // Engine replies are not covered by an input reservation. Drop them
+        // rather than let a wedged tail grow past the cap; caller input was
+        // already charged before it was accepted.
+        if reserved == 0 && queue.pending.len().saturating_add(bytes.len()) > MAX_QUEUED_INPUT_BYTES
+        {
+            return;
+        }
+        queue.pending.extend_from_slice(bytes);
+    } else {
+        enqueue_pty_chunks(queue, bytes);
+        if reserved == 0 && queue.pending.len() > MAX_QUEUED_INPUT_BYTES {
+            queue.pending.truncate(MAX_QUEUED_INPUT_BYTES);
+        }
+    }
+    if queue.closed {
+        queue.pending.clear();
+        release_queued_input_bytes(inner, std::mem::take(&mut queue.pending_reserved));
+        release_queued_input_bytes(inner, reserved);
+        return;
+    }
+    if queue.pending.len() > pending_before {
+        queue.pending_reserved = queue.pending_reserved.saturating_add(reserved);
+        return;
+    }
+    release_queued_input_bytes(inner, reserved);
+}
+
+fn flush_pending_pty_input(inner: &SessionInner, queue: &mut PtyInputQueue) {
+    if queue.closed {
+        queue.pending.clear();
+        release_queued_input_bytes(inner, std::mem::take(&mut queue.pending_reserved));
         return;
     }
     if !queue.pending.is_empty() {
-        queue.pending.extend_from_slice(bytes);
-        return;
+        let pending = std::mem::take(&mut queue.pending);
+        enqueue_pty_chunks(queue, &pending);
+        if queue.closed {
+            queue.pending.clear();
+        }
     }
-    enqueue_pty_chunks(queue, bytes);
-}
-
-fn flush_pending_pty_input(queue: &mut PtyInputQueue) {
-    if queue.pending.is_empty() || queue.closed {
-        return;
+    if queue.pending.is_empty() {
+        release_queued_input_bytes(inner, std::mem::take(&mut queue.pending_reserved));
     }
-    let pending = std::mem::take(&mut queue.pending);
-    enqueue_pty_chunks(queue, &pending);
 }
 
 fn enqueue_pty_chunks(queue: &mut PtyInputQueue, bytes: &[u8]) {
@@ -2540,7 +2605,7 @@ fn run_runtime(
     loop {
         count_runtime_loop_iteration();
         if let Some(queue) = pty_writer.queue().as_mut() {
-            flush_pending_pty_input(queue);
+            flush_pending_pty_input(&inner, queue);
         }
         advance_selection_autoscroll(
             &inner,
@@ -2622,50 +2687,64 @@ fn run_runtime(
                 eof = true;
             }
             Ok(Some(RuntimeMessage::Input(bytes))) => {
-                release_queued_input_bytes(&inner, bytes.len());
-                write_input_bytes(pty_writer.queue(), &bytes);
+                let reserved = bytes.len();
+                write_input_bytes(&inner, pty_writer.queue(), &bytes, reserved);
                 notify_command_capacity(&inner);
             }
             Ok(Some(RuntimeMessage::KeyInput(input))) => {
-                release_queued_input_bytes(
-                    &inner,
-                    std::mem::size_of::<ghostty::KeyInput>().saturating_add(input.text.len()),
-                );
+                let reserved =
+                    std::mem::size_of::<ghostty::KeyInput>().saturating_add(input.text.len());
                 match terminal.encode_key(&input) {
-                    Ok(bytes) => write_input_bytes(pty_writer.queue(), &bytes),
-                    Err(error) => reject_input(&inner, "key", error),
+                    Ok(bytes) => write_input_bytes(&inner, pty_writer.queue(), &bytes, reserved),
+                    Err(error) => {
+                        release_queued_input_bytes(&inner, reserved);
+                        reject_input(&inner, "key", error);
+                    }
                 }
                 notify_command_capacity(&inner);
             }
             Ok(Some(RuntimeMessage::MouseInput { input, repeat })) => {
-                release_queued_input_bytes(
-                    &inner,
-                    std::mem::size_of::<ghostty::MouseInput>().saturating_add(repeat),
-                );
+                let mut reserved =
+                    std::mem::size_of::<ghostty::MouseInput>().saturating_add(repeat);
                 for _ in 0..repeat {
                     match terminal.encode_mouse(input) {
-                        Ok(bytes) => write_input_bytes(pty_writer.queue(), &bytes),
+                        Ok(bytes) => {
+                            let charge = if bytes.is_empty() {
+                                0
+                            } else {
+                                std::mem::take(&mut reserved)
+                            };
+                            write_input_bytes(&inner, pty_writer.queue(), &bytes, charge);
+                        }
                         Err(error) => {
+                            release_queued_input_bytes(&inner, std::mem::take(&mut reserved));
                             reject_input(&inner, "mouse", error);
                             break;
                         }
                     }
                 }
+                release_queued_input_bytes(&inner, reserved);
                 notify_command_capacity(&inner);
             }
             Ok(Some(RuntimeMessage::FocusInput(event))) => {
-                release_queued_input_bytes(&inner, std::mem::size_of::<ghostty::FocusEvent>());
+                let reserved = std::mem::size_of::<ghostty::FocusEvent>();
                 match terminal.encode_focus(event) {
-                    Ok(bytes) => write_input_bytes(pty_writer.queue(), &bytes),
-                    Err(error) => reject_input(&inner, "focus", error),
+                    Ok(bytes) => write_input_bytes(&inner, pty_writer.queue(), &bytes, reserved),
+                    Err(error) => {
+                        release_queued_input_bytes(&inner, reserved);
+                        reject_input(&inner, "focus", error);
+                    }
                 }
                 notify_command_capacity(&inner);
             }
             Ok(Some(RuntimeMessage::PasteInput { text, allow_unsafe })) => {
-                release_queued_input_bytes(&inner, text.len());
+                let reserved = text.len();
                 match terminal.encode_paste(&text, allow_unsafe) {
-                    Ok(bytes) => write_input_bytes(pty_writer.queue(), &bytes),
-                    Err(error) => reject_input(&inner, "paste", error),
+                    Ok(bytes) => write_input_bytes(&inner, pty_writer.queue(), &bytes, reserved),
+                    Err(error) => {
+                        release_queued_input_bytes(&inner, reserved);
+                        reject_input(&inner, "paste", error);
+                    }
                 }
                 notify_command_capacity(&inner);
             }
@@ -3586,7 +3665,9 @@ fn handle_engine_events(
 ) -> Result<(), String> {
     for event in terminal.drain_events() {
         match event {
-            ghostty::BackendEvent::WritePty(bytes) => write_input_bytes(pty_input, &bytes),
+            ghostty::BackendEvent::WritePty(bytes) => {
+                write_input_bytes(inner, pty_input, &bytes, 0);
+            }
             ghostty::BackendEvent::ClipboardStore(text) => queue_clipboard(inner, text),
             ghostty::BackendEvent::Title(title) => queue_title(inner, title),
             ghostty::BackendEvent::WorkingDirectory(cwd) => {
@@ -4667,6 +4748,88 @@ mod tests {
     fn nfr_005_terminal_queue_caps_stay_below_budget() {
         assert_eq!(OUTPUT_POOL_BYTES, 128 * 1024);
         assert_eq!(MAX_QUEUED_INPUT_BYTES, 1024 * 1024);
+    }
+
+    /// A full writer channel parks the tail in `pending`. That tail must keep
+    /// its `queued_input_bytes` charge so another paste cannot pass the cap.
+    #[test]
+    fn wedged_pty_input_keeps_the_pending_tail_inside_the_queued_byte_cap() {
+        let (session, _pending, _events) =
+            GhosttySession::pending(TerminalWindowSize::new(80, 24, 8, 16));
+        let (tx, rx) = sync_channel(0);
+        let mut queue = Some(PtyInputQueue {
+            tx,
+            pending: Vec::new(),
+            pending_reserved: 0,
+            closed: false,
+        });
+        let first = vec![b'a'; 100];
+        session
+            .inner
+            .queued_input_bytes
+            .fetch_add(first.len(), Ordering::AcqRel);
+        write_input_bytes(&session.inner, &mut queue, &first, first.len());
+        assert_eq!(session.queued_input_bytes(), first.len());
+        assert_eq!(queue.as_ref().unwrap().pending.len(), first.len());
+        assert_eq!(queue.as_ref().unwrap().pending_reserved, first.len());
+
+        let second = vec![b'b'; 50];
+        session
+            .inner
+            .queued_input_bytes
+            .fetch_add(second.len(), Ordering::AcqRel);
+        write_input_bytes(&session.inner, &mut queue, &second, second.len());
+        let held = first.len() + second.len();
+        assert_eq!(session.queued_input_bytes(), held);
+        assert_eq!(queue.as_ref().unwrap().pending.len(), held);
+
+        let overflow = MAX_QUEUED_INPUT_BYTES - held + 1;
+        assert_eq!(
+            session.write(vec![b'c'; overflow]),
+            GhosttyInputSendResult::Full
+        );
+        assert_eq!(session.queued_input_bytes(), held);
+
+        drop(rx);
+        drop(queue);
+    }
+
+    #[test]
+    fn flushing_pending_pty_input_releases_the_cap_once_the_channel_accepts_it() {
+        let (session, _pending, _events) =
+            GhosttySession::pending(TerminalWindowSize::new(80, 24, 8, 16));
+        let (tx, rx) = sync_channel(1);
+        let mut queue = Some(PtyInputQueue {
+            tx,
+            pending: Vec::new(),
+            pending_reserved: 0,
+            closed: false,
+        });
+        let first = vec![b'a'; 8];
+        session
+            .inner
+            .queued_input_bytes
+            .fetch_add(first.len(), Ordering::AcqRel);
+        write_input_bytes(&session.inner, &mut queue, &first, first.len());
+        assert_eq!(session.queued_input_bytes(), 0);
+        assert!(queue.as_ref().unwrap().pending.is_empty());
+
+        let second = vec![b'b'; 8];
+        session
+            .inner
+            .queued_input_bytes
+            .fetch_add(second.len(), Ordering::AcqRel);
+        write_input_bytes(&session.inner, &mut queue, &second, second.len());
+        assert_eq!(session.queued_input_bytes(), second.len());
+        assert_eq!(queue.as_ref().unwrap().pending, second);
+
+        assert!(rx.try_recv().is_ok());
+        flush_pending_pty_input(&session.inner, queue.as_mut().unwrap());
+        assert_eq!(session.queued_input_bytes(), 0);
+        assert!(queue.as_ref().unwrap().pending.is_empty());
+        assert_eq!(queue.as_ref().unwrap().pending_reserved, 0);
+        let accepted = rx.try_recv().unwrap();
+        assert_eq!(accepted, second);
     }
 
     /// A gate whose clock starts at `origin`, with no publication yet made.
