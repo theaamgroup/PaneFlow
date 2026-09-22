@@ -12,6 +12,9 @@ pub struct GitDiffStats {
     pub files_changed: usize,
     pub insertions: usize,
     pub deletions: usize,
+    /// Untracked line reads stopped at [`GIT_DIFF_STAT_UNTRACKED_FILE_CAP`].
+    /// `insertions` is then a lower bound, not the exact total (issue #691).
+    pub insertions_truncated: bool,
 }
 
 /// Wall-clock deadline for ONE `GitDiffStats::from_cwd` probe (U-035). A healthy
@@ -34,7 +37,6 @@ const GIT_DIFF_STAT_STDOUT_CAP: u64 = 256 * 1024;
 
 const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const GIT_DIFF_STAT_UNTRACKED_FILE_CAP: usize = 200;
-const GIT_DIFF_STAT_UNTRACKED_PATH_CAP: usize = 1000;
 const GIT_DIFF_STAT_FILE_BYTES_CAP: u64 = 512 * 1024;
 
 impl GitDiffStats {
@@ -109,6 +111,18 @@ impl GitDiffStats {
             files_changed,
             insertions,
             deletions,
+            insertions_truncated: false,
+        }
+    }
+
+    /// `+N`, or `+N+` when untracked line reads were capped (issue #691).
+    /// The trailing plus is the lower-bound mark so a partial total is not
+    /// shown as exact.
+    pub fn insertion_label(&self) -> String {
+        if self.insertions_truncated {
+            format!("+{}+", self.insertions)
+        } else {
+            format!("+{}", self.insertions)
         }
     }
 
@@ -125,22 +139,28 @@ impl GitDiffStats {
             return;
         };
         let text = String::from_utf8_lossy(&out);
-        let mut paths = text.split('\0').filter(|p| !p.is_empty());
+        let to_read = self.record_untracked_paths(&text);
+        self.insertions += untracked_insertions_within(cwd, to_read, deadline_at);
+    }
+
+    /// Count every non-empty path in a NUL-delimited `ls-files` buffer.
+    /// Line reads stay capped; past that cap `insertions_truncated` is set
+    /// so the badge cannot present the partial sum as exact (issue #691).
+    fn record_untracked_paths(&mut self, listing: &str) -> Vec<String> {
         let mut to_read = Vec::new();
-        for (idx, path) in paths
-            .by_ref()
-            .take(GIT_DIFF_STAT_UNTRACKED_PATH_CAP)
+        for (idx, path) in listing
+            .split('\0')
+            .filter(|path| !path.is_empty())
             .enumerate()
         {
             self.files_changed += 1;
             if idx < GIT_DIFF_STAT_UNTRACKED_FILE_CAP {
                 to_read.push(path.to_string());
+            } else {
+                self.insertions_truncated = true;
             }
         }
-        if paths.next().is_some() {
-            self.files_changed += 1;
-        }
-        self.insertions += untracked_insertions_within(cwd, to_read, deadline_at);
+        to_read
     }
 }
 
@@ -203,7 +223,11 @@ fn git_stdout(cwd: &str, args: &[&str], deadline_at: std::time::Instant) -> Opti
     cmd.current_dir(cwd)
         // U-035: a hung credential/helper prompt would otherwise pin the
         // blocking-pool task. With no terminal git fails fast instead.
-        .env("GIT_TERMINAL_PROMPT", "0");
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // `parse_shortstat` matches English `file` / `insertion` / `deletion`.
+        // Same pin as `repository_discovery_command` (issue #689).
+        .env("LC_ALL", "C")
+        .env("LANGUAGE", "C");
     let output =
         paneflow_process::run_with_timeout(cmd, remaining, GIT_DIFF_STAT_STDOUT_CAP).ok()?;
     output.status.success().then_some(output.stdout)
@@ -1244,6 +1268,50 @@ mod tests {
         assert_eq!(single.files_changed, 1);
         assert_eq!(single.insertions, 0);
         assert_eq!(single.deletions, 2);
+        assert!(!single.insertions_truncated);
+    }
+
+    #[test]
+    fn untracked_listing_counts_every_path_past_the_old_thousand_cap() {
+        let mut stats = GitDiffStats::default();
+        let mut listing = String::new();
+        for index in 0..1001 {
+            listing.push_str(&format!("file-{index}\0"));
+        }
+        let to_read = stats.record_untracked_paths(&listing);
+        assert_eq!(stats.files_changed, 1001);
+        assert_eq!(to_read.len(), 200);
+        assert!(stats.insertions_truncated);
+        assert_eq!(stats.insertion_label(), "+0+");
+    }
+
+    #[test]
+    fn untracked_listing_under_the_read_cap_stays_exact() {
+        let mut stats = GitDiffStats {
+            insertions: 4,
+            ..GitDiffStats::default()
+        };
+        let to_read = stats.record_untracked_paths("a\0b\0");
+        assert_eq!(stats.files_changed, 2);
+        assert_eq!(to_read, vec!["a".to_string(), "b".to_string()]);
+        assert!(!stats.insertions_truncated);
+        assert_eq!(stats.insertion_label(), "+4");
+    }
+
+    #[test]
+    fn git_stdout_pins_the_c_locale() {
+        let body = include_str!("git.rs");
+        let start = body.find("fn git_stdout(").expect("git_stdout");
+        let end = body[start..]
+            .find("fn untracked_insertions(")
+            .map(|offset| start + offset)
+            .expect("untracked_insertions follows git_stdout");
+        let git_stdout = &body[start..end];
+        assert!(
+            git_stdout.contains(".env(\"LC_ALL\", \"C\")")
+                && git_stdout.contains(".env(\"LANGUAGE\", \"C\")"),
+            "sidebar diff stats must not depend on a translated shortstat: {git_stdout}"
+        );
     }
 
     #[test]

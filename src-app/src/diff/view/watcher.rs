@@ -148,6 +148,10 @@ pub(super) fn build(
     Some(watcher)
 }
 
+/// How many notify events one wake may take before yielding the frame.
+/// The rest stay queued so a hot stream cannot stall the GPUI poll (issue #678).
+const MAX_EVENTS_PER_WAKE: usize = 32;
+
 /// Debounce/cooldown driver for the watcher task, extracted so tests can drive
 /// it with an injected event stream and timer instead of a real
 /// [`RecommendedWatcher`] and `smol::Timer` (issue #209).
@@ -158,6 +162,10 @@ pub(super) fn build(
 /// expires dirty, the loop revalidates immediately and enters a fresh cooldown,
 /// so the trailing edge is never dropped while reload churn still costs at most
 /// one deferred refresh per period, never a tight loop.
+///
+/// Each deadline is polled before the event stream. A ready timer wins even
+/// when events are queued, and a wake drains at most [`MAX_EVENTS_PER_WAKE`]
+/// of them before yielding (issue #678).
 async fn drive_refresh_loop<S, T, TF, R>(mut events: S, mut make_timer: T, mut revalidate: R)
 where
     S: futures::Stream<Item = notify::Result<Event>> + Unpin,
@@ -186,41 +194,72 @@ where
         }
 
         // Debounce: a fixed window that coalesces the burst into one refresh.
-        let mut timer = make_timer(REFRESH_DEBOUNCE);
-        loop {
-            match futures::future::select(events.next(), timer).await {
-                Either::Left((Some(_), rest)) => timer = rest,
-                Either::Left((None, _)) => return,
-                Either::Right(_) => break,
-            }
+        // The deadline is polled first, so queued events cannot hold it off.
+        if await_deadline(&mut events, make_timer(REFRESH_DEBOUNCE), |_| {}).await {
+            return;
         }
 
         // Revalidate, then cool down. A relevant event arriving during the
         // cooldown sets `dirty`; a dirty expiry revalidates immediately and
         // enters a fresh cooldown (trailing edge, still bounded to one refresh
-        // per cooldown period).
+        // per cooldown period). Irrelevant events do not set `dirty`.
         loop {
             if !revalidate() {
                 return;
             }
             let mut dirty = false;
-            let mut timer = make_timer(REFRESH_COOLDOWN);
-            loop {
-                match futures::future::select(events.next(), timer).await {
-                    Either::Left((Some(result), rest)) => {
-                        timer = rest;
-                        if event_relevant(&result) {
-                            dirty = true;
-                        }
+            let stream_ended =
+                await_deadline(&mut events, make_timer(REFRESH_COOLDOWN), |result| {
+                    if event_relevant(&result) {
+                        dirty = true;
                     }
-                    Either::Left((None, _)) => return,
-                    Either::Right(_) => break,
-                }
+                })
+                .await;
+            if stream_ended {
+                return;
             }
             if !dirty {
                 break;
             }
             log::debug!("diff: watcher dirty during cooldown -> trailing revalidate");
+        }
+    }
+}
+
+/// Poll `timer` before the stream. Returns `true` when the stream ended.
+///
+/// `select` polls its first future first and, if that future is ready, does
+/// not poll the second. A ready deadline therefore breaks without taking a
+/// queued event. After [`MAX_EVENTS_PER_WAKE`] takes, yield so one wake cannot
+/// empty the channel; leftover events stay queued and the dirty/debounce path
+/// still refreshes.
+async fn await_deadline<S, TF>(
+    events: &mut S,
+    mut timer: TF,
+    mut on_event: impl FnMut(notify::Result<Event>),
+) -> bool
+where
+    S: futures::Stream<Item = notify::Result<Event>> + Unpin,
+    TF: Future + Unpin,
+{
+    let mut drained = 0usize;
+    loop {
+        match futures::future::select(timer, events.next()).await {
+            Either::Left((_, unread)) => {
+                // Timer won. `unread` was not polled, so the stream is not advanced.
+                drop(unread);
+                return false;
+            }
+            Either::Right((None, _)) => return true,
+            Either::Right((Some(result), rest)) => {
+                timer = rest;
+                on_event(result);
+                drained += 1;
+                if drained >= MAX_EVENTS_PER_WAKE {
+                    smol::future::yield_now().await;
+                    drained = 0;
+                }
+            }
         }
     }
 }
@@ -392,6 +431,8 @@ mod tests {
     use std::task::{Context, Poll};
     use std::time::Duration;
 
+    use futures::Stream;
+
     /// Manually released fake timer: ticket `n` completes once the harness has
     /// released more than `n` timers, so the test controls exactly when each
     /// debounce/cooldown window "expires".
@@ -412,11 +453,37 @@ mod tests {
         }
     }
 
+    /// Counts items the driver actually pulled. Dropping an unpolled `next`
+    /// future must not increment this.
+    struct CountingStream<S> {
+        inner: S,
+        taken: Rc<Cell<usize>>,
+    }
+
+    impl<S> Stream for CountingStream<S>
+    where
+        S: Stream + Unpin,
+    {
+        type Item = S::Item;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let this = self.get_mut();
+            match Pin::new(&mut this.inner).poll_next(cx) {
+                Poll::Ready(Some(item)) => {
+                    this.taken.set(this.taken.get() + 1);
+                    Poll::Ready(Some(item))
+                }
+                other => other,
+            }
+        }
+    }
+
     struct Harness {
         tx: Option<mpsc::UnboundedSender<notify::Result<Event>>>,
         fut: Pin<Box<dyn Future<Output = ()>>>,
         released: Rc<Cell<usize>>,
         revalidations: Rc<Cell<usize>>,
+        events_taken: Rc<Cell<usize>>,
     }
 
     impl Harness {
@@ -425,6 +492,7 @@ mod tests {
             let released = Rc::new(Cell::new(0usize));
             let created = Rc::new(Cell::new(0usize));
             let revalidations = Rc::new(Cell::new(0usize));
+            let events_taken = Rc::new(Cell::new(0usize));
             let make_timer = {
                 let released = released.clone();
                 move |_duration: Duration| {
@@ -443,11 +511,16 @@ mod tests {
                     true
                 }
             };
+            let events = CountingStream {
+                inner: rx,
+                taken: events_taken.clone(),
+            };
             Self {
                 tx: Some(tx),
-                fut: Box::pin(drive_refresh_loop(rx, make_timer, revalidate)),
+                fut: Box::pin(drive_refresh_loop(events, make_timer, revalidate)),
                 released,
                 revalidations,
+                events_taken,
             }
         }
 
@@ -472,6 +545,10 @@ mod tests {
 
         fn revalidations(&self) -> usize {
             self.revalidations.get()
+        }
+
+        fn events_taken(&self) -> usize {
+            self.events_taken.get()
         }
     }
 
@@ -563,5 +640,55 @@ mod tests {
         harness.tx = None;
         assert!(harness.poll().is_ready());
         assert_eq!(harness.revalidations(), 1);
+    }
+
+    #[test]
+    fn debounce_deadline_is_polled_while_events_are_waiting() {
+        let mut harness = Harness::new();
+
+        // Leading event opens the debounce window (timer #0) and is consumed.
+        harness.send(relevant_path());
+        assert!(harness.poll().is_pending());
+        assert_eq!(harness.revalidations(), 0);
+        let taken_idle = harness.events_taken();
+        assert_eq!(taken_idle, 1);
+
+        // Expire that deadline before the next poll, with a backlog well above
+        // one wake's drain cap already sitting in the channel.
+        harness.expire_timer();
+        let queued = 96usize;
+        for _ in 0..queued {
+            harness.send(relevant_path());
+        }
+
+        // One poll must refresh because the deadline is ready, and must return
+        // Pending while events are still queued. A stream that stays Ready
+        // would hang the old loop; this finite backlog is enough when the
+        // timer is polled first and a wake stops after 32 takes.
+        assert!(harness.poll().is_pending());
+        assert_eq!(harness.revalidations(), 1);
+        let drained = harness.events_taken() - taken_idle;
+        assert!(
+            drained <= 32,
+            "one wake drained {drained} events, cap is 32"
+        );
+        assert!(
+            drained < queued,
+            "deadline poll consumed the whole backlog ({drained})"
+        );
+
+        // No new expiry: the loop must not spin through the rest or refresh again.
+        let taken_mid = harness.events_taken();
+        assert!(harness.poll().is_pending());
+        assert_eq!(harness.revalidations(), 1);
+        let drained_again = harness.events_taken() - taken_mid;
+        assert!(
+            drained_again <= 32,
+            "follow-up wake drained {drained_again} events"
+        );
+        assert!(
+            harness.events_taken() - taken_idle < queued,
+            "follow-up wake emptied the backlog"
+        );
     }
 }

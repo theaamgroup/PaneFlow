@@ -116,11 +116,7 @@ fn diffstat(stats: &GitDiffStats, ui: crate::theme::UiColors) -> Option<AnyEleme
             .gap(px(5.))
             .text_size(crate::ui_primitives::LABEL_SM)
             .when(stats.insertions > 0, |row| {
-                row.child(
-                    div()
-                        .text_color(ui.vc_added)
-                        .child(format!("+{}", stats.insertions)),
-                )
+                row.child(div().text_color(ui.vc_added).child(stats.insertion_label()))
             })
             .when(stats.deletions > 0, |row| {
                 row.child(
