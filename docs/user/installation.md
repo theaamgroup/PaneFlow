@@ -1,8 +1,11 @@
 # Installation
 
-This fork is macOS-only and unpublished. There is no download page, no
-DMG release, and no Homebrew tap. The only install path is building from
-source.
+PaneFlow is macOS-only. Download the signed, notarized Apple Silicon DMG
+from [GitHub Releases](https://github.com/theaamgroup/PaneFlow/releases/latest),
+open it, and drag PaneFlow to Applications. Repository access is required for
+this private fork. The current release is 0.7.0. There is no Homebrew tap.
+
+Building and packaging from source remain available:
 
 - From-source setup (Rust, Xcode, Metal, cmake, `cargo run`):
   [`INSTALL.md`](../../INSTALL.md)
@@ -10,9 +13,8 @@ source.
   [installation/macos.md](installation/macos.md)
 - Symptom-first fixes: [troubleshooting.md](troubleshooting.md)
 
-What you get is a single `paneflow` binary. No services, no daemons, no
-background processes. Wrap a release build with
-`scripts/bundle-macos.sh --version 0.1.0 --arch aarch64` to produce
+The app bundles its helper binaries. To package a local release build, run
+`scripts/bundle-macos.sh --version 0.7.0 --arch aarch64` to produce
 `dist/PaneFlow.app`.
 
 ## Where the config lives

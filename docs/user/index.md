@@ -8,9 +8,10 @@ agentic CLI workflows: Claude Code, Codex, OpenCode, and any other agent
 that speaks plain shell. Split panes, persistent sessions, dev-server
 port detection, and bundled themes.
 
-This fork drops Windows and Linux support entirely. There is no public
-download, no Homebrew tap, and no public issue tracker. Build it from
-source: see [INSTALL.md](../../INSTALL.md).
+This fork targets macOS on Apple Silicon. Authorized repository users can
+download the signed, notarized 0.7.0 DMG from
+[GitHub Releases](https://github.com/theaamgroup/PaneFlow/releases/latest).
+There is no Homebrew tap. For source builds, see [INSTALL.md](../../INSTALL.md).
 
 ## Contents
 
@@ -62,6 +63,6 @@ choice. See [LICENSE](../../LICENSE).
 
 ## Fork context
 
-Fork rationale, staged cut plan, verified traps, and the running defect
-list live in
-[docs/fork/2026-08-25-mac-only-fork-design.md](../fork/2026-08-25-mac-only-fork-design.md).
+Fork rationale and verified traps live in
+[the fork design](../fork/2026-08-25-mac-only-fork-design.md).
+Open work is tracked in GitHub issues.

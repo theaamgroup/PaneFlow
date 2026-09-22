@@ -4,8 +4,8 @@
 > `PATH`, and deal with Gatekeeper. Prerequisites and `cargo build` live
 > in [`INSTALL.md`](../../../INSTALL.md).
 
-This fork ships no download. Build from source first, then come here if
-you want a bundle you can drop in `/Applications`.
+For the signed, notarized DMG, use [GitHub Releases](https://github.com/theaamgroup/PaneFlow/releases/latest).
+The steps below package a local source build.
 
 ## Assemble an .app bundle
 
@@ -14,7 +14,7 @@ you want a bundle you can drop in `/Applications`.
 
 ```bash
 cargo build --release
-scripts/bundle-macos.sh --version 0.1.0 --arch aarch64
+scripts/bundle-macos.sh --version 0.7.0 --arch aarch64
 ```
 
 That writes `dist/PaneFlow.app` with the executable at

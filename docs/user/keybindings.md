@@ -15,6 +15,11 @@ would drift. The source of truth is:
 | Wiring | `apply_keybindings()` in `src-app/src/keybindings/apply.rs` |
 | Rendered chord strings | `format_keystroke()` in `src-app/src/keybindings/display.rs` |
 
+The command palette (`Cmd+Shift+O`) searches actions and shows their live
+shortcuts. Other navigation entrypoints are agent summary (`Cmd+Shift+I`),
+pane overview (`Cmd+Shift+P`), Files sidebar (`Cmd+Alt+F`), and work review
+(`Cmd+Shift+U`). User overrides can change these defaults.
+
 The app also shows the live bindings in **Settings > Keyboard
 Shortcuts**, which is the right place to look them up while using it.
 That page is grouped by area, and its search box matches the action's

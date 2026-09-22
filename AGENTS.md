@@ -208,7 +208,3 @@ and linking overflow blockers in the maintained summary. Never hide a blocker to
 meet the limit. No formatting preferences, speculative improvements, duplicates,
 or narration. Re-review adds only new findings/evidence. Ask product/design
 questions separately from defects, once, with the decision needed.
-
-## Project context
-
-Read [CONTEXT.md](CONTEXT.md) in the repository root. It holds the project-specific rules and constraints this team requires agents to follow, and its stricter restrictions are binding.
