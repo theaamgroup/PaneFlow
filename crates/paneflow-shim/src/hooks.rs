@@ -82,6 +82,29 @@ pub(crate) fn safe_path_display(path: &Path) -> String {
     safe_log_text(&path.display().to_string())
 }
 
+/// #662: drop managed commands whose `paneflow-ai-hook` binary is gone,
+/// before the wrapped agent reads them. Grok executes the project Claude
+/// file and labels a failure `project/settings.local`; only the Claude
+/// installer used to reap that file.
+pub(crate) fn reap_dead_project_hooks_here() {
+    let Ok(cwd) = env::current_dir() else {
+        return;
+    };
+    let report = paneflow_agent_config::reap_dead_project_hooks(&cwd);
+    for path in &report.changed {
+        crate::diagnose(&format!(
+            "reaped dead managed hooks from {}",
+            safe_path_display(path)
+        ));
+    }
+    for (path, error) in &report.errors {
+        crate::diagnose(&format!(
+            "could not reap dead hooks in {}: {error}",
+            safe_path_display(path)
+        ));
+    }
+}
+
 fn safe_log_text(text: &str) -> String {
     text.chars()
         .map(|character| {
