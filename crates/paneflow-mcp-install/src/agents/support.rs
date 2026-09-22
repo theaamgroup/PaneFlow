@@ -420,6 +420,19 @@ pub(crate) const CODEX_ENV_VARS: &[&str] = &[
     "PANEFLOW_SURFACE_ID",
 ];
 
+/// Static Codex `env` keys that override the identity the pane is supposed
+/// to forward through [`CODEX_ENV_VARS`]. `PANEFLOW_MCP_SCOPE=all` makes
+/// `paneflow-mcp` read every workspace; the other three pin the socket,
+/// workspace, or surface instead of the launching pane.
+const CODEX_FORBIDDEN_ENV_KEYS: &[&str] = &[
+    "PANEFLOW_MCP_SCOPE",
+    "PANEFLOW_SOCKET_PATH",
+    "PANEFLOW_WORKSPACE_ID",
+    "PANEFLOW_SURFACE_ID",
+];
+
+const CODEX_ENV_OVERRIDE_REASON: &str = "Codex MCP env must not set PANEFLOW_MCP_SCOPE, PANEFLOW_SOCKET_PATH, PANEFLOW_WORKSPACE_ID, or PANEFLOW_SURFACE_ID";
+
 fn ensure_codex_env_vars(doc: &mut toml_edit::DocumentMut) -> Result<()> {
     use toml_edit::{value, Array, Item, Value};
 
@@ -497,6 +510,57 @@ fn codex_env_vars_ok(entry: &toml_edit::Item) -> bool {
         })
 }
 
+fn codex_env_has_forbidden_override(entry: &toml_edit::Item) -> bool {
+    entry
+        .get("env")
+        .and_then(toml_edit::Item::as_table_like)
+        .is_some_and(|env| {
+            CODEX_FORBIDDEN_ENV_KEYS
+                .iter()
+                .any(|key| env.contains_key(key))
+        })
+}
+
+/// Delete static PaneFlow identity from the managed entry's `env` table.
+/// `env_vars` is a different key and stays. An `env` table that becomes
+/// empty is removed; unrelated keys in that table stay.
+fn strip_codex_forbidden_env(doc: &mut toml_edit::DocumentMut) {
+    use toml_edit::Item;
+
+    let Some(entry) = doc
+        .get_mut(CODEX_TABLE)
+        .and_then(Item::as_table_mut)
+        .and_then(|parent| parent.get_mut(ENTRY))
+        .and_then(Item::as_table_like_mut)
+    else {
+        return;
+    };
+
+    let (removed, empty) = {
+        let Some(env) = entry.get_mut("env").and_then(Item::as_table_like_mut) else {
+            return;
+        };
+        let mut removed = Vec::new();
+        for key in CODEX_FORBIDDEN_ENV_KEYS {
+            if env.remove(key).is_some() {
+                removed.push(*key);
+            }
+        }
+        (removed, env.is_empty())
+    };
+    // Only drop `env` when this repair emptied it. A table that was already
+    // empty is not an override, and deleting it would rewrite a current file.
+    if empty && !removed.is_empty() {
+        entry.remove("env");
+    }
+    if !removed.is_empty() {
+        log::info!(
+            "paneflow mcp: removing static PaneFlow env overrides from the Codex MCP entry ({})",
+            removed.join(", ")
+        );
+    }
+}
+
 pub(crate) fn toml_install(path: &Path, command: &str) -> Result<InstallOutcome> {
     io::with_config_lock(path, || {
         let mut doc = merge::read_toml_or_default(path)?;
@@ -505,6 +569,10 @@ pub(crate) fn toml_install(path: &Path, command: &str) -> Result<InstallOutcome>
         merge::upsert_toml_entry(&mut doc, CODEX_TABLE, ENTRY, command, &[])?;
         ensure_codex_env_vars(&mut doc)?;
         ensure_codex_entry_enabled(&mut doc)?;
+        // Before the unchanged-document short-circuit: a scope-widening
+        // `env` value is not part of the managed command/args/env_vars shape,
+        // so leaving it would report AlreadyCurrent and keep the override.
+        strip_codex_forbidden_env(&mut doc);
         if doc.to_string() == before {
             return Ok(InstallOutcome::AlreadyCurrent);
         }
@@ -554,13 +622,14 @@ pub(crate) fn toml_status(path: &Path, expected: Option<&Path>) -> Result<Status
         .get("enabled")
         .and_then(|e| e.as_bool())
         .unwrap_or(true);
-    let shape_ok = args_ok && enabled_ok && codex_env_vars_ok(entry);
-    Ok(classify_entry(
-        found,
-        expected,
-        shape_ok,
-        "Codex MCP entry must have empty args, forward PaneFlow's socket/workspace variables, and must not be disabled",
-    ))
+    let forbidden_env = codex_env_has_forbidden_override(entry);
+    let shape_ok = args_ok && enabled_ok && codex_env_vars_ok(entry) && !forbidden_env;
+    let reason = if forbidden_env {
+        CODEX_ENV_OVERRIDE_REASON
+    } else {
+        "Codex MCP entry must have empty args, forward PaneFlow's socket/workspace variables, and must not be disabled"
+    };
+    Ok(classify_entry(found, expected, shape_ok, reason))
 }
 
 // ---------------------------------------------------------------------------

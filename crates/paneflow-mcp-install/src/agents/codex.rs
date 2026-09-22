@@ -364,6 +364,121 @@ mod tests {
     }
 
     #[test]
+    fn status_needs_repair_when_env_overrides_paneflow_scope() {
+        // Issue #648: a managed command with the required env_vars still
+        // widens the bridge when `env.PANEFLOW_MCP_SCOPE` is `all`. Status
+        // must say NeedsRepair, and install must delete the key before the
+        // already-current short-circuit. The same contract covers the three
+        // identity variables Codex is supposed to forward, not pin.
+        let bridge = Path::new("/data/paneflow-mcp");
+        let header = "[mcp_servers.paneflow]\n\
+             command = \"/data/paneflow-mcp\"\n\
+             args = []\n\
+             env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\", \"PANEFLOW_SURFACE_ID\"]\n";
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(
+            &p,
+            format!("{header}\n[mcp_servers.paneflow.env]\nPANEFLOW_MCP_SCOPE = \"all\"\n"),
+        )
+        .unwrap();
+        assert_scope_override_repaired(&p, bridge, "PANEFLOW_MCP_SCOPE", None);
+
+        for (key, value) in [
+            ("PANEFLOW_SOCKET_PATH", "/tmp/pinned.sock"),
+            ("PANEFLOW_WORKSPACE_ID", "7"),
+            ("PANEFLOW_SURFACE_ID", "9"),
+        ] {
+            std::fs::write(
+                &p,
+                format!("{header}\n[mcp_servers.paneflow.env]\n{key} = \"{value}\"\nCUSTOM = \"keep\"\n"),
+            )
+            .unwrap();
+            assert_scope_override_repaired(&p, bridge, key, Some("keep"));
+        }
+
+        // An unrelated env entry is not a PaneFlow override.
+        std::fs::write(
+            &p,
+            format!("{header}\n[mcp_servers.paneflow.env]\nCUSTOM = \"keep\"\n"),
+        )
+        .unwrap();
+        let w = test_writer(p.clone());
+        assert!(matches!(
+            w.status(Some(bridge)).unwrap(),
+            StatusOutcome::Installed { .. }
+        ));
+        assert_eq!(w.install(bridge).unwrap(), InstallOutcome::AlreadyCurrent);
+        let doc = std::fs::read_to_string(&p)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["paneflow"]["env"]["CUSTOM"].as_str(),
+            Some("keep")
+        );
+
+        // Inline `env` tables are the same override.
+        std::fs::write(
+            &p,
+            "[mcp_servers]\npaneflow = { command = \"/data/paneflow-mcp\", args = [], env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\", \"PANEFLOW_SURFACE_ID\"], env = { PANEFLOW_MCP_SCOPE = \"all\", CUSTOM = \"keep\" } }\n",
+        )
+        .unwrap();
+        assert_scope_override_repaired(&p, bridge, "PANEFLOW_MCP_SCOPE", Some("keep"));
+    }
+
+    fn assert_scope_override_repaired(
+        path: &Path,
+        bridge: &Path,
+        forbidden: &str,
+        kept: Option<&str>,
+    ) {
+        let w = test_writer(path.to_path_buf());
+        let status = w.status(Some(bridge)).unwrap();
+        assert!(
+            matches!(
+                status,
+                StatusOutcome::NeedsRepair { ref reason, .. } if reason.contains(forbidden)
+            ),
+            "expected NeedsRepair naming {forbidden}, got {status:?}"
+        );
+        assert_eq!(w.install(bridge).unwrap(), InstallOutcome::Updated);
+        let doc = std::fs::read_to_string(path)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        let entry = &doc["mcp_servers"]["paneflow"];
+        assert!(
+            entry
+                .get("env")
+                .and_then(|env| env.get(forbidden))
+                .is_none(),
+            "install must remove {forbidden}: {}",
+            std::fs::read_to_string(path).unwrap()
+        );
+        if let Some(kept) = kept {
+            assert_eq!(entry["env"]["CUSTOM"].as_str(), Some(kept));
+        }
+        let forwarded = entry["env_vars"].as_array().unwrap();
+        for required in [
+            "PANEFLOW_SOCKET_PATH",
+            "PANEFLOW_WORKSPACE_ID",
+            "PANEFLOW_SURFACE_ID",
+        ] {
+            assert!(
+                forwarded.iter().any(|item| item.as_str() == Some(required)),
+                "env_vars must still forward {required}"
+            );
+        }
+        assert!(matches!(
+            w.status(Some(bridge)).unwrap(),
+            StatusOutcome::Installed { .. }
+        ));
+        assert_eq!(w.install(bridge).unwrap(), InstallOutcome::AlreadyCurrent);
+    }
+
+    #[test]
     fn install_repairs_missing_env_forwards_and_preserves_custom_ones() {
         let dir = tempfile::TempDir::new().unwrap();
         let p = dir.path().join("config.toml");
