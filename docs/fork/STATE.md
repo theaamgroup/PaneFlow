@@ -1,7 +1,7 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-09-18 for the 0.7.0 cut (see the entry
-below), and before that 2026-09-17 after the #519 startup bench port and
+Living handoff record. Updated 2026-09-22 for the 0.7.1 cut (see the entry
+below), and before that 2026-09-18 for the 0.7.0 cut, 2026-09-17 after the #519 startup bench port and
 2026-09-16 after the post-0.6.1 review follow-ups. The prior header described
 the 0.6.1 cut;
 the one before that the 0.6.0 cut, and before that the 0.5.0 cut, which shipped
@@ -19,6 +19,33 @@ configured external editor. Git diff viewing and Review mode stay. The
 terminal bench and the startup bench are the performance suites that remain.
 The in-app Markdown viewer is removed (#598): a Cmd-clicked `.md` path opens in the external editor, and tree-sitter Markdown highlighting in Changes and Review stays.
 The fleet agent summary (`Cmd+Shift+I`) and its Swift sidecar are removed (#605). Pane overview stays.
+
+**2026-09-22: the 0.7.1 cut.** 47 non-merge commits since `v0.7.0`, a patch
+bump. The release removes surfaces that 0.7.0 added or still carried: the
+fleet summary and its sidecar (#605), the Launch Pad (#603), the Clone
+repository modal (#600), the title-bar profile menu (#604), fleet search
+(#602), the attention queue (#601, `Cmd+Shift+J` still jumps to the next
+waiting agent), the sidebar pull-request marker (#606), the workspace
+template builder (#607), and per-workspace custom buttons (#608). File and
+Markdown clicks open the configured external editor (#597, #598, #593).
+`Ctrl+Alt+Z` opens the workspace in that same editor (#599). CLI verbs
+`up`, `new`, `select`, `split`, and `focus`, and the CLI event stream, are
+gone (#610, #611, #612). Curated notes live in `docs/releases/v0.7.1.md`.
+
+Pre-flight on the bump, warm `target/`: `cargo test --workspace --locked
+--no-fail-fast` **2,917 passed, 0 failed, 4 ignored**; `cargo clippy
+--workspace --all-targets --locked -- -D warnings` exit 0, **WARNING COUNT
+1** (`block v0.1.6`); `cargo fmt --check` exit 0; `cargo deny check
+advisories licenses sources` exit 0 -> `advisories ok, licenses ok, sources
+ok` (the two GPUI crates without a license field remain accepted warnings).
+`cargo build -p paneflow-app --locked` exit 0, with the known vendored
+Ghostty `duplicate symbol '_memset'` linker notice. `./target/debug/paneflow
+--version` reports `paneflow 0.7.1`. The four ignored tests are
+`layout::render::eight_pane_gpui_input_to_paint_performance_gate`,
+`startup_bench::startup_first_frame_benchmark`,
+`terminal::ghostty_stress::ghostty_spawn_resize_close_stress_has_no_residual_growth`,
+and `terminal::perf_bench::terminal_pipeline_benchmark`. The version bump
+does not change platform `cfg` sites, so the 0.7.0 census stands.
 
 **2026-09-18: the 0.7.0 cut.** 36 non-merge commits since `v0.6.1`, a minor
 bump because the release adds surfaces rather than only fixing them: the
