@@ -1531,33 +1531,59 @@ fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::Sessio
     }
     match serialize_session_capped(state, MAX_SESSION_SIZE_BYTES as usize) {
         Ok(json) => {
-            let tmp_path = session_tmp_path(path);
-            let write_result = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp_path)
-                .and_then(|mut temporary| {
-                    // `mode` is ignored for a path that already exists, so pin
-                    // the temp file 0600 before it is renamed into place.
-                    temporary.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-                    std::io::Write::write_all(&mut temporary, &json)?;
-                    temporary.sync_all()
-                });
-            match write_result {
-                Ok(()) => {
-                    if let Err(e) = std::fs::rename(&tmp_path, path) {
-                        log::warn!("session save rename failed: {e}");
-                        let _ = std::fs::remove_file(&tmp_path);
-                        false
-                    } else {
-                        true
+            // `create_new` is O_EXCL. A symlink planted at the predictable
+            // temp name is an existing directory entry, so the open fails
+            // instead of truncating the link's target (issue #688).
+            let mut tmp_path = None;
+            let mut failure = None;
+            for _ in 0..8 {
+                let candidate = session_tmp_path(path);
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&candidate)
+                {
+                    Ok(mut temporary) => {
+                        let wrote = temporary
+                            .set_permissions(std::fs::Permissions::from_mode(0o600))
+                            .and_then(|()| std::io::Write::write_all(&mut temporary, &json))
+                            .and_then(|()| temporary.sync_all());
+                        match wrote {
+                            Ok(()) => {
+                                tmp_path = Some(candidate);
+                                break;
+                            }
+                            Err(err) => {
+                                let _ = std::fs::remove_file(&candidate);
+                                failure = Some(err);
+                                break;
+                            }
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(err) => {
+                        failure = Some(err);
+                        break;
                     }
                 }
-                Err(e) => {
-                    log::warn!("session save failed: {e}");
-                    let _ = std::fs::remove_file(&tmp_path);
+            }
+            match tmp_path {
+                Some(tmp_path) => match std::fs::rename(&tmp_path, path) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        log::warn!("session save rename failed: {err}");
+                        let _ = std::fs::remove_file(&tmp_path);
+                        false
+                    }
+                },
+                None => {
+                    log::warn!(
+                        "session save failed: {}",
+                        failure
+                            .map(|err| err.to_string())
+                            .unwrap_or_else(|| "temp path already existed".to_string())
+                    );
                     false
                 }
             }
@@ -3088,6 +3114,41 @@ mod tests {
                 .is_symlink()
         );
         assert!(!missing.exists());
+    }
+
+    /// Issue #688: the first temp name in a process is predictable. A symlink
+    /// there must not be followed, and the save must still publish the session.
+    #[test]
+    fn write_session_json_does_not_follow_a_symlink_at_the_temp_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir(&dir).expect("sessions dir");
+        let path = dir.join("session.json");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"secret-bytes").expect("victim");
+        let seq = SESSION_TMP_COUNTER.load(Ordering::Relaxed);
+        let planted = dir.join(format!(".session.json.tmp.{}.{seq}", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &planted).expect("planted temp symlink");
+
+        assert!(write_session_json(&path, &empty_session_state()));
+        assert_eq!(
+            std::fs::read(&victim).expect("victim readable"),
+            b"secret-bytes",
+            "the planted symlink's target must not be truncated"
+        );
+        assert!(
+            std::fs::symlink_metadata(&planted)
+                .expect("planted link")
+                .file_type()
+                .is_symlink()
+        );
+        let loaded: paneflow_config::schema::SessionState =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("session readable"))
+                .expect("session json");
+        assert_eq!(
+            loaded.version,
+            paneflow_config::schema::SESSION_SCHEMA_VERSION
+        );
     }
 
     #[test]
