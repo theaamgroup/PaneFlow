@@ -298,7 +298,7 @@ impl PaneFlowApp {
         // Decide open/close from the render-time snapshot, not the live state:
         // the menu's `on_mouse_down_out` fires on this same press and may have
         // already cleared it, so a live toggle would re-open the menu.
-        let mut trigger = select_trigger("theme-preset-select", ui, is_open)
+        let mut trigger = select_trigger("theme-preset-select", ui, is_open, current_name)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {

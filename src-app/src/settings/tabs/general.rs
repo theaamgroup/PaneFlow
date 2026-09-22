@@ -360,6 +360,7 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_open = self.general_dropdown == Some(which);
+        let trigger_name = format!("{title}, {current_label}");
 
         // Value cluster: optional leading logo + truncating label.
         let mut value = div()
@@ -388,6 +389,7 @@ impl PaneFlowApp {
             SharedString::from(format!("general-dd-{config_key}")),
             ui,
             is_open,
+            trigger_name,
         )
         .on_mouse_down(
             MouseButton::Left,

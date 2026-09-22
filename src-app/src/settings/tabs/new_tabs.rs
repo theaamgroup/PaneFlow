@@ -77,8 +77,8 @@ impl PaneFlowApp {
             SharedString::from(format!("new-tab-branch-{id}")),
             ui,
             is_open,
+            format!("{title}: new tab branch, {selected_label}"),
         )
-        .aria_label(format!("{title}: new tab branch, {selected_label}"))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _, window, cx| {

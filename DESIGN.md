@@ -1125,7 +1125,7 @@ visible text already names it — which still carries `Role::Button`.
 | --- | --- | --- |
 | Icon buttons, sidebar actions, menu triggers, nav rows | `Role::Button` | `aria_label`; `a11y_disabled` where a control can be disabled |
 | Settings toggles (`toggle_switch`) | `Role::Switch` | `aria_toggled`, `tab_index(0)` |
-| Select triggers | `Role::ComboBox` | `aria_expanded`, `tab_index(0)` |
+| Select triggers | `Role::ComboBox` | `aria_label` (visible value; setting title too when the row has one), `aria_expanded`, `tab_index(0)` |
 | Select lists and rows | `Role::ListBox` / `ListBoxOption` | `aria_selected` |
 | Terminal search status | `Role::Status` | the status string as `aria_label` |
 
