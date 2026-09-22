@@ -75,43 +75,6 @@ pub(super) const FIXED: &[(&str, &str)] = &[
         "cmd-shift-enter",
         "Text area / Composer · send prompt immediately",
     ),
-    ("left", "Code editor · left"),
-    ("right", "Code editor · right"),
-    ("up", "Code editor · up"),
-    ("down", "Code editor · down"),
-    ("shift-left", "Code editor · select left"),
-    ("shift-right", "Code editor · select right"),
-    ("shift-up", "Code editor · select up"),
-    ("shift-down", "Code editor · select down"),
-    ("home", "Code editor · line start"),
-    ("end", "Code editor · line end"),
-    ("shift-home", "Code editor · select home"),
-    ("shift-end", "Code editor · select end"),
-    ("pageup", "Code editor · page up"),
-    ("pagedown", "Code editor · page down"),
-    ("shift-pageup", "Code editor · select page up"),
-    ("shift-pagedown", "Code editor · select page down"),
-    ("secondary-a", "Code editor · select all"),
-    ("backspace", "Code editor · backspace"),
-    ("delete", "Code editor · delete"),
-    ("enter", "Code editor · insert newline"),
-    ("tab", "Code editor · increase indent"),
-    ("shift-tab", "Code editor · decrease indent"),
-    ("secondary-z", "Code editor · undo"),
-    ("secondary-shift-z", "Code editor · redo"),
-    ("secondary-c", "Code editor · copy"),
-    ("secondary-x", "Code editor · cut"),
-    ("secondary-v", "Code editor · paste"),
-    ("secondary-s", "Code editor · save"),
-    ("escape", "Code editor · dismiss"),
-    ("alt-left", "Code editor · word left"),
-    ("alt-right", "Code editor · word right"),
-    ("alt-shift-left", "Code editor · select word left"),
-    ("alt-shift-right", "Code editor · select word right"),
-    ("cmd-up", "Code editor · document start"),
-    ("cmd-down", "Code editor · document end"),
-    ("cmd-shift-up", "Code editor · select document start"),
-    ("cmd-shift-down", "Code editor · select document end"),
     ("f2", "Sidebar · rename focused workspace or tab"),
     ("enter", "Sidebar rename · confirm"),
     ("escape", "Sidebar rename · cancel"),
@@ -133,21 +96,15 @@ pub(super) const FIXED: &[(&str, &str)] = &[
         "backspace",
         "Theme picker, broadcast groups · delete filter character",
     ),
-    ("up", "Files and Sessions sidebars · previous row"),
-    ("down", "Files and Sessions sidebars · next row"),
-    ("home", "Files and Sessions sidebars · first row"),
-    ("end", "Files and Sessions sidebars · last row"),
-    (
-        "enter",
-        "Files and Sessions sidebars · open / resume selection",
-    ),
-    (
-        "space",
-        "Files and Sessions sidebars · open / resume selection",
-    ),
+    ("up", "Sessions sidebar · previous row"),
+    ("down", "Sessions sidebar · next row"),
+    ("home", "Sessions sidebar · first row"),
+    ("end", "Sessions sidebar · last row"),
+    ("enter", "Sessions sidebar · resume selection"),
+    ("space", "Sessions sidebar · resume selection"),
     (
         "escape",
-        "Files and Sessions sidebars · dismiss menu, clear filter, then close",
+        "Sessions sidebar · dismiss menu, clear filter, then close",
     ),
     ("up", "Work review · previous checkout"),
     ("down", "Work review · next checkout"),
@@ -163,9 +120,6 @@ pub(super) const FIXED: &[(&str, &str)] = &[
     ("escape", "Launch Pad · cancel"),
     ("escape", "Dialogs and menus · dismiss"),
     ("enter", "About and close confirmation · confirm"),
-    ("up", "Editor Controls · previous option"),
-    ("down", "Editor Controls · next option"),
-    ("enter", "Editor Controls · choose option"),
     ("left", "Copy mode · move left"),
     ("right", "Copy mode · move right"),
     ("up", "Copy mode · move up"),
@@ -177,8 +131,6 @@ pub(super) const FIXED: &[(&str, &str)] = &[
     ("enter", "Copy mode · copy selection and exit"),
     ("escape", "Copy mode · exit"),
     ("q", "Copy mode · exit"),
-    ("tab", "Editor Controls · next option"),
-    ("space", "Editor Controls · choose option"),
     ("enter", "Diff branch menu · switch to typed branch"),
     ("up", "Custom Buttons · previous button"),
     ("down", "Custom Buttons · next button"),
@@ -269,7 +221,6 @@ mod tests {
                 include_str!("../widgets/text_area.rs"),
                 "Text area / Composer",
             ),
-            (include_str!("../app/diff_dock/code/view.rs"), "Code editor"),
         ] {
             for binding in pattern.captures_iter(source) {
                 assert!(
@@ -314,10 +265,10 @@ mod tests {
 
     #[test]
     fn fixed_bindings_survive_global_overrides() {
-        let entries = settings_shortcuts(&HashMap::from([("cmd-s".into(), "none".into())]));
+        let entries = settings_shortcuts(&HashMap::from([("cmd-c".into(), "none".into())]));
         assert!(entries.iter().any(|entry| entry.fixed
-            && entry.description == "Code editor · save"
-            && entry.key == format_keystroke("secondary-s")));
+            && entry.description == "Text area / Composer · copy"
+            && entry.key == format_keystroke("cmd-c")));
         assert!(entries.iter().any(|entry| !entry.fixed
             && entry.action_name == "open_pane_overview"
             && entry.description.contains("Show all panes")));

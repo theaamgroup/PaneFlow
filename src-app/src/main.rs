@@ -260,17 +260,6 @@ pub(crate) struct PaneContextMenu {
     pub(crate) position: Point<Pixels>,
 }
 
-/// Open right-click menu for a Files-sidebar row (PRD files-tree EP-003
-/// US-009). Carries the row's absolute path and the click anchor; "Copy
-/// relative path" resolves the workspace root at render/action time.
-#[derive(Clone)]
-pub(crate) struct FilesContextMenu {
-    /// Tree root the row belongs to; "Copy relative path" resolves against it.
-    pub(crate) root: std::path::PathBuf,
-    pub(crate) path: std::path::PathBuf,
-    pub(crate) position: Point<Pixels>,
-}
-
 /// Captured state of a closed pane for undo-close-pane (US-014).
 pub(crate) enum ClosedSurfaceRecord {
     Terminal {
@@ -337,7 +326,6 @@ pub(crate) struct ClosedWorkspaceRecord {
     pub(crate) active_tab: usize,
     pub(crate) tabs: Vec<ClosedWorkspaceTabRecord>,
     pub(crate) custom_buttons: Vec<paneflow_config::schema::ButtonCommand>,
-    pub(crate) files_expanded: Vec<std::path::PathBuf>,
     pub(crate) sidebar_expanded: bool,
     pub(crate) pinned: bool,
     /// Lifecycle ownership held while the workspace is undoable. Destructive
@@ -1158,10 +1146,6 @@ struct DiffDockState {
     pub(crate) diff_tabs: Vec<crate::app::diff_dock::DiffDockTab>,
     /// Index into `diff_tabs` of the tab whose body the dock renders.
     pub(crate) diff_active_tab: usize,
-    /// Index of the modified file tab whose close button is armed, i.e. waiting
-    /// for the confirming second press (US-017). Cleared by any tab selection,
-    /// open or close, so the confirmation never outlives its gesture.
-    pub(crate) diff_tab_close_armed: Option<usize>,
     /// Open branch picker anchored to the diff dock's toolbar chip; `None` when
     /// closed. Holds the branch list, the search field and the focus to restore.
     pub(crate) diff_branch_menu: Option<crate::app::diff_dock::DiffBranchMenuState>,
@@ -1455,34 +1439,6 @@ struct PaneFlowApp {
     profile_menu_open: Option<Point<Pixels>>,
     /// US-053: agent-sessions sidebar state (see `AgentSessionsState`).
     agent_sessions: AgentSessionsState,
-    /// Whether the docked Files right sidebar is up (PRD
-    /// `prd-files-tree-sidebar-2026-Q3`, EP-001). Mutually exclusive with
-    /// `sessions_sidebar_open`. Never persisted - always `false` on launch.
-    ///
-    /// Live mirror of the visible session's `Tab::files_sidebar_open`, which is
-    /// where the desire is actually owned; `sync_files_sidebar_session`
-    /// reconciles the two. Being up is still not being on screen: Review and
-    /// Settings unmount the rail while this stays set
-    /// (`files_sidebar_host_visible`).
-    files_sidebar_open: bool,
-    /// Width animation for opening/closing the docked Files right sidebar.
-    /// Matches the agent-sessions sidebar animation.
-    files_sidebar_animation: Option<SidebarWidthAnimation>,
-    /// The Files rail's own entity (issue #430, upstream `d6a44bfc`): the
-    /// cached tree snapshot, its worker thread and watches, the projection,
-    /// selection, filter, focus and scroll all live there. Created once at
-    /// bootstrap and reused across opens; `close_files_sidebar` deactivates
-    /// it and releases the snapshot once the closing animation is done.
-    files_sidebar: Entity<app::files_sidebar::FilesSidebar>,
-    /// Root the rail is currently showing, or `None` while closed. Compared
-    /// against the active workspace's `cwd` by `reroot_files_tree`.
-    files_sidebar_root: Option<std::path::PathBuf>,
-    /// Workspace id the rail is rooted on, so two workspaces on the same
-    /// `cwd` still re-root (their expansion sets differ).
-    files_sidebar_workspace: Option<u64>,
-    /// Open right-click context menu for a Files-sidebar row (EP-003 US-009),
-    /// or `None` when closed. Mutually exclusive with the other popovers.
-    files_menu_open: Option<FilesContextMenu>,
     /// Ephemeral bottom-right toast.
     toast: Option<Toast>,
     /// Pending toasts waiting for the active one to finish. Runtime bursts
@@ -1954,37 +1910,6 @@ impl Render for PaneFlowApp {
         let sessions_sidebar_opacity = (sessions_sidebar_width
             / crate::app::sessions_sidebar::SESSIONS_SIDEBAR_WIDTH.max(1.))
         .clamp(0., 1.);
-        // The Files rail belongs to the CLI cockpit only. Review and Settings
-        // unmount it (`files_sidebar_host_visible`) while `files_sidebar_open`
-        // survives, so returning to the cockpit brings the same tree back. The
-        // width animation is still advanced off-screen so an in-flight close
-        // finishes and releases the tree state instead of freezing mid-way.
-        let files_sidebar_host_visible = self.files_sidebar_host_visible();
-        // The rail follows the session on screen, so every tab switch, tab
-        // close and cross-workspace tab move is reconciled here instead of in
-        // each of those mutations. Off the cockpit the rail is unmounted
-        // anyway: leave the live state alone and reconcile on the way back.
-        if files_sidebar_host_visible {
-            self.sync_files_sidebar_session(cx);
-        }
-        let animated_files_sidebar_width = self.rendered_files_sidebar_width(window, cx);
-        let files_sidebar_width = if files_sidebar_host_visible {
-            animated_files_sidebar_width
-        } else {
-            0.
-        };
-        let files_sidebar_mounted = files_sidebar_host_visible
-            && (self.files_sidebar_open || self.files_sidebar_animation.is_some());
-        // Both mounts share state; dock mode consumes no standalone rail space.
-        let files_sidebar_width = if self.files_tree_in_dock() {
-            0.
-        } else {
-            files_sidebar_width
-        };
-        let files_sidebar_mounted = files_sidebar_mounted && !self.files_tree_in_dock();
-        let files_sidebar_opacity = (files_sidebar_width
-            / crate::app::files_sidebar::FILES_SIDEBAR_WIDTH.max(1.))
-        .clamp(0., 1.);
         // Every mode now renders the right area as ONE top-rounded clipped panel
         // (`panel_bg` fill + 16px rail-side top radius + 5px inset), replacing the
         // old Cli/Diff corner-mask trick. GPUI clips the panel's bg fill to the
@@ -2045,12 +1970,8 @@ impl Render for PaneFlowApp {
         let main_panel_left_inset = crate::app::constants::PANEL_INSET * panel_edge_share;
         let pane_grid_left_gutter = crate::layout::PANE_GUTTER_PX * panel_edge_share;
         let main_panel_corner_mask_bg = panel_corner_mask_bg;
-        // The two right rails are mutually exclusive layout children, so the
-        // main panel loses exactly one of their widths.
         let right_rail_width = if sessions_sidebar_mounted {
             sessions_sidebar_width
-        } else if files_sidebar_mounted {
-            files_sidebar_width
         } else {
             0.
         };
@@ -2337,7 +2258,6 @@ impl Render for PaneFlowApp {
                     }
                 }),
             )
-            .on_action(cx.listener(Self::handle_toggle_files_sidebar))
             .on_action(cx.listener(Self::handle_toggle_diff_dock_maximize))
             // Issue #106: keyboard access to the primary left rail.
             .on_action(cx.listener(Self::handle_toggle_primary_sidebar))
@@ -2352,7 +2272,6 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_open_launch_pad))
             .on_action(cx.listener(Self::handle_open_pane_overview))
             .on_action(cx.listener(Self::handle_open_agent_summary))
-            .on_action(cx.listener(Self::handle_diff_new_file_tab))
             .on_action(cx.listener(Self::handle_diff_new_terminal_tab))
             // EP-001 US-003: Escape cancels an in-flight tab drag. Capture
             // phase runs ancestor-before-descendant, so this pre-empts the
@@ -2386,15 +2305,6 @@ impl Render for PaneFlowApp {
                     cx.stop_active_drag(window);
                     cx.stop_propagation();
                     return;
-                }
-                // The diff dock has its own arm-then-confirm close (a modified
-                // file tab arms on the first press), and it is an armed
-                // destructive control on screen too. Stand it down for the
-                // same gesture. NOT a reason to swallow the key on its own,
-                // unlike the close arm below: nothing is at stake if the
-                // terminal underneath also sees this Escape.
-                if this.diff_dock.diff_tab_close_armed.take().is_some() {
-                    cx.notify();
                 }
                 if app::close_guard::escape_consumes_inline_arm(this.pending_close.as_ref()) {
                     this.set_pending_close(None, cx);
@@ -2588,26 +2498,6 @@ impl Render for PaneFlowApp {
                                 .child(self.render_sessions_sidebar(window, cx))
                                 .into_any_element(),
                         )
-                    })
-                    // Docked Files sidebar (right edge) - same layout child as
-                    // the sessions sidebar, mutually exclusive with it (PRD
-                    // files-tree EP-001).
-                    .when(files_sidebar_mounted && !sessions_sidebar_mounted, |row| {
-                        row.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .h_full()
-                                .w(px(files_sidebar_width))
-                                .flex_shrink_0()
-                                .overflow_hidden()
-                                .opacity(files_sidebar_opacity)
-                                // Keep the right rail below the full-width
-                                // title bar, aligned with the main panel.
-                                .pt(title_bar_h)
-                                .child(self.render_files_sidebar(window, cx))
-                                .into_any_element(),
-                        )
                     }),
             );
 
@@ -2754,10 +2644,6 @@ impl Render for PaneFlowApp {
         // files-tree EP-003 US-009: per-file copy-path context menu.
         if let Some(menu) = self.review.rail_menu.clone() {
             app_content = app_content.child(self.render_review_rail_menu(menu, ui, window, cx));
-        }
-
-        if let Some(menu) = self.files_menu_open.clone() {
-            app_content = app_content.child(self.render_files_context_menu(menu, ui, window, cx));
         }
 
         // Issue #334: sessions-sidebar row menu (Resume / Copy summary /

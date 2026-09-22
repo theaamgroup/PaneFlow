@@ -1118,8 +1118,8 @@ mod tests {
     fn fixed_shortcuts_are_searchable_by_description_and_captured_chord() {
         let entries = keybindings::settings_shortcuts(&HashMap::new());
         for (query, capture) in [
-            ("code editor · save".to_string(), false),
-            (keybindings::format_keystroke("cmd-s").to_lowercase(), true),
+            ("text area / composer · copy".to_string(), false),
+            (keybindings::format_keystroke("cmd-c").to_lowercase(), true),
         ] {
             let rows = shortcut_rows_from(
                 &entries,
@@ -1127,7 +1127,7 @@ mod tests {
                 capture,
                 &HashSet::from([ShortcutGroup::Contextual]),
             );
-            assert!(rows.iter().any(|row| matches!(row, ShortcutListRow::Binding { idx, .. } if entries[*idx].fixed && entries[*idx].description == "Code editor · save")));
+            assert!(rows.iter().any(|row| matches!(row, ShortcutListRow::Binding { idx, .. } if entries[*idx].fixed && entries[*idx].description == "Text area / Composer · copy")));
         }
     }
 

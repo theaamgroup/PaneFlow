@@ -817,30 +817,23 @@ mod tests {
     }
 
     #[test]
-    fn editor_controls_persist_latest_choice_and_reload_without_changing_other_settings() {
-        use crate::app::diff_dock::code::controls::EditorDisplay;
-
+    fn the_latest_field_write_wins_and_leaves_other_settings() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("paneflow.json");
-        std::fs::write(&path, r#"{"font_size":17,"editor":{"minimap":true}}"#).unwrap();
+        std::fs::write(&path, r#"{"theme":"Cursor Dark","font_size":17}"#).unwrap();
         let initial: PaneFlowConfig =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let mut display = EditorDisplay::from_config(&initial.editor);
-        assert!(display.minimap);
-        assert!(display.scrollbar);
-        display.scrollbar = false;
-        let older = display.to_config_value();
-        display.minimap = false;
-        let latest = display.to_config_value();
-        let cached = with_field(&initial, false, "editor", latest.clone()).unwrap();
+        let older = json!(18.0);
+        let latest = json!(19.0);
+        let cached = with_field(&initial, false, "font_size", latest.clone()).unwrap();
         let seqs = FieldPersistSeq::default();
-        let first = seqs.bump(FieldScope::TopLevel, "editor");
-        let second = seqs.bump(FieldScope::TopLevel, "editor");
+        let first = seqs.bump(FieldScope::TopLevel, "font_size");
+        let second = seqs.bump(FieldScope::TopLevel, "font_size");
         for (value, seq) in [(latest, second), (older, first)] {
             assert!(save_field_at_if_current(
                 &path,
                 FieldScope::TopLevel,
-                "editor",
+                "font_size",
                 value,
                 &seqs,
                 seq,
@@ -848,9 +841,9 @@ mod tests {
         }
         let reloaded: PaneFlowConfig =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(EditorDisplay::from_config(&reloaded.editor), display);
-        assert_eq!(reloaded.editor, cached.editor);
-        assert_eq!(reloaded.font_size, Some(17.0));
+        assert_eq!(reloaded.font_size, Some(19.0));
+        assert_eq!(reloaded.font_size, cached.font_size);
+        assert_eq!(reloaded.theme.as_deref(), Some("Cursor Dark"));
     }
 
     #[test]

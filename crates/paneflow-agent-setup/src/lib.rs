@@ -6,7 +6,7 @@
 //! background thread and renders the returned [`Inventory`]. The scan is
 //! read-only - it never creates, edits or deletes an artifact - and never
 //! makes a network call. It walks a fixed catalog ([`catalog`]), not the file
-//! tree, so the Files sidebar's hidden / gitignored filter is untouched.
+//! tree.
 //!
 //! Layout:
 //! - [`catalog`]: the path catalog, per harness and scope.

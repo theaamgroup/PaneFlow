@@ -11,7 +11,7 @@ use gpui::{Hsla, Pixels, WindowBackgroundAppearance, px};
 ///
 /// Sized so a tab row keeps at least the title budget of a sidebar row
 /// once the row margins, the folder lead, and the 48px agent-status slot are
-/// taken out. It also lines up with the files rail, which already sits at 300.
+/// taken out.
 pub(crate) const SIDEBAR_WIDTH: f32 = 300.;
 /// Outer title-bar inset aligned with workspace rows and the sidebar footer.
 pub(crate) const TITLE_BAR_EDGE_INSET: Pixels = px(8.);

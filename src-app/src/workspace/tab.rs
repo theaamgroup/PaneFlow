@@ -50,15 +50,6 @@ pub struct Tab {
     /// The branch is derived for display. Persisted as `TabSession::worktree`;
     /// a path that no longer exists at restore is dropped.
     pub worktree: Option<std::path::PathBuf>,
-    /// Whether this tab wants the docked Files rail on screen.
-    ///
-    /// The rail itself is a single app-level surface (one tree, one watcher),
-    /// but *wanting* it is a property of the session that asked for it: opening
-    /// the tree in one tab must not put it in front of a sibling tab. The app
-    /// mirrors the visible tab's flag and reconciles on every session change
-    /// ([`crate::PaneFlowApp::sync_files_sidebar_session`]). Never persisted -
-    /// like the app-level mirror, a restart starts every tab closed.
-    pub files_sidebar_open: bool,
 }
 
 impl Tab {
@@ -71,7 +62,6 @@ impl Tab {
             root,
             saved_layout: None,
             worktree: None,
-            files_sidebar_open: false,
         }
     }
 
@@ -420,14 +410,6 @@ mod tests {
             "whitespace is not a name: {title:?}",
             title = tab.title
         );
-    }
-
-    /// #184 Phase 4: the Files rail is wanted per tab, and never persisted, so
-    /// every construction path starts closed.
-    #[test]
-    fn a_new_tab_starts_with_the_files_sidebar_closed() {
-        assert!(!Tab::new("Claude", None).files_sidebar_open);
-        assert!(!Tab::empty().files_sidebar_open);
     }
 
     #[test]

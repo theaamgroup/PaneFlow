@@ -72,19 +72,6 @@ pub(super) fn render_diff_new_tab_menu(
         )
         .child(
             menu_row(
-                "diff-dock-new-tab-file",
-                "icons/file-text.svg",
-                "File",
-                Some("secondary-g"),
-                ui,
-            )
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.close_diff_new_tab_menu(cx);
-                this.open_diff_file_picker(window, cx);
-            })),
-        )
-        .child(
-            menu_row(
                 "diff-dock-new-tab-terminal",
                 "icons/terminal.svg",
                 "Terminal",

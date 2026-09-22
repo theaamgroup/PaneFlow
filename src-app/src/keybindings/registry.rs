@@ -547,13 +547,6 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         group: ShortcutGroup::Diff,
     },
     ActionMeta {
-        name: "toggle_files_sidebar",
-        factory: || Box::new(crate::ToggleFilesSidebar),
-        context: "",
-        description: "Toggle Files sidebar",
-        group: ShortcutGroup::Diff,
-    },
-    ActionMeta {
         name: "toggle_diff_dock_maximize",
         factory: || Box::new(crate::ToggleDiffDockMaximize),
         context: "",
@@ -610,22 +603,12 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         description: "Diff: toggle unified / split",
         group: ShortcutGroup::Diff,
     },
-    // EP-005 US-018 (prd-file-editor-2026-Q3): the diff dock's new-tab chords.
-    // Kept off terminals and text widgets - Ctrl+G is BEL and Ctrl+J is LF in a
-    // shell, so a global binding would eat both. `CodeEditor` is excluded for
-    // the same reason, and because it is the surface the file chord opens: a
-    // caret inside the editor must keep its own keystrokes.
-    ActionMeta {
-        name: "diff_new_file_tab",
-        factory: || Box::new(crate::DiffNewFileTab),
-        context: "!Terminal && !TextInput && !PaneflowTextArea && !CodeEditor",
-        description: "Diff dock: open a file tab",
-        group: ShortcutGroup::Diff,
-    },
+    // The diff dock's new-terminal chord. Kept off terminals and text
+    // widgets: Ctrl+J is LF in a shell, so a global binding would eat it.
     ActionMeta {
         name: "diff_new_terminal_tab",
         factory: || Box::new(crate::DiffNewTerminalTab),
-        context: "!Terminal && !TextInput && !PaneflowTextArea && !CodeEditor",
+        context: "!Terminal && !TextInput && !PaneflowTextArea",
         description: "Diff dock: open a terminal tab",
         group: ShortcutGroup::Diff,
     },
@@ -758,7 +741,7 @@ mod tests {
         assert!(action_from_name("swap_pane").is_some());
         assert!(action_from_name("split_equalize").is_some());
         assert!(action_from_name("toggle_copy_mode").is_some());
-        assert!(action_from_name("toggle_files_sidebar").is_some());
+        assert!(action_from_name("toggle_primary_sidebar").is_some());
     }
 
     #[test]
@@ -773,7 +756,7 @@ mod tests {
         assert_eq!(context_for_action("toggle_copy_mode"), Some("Terminal"));
         assert_eq!(context_for_action("toggle_search"), Some("Terminal"));
         assert_eq!(context_for_action("split_horizontally"), None);
-        assert_eq!(context_for_action("toggle_files_sidebar"), None);
+        assert_eq!(context_for_action("toggle_primary_sidebar"), None);
     }
 
     #[test]

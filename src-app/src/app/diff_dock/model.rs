@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use gpui::Pixels;
 
-use super::code::save::FileStamp;
+use super::file_save::FileStamp;
 use super::git::DiffDockBuilt;
 use crate::diff::{
     DisplayRow, FileDiff, FileRowCache, FileSpan, SplitRow, apply_collapse_split,
@@ -28,29 +28,15 @@ pub(crate) const DIFF_DOCK_PANEL_WIDTH: f32 = 880.0;
 pub(crate) const DIFF_DOCK_PANEL_MIN_WIDTH: f32 = 360.0;
 pub(crate) const DIFF_DOCK_PANEL_MAX_WIDTH: f32 = 1400.0;
 
-/// How many `File` tabs the dock keeps open at once (US-017). Past the cap the
-/// oldest tab that is neither modified nor active is evicted, so a cap hit can
-/// never drop unsaved work.
-pub(crate) const MAX_DIFF_FILE_TABS: usize = 8;
-
 /// One tab of the dock's strip. `Changes` is the diff tab, opened from the
 /// surface picker or the strip's `+` menu like every other kind and closable
-/// like every other kind (upstream f587f7fc); `Terminal` tabs are opened from
-/// the `+` menu. `File` tabs host the editor of `super::code`, with a
-/// confirmation step on close while the document is modified (US-017).
+/// like every other kind (upstream f587f7fc). `Terminal` tabs are opened from
+/// the `+` menu. A clicked file path opens in the external editor; the dock
+/// does not host a document.
 #[derive(Clone)]
 pub(crate) enum DiffDockTab {
     Changes,
     Terminal(gpui::Entity<crate::terminal::TerminalView>),
-    /// Constructed only by `PaneFlowApp::open_diff_file_tab`, reached from the
-    /// Files sidebar and from the strip's `+` menu (US-017 / US-018).
-    File(gpui::Entity<super::code::view::CodeView>),
-    /// A `File` tab with no document yet: what "File" opens, alongside the Files
-    /// tree that supplies the path. Without it the dock would answer "File" by
-    /// showing `Changes` - the answer to a different question - while the tree
-    /// waits for a click. At most one exists at a time, and the next document
-    /// opened takes its slot.
-    PendingFile,
     /// The Agent setup inventory (issue #331): the instruction files, skills,
     /// rules, hooks and MCP entries the agents in this folder read. Opened
     /// from the `+` menu and the surface picker; at most one per dock, see
@@ -310,10 +296,7 @@ mod tests {
         assert!(loading.head_sha.is_none());
         loading.head_sha = Some("abc".into());
         let built = Some("def".to_string());
-        assert_ne!(
-            loading.head_sha, built,
-            "reload_file_tab_bases is keyed on this comparison; has_rows() must not gate it"
-        );
+        assert_ne!(loading.head_sha, built);
         loading.head_sha = built.clone();
         assert_eq!(loading.head_sha, built);
     }

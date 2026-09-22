@@ -4,7 +4,7 @@
 //!
 //! Part of the US-025 sidebar decomposition.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, CursorStyle, Entity, InteractiveElement,
@@ -12,12 +12,20 @@ use gpui::{
     point, prelude::*, px,
 };
 
-use crate::app::files_tree;
 use crate::editor::WorkspaceEditor;
 use crate::pane::PaneSurface;
 use crate::settings::components::{menu_divider_color, select_item, select_menu, with_alpha};
 use crate::ui_primitives::AnimatedHoverExt;
 use crate::{PaneContextMenu, PaneFlowApp, TabContextMenu, WorkspaceContextMenu};
+
+/// Path relative to the workspace root. Falls back to the absolute path when
+/// `path` is not under `root`.
+fn workspace_relative_path(root: &Path, path: &Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => path.to_string_lossy().into_owned(),
+    }
+}
 
 fn context_menu_divider(ui: crate::theme::UiColors) -> gpui::Div {
     div()
@@ -767,7 +775,7 @@ impl PaneFlowApp {
         let relative_path = surface_path.as_ref().map(|path| {
             workspace_cwd
                 .as_ref()
-                .map(|root| files_tree::workspace_relative_path(root, path))
+                .map(|root| workspace_relative_path(root, path))
                 .unwrap_or_else(|| path.to_string_lossy().into_owned())
         });
 

@@ -1294,12 +1294,9 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let menu_files = [
             "app/diff_dock/branch.rs",
-            "app/diff_dock/code/controls.rs",
-            "app/diff_dock/code/view.rs",
             "app/diff_dock/new_tab_menu.rs",
             "app/diff_dock/options_menu.rs",
             "app/diff_sidebar/header.rs",
-            "app/files_sidebar/context_menu.rs",
             "app/profile_menu.rs",
             "app/review/menu.rs",
             "app/sidebar/context_menu.rs",
@@ -1423,15 +1420,10 @@ mod tests {
             ("app/sidebar/context_menu.rs", "tab-context-menu-reveal"),
             ("app/sidebar/context_menu.rs", "pane-context-menu-reveal"),
             (
-                "app/files_sidebar/context_menu.rs",
-                "files-context-menu-reveal",
-            ),
-            (
                 "app/sessions_context_menu.rs",
                 "sessions-context-menu-reveal",
             ),
             ("diff/view/interaction.rs", "diff-body-context-menu-reveal"),
-            ("app/diff_dock/code/view.rs", "code-marker-popup-reveal"),
             ("app/review/menu.rs", "review-rail-menu-reveal"),
         ];
         for (rel, id) in retargetable {

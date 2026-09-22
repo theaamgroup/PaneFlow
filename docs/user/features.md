@@ -150,17 +150,13 @@ Give it a name, a shell command - say `clear && cargo run` for a dev
 server - and an icon, then click it to run that command in the focused
 pane. Stop retyping your build, test, or lint invocation on every loop.
 
-## File tree sidebar
+## Opening a file
 
-Open a sidebar on the current workspace to browse the full file tree of
-your codebase. Click any file - a markdown spec or a PRD included - and it
-opens as source in the dock editor next to your Claude Code session, so the
-document stays in view while the agent works. The sidebar is per tab: opening
-it in one tab leaves your other tabs as they were, and it steps aside while
-you are in Review or Settings. Copy any file's absolute or relative path in
-one click, ready to paste into a prompt or a command.
+There is no in-app file tree and no in-app editor. Clicking a file path,
+including a row in the dock's Agent setup tab, opens that file in the
+configured external editor.
 
-The dock itself is per tab too. Two tabs of the same folder each get their
+The Changes dock itself is per tab. Two tabs of the same folder each get their
 own dock - open a shell or a diff in one and the other stays as it was - and
 switching tabs brings each tab's dock back the way you left it. Closing a tab
 closes its dock; the dock never follows a tab into a session restore. When a
@@ -173,10 +169,9 @@ aside until there is.
 
 ## Projects
 
-Point PaneFlow at a codebase folder and it becomes a project: the file
-tree opens in the sidebar, the active Git branch shows in the header,
-and new panes are scoped to that directory. It's the working context
-every session, split, and action runs inside.
+Point PaneFlow at a codebase folder and it becomes a project: the active
+Git branch shows in the header, and new panes are scoped to that directory.
+It's the working context every session, split, and action runs inside.
 
 ## Workspace notifications
 
@@ -193,8 +188,8 @@ completions and clears them across all its tabs. The tab menu has its own
 ## Multiple projects in one window
 
 Open several codebases as tabs in the same window and switch between
-them without juggling OS windows. Each project keeps its own panes,
-branch, and file tree, so a Claude Code session in one repo stays put
+them without juggling OS windows. Each project keeps its own panes
+and branch, so a Claude Code session in one repo stays put
 while you jump to another.
 
 ## Git worktrees

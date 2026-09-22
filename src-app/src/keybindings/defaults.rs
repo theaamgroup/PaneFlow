@@ -358,14 +358,6 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "open_diff_view",
         context: None,
     },
-    // Files right-sidebar toggle. `secondary-alt-f`: `f` for Files, kept off
-    // `secondary-shift-f`, which maximizes the Changes dock below. Neither
-    // shadows the terminal search chord (`ctrl-shift-f`).
-    DefaultBinding {
-        key: "secondary-alt-f",
-        action_name: "toggle_files_sidebar",
-        context: None,
-    },
     // Maximize / restore the Changes dock (upstream e0ff7e21): the dock takes
     // the whole cockpit and the pane grid is clipped away, never resized.
     DefaultBinding {
@@ -373,8 +365,8 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "toggle_diff_dock_maximize",
         context: None,
     },
-    // Issue #106: primary left-rail toggle. `secondary-alt-b` for the same
-    // reason `secondary-alt-f` reads that way - `b` for the sidebar, kept off
+    // Issue #106: primary left-rail toggle. `secondary-alt-b`: `b` for the
+    // sidebar, kept off
     // `secondary-shift-b`, which is already `toggle_broadcast_member`. Alt
     // rather than Shift also keeps it clear of `ctrl-shift-b`-style terminal
     // chords. Pinned by `primary_sidebar_chord_is_bindable_and_does_not_collide`
@@ -415,21 +407,12 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "diff_dismiss",
         context: Some("DiffView && !Terminal && !TextInput && !PaneflowTextArea"),
     },
-    // EP-005 US-018 (prd-file-editor-2026-Q3): the two chords the diff dock's
-    // `+` menu already advertises on its rows. `secondary-g` / `secondary-j`
-    // were free (only their `shift` variants were taken), and the context keeps
-    // them off shells, where bare Ctrl+G is BEL and Ctrl+J is LF. `CodeEditor`
-    // is excluded for the same reason: it is a text surface, and it is the very
-    // surface these chords open, so a caret inside it must keep its keystrokes.
-    DefaultBinding {
-        key: "secondary-g",
-        action_name: "diff_new_file_tab",
-        context: Some("!Terminal && !TextInput && !PaneflowTextArea && !CodeEditor"),
-    },
+    // The chord the diff dock's `+` menu advertises on its Terminal row.
+    // The context keeps it off shells, where bare Ctrl+J is LF.
     DefaultBinding {
         key: "secondary-j",
         action_name: "diff_new_terminal_tab",
-        context: Some("!Terminal && !TextInput && !PaneflowTextArea && !CodeEditor"),
+        context: Some("!Terminal && !TextInput && !PaneflowTextArea"),
     },
     // EP-001 (CLI Cockpit): Composer + broadcast
     // groups. All three are unclaimed `secondary-shift-…` slots (taken set
@@ -551,7 +534,6 @@ mod tests {
             "split_equalize",
             "swap_pane",
             "undo_close_pane",
-            "toggle_files_sidebar",
             "toggle_primary_sidebar",
         ] {
             assert!(

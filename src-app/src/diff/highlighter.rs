@@ -23,17 +23,9 @@
 //! links / inline code) - merged by `resolve_runs`, which follows Zed's
 //! last-active-capture rule so nested inline captures keep their colors.
 //!
-//! **Reuse contract (prd-file-editor-2026-Q3, US-004).** The file editor's
-//! incremental driver (`app/diff_dock/code/highlight.rs`) must color a file
-//! exactly like this module colors its diff, so it consumes the same grammars
-//! ([`grammar_for_ext`], [`markdown_inline_grammar`]), the same size cutoff
-//! ([`MAX_HIGHLIGHT_BYTES`]) and the same overlap resolution
-//! ([`resolve_runs`]) instead of holding a second copy of the grammar table.
-//! Those five items are `pub(crate)` for that reason alone - the parse driven
-//! here is still the diff's own, and the editor never calls [`highlight_lines`]
-//! outside its parity test. Nothing in this module's behavior may change to
-//! suit the editor: a divergence between the two surfaces is the one failure
-//! US-004 does not tolerate.
+//! Changes and Review share this highlighter. Grammar selection, the size
+//! cutoff, and [`resolve_runs`] are the one coloring path; `diff/parity_tests.rs`
+//! is the shared corpus.
 
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -48,15 +40,14 @@ use super::syntax::DiffSyntax;
 /// responsiveness than help readability. The diff still renders normally.
 ///
 /// Set by measurement, not by guess (#427): a file at its cap must hold less
-/// than 128 MiB of tree-sitter tree, and `tree_memory_probe`
-/// (`app/diff_dock/code/perf_bench.rs`) asserts it. The densest single-pass
-/// grammar in the corpus, minified JSON, sets the number; Rust alone would
-/// allow twice as much.
+/// than 128 MiB of tree-sitter tree. The probe that measured it left with the
+/// dock code editor. The densest single-pass grammar in the corpus, minified
+/// JSON, sets the number; Rust alone would allow twice as much.
 pub(crate) const MAX_HIGHLIGHT_BYTES: usize = 2_000_000;
 
 /// Markdown's own cap: the inline injection parses the whole document a
 /// second time, so its tree costs about four times Rust's per source byte.
-/// Read through [`highlight_cap`] by the editor and the diff view alike.
+/// Read through [`highlight_cap`] by the diff view.
 pub(crate) const MAX_MARKDOWN_HIGHLIGHT_BYTES: usize = 1_000_000;
 
 /// Upper bound on the captures one row feeds into [`resolve_runs`]; anything

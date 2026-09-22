@@ -150,15 +150,11 @@ actions!(
         ToggleBroadcastMember,
         OpenBroadcastGroups,
         // Launch Pad opens a worktree, split, agent and prompt in one modal.
-        ToggleFilesSidebar,
         ToggleDiffDockMaximize,
         OpenLaunchPad,
-        // EP-005 US-018 (prd-file-editor-2026-Q3): the diff dock's `+` menu
-        // advertises Ctrl+G / Ctrl+J on its two rows. These make both chords
-        // real. Both no-op unless the dock is open, and both are scoped away
-        // from terminals and text widgets so a shell keeps its own Ctrl+G
-        // (BEL) and Ctrl+J (LF).
-        DiffNewFileTab,
+        // The diff dock's `+` menu advertises Ctrl+J on its Terminal row.
+        // No-op unless the dock is open, and scoped away from terminals and
+        // text widgets so a shell keeps its own Ctrl+J (LF).
         DiffNewTerminalTab,
         // Issue #106: collapse/expand the primary left rail from the keyboard.
         // Until this existed the rail was mouse-only - the title-bar button
@@ -186,7 +182,7 @@ mod tests {
     #[test]
     fn claude_md_action_count_matches_the_actions_macro() {
         let declared = actions_macro_entries(include_str!("actions.rs"));
-        assert_eq!(declared, 95, "review action surface is pinned");
+        assert_eq!(declared, 93, "review action surface is pinned");
 
         let claude_md = include_str!("../../../CLAUDE.md");
         for phrase in ["GPUI action types", "actions total"] {

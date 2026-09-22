@@ -24,7 +24,7 @@ dependency sources, and command examples. Use [keybindings](docs/user/keybinding
 and [configuration runtime behavior](docs/user/configuration/runtime.md) for their
 reference tables. Read [DESIGN.md](DESIGN.md) before UI changes and update it in the same PR.
 
-The registry currently declares **95 GPUI action types**, **95 actions total**.
+The registry currently declares **93 GPUI action types**, **93 actions total**.
 Update both counts when changing `app/actions.rs`; its drift test reads this file.
 
 ## Verify before claiming
@@ -117,7 +117,7 @@ builds use the installed app’s namespace; isolate smoke runs with an absolute
 Only the value `1` bypasses the singleton guard. `PANEFLOW_HOME` does not move
 the socket. See [build and benchmark commands](ARCHITECTURE.md#building).
 
-Never publish a performance claim without the terminal/editor/startup benchmark
+Never publish a performance claim without the terminal or startup benchmark
 suite evidence in `bench/README.md`. Reject runs carrying `PANEFLOW_BENCH_WARNING`.
 Keep all three GPUI git revisions in `src-app/Cargo.toml` identical and immutable;
 keep `gpui_platform`’s macOS `font-kit` feature. Do not restore the removed Markdown
@@ -146,8 +146,8 @@ For tag-push releases specifically: run `cargo fmt --check` *one last time* on t
 - **Entity/Context model**: all mutable state lives in `Entity<T>`, mutated via `Context<Self>`. Use `cx.new()` to create, `cx.notify()` to trigger repaint, `cx.spawn()` for async tasks.
 - **`actions!` macro** (`app/actions.rs`): generates zero-sized typed action structs in the `paneflow` namespace. Actions are dispatched through GPUI's focus chain.
 - **`Render` trait**: implement for high-level views (PaneFlowApp, TitleBar, TerminalView). Returns a div element tree.
-- **`Element` trait**: implement for low-level custom rendering (terminal, diff, and code elements). Has 3 phases: `request_layout()` → `prepaint()` → `paint()`.
-- **Focus**: each `TerminalView` owns a `FocusHandle`. Key context `"Terminal"` scopes terminal-only keybindings; other contexts are `Search`, `Markdown`, `MarkdownSearch`, `DiffView`. Focus navigation is structural (layout-tree traversal), not spatial.
+- **`Element` trait**: implement for low-level custom rendering (terminal and diff elements). Has 3 phases: `request_layout()` → `prepaint()` → `paint()`.
+- **Focus**: each `TerminalView` owns a `FocusHandle`. Key context `"Terminal"` scopes terminal-only keybindings; other contexts are `Search`, `Markdown`, `MarkdownSearch`, `DiffView`. There is no in-app code editor. Focus navigation is structural (layout-tree traversal), not spatial.
 - **No `Arc`/`Mutex` for UI state**: use `Rc<Cell<f32>>` for single-threaded shared state (e.g. split ratios in render closures).
 
 ## GPUI scroll & wheel (gotchas)
@@ -157,7 +157,6 @@ Hard-won from the diff-dock horizontal-scroll saga (`src-app/src/app/diff_dock/m
 - **Shift+wheel is axis-swapped to X at the platform layer**, before app code ever sees it. On macOS the NSEvent delivers the horizontal component natively; the other platform backends do the swap explicitly. Either way the value lands in `delta.x` with `delta.y` zeroed. So: read `delta.x` for horizontal, NEVER branch on `modifiers.shift` (reading `delta.y` under Shift reads zero). The `div.rs` `delta_x = delta.y` line is a separate fallback (fires only when `delta.x == 0`), not the Shift mechanism.
 - **`overflow_hidden()` + `track_scroll()` does NOT scroll-translate children.** It only keeps the handle's bookkeeping (`offset()`/`bounds()`/`max_offset()`) live. GPUI only pushes the scroll offset onto the element-offset stack (which bakes into each child's `bounds.origin`) when the host overflow axis is `Overflow::Scroll`. A custom `Element` that positions content off its own `bounds.origin` (e.g. `DiffElement`) therefore only scrolls under `overflow_y_scroll`/`overflow_scroll`; `set_offset()` under `overflow_hidden` is stored but dead. Custom elements get the shift automatically via their passed `bounds` (no `window.element_offset()` call needed).
 - **Two-axis recipe (vertical list whose items also scroll horizontally)**, the canonical Zed pattern (`data_table.rs`, `thread_view.rs`, `markdown.rs`): host = `overflow_y_scroll()` + `track_scroll(&handle)` + `element.style().restrict_scroll_to_axis = Some(true)`. The flag is a raw `StyleRefinement` mutation (no builder method, but it compiles: non-`#[refineable]` `Style` fields still become `Option<T>`). It stops a vertical wheel bleeding into a horizontal child AND stops the native Y handler back-filling `delta_y = delta.x` under Shift+wheel (the "vertical scrolls when I Shift+wheel" bug). Per-item horizontal stays custom (an `on_scroll_wheel` reading `delta.x` only); native owns vertical.
-- **The dock's code editor (`app/diff_dock/code/`) uses a separate scrolling contract**. `CodeView` owns its position as a fractional row (`element.rs::CodeScroll`, `Rc`-shared with `CodeElement`, `ScrollableHandle` for the scrollbar widget); the host is `overflow_hidden().line_height(px(CODE_ROW_HEIGHT))`, the element fills the viewport (`relative(1.)`, never `line_count * 18 px`) and places each row at `origin.y + (row - scroll_rows) * CODE_ROW_HEIGHT` rounded to the device pixel; `apply_wheel` converts both axes itself through `wheel_pixels` (a `Lines` notch is exactly three rows / whole columns, a trackpad `Pixels` delta passes through unrounded, a document shorter than the viewport absorbs the notch without a repaint). Removing `overflow_y_scroll` without that origin math is a frozen viewport - the second bullet above still holds. `CodeScroll::set_rows` refuses to move while the viewport is 0 px, or a zero-height frame rewinds the file to row 0. Rows are shaped through `shape_line_by_hash` keyed on the rope line's content hash, so a warm frame builds no `String` (`materialized_lines` in `CodeHitMap` counts the misses).
 
 ## Split / layout system (`layout/`)
 

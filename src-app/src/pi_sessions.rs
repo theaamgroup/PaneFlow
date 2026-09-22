@@ -21,8 +21,7 @@ const MAX_HEADER_LINES: usize = 256;
 
 /// Cap on directory entries examined by one walk of the session store (files
 /// and subdirectories alike), so a large or hostile `~/.pi/agent/sessions`
-/// cannot turn a sidebar refresh into an unbounded disk walk. Mirrors
-/// `MAX_DIRECTORY_ENTRIES` in `app/files_tree.rs`; the sidebar retains at most
+/// cannot turn a sidebar refresh into an unbounded disk walk. The sidebar retains at most
 /// `SIDEBAR_SESSION_RETAINED_PER_SOURCE` of the results anyway.
 const MAX_WALK_ENTRIES: usize = 4_096;
 

@@ -62,7 +62,6 @@ pub(super) fn render_diff_resize_handle(
 pub(super) fn render_diff_tab_strip(
     tabs: &[DiffDockTab],
     active: usize,
-    close_armed: Option<usize>,
     new_tab_menu_open: bool,
     maximized: bool,
     ui: crate::theme::UiColors,
@@ -80,14 +79,7 @@ pub(super) fn render_diff_tab_strip(
         .border_color(ui.border);
 
     for (index, tab) in tabs.iter().enumerate() {
-        strip = strip.child(render_diff_tab(
-            tab,
-            index,
-            index == active,
-            close_armed == Some(index),
-            ui,
-            cx,
-        ));
+        strip = strip.child(render_diff_tab(tab, index, index == active, ui, cx));
     }
 
     // Toggle off the render-time snapshot, not the live flag: the open menu's
@@ -170,39 +162,14 @@ fn render_diff_tab(
     tab: &DiffDockTab,
     index: usize,
     active: bool,
-    close_armed: bool,
     ui: crate::theme::UiColors,
     cx: &mut Context<PaneFlowApp>,
 ) -> AnyElement {
-    // A file tab reads its chip straight off the open document, so the label,
-    // the icon and the dirty dot can never describe a stale path.
-    let file = match tab {
-        DiffDockTab::File(view) => {
-            let view = view.read(cx);
-            let name = view
-                .path()
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Untitled".to_string());
-            Some((
-                file_tab_icon(&name),
-                truncate_tab_label(&name),
-                view.is_dirty(),
-            ))
-        }
-        _ => None,
+    let (icon, label) = match tab {
+        DiffDockTab::Changes => ("icons/plus-minus.svg", "Changes".to_string()),
+        DiffDockTab::Terminal(_) => ("icons/terminal.svg", "Terminal".to_string()),
+        DiffDockTab::Setup(_) => ("icons/list.svg", "Agent setup".to_string()),
     };
-    let (icon, label) = match (tab, &file) {
-        (DiffDockTab::Changes, _) => ("icons/plus-minus.svg", "Changes".to_string()),
-        (DiffDockTab::Terminal(_), _) => ("icons/terminal.svg", "Terminal".to_string()),
-        (DiffDockTab::PendingFile, _) => ("icons/file-text.svg", "Open a file".to_string()),
-        (DiffDockTab::Setup(_), _) => ("icons/list.svg", "Agent setup".to_string()),
-        (_, Some((icon, label, _))) => (*icon, label.clone()),
-        // Unreachable: `File` is the only remaining variant and it always
-        // resolves `file` above. Kept total rather than panicking in a paint.
-        _ => ("icons/file-text.svg", "File".to_string()),
-    };
-    let dirty = file.map(|(_, _, dirty)| dirty).unwrap_or(false);
     // The rail's row grammar, verbatim: exactly one chip rests filled (the
     // active one, which then has no hover step), every other stays flat and
     // takes the same fill on hover. No hairline - the rail marks selection with
@@ -253,60 +220,16 @@ fn render_diff_tab(
 
     // Every tab closes, `Changes` included (upstream f587f7fc): the strip
     // that empties hands the dock back to its surface picker.
-    // Cursor's grammar: a modified document trades the close glyph for a
-    // dot at rest, the dot yields the slot back to the glyph while the
-    // pointer is on the chip, and the control keeps its hit target through
-    // both. Arming the close (the confirmation US-017 asks for) pins the
-    // glyph in the deletion color, so the second press reads as
-    // destructive.
     //
-    // Issue #340: the control's name follows the same arming, so a screen
-    // reader hears what the next click does, as the pane header's `x`
-    // (issue #83) already says in its tooltip.
-    let close_label = if close_armed {
-        "Click again to close"
-    } else {
-        "Close tab"
-    };
-    let mark: AnyElement = if dirty && !close_armed {
-        // The two states share the slot and swap by visibility, the way
-        // `squircle_skin` swaps its own fills: both are laid out every
-        // frame, so the flip cannot disagree with itself between prepaint
-        // and paint, and the chip never resizes under the pointer.
-        div()
-            .relative()
-            .flex_none()
-            .size(px(11.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(7.))
-                    .rounded_full()
-                    .bg(ui.vc_modified)
-                    .group_hover(group.clone(), |style| style.invisible()),
-            )
-            .child(
-                svg()
-                    .absolute()
-                    .inset_0()
-                    .size(px(11.))
-                    .invisible()
-                    .group_hover(group.clone(), |style| style.visible())
-                    .path("icons/close.svg")
-                    .text_color(ui.muted),
-            )
-            .into_any_element()
-    } else {
-        svg()
-            .size(px(11.))
-            .flex_none()
-            .path("icons/close.svg")
-            .text_color(if close_armed { ui.vc_deleted } else { ui.muted })
-            .into_any_element()
-    };
+    // Issue #340: the control is a named button, as the pane header's `x`
+    // (issue #83) already is.
+    let close_label = "Close tab";
+    let mark: AnyElement = svg()
+        .size(px(11.))
+        .flex_none()
+        .path("icons/close.svg")
+        .text_color(ui.muted)
+        .into_any_element();
     chip = chip.child(
         div()
             .id(SharedString::from(format!("diff-dock-tab-close-{index}")))
@@ -340,14 +263,6 @@ fn render_diff_tab(
     chip.into_any_element()
 }
 
-/// Icon for a file tab, derived from the basename (US-017). Shares the diff
-/// body's language mapping (`crate::file_icons::language_icon`, issue #220),
-/// but falls back to `icons/file-text.svg` rather than the diff's generic file
-/// glyph, so an unknown extension still reads as "a document" in the strip.
-pub(super) fn file_tab_icon(name: &str) -> &'static str {
-    crate::file_icons::language_icon(name).unwrap_or("icons/file-text.svg")
-}
-
 /// Whether an icon asset carries its own colors.
 ///
 /// The `icons/languages/` set is multi-fill artwork; everything else in the
@@ -373,96 +288,6 @@ fn file_icon_element(icon: &'static str, size: Pixels, color: Hsla) -> AnyElemen
             .text_color(color)
             .into_any_element()
     }
-}
-
-/// Longest tab label the strip shows before eliding. Past it the tail is kept
-/// (the extension carries more signal than the head of a long basename).
-const TAB_LABEL_MAX_CHARS: usize = 22;
-
-/// Truncate a tab label to [`TAB_LABEL_MAX_CHARS`] on char boundaries, so a
-/// multi-byte basename can never be sliced mid-codepoint (US-017).
-fn truncate_tab_label(name: &str) -> String {
-    if name.chars().count() <= TAB_LABEL_MAX_CHARS {
-        return name.to_string();
-    }
-    let kept: String = name
-        .chars()
-        .skip(name.chars().count() - (TAB_LABEL_MAX_CHARS - 1))
-        .collect();
-    format!("…{kept}")
-}
-
-/// Longest path the file header shows before eliding from the left. Beyond it
-/// the tail (the file itself) is what survives.
-const FILE_HEADER_MAX_CHARS: usize = 64;
-
-/// The worktree-relative path of `path`, truncated from the left, plus the
-/// separator normalization the header needs. `root` is the dock's diff cwd;
-/// a file outside it keeps its absolute path, which is the honest label.
-pub(super) fn diff_file_header_path(root: &str, path: &std::path::Path) -> String {
-    let relative = if root.is_empty() {
-        None
-    } else {
-        path.strip_prefix(std::path::Path::new(root)).ok()
-    };
-    let shown = relative
-        .map(|rel| rel.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned());
-    let count = shown.chars().count();
-    if count <= FILE_HEADER_MAX_CHARS {
-        return shown;
-    }
-    let kept: String = shown
-        .chars()
-        .skip(count - (FILE_HEADER_MAX_CHARS - 1))
-        .collect();
-    format!("…{kept}")
-}
-
-/// The header shown under the tab strip while a file tab is active (US-018):
-/// the worktree-relative path on the left, the caret's line and column on the
-/// right. Same 36 px height and hairline as [`render_diff_files_toolbar`], so
-/// switching tabs never shifts the body by a pixel.
-pub(super) fn render_diff_file_header(
-    icon: &'static str,
-    path: String,
-    line: usize,
-    column: usize,
-    controls: AnyElement,
-    ui: crate::theme::UiColors,
-) -> AnyElement {
-    div()
-        .flex_none()
-        .h(px(36.))
-        .w_full()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.))
-        .px(px(10.))
-        .border_b_1()
-        .border_color(ui.border)
-        .child(file_icon_element(icon, px(14.), ui.muted))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .text_size(crate::ui_primitives::BODY)
-                .text_color(ui.text)
-                .child(path),
-        )
-        .child(
-            div()
-                .flex_none()
-                .whitespace_nowrap()
-                .text_size(crate::ui_primitives::BODY)
-                .text_color(ui.muted)
-                .child(format!("Ln {line}, Col {column}")),
-        )
-        .child(controls)
-        .into_any_element()
 }
 
 /// A dock-header control skinned exactly like the sidebar's rail actions: the
@@ -569,20 +394,6 @@ pub(super) fn render_diff_files_toolbar(
         .into_any_element()
 }
 
-/// The body of the placeholder `File` tab: what the dock is now for, while the
-/// Files sidebar beside it supplies the document. Titled (unlike the diff's own
-/// empty states) because it is an instruction, not a report on a folder.
-pub(super) fn render_pending_file_body(ui: crate::theme::UiColors) -> AnyElement {
-    crate::ui_primitives::panel_empty_state(
-        ui,
-        Some("icons/folder-open.svg"),
-        Some("Open a file".into()),
-        "Select a file in the workspace tree",
-        false,
-    )
-    .into_any_element()
-}
-
 pub(super) fn diff_panel_centered(
     icon: &'static str,
     label: impl Into<String>,
@@ -600,9 +411,7 @@ pub(super) fn diff_panel_centered(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::source_probe::source_slice;
-    use std::path::Path;
 
     /// Issue #340: the dock's icon-only controls (the strip's `+`, a tab's
     /// close, the header close) had no button role, no accessible name and no
@@ -657,120 +466,5 @@ mod tests {
         ] {
             assert!(close.contains(needle), "the tab close lost `{needle}`");
         }
-    }
-
-    /// US-017: the chip's icon is derived from the extension, with
-    /// `icons/file-text.svg` as the declared fallback.
-    #[test]
-    fn the_tab_icon_follows_the_extension_and_falls_back() {
-        assert_eq!(file_tab_icon("main.rs"), "icons/languages/rust-small.svg");
-        // Issue #220: TSX is React here too, as in the diff body and Files tree.
-        assert_eq!(file_tab_icon("view.TSX"), "icons/languages/react.svg");
-        assert_eq!(file_tab_icon("Cargo.toml"), "icons/languages/toml.svg");
-        // Extension-less well-known names are matched whole.
-        assert_eq!(file_tab_icon("Dockerfile"), "icons/languages/docker.svg");
-        // Multi-dot names use the last segment.
-        assert_eq!(
-            file_tab_icon("paneflow.schema.json"),
-            "icons/languages/json.svg"
-        );
-        // Anything unrecognized, and anything with no extension at all.
-        assert_eq!(file_tab_icon("LICENSE"), "icons/file-text.svg");
-        assert_eq!(file_tab_icon("notes.xyz"), "icons/file-text.svg");
-        assert_eq!(file_tab_icon(""), "icons/file-text.svg");
-    }
-
-    /// Issue #220: the tab strip and the diff body / Files tree share one
-    /// language policy; only the unknown-file fallback may differ.
-    #[test]
-    fn the_tab_icon_agrees_with_the_shared_language_policy() {
-        for (name, expected) in crate::file_icons::cases::CASES {
-            assert_eq!(
-                file_tab_icon(name),
-                expected.unwrap_or("icons/file-text.svg"),
-                "tab icon for {name:?}"
-            );
-            assert_eq!(
-                crate::file_icons::language_icon_path(name),
-                expected.unwrap_or("icons/languages/file.svg"),
-                "body/tree icon for {name:?}"
-            );
-        }
-    }
-
-    /// The `icons/languages/` assets ship their own `fill`, so every icon
-    /// `file_tab_icon` can hand back must be routed to `img()`; only the
-    /// monochrome fallback goes through the tinted `svg()` path. Painting a
-    /// colored asset as an `svg()` mask flattens it to a solid blob.
-    #[test]
-    fn colored_language_icons_are_not_painted_as_masks() {
-        for name in [
-            "main.rs",
-            "view.tsx",
-            "Cargo.toml",
-            "Dockerfile",
-            "Makefile",
-            "app.py",
-            "logo.png",
-        ] {
-            let icon = file_tab_icon(name);
-            assert!(
-                icon_is_colored(icon),
-                "{name} resolves to {icon}, which would be tinted flat"
-            );
-        }
-        assert!(!icon_is_colored(file_tab_icon("LICENSE")));
-        assert!(!icon_is_colored("icons/close.svg"));
-    }
-
-    /// US-017: a long file name is truncated for the chip, keeping the tail
-    /// (the part that identifies the file) and never splitting a character.
-    #[test]
-    fn a_long_tab_label_is_truncated_from_the_left() {
-        let short = "main.rs";
-        assert_eq!(truncate_tab_label(short), short);
-
-        let long = "a_very_long_generated_module_name.rs";
-        let cut = truncate_tab_label(long);
-        assert_eq!(cut.chars().count(), TAB_LABEL_MAX_CHARS);
-        assert!(cut.starts_with('…'));
-        assert!(cut.ends_with(".rs"), "the tail must survive, got {cut}");
-
-        // Multi-byte input must not panic or produce a broken boundary.
-        let accented = "élément_très_long_généré_par_le_compilateur.rs";
-        let cut = truncate_tab_label(accented);
-        assert_eq!(cut.chars().count(), TAB_LABEL_MAX_CHARS);
-        assert!(cut.ends_with(".rs"));
-    }
-
-    /// US-018: the header shows the worktree-relative path, elided from the
-    /// left when it does not fit; a file outside the worktree keeps its
-    /// absolute path rather than a misleading relative one.
-    #[test]
-    fn the_file_header_path_is_relative_and_elides_from_the_left() {
-        assert_eq!(
-            diff_file_header_path("/repo", Path::new("/repo/src/main.rs")),
-            "src/main.rs"
-        );
-        // Outside the worktree, and with no worktree at all.
-        assert_eq!(
-            diff_file_header_path("/repo", Path::new("/etc/hosts")),
-            "/etc/hosts"
-        );
-        assert_eq!(
-            diff_file_header_path("", Path::new("/repo/src/main.rs")),
-            "/repo/src/main.rs"
-        );
-
-        let deep = Path::new(
-            "/repo/crates/paneflow-config/src/schema/very/deeply/nested/module/config.rs",
-        );
-        let shown = diff_file_header_path("/repo", deep);
-        assert_eq!(shown.chars().count(), FILE_HEADER_MAX_CHARS);
-        assert!(shown.starts_with('…'));
-        assert!(
-            shown.ends_with("config.rs"),
-            "the file itself must survive the elision, got {shown}"
-        );
     }
 }

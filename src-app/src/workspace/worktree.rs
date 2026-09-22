@@ -1713,10 +1713,6 @@ mod tests {
         );
         assert_production_git_command_isolated(include_str!("git.rs"), "fn git_stdout(");
         assert_production_git_command_isolated(
-            include_str!("../app/files_git.rs"),
-            "fn git_stdout(",
-        );
-        assert_production_git_command_isolated(
             include_str!("../app/diff_dock/branch.rs"),
             "fn list_branches(",
         );

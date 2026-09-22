@@ -5,7 +5,7 @@
 //! sync with the engine. Nothing here touches a terminal backend: the same
 //! bytes feed the Ghostty stress scenarios and the GPUI input-to-frame probe.
 //! The percentile and process-counter helpers that used to sit beside the
-//! corpus live in `crate::bench_harness`, shared with the editor bench.
+//! corpus live in `crate::bench_harness`.
 
 pub(crate) const CORPUS_SEED: u64 = 0x5041_4e45_464c_4f57;
 const CORPUS_FAMILIES: usize = 27;
