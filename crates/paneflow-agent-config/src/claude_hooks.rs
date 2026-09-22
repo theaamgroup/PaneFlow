@@ -260,8 +260,11 @@ fn reconcile_valid_matcher_hooks(
 ///
 /// `program_missing` receives the command's program token (already confirmed
 /// to be a `paneflow-ai-hook` spelling). Neighboring user handlers in a shared
-/// matcher group survive, exactly as in [`remove_hooks_lenient`]. Returns
-/// whether anything was removed.
+/// matcher group survive, exactly as in [`remove_hooks_lenient`]. Every event
+/// key is visited, not only [`CLAUDE_HOOK_EVENTS`]: Codex stores the same
+/// matcher groups under `SessionStart` and `PermissionRequest`, and a dead
+/// command there fails the same way (#662). Returns whether anything was
+/// removed.
 pub fn remove_dead_hooks(root: &mut Value, program_missing: &dyn Fn(&str) -> bool) -> bool {
     let Some(object) = root.as_object_mut() else {
         return false;
@@ -270,14 +273,15 @@ pub fn remove_dead_hooks(root: &mut Value, program_missing: &dyn Fn(&str) -> boo
         return false;
     };
     let mut removed = false;
-    for event in CLAUDE_HOOK_EVENTS {
-        let Some(groups) = hooks.get_mut(*event).and_then(Value::as_array_mut) else {
+    let events: Vec<String> = hooks.keys().cloned().collect();
+    for event in events {
+        let Some(groups) = hooks.get_mut(&event).and_then(Value::as_array_mut) else {
             continue;
         };
         let removed_from_event = strip_dead_handlers(groups, program_missing);
         removed |= removed_from_event;
         if removed_from_event && groups.is_empty() {
-            hooks.remove(*event);
+            hooks.remove(&event);
         }
     }
     if removed && hooks.is_empty() {
@@ -545,6 +549,25 @@ mod tests {
             "the dead group goes, the emptied event key goes, the user handler \
              and the live managed group stay"
         );
+    }
+
+    /// Codex `hooks.json` uses events Claude's list does not name. A missing
+    /// binary there is the same exit 127 (#662).
+    #[test]
+    fn dead_hooks_outside_the_claude_event_list_are_reaped() {
+        let dead = "/Users/a/Library/Caches/paneflow/bin/0.2.0/paneflow-ai-hook";
+        let mut root = json!({
+            "hooks": {
+                "SessionStart": [{
+                    MANAGED_MARKER: true,
+                    "hooks": [{ "type": "command", "command": format!("{dead} SessionStart") }]
+                }],
+                "notes": "not a hook list"
+            }
+        });
+
+        assert!(remove_dead_hooks(&mut root, &|_| true));
+        assert_eq!(root, json!({ "hooks": { "notes": "not a hook list" } }));
     }
 
     #[test]
