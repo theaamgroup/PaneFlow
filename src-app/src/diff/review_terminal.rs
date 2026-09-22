@@ -99,12 +99,15 @@ pub(crate) fn build_cli_review_prompt(branch: &str, base: &str, adversarial: boo
     } else {
         ""
     };
+    // Single quotes, not backticks or $(...): a missing CLI leaves this text
+    // on a live shell, and a legal ref such as `scripts/pwn` would otherwise
+    // run as a command (issue #694).
     format!(
-        "Review the changes this branch (`{branch}`) adds vs `{base}`, including uncommitted work. \
-         Inspect the diff yourself with git (e.g. `git diff $(git merge-base HEAD {base})` plus \
-         `git status`). {lens}Review ONLY the changed lines for bugs, security issues, regressions, \
+        "Review the changes this branch '{branch}' adds vs '{base}', including uncommitted work. \
+         Inspect the diff yourself with git diff against the merge-base of HEAD and '{base}', plus git status. \
+         {lens}Review ONLY the changed lines for bugs, security issues, regressions, \
          and broken invariants - skip style nits unless harmful. Give a one-line verdict (SAFE or \
-         the top concern), then findings as `path:line [blocker|suggestion|nit] note`."
+         the top concern), then findings as path:line [blocker|suggestion|nit] note."
     )
 }
 
@@ -191,6 +194,20 @@ mod tests {
         assert!(
             !p.contains("`id`"),
             "no backtick substitution from the branch"
+        );
+    }
+
+    /// Issue #694: a path-shaped ref is a legal branch name. The prompt must
+    /// not wrap it in backticks or `$(...)`, or submitting the prefilled text
+    /// to a shell runs that path as a command.
+    #[test]
+    fn path_like_branch_is_not_a_shell_command() {
+        let prompt = build_cli_review_prompt("scripts/pwn", "origin/main", false);
+        assert!(prompt.contains("'scripts/pwn'"), "got {prompt}");
+        assert!(prompt.contains("'origin/main'"), "got {prompt}");
+        assert!(
+            !prompt.contains('`') && !prompt.contains("$("),
+            "prompt still has command substitution: {prompt}"
         );
     }
 }
