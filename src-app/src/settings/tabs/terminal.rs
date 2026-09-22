@@ -353,6 +353,7 @@ impl PaneFlowApp {
             ui,
             trigger_hover_bg,
             font_open,
+            format!("Font family, {trigger_label}"),
         )
         .on_mouse_down(
             MouseButton::Left,
@@ -669,6 +670,7 @@ impl PaneFlowApp {
             ui,
             trigger_hover_bg,
             is_open,
+            format!("{title}, {current_label}"),
         )
         .on_mouse_down(
             MouseButton::Left,
