@@ -16,11 +16,12 @@ keeps them from firing twice.
 | **Ephemeral shim** (`paneflow-shim`) | project | `./.claude/settings.local.json` in the launched project | written on agent launch, swept on exit |
 | **Persistent setup** (`paneflow hooks setup`) | user | `~/.claude/settings.json` | written once, survives restarts and PaneFlow updates |
 
-The shim copy references the version-pinned binary under
-`cache_dir()/paneflow/bin/<VERSION>/`; the persistent copy references the
-**stable, non-versioned** path under `data_dir()/paneflow/bin/paneflow-ai-hook`
-(`runtime_paths::ai_hook_binary_path`), so the path written into your config
-never goes stale across updates.
+A managed command names the stable, non-versioned
+`data_dir()/paneflow/bin/paneflow-ai-hook` when the app set
+`PANEFLOW_AI_HOOK_PATH` (`runtime_paths::ai_hook_binary_path`). Otherwise it
+names the version-pinned copy under `cache_dir()/paneflow/bin/<VERSION>/`.
+The stable path is what survives an update. A command already stored with a
+version directory is removed once that directory is gone; see below.
 
 Both write the *byte-identical* matcher-group shape, tagged with a
 `_paneflow_managed` marker, so each side recognizes the other's entries.
@@ -40,6 +41,21 @@ you have run `hooks setup`.
 
 If you have **not** run `hooks setup`, the shim's ephemeral injection is the
 only mechanism, and it cleans up after itself on exit.
+
+## Dead commands
+
+Grok and Claude Code both execute `<project>/.claude/settings.local.json`.
+A block left behind when a pane is killed still names whatever binary wrote
+it. After an upgrade deletes that version directory, every tool call fails
+with `exit code 127` and the source label `project/settings.local`.
+
+Every wrapped agent launch, before the real CLI starts, removes PaneFlow
+hook commands whose program is not on disk from that file and from
+`<project>/.codex/hooks.json`. The walk stops at the git checkout that
+contains the working directory. A linked worktree also checks the main
+checkout, which is the file Claude Code opens. User permissions, user
+hooks, and any PaneFlow command whose binary still exists stay. The file
+itself is not deleted.
 
 ## Commands
 
