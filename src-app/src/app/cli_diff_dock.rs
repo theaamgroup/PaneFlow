@@ -23,7 +23,6 @@
 //! already promises ("dock and Review sessions are not restored").
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -32,7 +31,6 @@ use gpui::{
 };
 
 use crate::PaneFlowApp;
-use crate::app::diff_dock::code::controls::{EditorDisplay, editor_display, set_editor_display};
 use crate::app::diff_dock::{DIFF_DOCK_PANEL_MIN_WIDTH, DiffDockData, DiffDockTab};
 use crate::workspace::Workspace;
 
@@ -114,22 +112,6 @@ pub(crate) struct DiffDockSlot {
     tabs: Vec<DiffDockTab>,
     active_tab: usize,
     data: Option<DiffDockData>,
-}
-
-#[cfg(test)]
-impl DiffDockSlot {
-    /// Test-only: a parked slot holding `tabs`, so a guard that has to see a
-    /// parked dock can be exercised without a live `PaneFlowApp`.
-    pub(crate) fn parked_with_tabs(tabs: Vec<DiffDockTab>) -> Self {
-        Self {
-            open: true,
-            picker: false,
-            picked: true,
-            tabs,
-            active_tab: 0,
-            data: None,
-        }
-    }
 }
 
 impl DiffDockSlot {
@@ -282,39 +264,6 @@ pub(crate) fn all_dock_tabs<'a>(
         .chain(parked.values().flat_map(|slot| slot.tabs.iter()))
 }
 
-/// Whether a `DiffDockTab::File` among `tabs` open on `path` holds unsaved
-/// edits (issue #468: the hunk-revert guard must refuse to rewrite a file some
-/// dock editor is still holding edits for, parked docks included).
-pub(crate) fn file_tab_dirty_at_path<'a>(
-    tabs: impl IntoIterator<Item = &'a DiffDockTab>,
-    path: &Path,
-    cx: &App,
-) -> bool {
-    tabs.into_iter().any(|tab| match tab {
-        DiffDockTab::File(view) => {
-            let view = view.read(cx);
-            view.path() == path && view.is_dirty()
-        }
-        _ => false,
-    })
-}
-
-/// Whether any `DiffDockTab::File` among `tabs` holds unsaved edits
-/// (issue #396: quit must see this before it discards the buffer for good).
-///
-/// A free function rather than a `PaneFlowApp` method so it is directly
-/// testable against a real, dirtied `CodeView` - a live `PaneFlowApp` cannot
-/// be constructed in a test (its constructor binds a Unix socket and spawns
-/// PTYs), the same reason [`dock_terminals`] and its siblings above take
-/// their tabs by reference instead of `&self`.
-pub(crate) fn any_file_tab_dirty<'a>(
-    tabs: impl IntoIterator<Item = &'a DiffDockTab>,
-    cx: &App,
-) -> bool {
-    tabs.into_iter()
-        .any(|tab| matches!(tab, DiffDockTab::File(view) if view.read(cx).is_dirty()))
-}
-
 impl PaneFlowApp {
     pub(crate) fn invalidate_parked_diff_docks_for_cwd(&mut self, cwd: &str) {
         for slot in self.diff_dock.parked.values_mut() {
@@ -334,34 +283,6 @@ impl PaneFlowApp {
                     .values()
                     .flat_map(|slot| slot.tabs.iter()),
             ),
-        )
-    }
-
-    /// Whether any dock file tab - the live dock plus every parked slot,
-    /// across every workspace - holds unsaved edits (issue #396). Unlike a
-    /// dropped dock terminal, a `CodeView` buffer that never reaches disk is
-    /// gone for good, so quit must see this before it tears the window down.
-    pub(crate) fn any_dock_file_dirty(&self, cx: &App) -> bool {
-        any_file_tab_dirty(
-            self.diff_dock.diff_tabs.iter().chain(
-                self.diff_dock
-                    .parked
-                    .values()
-                    .flat_map(|slot| slot.tabs.iter()),
-            ),
-            cx,
-        )
-    }
-
-    /// Whether a dock file tab open on `path` - live dock or parked slot -
-    /// holds unsaved edits (issue #468). The hunk revert rewrites that file on
-    /// disk, so an editor holding edits for it anywhere in the process must
-    /// refuse the revert up front rather than let the later save collide.
-    pub(crate) fn dock_file_dirty_at_path(&self, path: &Path, cx: &App) -> bool {
-        file_tab_dirty_at_path(
-            all_dock_tabs(&self.diff_dock.diff_tabs, &self.diff_dock.parked),
-            path,
-            cx,
         )
     }
 
@@ -393,25 +314,6 @@ impl PaneFlowApp {
             &self.diff_dock.parked,
             tab_id,
         ))
-    }
-
-    /// Whether the dock owned by tab `tab_id` - the live dock when that tab
-    /// owns it, plus the tab's parked slot - holds a dirty `DiffDockTab::File`
-    /// (issue #397). `close_workspace_tab` must see this before it calls
-    /// [`Self::drop_diff_dock_for_tab`], the same way #396 made
-    /// `quit_after_session_save` see [`Self::any_dock_file_dirty`] before
-    /// `cx.quit()`: `session.json` never journals a `CodeView`'s in-memory
-    /// edits, so dropping the slot here would discard them for good.
-    pub(crate) fn dock_file_dirty_for_tab(&self, tab_id: u64, cx: &App) -> bool {
-        any_file_tab_dirty(
-            dock_tabs_for_session(
-                self.diff_dock.owner,
-                &self.diff_dock.diff_tabs,
-                &self.diff_dock.parked,
-                tab_id,
-            ),
-            cx,
-        )
     }
 
     /// The dock terminals that die when workspace `workspace_id` closes: those
@@ -596,7 +498,6 @@ impl PaneFlowApp {
         self.close_diff_dock_panel(cx);
         self.diff_dock.picker = false;
         self.diff_dock.picked = false;
-        self.diff_dock.diff_tab_close_armed = None;
         self.diff_dock.diff_options_menu_open = false;
         self.diff_dock.diff_layout_submenu_open = false;
         self.diff_dock.diff_new_tab_menu_open = false;
@@ -733,9 +634,9 @@ impl PaneFlowApp {
                     }),
                 };
                 self.diff_dock.maximized = Some(previous_focus);
-                // The hidden grid must not keep the keyboard: a tab with its
-                // own handle (File, Terminal) takes it, and Changes, which has
-                // none, blurs the pane instead. Never the `focus_diff_tab`
+                // The hidden grid must not keep the keyboard: a terminal tab
+                // takes it, and Changes or Agent setup, which have none, blur
+                // the pane instead. Never the `focus_diff_tab`
                 // pane fallback, which would focus exactly the pane that is
                 // about to disappear.
                 match self.dock_tab_focus_handle(self.diff_dock.diff_active_tab, cx) {
@@ -794,26 +695,6 @@ impl PaneFlowApp {
             window,
             cx,
         );
-    }
-
-    /// Refresh live and parked file editors after a display preference changes.
-    pub(crate) fn apply_editor_display(&mut self, cx: &mut Context<Self>) {
-        let display = EditorDisplay::from_config(&self.cached_config.editor);
-        if display == editor_display() {
-            return;
-        }
-        set_editor_display(display);
-        let live = self.diff_dock.diff_tabs.iter();
-        let parked = self
-            .diff_dock
-            .parked
-            .values()
-            .flat_map(|slot| slot.tabs.iter());
-        for tab in live.chain(parked) {
-            if let DiffDockTab::File(view) = tab {
-                view.update(cx, |_, cx| cx.notify());
-            }
-        }
     }
 
     /// Whether the dock flexes to its container this frame: maximized, or
@@ -935,7 +816,6 @@ impl PaneFlowApp {
             self.diff_dock.maximized = None;
             self.diff_dock.maximize_animation = None;
             self.diff_dock.restore_focus_after_slide = None;
-            self.blur_unmounted_files_tree(window, cx);
             return body;
         }
         // A restore slide parks the pre-maximize focus (#506); the first frame
@@ -959,7 +839,6 @@ impl PaneFlowApp {
                 self.diff_dock.h_scroll_drag = None;
                 self.diff_dock.vertical_scrollbar.cancel_drag();
                 self.diff_dock.rendered = false;
-                self.blur_unmounted_files_tree(window, cx);
                 return body;
             };
             fit

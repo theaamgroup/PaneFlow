@@ -1481,7 +1481,6 @@ impl PaneFlowApp {
 
         if self.active_idx != target_idx {
             self.active_idx = target_idx;
-            self.sync_files_sidebar_session(cx);
         }
         if let Some(pane) = focus_pane {
             self.pending_pane_focus = Some(pane);

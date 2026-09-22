@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{Context, Pixels, Point, point, px};
 
-use super::code::save::{FileStamp, SaveError, save_regular_blocking};
+use super::file_save::{FileStamp, SaveError, save_regular_blocking};
 use super::git::{normalized_working_text, read_regular_snapshot};
 use super::model::{DiffDockTab, DiffHover};
 use crate::PaneFlowApp;
@@ -11,7 +11,6 @@ use crate::diff::{
     hunk_for_base_line, hunk_for_new_line, revert_chip_bounds, row_at_offset, show_revision_file,
 };
 
-pub(super) const DIRTY_TAB_MESSAGE: &str = "Save or discard the editor changes first";
 pub(super) const STALE_FILE_MESSAGE: &str = "File changed on disk, refresh first";
 
 /// Recover the exact HEAD bytes discarded by display normalization. Also
@@ -392,10 +391,6 @@ impl PaneFlowApp {
         let recorded = data.stamps.get(&file.path).copied();
         let cwd = data.cwd.clone();
         let owner = self.diff_dock.owner;
-        if self.dock_file_dirty_at_path(&path, cx) {
-            self.show_diff_dock_error(DIRTY_TAB_MESSAGE, cx);
-            return;
-        }
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let result = smol::unblock(move || {
@@ -459,37 +454,20 @@ mod tests {
         crate::diff::compute_hunks(base, new)
     }
 
-    /// Issue #468: the guard scanned `self.diff_dock.diff_tabs` only, so a
-    /// `CodeView` with unsaved edits in a *parked* dock (a sibling tab on the
-    /// same checkout) never refused the revert. A `PaneFlowApp` cannot be
-    /// constructed in a test (its constructor binds a Unix socket and spawns
-    /// PTYs), so this pins the wiring on the raw function body the way
-    /// `session.rs` does for #396;
-    /// `a_dirty_parked_dock_file_is_visible_to_the_revert_guard` in
-    /// `diff_dock/code/view.rs` exercises the predicate against a real,
-    /// edited buffer.
+    /// A revert failure the banner cannot show (the user left the dock) is
+    /// still logged. A `PaneFlowApp` cannot be constructed in a test, so this
+    /// pins the wiring on the function body.
     #[test]
-    fn the_revert_guard_consults_parked_docks_and_logs_a_dropped_failure() {
+    fn a_dropped_revert_failure_is_logged() {
         let src = include_str!("revert.rs");
         let body = src
             .split("fn revert_diff_dock_hunk(")
             .nth(1)
             .and_then(|rest| rest.split("fn show_diff_dock_error(").next())
             .expect("revert_diff_dock_hunk body");
-
-        let guard_at = body
-            .find("self.dock_file_dirty_at_path(&path, cx)")
-            .expect("the revert must consult the live-plus-parked dirty check");
-        let spawn_at = body
-            .find("cx.spawn(")
-            .expect("the revert must still run its write off the render thread");
         assert!(
-            guard_at < spawn_at,
-            "the dirty check must refuse before the write is spawned: {body}"
-        );
-        assert!(
-            !body.contains("self.diff_dock.diff_tabs"),
-            "scanning the live dock alone misses a parked editor's edits: {body}"
+            body.contains("cx.spawn("),
+            "the revert must still run its write off the render thread: {body}"
         );
         assert!(
             !body.contains("Err(_) => {}"),

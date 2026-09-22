@@ -692,19 +692,6 @@ fn worktree_toplevel_within(budget: &GitBudget, dir: &Path) -> PathBuf {
     }
 }
 
-/// Resolve the working-tree root of `dir`. `Ok(None)` when Git reports that
-/// `dir` is not inside a repository; other failures stay `Err`.
-pub(crate) fn try_worktree_toplevel(dir: &Path) -> Result<Option<PathBuf>, String> {
-    match GitBudget::for_column().run(dir, &["rev-parse", "--show-toplevel"]) {
-        Ok(out) => {
-            let s = String::from_utf8_lossy(&out).trim().to_string();
-            Ok((!s.is_empty()).then(|| PathBuf::from(s)))
-        }
-        Err(err) if err.contains("not a git repository") => Ok(None),
-        Err(err) => Err(err),
-    }
-}
-
 /// `HEAD`'s object name, or `None` when the ref is unborn or unreadable.
 pub(crate) fn head_sha(worktree_dir: &Path) -> Option<String> {
     GitBudget::for_column()

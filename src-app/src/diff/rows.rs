@@ -342,11 +342,6 @@ pub struct RowPalette {
     pub gutter_bg: Hsla,
     pub add_gutter_bg: Hsla,
     pub del_gutter_bg: Hsla,
-    /// EP-003 US-009: wash behind the code editor's current line. Derived from
-    /// `ui.text` at low alpha rather than added as a theme slot, so the six
-    /// bundled theme files keep their current shape and a user theme cannot
-    /// forget to define it.
-    pub cursor_line_bg: Hsla,
     pub chip_bg: Hsla,
     pub chip_fg: Hsla,
 }
@@ -565,11 +560,6 @@ pub fn palette(ui: crate::theme::UiColors) -> RowPalette {
         gutter_bg: ui.base,
         add_gutter_bg: diff.added_gutter_background,
         del_gutter_bg: diff.deleted_gutter_background,
-        // EP-003 US-009: the current-line wash has to survive both themes with
-        // one alpha. 0.05 of the foreground reads as a lift on dark and as a
-        // shade on light, and stays under every diff wash so a changed line
-        // keeps its status color when the caret sits on it.
-        cursor_line_bg: ui.text.opacity(0.05),
         chip_bg: crate::app::constants::sidebar_tab_hover_background(),
         chip_fg: ui.text,
     }

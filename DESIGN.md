@@ -58,7 +58,7 @@ emulator with tabs. The dominant idea of the screen is the grid of live pane
 cards, each one a real terminal running a real agent. Everything else is
 instrumentation around that grid: a rail of workspaces and tabs on the left, a
 title bar that is almost empty, docks and rails that appear only when review
-or files are needed, and a footer switch between the two modes that matter,
+or sessions are needed, and a footer switch between the two modes that matter,
 **Agents** and **Review**.
 
 The code calls this shell the cockpit (`cockpit_chrome_background`,
@@ -76,7 +76,7 @@ history names them:
 | --- | --- | --- |
 | Codex app (OpenAI) | The material language of the shell: one slightly brighter translucent highlight for hover and selection, inline Settings that replace the main panel, the select, toggle, and card primitives, the sectioned rail | `ee35d86e` `refactor(ui): unify chrome on the Codex material language`, `433b9e09` `feat(settings): shared Codex-style select, toggle, and card primitives`, `70d84e3e` `feat(settings): embed Codex-style inline settings`, `33fb6193` `feat(theme): restore PaneFlow Light with a Codex-style light shell` |
 | Cursor | The diff dock chrome: file tabs as chips, the toolbar rail skin, the Changes rail hierarchy, the compact graphite sidebar and pale blue accent of the Cursor preset | `8d084ab3` `feat(diff-dock): Cursor-style chrome and retire the Agents environment card`, `docs/user/themes.md` |
-| Zed | The dock's code editor: the minimap, the editor scrollbars, the Editor Controls menu, and the syntax highlight queries | `src-app/src/app/diff_dock/code/`, issues #432, #433, #435 |
+| Zed | The syntax highlight queries Changes and Review share | `src-app/src/diff/highlighter.rs`, issue #433 |
 | AppKit | Client-side decorations with the macOS traffic lights, the `NSVisualEffectMaterial::Sidebar` material behind the shell | `4d85f1ce` `feat(macos): add sidebar material setting`, `801a68ee` `feat(chrome): native compositor blur backdrop` |
 
 PaneFlow borrows the reasoning of these products, not their pixels. The
@@ -158,8 +158,8 @@ fonts come from the user's system, with a bundled Nerd Font as the default.
 | Primary sidebar | Workspaces rail in Agents mode; the Workspaces and Changes rails side by side in Review; navigation in Settings | Width 300, **520 in Review** (220 + 300); slides in 280 ms | `app/constants.rs:15`, `app/review/mod.rs:22-23`, `app/review/mode.rs:90-92`, `main.rs:352`, `settings/chrome.rs:35` |
 | Main panel | The inset card that holds the pane grid (Agents or Review) or a Settings page | Inset 4 on right and bottom, and on the left only when the sidebar is hidden; radius 10; four corner masks painted in the shell color. There is no top inset — a spacer the height of the title bar reserves the strip | `app/constants.rs:25-27`, `main.rs:872,1983,2425,2435-2438,2471-2506` |
 | Pane grid | **N-ary** `LayoutTree { Leaf, Container }` of pane cards; one grid per workspace tab in Agents, one global grid of diff panes in Review | Gutter 8, divider hit area 7, minimum pane 80; `MAX_PANES` 32, `MAX_WORKSPACES` 32, `MAX_TABS_PER_WORKSPACE` 32, Review caps at `MAX_REVIEW_PANES` 6 | `layout/tree.rs:62-67`, `layout/mod.rs:34,39`, `workspace/mod.rs:53,59`, `app/review/mod.rs:21` |
-| Right rail | Sessions rail, or the default Files tree rail. Mutually exclusive in rail placement; Sessions can coexist with a dock tree. | Width 300 each | `app/sessions_sidebar.rs:37`, `app/files_sidebar/mod.rs:52` |
-| Diff dock | Side dock attached to a workspace tab, holding Changes plus file, terminal, and Agent setup tabs | Preferred width 880, minimum 360, maximum 1400, fitted to the live remainder and hidden below the floor (5.4); 8 file tabs, a cap that yields to unsaved work (5.4) | `app/diff_dock/model.rs:23-34`, `app/cli_diff_dock.rs:38-64` |
+| Right rail | Sessions rail | Width 300 | `app/sessions_sidebar.rs:37` |
+| Diff dock | Side dock attached to a workspace tab, holding Changes, terminal, and Agent setup tabs. A clicked file path opens in the external editor | Preferred width 880, minimum 360, maximum 1400, fitted to the live remainder and hidden below the floor (5.4) | `app/diff_dock/model.rs`, `app/cli_diff_dock.rs:38-64` |
 | Footer | IPC offline banner, MCP bridge callout, then the Agents / Review mode strip | Persistent primary navigation. **No Settings gear** (issue #105) and **no update banner** | `app/sidebar_actions_menu.rs:21-60,62-178,254-299` |
 
 The window is 800 by 500 at minimum, and a surface MUST hold there with the
@@ -211,7 +211,7 @@ explicit priority.
 | --- | --- | --- | --- |
 | Launch Pad | Horizontally centered, **top-anchored at 72**, over a full-window black 0.4 backdrop | Card 520 wide, radius 10; agent list, GitHub issue row, branch field, prompt field, footer hint, one tinted accent button | `app/launch_pad.rs:872-908` |
 | Pane palette | Fills an empty tab, titled `New pane` | A centered 260 px column on a 20 px squircle of the terminal background: 13 px Semibold title, an optional branch row 28 tall, preset rows 34 tall with a 14 px agent mark, gap 2, list capped at 420 tall, inline error at 11 px | `app/pane_palette.rs:36-40,654-782,1021-1059` |
-| Diff dock surface picker | Fills a fresh dock, under a 40 px header band carrying only the dock close button | **Four** cards 122 by 98, gap 12, radius 10, grid padding 16, icon gap 8; the grid wraps rather than fixing a column count | `app/diff_dock/surface_picker.rs:29-39,62-69,99-126` |
+| Diff dock surface picker | Fills a fresh dock, under a 40 px header band carrying only the dock close button | **Three** cards 122 by 98, gap 12, radius 10, grid padding 16, icon gap 8; the grid wraps rather than fixing a column count | `app/diff_dock/surface_picker.rs:29-39,62-69,99-126` |
 | Composer | Scrim over the whole pane, panel docked at its bottom | Black scrim at 0.25 on the 20 px squircle; panel on `overlay` with margin 8, padding 8, gap 6, 1 px border, radius 8, `shadow_lg`; header chips 10 px; input max height 180 | `pane.rs:690-732` |
 | Pane Overview | Horizontally centered, top-anchored at 24 (`OVERVIEW_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; 312.5 by 192.5 cards, gap 10, radius 8, grid padding 16 | `app/pane_overview/mod.rs:36-41,486-559` |
 | Agent Summary | Horizontally centered, top-anchored at 24 (`OVERLAY_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; width capped at 920 (`MAX_OVERLAY_WIDTH`); rows padded 16 by 8, gap 2, with a 2 px accent left border on the selected row | `app/agent_summary/view.rs:16-17,101-176` |
@@ -236,7 +236,7 @@ Color resolves in three layers.
    colors (`background`, `foreground`, `bright_foreground`, `dim_foreground`,
    `ansi_background`), `cursor`, `selection`, the derived `selection_foreground`,
    `scrollbar_thumb`, `link_text`, and two title bar colors — plus a 30-slot
-   `SyntaxPalette` for the diff and the editor
+   `SyntaxPalette` for Changes and Review diffs
    (`theme/model.rs:11-64,75-104`).
 2. **UI colors**: the 30 semantic roles plus one flag (`use_theme_diff_washes`)
    that the chrome consumes, `UiColors` (`theme/model.rs:522-596`). Vercel,
@@ -327,7 +327,6 @@ hand-tuned: it is recomputed at theme load until it clears APCA Lc 45 (7.3).
 | Sidebar drop placeholder | `text` at 0.10 fill, 0.22 border | same | `app/sidebar/mod.rs:218-219,2469-2471` |
 | Sidebar reorder line | `text` at 0.5, 2 px, `rounded_full` | same | `app/sidebar/mod.rs:241,1332` |
 | Changes rail left border | `text` at 0.06 | same | `app/diff_sidebar/mod.rs:44-45` |
-| Unfocused code editor wash | one third | same | `app/diff_dock/code/element.rs:311,323` |
 | Icon button hover | the caller's hover color from 0 to 1 | same | `ui_primitives.rs:606` |
 
 Fixed values that deliberately do not follow the theme. They read as OS
@@ -365,7 +364,7 @@ neutral `text` tints.
 | Settings card, pane palette ground, diff dock card | 20 | squircle | none |
 | System Info dialog | 20 | squircle | 1 px `border` at 0.6, plus `shadow_lg` |
 | Menu, select popup | 18 | squircle | 1 px `border` at 0.6 |
-| Sidebar rows, tab icon cards, footer mode buttons, row skin, secondary button, select item, dock tab chip, file tree row, tooltip | 14 (`ROW_RADIUS`) | squircle | tab icon card and tooltip, 1 px `border` |
+| Sidebar rows, tab icon cards, footer mode buttons, row skin, secondary button, select item, dock tab chip, tooltip | 14 (`ROW_RADIUS`) | squircle | tab icon card and tooltip, 1 px `border` |
 | Pane Overview panel | 12 | round | 1 px `border`, plus `shadow_lg` |
 | Theme tile | 10 | round | 2 px `text` at 0.12, 0.32 on hover, 0.85 when selected |
 | About dialog | 10 | round | 1 px, plus `shadow_lg`; **Migration** |
@@ -402,7 +401,6 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | Sidebar footer | padding 6 top and 8 bottom; mode buttons 30 tall on squircle 14, gap 3, margin 8; IPC banner mx 6 / mb 2 / px 8 / py 6 with no fixed height |
 | Review rail row | margin-x 8, padding-x 8, height 30, gap 4, child indent 18, icon 14, subject dot 6 |
 | Sessions row | height 30; 5 rows per agent group before **Show more** |
-| Files tree | rail 300, optional dock panel 250; rows 28, indent 18, leading slot 14, trailing status slot 14, row gap 12; selection is a `ROW_RADIUS` squircle |
 | Settings row | padding 12 by 10, gap 16; section header bottom padding 8 |
 | Select trigger | padding 10 by 6, width 190 to 260 |
 | Menu | list padding 4, item gap 1, item height 28, width 200 to 280, max height 320 |
@@ -413,7 +411,6 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | Toast | right 18, bottom **20** (the animation owns the vertical axis - see 3.3), padding 12 / 14 by 11, minimum width 220, max width 340 (440 for an error), single line. **Sticky toast** (5.8): padding 12 / 8 by 8, max width 440, gap 9; action button 24 high, padding 9, radius 6, 12 Medium; close glyph is `icon_button_sm` (20 / 12, radius 4) |
 | Scrollbar | width 6, gutter 10, minimum thumb 24 |
 | Diff | row 18, file header 32, fold row 32, sticky header 24, gutter 36 (a floor, widened per digit count), change bar 4, split divider 3, minimum split column 360, revert chip 56 by 16 inset 10, horizontal track 6 |
-| Code editor | 12 px mono, row 18, caret 2, scrollbar track 15, minimum thumb 25 vertical and 28 horizontal; git marker column 6 left of the numbers, bar 4 radius 2 inset 1, deleted dot 8, hover grows 3 to the left |
 | Dock | preferred 880, minimum 360, maximum 1400; maximized: panel width minus two 8 px gutters, floor 360; tab strip 40 with 26 px chips, gap 4 |
 | Pane Overview | cards 312.5 by 192.5, gap 10, radius 8, grid padding 16, panel margin 24 |
 
@@ -429,8 +426,7 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | Page heading | Geist | 26 Semibold | Settings page title |
 | Dialog title | Geist | 16 | About only — System Info uses `TITLE` (14) |
 | Terminal | User choice among fixed-pitch families; default the bundled JetBrainsMono Nerd Font | 13 pt default (range 8–32); `line_height` and `cell_width` are multipliers of the measured cell, both defaulting to 1.0 (ranges 0.8–2.5 and 0.8–2.0). At 13 pt the cell measures 10 by 23 px | Panes |
-| Code and diff | `resolve_font_family(None)`, the terminal default | 12 | Diff dock, editor, theme preview |
-| Minimap | `.ZedMono`, which resolves to the bundled Nerd Font | 2 px Black, 1.618 line height | Dock code editor |
+| Code and diff | `resolve_font_family(None)`, the terminal default | 12 | Diff dock, theme preview |
 
 The named constants live in `ui_primitives.rs:425-433`: `LABEL_XS` 10,
 `LABEL_SM` 11, `BODY` 12, `BODY_EMPHASIS` 13, `TITLE` 14. New interface text
@@ -481,7 +477,7 @@ chrome only.
 | 13 | Medium icon button, filter search, menu check mark, dock tab icon, diff file-header file-type icon |
 | 14 | Title bar sidebar toggle, editor and preset logos, sidebar folder, sidebar footer banner |
 | 15 | Toast icon |
-| 16 | Sidebar tab icon, callout icon, dock options trigger, Editor Controls trigger |
+| 16 | Sidebar tab icon, callout icon, dock options trigger |
 | 18 | Empty-state glyph |
 
 The pane card's close chip is the one glyph below the table: `CLOSE_GLYPH_SIZE`
@@ -688,7 +684,7 @@ so the glow paints without reflow. There is no blue focus ring anywhere.
 ### 5.4 Diff dock and Review view
 
 **The dock** attaches to a workspace tab and opens on a surface picker of
-**four** cards — Changes, Terminal, File, Agent setup — 122 by 98 on a wrapping
+**three** cards — Changes, Terminal, Agent setup — 122 by 98 on a wrapping
 grid. The choice is parked on the **tab**, not the workspace: dock slots are
 keyed by `Tab::id` (`app/cli_diff_dock.rs:18`), so a sibling tab of the same
 folder is a new session and shows the picker again.
@@ -707,15 +703,15 @@ the ceiling leaves a wider stored preference alone
 **Maximized**, the dock takes the whole cockpit: `secondary-shift-f` or the
 maximize button at the right of the tab strip (`diff-dock-maximize`, labelled
 "Maximize dock" / "Restore dock", a `minimize` glyph while maximized) hides
-the pane grid so Changes, an editor tab, or a dock terminal gets the full
+the pane grid so Changes, Agent setup, or a dock terminal gets the full
 window width. The grid is **clipped, never resized**: it stays mounted at its
 last measured width inside an `overflow_hidden` column that slides to 0, so an
 agent running behind the dock never sees a PTY resize. The dock bypasses the
 fit (it renders even in a panel too narrow for dock plus grid), flexes to the
 container with no resize handle, and paints the grid's left gutter itself as
 the grid goes. Maximizing records the focus that was active and moves it onto
-the active dock tab's own handle (a File or Terminal tab), or blurs the pane
-when the tab has none (Changes), so keystrokes never reach the hidden grid;
+the active dock tab's own handle (a Terminal tab), or blurs the pane
+when the tab has none (Changes or Agent setup), so keystrokes never reach the hidden grid;
 restoring, or closing the maximized dock from its strip or a pane header's
 dock toggle, hands it back. What comes back is checked against the model, not
 against the frame: a maximized dock renders no grid, so maximize records the
@@ -744,52 +740,21 @@ instantly under `reduce_motion`.
 The tab strip is 40 px with a bottom hairline, gap 4, px 8. Chips are 26 tall
 on a `ROW_RADIUS` squircle, gap 6, px 8, with a 13 px kind icon, the title at
 body size Medium, and a 16 px close slot at radius 6 carrying an 11 px glyph.
-A modified tab swaps that glyph for a 7 px `vc_modified` dot at rest, and
-arming the close paints it `vc_deleted` — the same two-press confirm the pane
-uses. **No tab is permanent**: the dock starts with no content tabs, Changes
+**No tab is permanent**: the dock starts with no content tabs, Changes
 is created only when its picker card or `+` menu row is chosen (and reused
 when it already exists), and every tab carries the close control, Changes and
-the first tab included. Closing the last tab returns the dock to the picker,
-re-armed. A Changes tab explicitly opened against a non-git or clean-diff
-workspace keeps the blank Changes body (#393). `MAX_DIFF_FILE_TABS` is 8 and
-counts *file* tabs only; past the cap the leftmost file tab that is neither
-modified nor active is evicted. **The cap yields to unsaved work**: when every
-file tab is modified or active, `file_tab_eviction` returns `None` and the new
-tab is still inserted, so the strip may exceed eight rather than drop an edit
-(`app/diff_dock/tabs.rs:329-346`). The `+` trigger is a 28 px `ROW_RADIUS` square opening a
-236 px menu of Changes, File (`secondary-g`), Terminal (`secondary-j`), and
-Agent setup.
+the first tab included. Closing the last tab returns the dock to the picker
+so the next open asks again. A Changes tab explicitly opened against a non-git
+or clean-diff workspace keeps the blank Changes body (#393). The `+` trigger
+is a 28 px `ROW_RADIUS` square opening a 236 px menu of Changes, Terminal
+(`secondary-j`), and Agent setup. There is no File row.
 
-**The Files tree defaults to a separate 300 px right rail** (`files_tree_placement: "rail"`). It is
-per workspace tab (`Tab::files_sidebar_open`), mutually exclusive with the
-Sessions rail, unmounted in Review and Settings while staying warm, and
-toggled by `secondary-alt-f`. Its width is fixed and resizing it is an explicit
-non-goal. Rows are 28 tall with 18 px indentation, a 14 px leading slot, a
-12 px row gap, a 14 px trailing status slot on rows that carry one, and a
-`ROW_RADIUS` squircle selection; the header is a 36 px
-title row and the search field is the shared `filter_pill`.
-
-Tree rows carry Zed's version control decoration, summed from
-`git status` over the tree root. The label takes `vc_conflict`, then
-`vc_deleted`, then `vc_modified`, then `vc_added` for an addition or an
-untracked path, and falls back to `text`. A file also shows a status letter at
-the right of the row, 11 px bold in a 14 px slot: `!` for a conflict, `U` for
-untracked, then `D` and `M` for the worktree side before the same two for the
-index, and `A` for a staged addition. A directory shows a 6 px dot at 0.5
-opacity in that slot instead, rolling up every descendant. Ignored paths never
-reach the tree, so they never carry a status.
-
-With `files_tree_placement: "dock"`, the same panel renders at 250 px to the
-right of the editor, below a shared 40 px project/file breadcrumb toolbar.
-The named folder button and `secondary-alt-f` toggle it. It has the same rows,
-filter and context menus, with no duplicate title, close button or material
-background. Sessions can coexist. File and PendingFile tabs show it; other
-tabs hide it. The chord creates a file-picker tab and opens the dock when
-needed, and closing the last file tab closes the tree. Below 450 px of
-rendered dock width only the tree hides, preserving a 200 px editor and the
-existing 360 px dock floor and stored width preference. Unmounting preserves
-the panel and watches. Both layouts keep per-tab open state and source-only
-file opening, including Markdown.
+There is no in-app file tree and no in-app editor. A clicked file path,
+including an Agent setup row, opens in the configured external editor
+(`editor::open_at_location`). The right rail is the Sessions sidebar only
+(300 px). `files_tree_placement` and the `editor` config block are not
+settings; an old `paneflow.json` that still carries them loads, and those
+keys are ignored.
 
 **Review** puts the same `DiffElement` inside ordinary pane cards. One pane
 shows one worktree against one base branch, and the grid caps at six. The pane
@@ -840,59 +805,10 @@ theme slots consumed by nothing. There is no whitespace comparison mode and no
 Highlight or Whitespace menu row; the dock's `Dock options` menu is Layout,
 Collapse/Expand all, and Refresh Changes only.
 
-A file tab carries git markers in a 6 px column left of the line numbers,
-computed against `HEAD` off the render thread and kept current by a block
-tracker that shifts blocks on every keystroke and re-diffs the touched blocks
-after a 150 ms pause. Added and modified blocks paint a 4 px bar with radius 2
-and a 1 px inset; a deleted block is an 8 px dot centered on the boundary.
-Hovering widens a marker 3 px to the left; clicking opens a `menu_surface`
-popup anchored to the block's row, 280 to 520 px wide, flipping above when
-there is no room below. It names the block, shows the base text in the code
-font with syntax runs on the `vc_deleted_background` wash (12 rows visible,
-200 lines with an `and N more lines` foot), and offers `Copy` and `Revert`; an
-added block offers `Revert` alone. Escape, an outside click, or an agent write
-closes it. In the Changes tab, hovering a modified file's block shows a
-`Revert` pill, 56 by 16 on the sidebar hover tint, inset 10 from the right.
-
-The file header is a 36 px row, gap 6, px 10, with a bottom border, the
-file-type icon at the far left, and `Ln {line}, Col {column}`. Banners stack
-under it, each a `text_xs` row with `px 3 / py 1.5`, gap 2, and a bottom
-`border`: the read-only notice (on `overlay` in `muted`, flashing to
-`vc_conflict` at 0.22 in `text` for 600 ms on a refused keystroke), the
-on-disk conflict and deletion notices (`vc_conflict` at 0.16, `text`), the
-last failed write (`vc_deleted` at 0.16, `text`), and, when the file's
-initial parse ran past 5 s, `This file is too complex to color.` on `overlay`
-in `muted`; that file stays plain and fully editable. A file opens as plain
-text and colors when its tree lands off the render thread; each frame colors
-only the stale rows in view under a 2 ms budget, so a scrolled-to region may
-read plain for a frame before it colors. An unfocused editor, or one whose
-caret is scrolled out of view, does not repaint for the caret blink. Its right end
-carries the **Editor Controls trigger** — matching the Files toggle's 28 px
-button, 8 px radius, 16 px glyph, and animated sidebar hover wash. This is a
-named size exception to the small/medium icon primitives; it keeps their
-Button role, accessible name, click activation, and delayed tooltip. While
-open, the glyph uses `ui.text` (formerly `ui.accent`); at rest it uses `ui.muted`.
-The menu uses `menu_surface` and `select_item`, 180 px wide with 4 px padding,
-13 px labels and a trailing 13 px check slot. It retains `menu_reveal` and
-settles immediately under `reduce_motion`. Escape, an outside click, or a
-second trigger click dismisses it; arrows, Tab, Enter and Space operate the
-checkbox rows, which announce their checked state.
-
-Minimap and Scrollbar persist in `editor.minimap` and `editor.scrollbar` in
-`paneflow.json`. Minimap defaults off and scrollbar on. Startup, menu changes,
-and config hot reload apply one process-wide preference to every file editor,
-including dock tabs parked in other sidebar tabs. Changes and Review diff
-viewers retain their own scrollbar contract.
-
-Editor scrollbars follow Zed's 15 px tracks with square thumbs, a 25 px
-vertical minimum and a 28 px horizontal one, and a 1 px left border on the
-vertical track and thumb. Both axes support centered track clicks and dragging,
-and git markers occupy the vertical track. Changes and Review diffs keep the
-same vertical track permanently enabled in its own gutter, without editor
-controls or a minimap. The minimap uses `.ZedMono` at 2 px Black with a 1.618
-line height, caps at 15 percent of the text area and 80 columns, hides below 20
-columns, truncates rows at 160 characters, and paints its background at 0.7
-with the viewport thumb at 0.5 behind an open left border.
+In the Changes tab, hovering a modified file's block shows a `Revert` pill,
+56 by 16 on the sidebar hover tint, inset 10 from the right. Changes and
+Review diffs keep a vertical scrollbar track permanently enabled in its own
+gutter. There is no minimap.
 
 ### 5.5 Settings
 
@@ -912,7 +828,7 @@ trigger, whose 8 px corner is round — the one non-squircle in the family.
 Destructive actions use the fixed red button on a `ROW_RADIUS` squircle.
 
 Keyboard Shortcuts includes a searchable Fixed shortcuts section documenting
-editor, text-field, Composer, copy-mode, sidebar, and overlay controls. Each row
+text-field, Composer, copy-mode, sidebar, and overlay controls. Each row
 names the context in which it applies and is marked Fixed; clicking it cannot
 arm recording or write a binding. Hover reveals a truncated description. Live
 alternative chords for the same action are also listed; editing either row
@@ -937,7 +853,7 @@ Selects use the shared keyboard and accessibility behavior.
 ### 5.6 Menus, selects, tooltips
 
 Popups share `menu_surface` — squircle 18, a surface lifted 0.035 in dark or
-`overlay` in light, and a `border` at 0.6, including Editor Controls (5.4).
+`overlay` in light, and a `border` at 0.6.
 Items are 28 px `ROW_RADIUS` squircle rows with `text` washes for hover
 (0.05) and selection (0.10), 12 px text, and a 12 px chevron on triggers.
 `select_item` and `select_trigger` set that 12 px `text` themselves. A popup
@@ -1174,9 +1090,9 @@ a chord or a menu item, and MUST NOT rely on a surface that has neither.
 | Pane overview | `secondary-shift-p` |
 | Agent summary | `secondary-shift-i` |
 | Work review | `secondary-shift-u` |
-| Primary sidebar, files rail | `secondary-alt-b`, `secondary-alt-f` |
+| Primary sidebar | `secondary-alt-b` |
 | Maximize / restore the Changes dock | `secondary-shift-f` |
-| New file tab, new terminal tab (dock) | `secondary-g`, `secondary-j` |
+| New terminal tab (dock) | `secondary-j` |
 | Composer, Launch Pad | `secondary-shift-space`, `secondary-shift-l` |
 | Command palette | `secondary-shift-o` |
 | Jump to next waiting agent | `secondary-shift-j` |
@@ -1308,7 +1224,7 @@ row washes carry no floor today.
 ### 7.4 Keyboard-operable surfaces
 
 These answer arrows, Enter, and Escape in full: Pane Overview
-(two-dimensional), sessions rail, files rail, theme picker, pane palette, work review, broadcast groups, and the Editor Controls menu. Launch
+(two-dimensional), sessions rail, theme picker, pane palette, work review, and broadcast groups. Launch
 Pad, the diff branch menu, close confirm, and About answer Escape and Enter
 only; Launch Pad additionally cycles its text fields with Tab, and its agent
 list is mouse-driven by design. **System Info is Escape-only** — it carries
@@ -1325,7 +1241,7 @@ This paragraph covers the six origin-tracked overlays, the `OverlayKind`
 variants in `app/overlay_origin.rs`: theme picker, broadcast picker, Launch Pad, Pane Overview, the pane palette, and
 the agent summary. The
 modal dialogs (About, System Info, Custom Buttons, close confirm, Work
-Review), the diff branch menu, and the Editor Controls menu keep their own
+Review), and the diff branch menu keep their own
 restore paths and are not part of it. Dismissing a tracked overlay (Escape,
 an outside click on its scrim, its toggle chord, or a committed choice)
 returns the focus to the pane it was opened from, then to the workspace's

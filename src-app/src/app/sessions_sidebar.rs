@@ -77,12 +77,6 @@ impl PaneFlowApp {
         focus_window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        // Mutual exclusion: only one right column. Opening sessions closes
-        // the Files sidebar (and vice-versa, in `toggle_files_sidebar`).
-        if self.files_sidebar_open && !self.files_tree_in_dock() {
-            self.close_files_sidebar(cx);
-        }
-
         // Close floating dropdowns so they don't paint over the newly opened
         // docked sidebar.
         self.dismiss_transient_surfaces();
@@ -344,7 +338,7 @@ impl PaneFlowApp {
                     // Only swallow the Escape that actually cleared something.
                     // On an already-empty field it keeps bubbling to the
                     // sidebar container, which closes the sidebar - the
-                    // two-stage Escape the Files sidebar already ships.
+                    // two-stage Escape: clear the filter, then close.
                     if ev.keystroke.key.as_str() == "escape"
                         && this.clear_sessions_filter(window, cx)
                     {
@@ -1119,15 +1113,6 @@ impl PaneFlowApp {
             [false; crate::agent_sessions::SESSION_AGENT_COUNT];
         self.agent_sessions.sessions_scanning = [false; crate::agent_sessions::SESSION_AGENT_COUNT];
         self.agent_sessions.sessions_menu_open = None;
-    }
-
-    pub(crate) fn close_sessions_sidebar_immediate(&mut self, cx: &mut Context<Self>) {
-        self.agent_sessions.sessions_sidebar_open = false;
-        self.agent_sessions.sessions_sidebar_animation = None;
-        self.agent_sessions.sessions_scan_generation =
-            self.agent_sessions.sessions_scan_generation.wrapping_add(1);
-        self.clear_sessions_sidebar_state();
-        cx.notify();
     }
 
     /// Start closing the sidebar and invalidate in-flight scans immediately.

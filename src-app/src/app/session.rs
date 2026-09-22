@@ -6,7 +6,7 @@
 //! Extracted from `main.rs` per US-017 of the src-app refactor PRD.
 
 use std::collections::VecDeque;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -193,10 +193,6 @@ impl PaneFlowApp {
                     legacy_layout: None,
                     legacy_empty: false,
                     custom_buttons: ws.custom_buttons.clone(),
-                    // US-007: store expanded dirs relative to the workspace
-                    // root. A path that can't be made relative (symlinked
-                    // outside the root) is dropped rather than persisted absolute.
-                    expanded_paths: persisted_expanded_paths(&ws.cwd, &ws.files_expanded),
                     // EP-002 (orchestration-v2): persist worktree ownership so
                     // a crash/restart keeps the teardown + prune record.
                     managed_worktrees: ws
@@ -334,15 +330,6 @@ impl PaneFlowApp {
     /// Persist then quit. A failed write is toasted and quit is delayed so
     /// the message is visible instead of racing the process exit.
     pub(crate) fn quit_after_session_save(&mut self, cx: &mut Context<Self>) {
-        // Issue #396: `session.json` only journals the layout, not a dock
-        // file tab's in-memory edits. File-tab close already refuses to drop
-        // those silently (`close_arms_first`); quitting must not be the back
-        // door that does. Arm a toast instead of quitting so the buffer stays
-        // put until the user saves or explicitly closes it.
-        if self.any_dock_file_dirty(cx) {
-            self.show_toast(unsaved_dock_file_quit_toast_message().to_string(), cx);
-            return;
-        }
         // Keep the on-disk session from the previous launch rather than
         // clobbering it with a partial in-memory restore, then quit.
         if self.session_restore.is_some() {
@@ -837,15 +824,6 @@ impl PaneFlowApp {
             }
         }
         workspace.managed_worktrees = restored_worktrees;
-        // US-007: rehydrate expanded dirs as absolute paths under this
-        // workspace's cwd. Paths that no longer resolve to a directory are
-        // dropped lazily later (by the files worker's scan on open),
-        // so a deleted folder never resurrects a dead row.
-        workspace.files_expanded = ws_session
-            .expanded_paths
-            .iter()
-            .filter_map(|rel| rehydrate_expanded_path(&workspace.cwd, rel))
-            .collect();
         // US-013: kick off the deferred git-stats probe (off render thread).
         Self::spawn_initial_git_stats(ws_id, workspace.cwd.clone(), cx);
         workspace
@@ -1318,35 +1296,6 @@ fn is_numbered_terminal_title(title: &str) -> bool {
     !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit())
 }
 
-/// Rehydrate one persisted `expanded_paths` entry into an absolute path under
-/// `cwd`, re-asserting containment (U-030). The save side strips to a relative
-/// inside-root path, but `Path::join` does not normalize, so a hand-edited /
-/// agent-written session.json could carry `../../etc` or an absolute `/etc`
-/// that silently replaces the base. Reject any traversal/absolute component up
-/// front, then re-check `starts_with(base)` after the join. Returns `None`
-/// (drop the entry) on any escape.
-fn rehydrate_expanded_path(cwd: &str, rel: &str) -> Option<PathBuf> {
-    let rel_path = Path::new(rel);
-    if rel_path.components().any(|c| {
-        matches!(
-            c,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        log::warn!(
-            "session restore: dropping expanded_path with traversal/absolute component: {rel:?}"
-        );
-        return None;
-    }
-    let base = PathBuf::from(cwd);
-    let abs = base.join(rel_path);
-    if !abs.starts_with(&base) {
-        log::warn!("session restore: dropping expanded_path escaping workspace root: {rel:?}");
-        return None;
-    }
-    Some(abs)
-}
-
 /// Rehydrate a tab's worktree binding (issue #347), dropping it when the
 /// checkout is gone.
 ///
@@ -1436,16 +1385,6 @@ fn persisted_pending_worktree_teardowns(
         .collect();
     let worktrees = crate::workspace::worktree::merge_managed_worktree_records(worktrees);
     worktrees.iter().map(managed_worktree_def).collect()
-}
-
-fn persisted_expanded_paths(cwd: &str, expanded: &[PathBuf]) -> Vec<String> {
-    let mut paths: Vec<String> = expanded
-        .iter()
-        .filter_map(|p| p.strip_prefix(cwd).ok())
-        .map(|rel| rel.to_string_lossy().into_owned())
-        .collect();
-    paths.sort();
-    paths
 }
 
 // ---------------------------------------------------------------------------
@@ -1615,13 +1554,6 @@ fn session_corruption_toast_message(info: &SessionCorruptionInfo) -> String {
 
 fn session_save_failure_toast_message() -> &'static str {
     "Could not save session. Your layout may be lost on next launch."
-}
-
-/// Shown instead of quitting when a dock file tab has unsaved edits
-/// (issue #396): `session.json` only journals the layout, so a discarded
-/// buffer here is gone for good, unlike a closed pane's scrollback.
-fn unsaved_dock_file_quit_toast_message() -> &'static str {
-    "Save your changes in the dock's open files before quitting."
 }
 
 fn session_tmp_path(path: &Path) -> PathBuf {
@@ -1808,44 +1740,6 @@ mod tests {
         cwd.push("project");
 
         assert!(!should_repair_restored_root_terminal("Terminal 1", &cwd));
-    }
-
-    #[test]
-    fn rehydrate_expanded_path_keeps_inside_root_and_drops_escapes() {
-        // U-030: a legitimate relative path joins under the cwd…
-        assert_eq!(
-            rehydrate_expanded_path("/home/u/proj", "src/app"),
-            Some(PathBuf::from("/home/u/proj/src/app"))
-        );
-        // …while traversal and absolute entries from a tampered session.json
-        // are dropped rather than silently escaping the workspace root.
-        assert_eq!(rehydrate_expanded_path("/home/u/proj", "../../etc"), None);
-        assert_eq!(rehydrate_expanded_path("/home/u/proj", "/etc/passwd"), None);
-        assert_eq!(rehydrate_expanded_path("/home/u/proj", "a/../../b"), None);
-    }
-
-    #[test]
-    fn persisted_expanded_paths_are_workspace_relative_and_sorted() {
-        let root = PathBuf::from("project");
-        let cwd = root.to_string_lossy().into_owned();
-        let paths = vec![
-            root.join("src").join("z"),
-            PathBuf::from("outside"),
-            root.join("src").join("a"),
-        ];
-
-        let expected_a = PathBuf::from("src")
-            .join("a")
-            .to_string_lossy()
-            .into_owned();
-        let expected_z = PathBuf::from("src")
-            .join("z")
-            .to_string_lossy()
-            .into_owned();
-        assert_eq!(
-            persisted_expanded_paths(&cwd, &paths),
-            vec![expected_a, expected_z]
-        );
     }
 
     #[test]
@@ -3061,49 +2955,6 @@ mod tests {
         );
     }
 
-    /// Issue #396: a dock file tab's edits live only in `CodeView`'s buffer -
-    /// `session.json` never journals them - so quitting past a dirty one would
-    /// discard it silently. The guard has to run before every quit path
-    /// (staged restore, a durable save, and a failed one), which is why this
-    /// asserts on the raw function body rather than one branch: a real
-    /// `PaneFlowApp` cannot be built in a test (its constructor binds a Unix
-    /// socket and spawns PTYs), the same reason
-    /// `graceful_quit_retires_closed_worktrees_only_after_a_durable_save`
-    /// above takes this approach. A sibling test in
-    /// `diff_dock/code/view.rs` (`a_dirty_code_view_is_reported_by_the_dock_file_dirty_check`)
-    /// exercises the predicate itself against a real, edited `CodeView`.
-    #[test]
-    fn quit_after_session_save_refuses_to_discard_a_dirty_dock_file() {
-        let src = include_str!("session.rs");
-        let quit = src
-            .split("pub(crate) fn quit_after_session_save(")
-            .nth(1)
-            .and_then(|rest| rest.split("/// Restore a saved session").next())
-            .expect("quit_after_session_save body");
-
-        // The dirty check must be the very first thing the function does,
-        // ahead of the staged-restore and blocking-save branches - otherwise
-        // one of those `cx.quit()` calls would run first.
-        let before_dirty_check = quit
-            .split("if self.any_dock_file_dirty(cx) {")
-            .next()
-            .expect("text before the dirty-dock check");
-        assert!(
-            !before_dirty_check.contains("cx.quit()"),
-            "nothing may quit before the dirty-dock-file check runs: {before_dirty_check}"
-        );
-
-        let dirty_branch = quit
-            .split("if self.any_dock_file_dirty(cx) {")
-            .nth(1)
-            .and_then(|rest| rest.split("return;").next())
-            .expect("dirty-dock-file branch");
-        assert!(
-            !dirty_branch.contains("cx.quit()"),
-            "a dirty dock file tab must never reach cx.quit(): {dirty_branch}"
-        );
-    }
-
     #[test]
     fn session_journal_includes_closed_workspace_ownership_and_preserves_keep() {
         let worktree = crate::workspace::worktree::ManagedWorktree {
@@ -3124,7 +2975,6 @@ mod tests {
                 active_tab: 0,
                 tabs: Vec::new(),
                 custom_buttons: Vec::new(),
-                files_expanded: Vec::new(),
                 sidebar_expanded: true,
                 pinned: false,
                 managed_worktrees: vec![closed_worktree],

@@ -25,14 +25,14 @@ without Electron.
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 95 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 93 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
 │   ├── session.rs                     ← persist/restore workspaces to session.json
 │   ├── settings.rs                    ← settings lifecycle: open/close, persist_setting, key handlers
-│   ├── diff_dock/                     ← git diff dock (`code/` file + terminal tabs; `code/perf_bench.rs` +
-│   │                                     `code/bench_corpus.rs` are the editor bench, scripts/bench-editor.sh); parked per TAB
+│   ├── diff_dock/                     ← git diff dock (Changes, terminal, and Agent setup tabs; a clicked
+│   │                                     file path opens in the external editor); parked per TAB
 │   │                                     (`cli_diff_dock.rs` keys slots by `Tab::id`, never by workspace);
 │   │                                     rendered width = min(stored, main-panel remainder), and the dock is
 │   │                                     not rendered at all below the floor (remainder < 360 px dock +
@@ -44,10 +44,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   │                                     independent single-subject diff panes in LayoutTree (MAX_REVIEW_PANES = 6);
 │   │                                     mode.rs gates entry, grid.rs handles opening/split/move/zoom,
 │   │                                     session.rs persists subjects + geometry + collapsed repository groups
-│   ├── diff_sidebar/ files_sidebar/   ← diff + file trees; Files rail is per-tab (`Tab::files_sidebar_open`),
-│   │                                     CLI-cockpit only, every row (`.md` too) opens as source in the dock editor;
-│   │                                     `FilesSidebar` entity (#430): `worker.rs` thread owns the snapshot + watches,
-│   │                                     `projection.rs` builds rows off-thread, `view.rs` is a `uniform_list`
+│   ├── diff_sidebar/                  ← Review Changes rail (git file list, not an in-app file tree)
 │   ├── sidebar/ sidebar_actions_menu.rs ← sidebar list + context menus (`context_menu.rs`; Remove worktree row, #348;
 │   │                                     tab Mark as read clears waiting/errored/stalled session badges, #408;
 │   │                                     workspace Mark as read clears completions, Mute/Unmute notifications persists, #493),
@@ -149,7 +146,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── startup_trace.rs / startup_bench.rs ← PANEFLOW_STARTUP_TRACE probe (marks in main / mount / new / render, writes
 │                                         JSON at the measured frame, quits); cfg(test) first-frame bench (#519)
 ├── system_info.rs                     ← Help ▸ System Info… collection: sysctl, Metal devices, install format, libghostty identity
-├── bench_harness.rs                   ← cfg(test): Metric, measure, comparison table, publish(), libproc counters shared by both benches
+├── bench_harness.rs                   ← cfg(test): Metric, measure, comparison table, publish(), libproc counters shared by the terminal and startup benches
 └── assets.rs                          ← rust-embed asset registry (fonts, icons)
 ```
 
@@ -170,7 +167,6 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 | `paneflow-agent-config` | `crates/paneflow-agent-config/` | Library | Shared agent config, hooks, locking, Claude hook shapes |
 | `paneflow-libghostty-sys` | `crates/paneflow-libghostty-sys/` | Library | Raw libghostty-vt FFI; `build.rs` verifies and links `native/libghostty/prebuilt/aarch64-apple-darwin` (no Zig) |
 | `paneflow-terminal-ghostty` | `crates/paneflow-terminal-ghostty/` | Library | Safe `DisplayTerminal` wrapper over the FFI |
-| `paneflow-textdiff` | `crates/paneflow-textdiff/` | Library | IntelliJ-style line/word comparison + `BlockTracker` for editor gutter markers (#432). GPU-free; never linked by the size-capped helpers |
 | `paneflow-ghostty-smoke` | `crates/paneflow-ghostty-smoke/` | Binary | Headless PTY smoke against the linked archive |
 
 There is **no** `paneflow-telemetry` crate, and the lockfile contains no
@@ -206,47 +202,17 @@ keeping the workspace lint policy strict in production code.
 
 Blocking git, filesystem walks, recursive watcher registration, and fleet-wide search run off the render thread.
 
-## Files tree
+## Opening a file
 
-The right Files rail has its own `FilesSidebar` GPUI entity, mounted with
-the view cache. `PaneFlowApp` owns its placement, workspace association and
-editor integration; row hover and keyboard selection update the rail entity.
-The implementation is under `src-app/src/app/files_sidebar/` (issue #430,
-upstream `d6a44bfc`).
+There is no in-app file tree and no in-app editor. A clicked file path,
+including an Agent setup row, opens in the configured external editor
+(`editor::open_at_location`). The right rail is the Sessions sidebar only.
+Git diff viewing (the Changes dock) and Review mode stay.
 
-Three states have separate lifetimes, following Zed's project panel model:
+## Diff syntax highlighting
 
-- `worker.rs` owns the directory snapshot and nonrecursive filesystem watches
-  on a dedicated thread. It registers each watch before reading the directory,
-  loads newly expanded directories, and refreshes invalidated listings. Loaded
-  collapsed directories remain searchable and watched. Deleted or ignored
-  subtrees are pruned. Watch events are coalesced in the worker; unavailable
-  watches fall back to background polling and registration retries. Every
-  read goes through `files_tree::read_dir_sorted`, which keeps the #238 cap on
-  the raw `read_dir` walk ahead of the ignore filter.
-- `projection.rs` prepares ordered rows, labels, icons, filter highlights and
-  a path-to-index map on GPUI's background executor. Tree, expansion and query
-  changes replace the pending projection task. Epoch and revision checks
-  discard results from an earlier root, fold state or query.
-- `panel.rs` owns the current projection, path-based selection, input focus and
-  uniform-list scroll handle. `view.rs` renders only the requested row range.
-  Hover uses the immediate squircle state and does not flatten, filter or sort
-  the tree. Selection survives insertions; a collapsed selection returns to
-  its visible ancestor. Keyboard navigation reveals the selected row.
-
-Closing or switching workspaces cancels the worker and pending publications.
-The closing animation keeps its last snapshot until it finishes, then releases
-the snapshot on a background executor. The rail keeps PaneFlow's 300 px width,
-28 px rows, icons, indentation and full-width hover inside the 8 px edge insets.
-It stays a per-tab (`Tab::files_sidebar_open`), CLI-cockpit-only rail: Review
-and Settings unmount its element while the entity and its worker stay warm,
-every row (`.md` included) opens as source in the dock editor, and rows carry
-no drag.
-
-## Editor and diff syntax highlighting
-
-The editor's `CodeHighlighter` and the diff view's `highlight_lines` share
-`diff/highlighter.rs`: grammar selection and capture resolution use one path.
+Changes and Review share `diff/highlighter.rs`: grammar selection and capture
+resolution use one path.
 Fifteen Zed highlighting queries are compiled with `include_str!` from
 `diff/queries/` (issue #433). TOML, HTML, Java and Ruby keep their grammar's
 stock queries. JavaScript uses the JavaScript query on the existing TSX
@@ -258,7 +224,7 @@ Each styled capture goes onto a stack. The last active capture paints until
 its end or the next capture, including when it is wider than an earlier one.
 Captures without a palette role do not enter the stack. Each row caps input
 at 4,096 captures. Theme changes rebuild color tables without querying or
-reparsing the retained trees. Variables and namespaces use the editor's text
+reparsing the retained trees. Variables and namespaces use the text
 color; constructors share the function role. `diff/parity_tests.rs` holds the
 independent byte oracle, the token expectations per language and the frozen
 `fixtures/stock-priority-audit.txt` of every byte the stock-to-Zed switch
@@ -297,7 +263,7 @@ KeyDownEvent → TerminalView::handle_key_down() → input::ghostty_key_input()
 → TerminalElement::paint() → paint_quad + shape_line (+ kitty placements) → Metal
 ```
 
-Debug builds can trace ingress-to-paint latency with `PANEFLOW_LATENCY_PROBE=1`. Terminal and diff/code elements implement GPUI’s low-level `Element` contract; ordinary chrome uses flex layout.
+Debug builds can trace ingress-to-paint latency with `PANEFLOW_LATENCY_PROBE=1`. Terminal and diff elements implement GPUI’s low-level `Element` contract; ordinary chrome uses flex layout.
 
 ## The terminal engine boundary
 
@@ -431,25 +397,17 @@ cargo fmt --check
 scripts/bench-terminal.sh                # terminal pipeline benchmark: writes bench/results/<stamp>-<sha>.json,
                                          # prints a Markdown comparison against bench/baseline.json when it exists
 scripts/bench-terminal.sh --set-baseline # same run, then make it the baseline
-scripts/bench-editor.sh                  # code editor benchmark: writes bench/results/editor-<stamp>-<sha>.json,
-                                         # compares against bench/editor-baseline.json (plain results table without one)
-scripts/bench-editor.sh --set-baseline   # same run, then make it the baseline; refused when cpu_share < 0.90
 scripts/bench-startup.sh                 # time to first frame: builds the release binary, launches it against two
                                          # seeded PANEFLOW_HOME fixtures, writes bench/results/startup-<stamp>-<sha>.json,
                                          # compares against bench/startup-baseline.json
 scripts/bench-startup.sh --set-baseline  # same run, then make it the baseline; refused when the core-share probe < 0.90
-cargo test -p paneflow-app --release -- --ignored layout::render --test-threads=1
-                                         # editor scroll frame beside 0/2/6 terminal panes (scroll_frame_p95_us_panes_N)
 ```
 
-Performance claims about the terminal pipeline, the code editor, or startup
+Performance claims about the terminal pipeline or startup
 need evidence from those suites: the ignored `terminal_pipeline_benchmark` in
-`src-app/src/terminal/perf_bench.rs` and `editor_pipeline_benchmark` in
-`src-app/src/app/diff_dock/code/perf_bench.rs` measure them GPU-free under
-the release profile through the shared `src-app/src/bench_harness.rs` and
-print the comparison table `bench/README.md` documents; the ignored
-`layout::render::tests::editor_scroll_frame_by_pane_count` measures one
-wheel notch on the editor with terminal panes in the frame; the ignored
+`src-app/src/terminal/perf_bench.rs` measures the terminal GPU-free under
+the release profile through `src-app/src/bench_harness.rs` and
+prints the comparison table `bench/README.md` documents; the ignored
 `startup_bench::startup_first_frame_benchmark` (#519) launches the release
 binary with `PANEFLOW_STARTUP_TRACE=<file>` set, which makes
 `src-app/src/startup_trace.rs` record a mark per launch stage, write the
@@ -457,7 +415,7 @@ timeline once the measured frame is presented (the first frame, or the frame
 after the last #156 restore batch when a session was restored), and quit.
 Do not ship a perf number you did not measure, and do not publish a run that
 printed `PANEFLOW_BENCH_WARNING` (another workload was competing);
-`--set-baseline` refuses such a run for the editor and startup suites.
+`--set-baseline` refuses such a run for the startup suite.
 
 `PANEFLOW_HOME=<absolute dir>` (#519, `paneflow_config::loader::HOME_ENV`)
 relocates every per-user directory the app owns: the config root becomes

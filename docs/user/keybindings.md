@@ -17,8 +17,9 @@ the source of truth is:
 
 The command palette (`Cmd+Shift+O`) searches actions and shows their live
 shortcuts. Other navigation entrypoints are agent summary (`Cmd+Shift+I`),
-pane overview (`Cmd+Shift+P`), Files sidebar (`Cmd+Alt+F`), and work review
-(`Cmd+Shift+U`). User overrides can change these defaults.
+pane overview (`Cmd+Shift+P`), and work review (`Cmd+Shift+U`). User
+overrides can change these defaults. A clicked file path opens in the
+configured external editor; there is no Files sidebar.
 
 The app also shows the live bindings in **Settings > Keyboard
 Shortcuts**, which is the right place to look them up while using it.
@@ -62,7 +63,7 @@ load. `+` and `-` both parse as separators.
 
 ## Default binding reference
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 95 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 93 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in the tree above drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 
@@ -85,11 +86,10 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 95 ac
 | `Cmd+Shift+P` | Pane overview (every terminal pane, all workspaces and tabs) | Global |
 | `Cmd+Shift+I` | Fleet agent summary (on-device, one line per agent pane) | Global |
 | `Cmd+Shift+G` | Diff view | Global |
-| `Cmd+G` / `Cmd+J` | New file tab / new terminal tab (diff dock; `secondary-g` / `secondary-j`) | Global, not Terminal/TextInput/CodeEditor |
+| `Cmd+J` | New terminal tab (diff dock; `secondary-j`) | Global, not Terminal/TextInput |
 | `Cmd+Shift+Space` / `Cmd+Shift+L` | Composer / launch pad | Global |
 | `Cmd+Shift+B` / `Cmd+Shift+M` | Toggle broadcast member / broadcast groups | Global |
 | `Cmd+Shift+O` | Command palette (every context-free action with its live binding; `app/command_palette.rs`, #523; upstream's `Cmd+Shift+P` is Pane Overview here) | Global |
-| `Cmd+Alt+F` | Toggle files sidebar for the active tab (inert in Review and Settings, where the rail is unmounted) | Global |
 | `Cmd+Shift+F` | Maximize / restore the Changes dock (`toggle_diff_dock_maximize`; no-op while the dock is not visible) | Global |
 | `Cmd+Alt+B` | Toggle primary sidebar (persisted across launches) | Global |
 | `Ctrl+Alt+R` / `Ctrl+Shift+Alt+C` | Reveal in Finder / copy workspace path | Global |
@@ -116,4 +116,4 @@ covered by `cmd_shift_k_and_cmd_k_clear_scrollback` in `keybindings/apply.rs`.
 
 Next-workspace is `ctrl-tab`, not the upstream `secondary-tab` (Cmd+Tab): macOS reserves Cmd+Tab for the application switcher and never delivers it to the app (issue #10; a synthetic Cmd+Tab on 2026-08-27 moved focus to another app while Cmd+1/Cmd+2 through the same path switched workspaces). A test in `keybindings/apply.rs` fails if any default binds `secondary-tab` again.
 
-Work Review opens with `Cmd+Shift+U` (`open_work_review`) or **Window → Work Review**. The command palette (`Cmd+Shift+O`), agent summary (`Cmd+Shift+I`), pane overview (`Cmd+Shift+P`), and Files sidebar (`Cmd+Alt+F`) use the current defaults in `keybindings/defaults.rs`.
+Work Review opens with `Cmd+Shift+U` (`open_work_review`) or **Window → Work Review**. The command palette (`Cmd+Shift+O`), agent summary (`Cmd+Shift+I`), and pane overview (`Cmd+Shift+P`) use the current defaults in `keybindings/defaults.rs`.

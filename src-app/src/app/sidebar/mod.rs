@@ -107,9 +107,9 @@ struct SidebarWorkspaceTone {
     meta_opacity: f32,
 }
 
-/// Match the Files tree's established quiet step, but apply it only to a
-/// workspace's title and service metadata. The row shell, action buttons, and
-/// agent badge stay at full strength.
+/// Quiet step for a workspace's title and service metadata when it has no
+/// foreground work. The row shell, action buttons, and agent badge stay at
+/// full strength.
 const IDLE_WORKSPACE_TEXT_OPACITY: f32 = 0.55;
 
 fn sidebar_workspace_tone(

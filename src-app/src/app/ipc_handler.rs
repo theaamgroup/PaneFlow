@@ -1626,7 +1626,6 @@ impl PaneFlowApp {
             // Hot-reload the motion switch (GPUI refreshes the windows itself
             // when the value actually changes).
             crate::ui_primitives::set_reduce_motion(self.cached_config.reduce_motion_enabled());
-            self.apply_editor_display(cx);
             // Issue #283: keep the socket thread's `system.capabilities`
             // answer in step with the write gate this reload just changed.
             crate::ipc::set_ai_unrestricted(self.cached_config.ai_unrestricted_enabled());

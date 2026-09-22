@@ -21,11 +21,10 @@ pub const MAX_ROWS: usize = 200;
 /// tree cannot walk forever; the overflow counts toward `omitted`.
 pub const MAX_SKILLS_PER_DIR: usize = 100;
 
-/// Largest file a row may open in the dock editor. Pinned by a test in the
-/// app crate to the editor's own `MAX_FILE_BYTES` so the two ceilings cannot
-/// drift. A larger file is still listed, and a config file past the cap is
-/// still parsed for its hook / MCP rows - the cap is about opening a 10 MB
-/// buffer in an editor, not about reading a key out of it.
+/// Largest file a row may open. Pinned by a test in the app crate to the
+/// markdown viewer's input ceiling so the two ceilings cannot drift. A larger
+/// file is still listed, and a config file past the cap is still parsed for
+/// its hook / MCP rows.
 pub const MAX_ARTIFACT_BYTES: usize = 10 * 1024 * 1024;
 
 /// Hard ceiling on a config file the scan parses whole. Far above anything
@@ -41,7 +40,7 @@ pub struct SetupRow {
     pub scope: Scope,
     /// The file to open: the artifact itself, or the config file declaring a
     /// hook / MCP entry. As the catalog names it, not canonicalized, so the
-    /// editor tab shows the path the user knows.
+    /// external editor shows the path the user knows.
     pub path: PathBuf,
     /// Repo-relative, or `~`-shortened outside the project.
     pub display_path: String,

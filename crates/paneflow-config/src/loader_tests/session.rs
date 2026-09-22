@@ -11,7 +11,6 @@ fn make_workspace(title: &str, cwd: &str, tabs: Vec<TabSession>) -> WorkspaceSes
         legacy_layout: None,
         legacy_empty: false,
         custom_buttons: vec![],
-        expanded_paths: vec![],
         managed_worktrees: vec![],
         pinned: false,
         sidebar_collapsed: false,
@@ -498,8 +497,8 @@ fn test_migrate_v1_preserves_surface_count() {
         _ => panic!("expected a split"),
     };
     assert_eq!(kept.as_deref(), Some("cargo-run"), "the focused one stays");
-    // Untouched v1 fields survive, and the legacy keys are drained.
-    assert_eq!(ws.expanded_paths, vec!["src".to_string()]);
+    // A retired `expanded_paths` key must not fail the migration, and the
+    // legacy layout keys are drained.
     assert!(ws.legacy_layout.is_none());
     assert!(!ws.legacy_empty);
     assert_eq!(ws.active_tab, 0);
@@ -647,9 +646,8 @@ fn test_session_without_primary_sidebar_key_restores_visible() {
 }
 
 /// Issue #107: the sidebar pin is user state, so it has to outlive a quit.
-/// Additive on v2 exactly like `expanded_paths` - `SESSION_SCHEMA_VERSION`
-/// must NOT move for it, or every existing session.json takes the
-/// unsupported-version corruption-backup path.
+/// Additive on v2: `SESSION_SCHEMA_VERSION` must NOT move for it, or every
+/// existing session.json takes the unsupported-version corruption-backup path.
 #[test]
 fn workspace_pinned_survives_a_session_round_trip() {
     let mut ws = make_workspace("pinned", "/tmp/pinned", vec![TabSession::empty()]);
@@ -661,6 +659,34 @@ fn workspace_pinned_survives_a_session_round_trip() {
     let back: WorkspaceSession = serde_json::from_str(&json).unwrap();
     assert!(back.pinned);
     assert_eq!(back, ws);
+}
+
+#[test]
+fn leftover_expanded_paths_still_load() {
+    // Older session.json files list Files-rail directories under
+    // `expanded_paths`. Unknown keys are ignored; the rest of the workspace
+    // still parses, and the retired key does not round-trip.
+    let json = r#"{
+        "version": 2,
+        "active_workspace": 0,
+        "workspaces": [{
+            "title": "paneflow",
+            "cwd": "/home/user/dev/paneflow",
+            "expanded_paths": ["src", "crates"],
+            "pinned": true
+        }]
+    }"#;
+    let state: SessionState = serde_json::from_str(json).unwrap();
+    assert_eq!(state.version, SESSION_SCHEMA_VERSION);
+    assert_eq!(state.workspaces.len(), 1);
+    assert_eq!(state.workspaces[0].title, "paneflow");
+    assert_eq!(state.workspaces[0].cwd, "/home/user/dev/paneflow");
+    assert!(state.workspaces[0].pinned);
+    let written = serde_json::to_value(&state).unwrap();
+    assert!(
+        written["workspaces"][0].get("expanded_paths").is_none(),
+        "{written}"
+    );
 }
 
 #[test]

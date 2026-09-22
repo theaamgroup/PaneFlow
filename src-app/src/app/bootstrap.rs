@@ -639,12 +639,6 @@ impl PaneFlowApp {
             cx.new(|cx| crate::widgets::text_input::TextInput::new("", "Search threads", cx));
         cx.observe(&agents_filter_input, |_, _, cx| cx.notify())
             .detach();
-        // Issue #430: the Files rail is its own entity; its events (open a
-        // file, expansion changed, close, context menu) come back through
-        // `handle_files_event`.
-        let files_sidebar = cx.new(crate::app::files_sidebar::FilesSidebar::new);
-        cx.subscribe(&files_sidebar, Self::handle_files_event)
-            .detach();
         // Issue #333: the sessions sidebar type-to-filter field - same pattern.
         let sessions_filter_input =
             cx.new(|cx| crate::widgets::text_input::TextInput::new("", "Filter sessions", cx));
@@ -805,12 +799,6 @@ impl PaneFlowApp {
                 sessions_filter_input,
                 sessions_menu_open: None,
             },
-            files_sidebar_open: false,
-            files_sidebar_animation: None,
-            files_sidebar,
-            files_sidebar_root: None,
-            files_sidebar_workspace: None,
-            files_menu_open: None,
             toast: None,
             toast_queue: std::collections::VecDeque::new(),
             _toast_task: None,
@@ -905,7 +893,6 @@ impl PaneFlowApp {
                 parked: std::collections::HashMap::new(),
                 diff_tabs: Vec::new(),
                 diff_active_tab: 0,
-                diff_tab_close_armed: None,
                 diff_branch_menu: None,
                 width: crate::app::diff_dock::DIFF_DOCK_PANEL_WIDTH,
                 resize: None,
@@ -935,11 +922,6 @@ impl PaneFlowApp {
         // Hydrate the motion switch from the config: it gates the
         // `AnimatedHover` transitions and the primary sidebar slide.
         crate::ui_primitives::set_reduce_motion(app.cached_config.reduce_motion_enabled());
-        crate::app::diff_dock::code::controls::set_editor_display(
-            crate::app::diff_dock::code::controls::EditorDisplay::from_config(
-                &app.cached_config.editor,
-            ),
-        );
 
         // Issue #443: the sidebar's "Install MCP bridge" callout reads the
         // same status cache Settings does, so warm it once here instead of

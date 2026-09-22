@@ -238,24 +238,17 @@ pub struct WorkspaceSession {
     /// User-defined command buttons rendered in this workspace's tab bar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_buttons: Vec<ButtonCommand>,
-    /// Workspace-relative directory paths expanded in the Files tree sidebar
-    /// (PRD files-tree US-007). Additive + optional: absent in older
-    /// `session.json` files, which deserialize to an empty list and never
-    /// break restore of the other fields. The sidebar's open/closed state is
-    /// deliberately NOT persisted.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub expanded_paths: Vec<String>,
     /// Git worktrees Paneflow created for this workspace via Launch Pad
     /// (EP-002, prd-orchestration-v2). Persisted so a crash/restart keeps the
     /// ownership record (teardown at close, `git worktree prune` at startup).
-    /// Additive + optional like `expanded_paths`.
+    /// Additive and optional.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed_worktrees: Vec<ManagedWorktreeDef>,
     /// Issue #107: whether the user pinned this workspace to the top of the
     /// sidebar's Auto ordering. A pin is a deliberate choice about a project,
     /// so unlike the sidebar's expand/collapse state it is persisted.
     ///
-    /// Additive on v2, exactly like `expanded_paths` and `managed_worktrees`:
+    /// Additive on v2, exactly like `managed_worktrees`:
     /// [`SESSION_SCHEMA_VERSION`] must NOT move for it. The loader routes any
     /// version that is neither 2 nor 1 to the corruption-backup path, so a
     /// bump would discard every existing user's workspaces to gain one bool.

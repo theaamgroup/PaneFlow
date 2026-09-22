@@ -1,11 +1,11 @@
 //! The harness the performance benchmarks share (#425).
 //!
-//! Both suites, the terminal pipeline (`terminal/perf_bench.rs`) and the code
-//! editor (`app/diff_dock/code/perf_bench.rs`), print the same JSON document
-//! and the same Markdown comparison table, so the metric type, the timing
-//! helpers, the process counters and the reporting live here once. The
-//! layout gates in `layout/render.rs` and the Ghostty stress scenarios read
-//! the percentile and process-counter helpers from here too.
+//! The terminal pipeline (`terminal/perf_bench.rs`) and the startup bench
+//! print the same JSON document and the same Markdown comparison table, so
+//! the metric type, the timing helpers, the process counters and the
+//! reporting live here once. The layout gates in `layout/render.rs` and the
+//! Ghostty stress scenarios read the percentile and process-counter helpers
+//! from here too.
 //!
 //! Allocation counts come from the test binary's one `#[global_allocator]`,
 //! `terminal/test_allocator.rs`: a crate may install a single one, and the
@@ -15,115 +15,9 @@
 //! Everything here is `cfg(test)`: the module is only compiled into the test
 //! binary.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::ffi::c_void;
-use std::sync::Once;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 pub(crate) use crate::terminal::test_allocator::{allocation_counters, live_bytes};
-
-// ---------------------------------------------------------------------------
-// Tree-sitter allocation counter (#427)
-// ---------------------------------------------------------------------------
-
-/// Bytes kept ahead of every block handed to tree-sitter, holding the size
-/// `free` and `realloc` need back. 16 keeps libc `malloc` alignment.
-const TREE_SITTER_HEADER: usize = 16;
-
-static TREE_SITTER_LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
-
-fn tree_sitter_layout(size: usize) -> Option<Layout> {
-    Layout::from_size_align(size.checked_add(TREE_SITTER_HEADER)?, TREE_SITTER_HEADER).ok()
-}
-
-unsafe fn tree_sitter_hand_out(block: *mut u8, size: usize) -> *mut c_void {
-    if block.is_null() {
-        return std::ptr::null_mut();
-    }
-    unsafe {
-        block.cast::<usize>().write(size);
-        TREE_SITTER_LIVE_BYTES.fetch_add(size as i64, Ordering::Relaxed);
-        block.add(TREE_SITTER_HEADER).cast()
-    }
-}
-
-unsafe extern "C" fn tree_sitter_malloc(size: usize) -> *mut c_void {
-    let Some(layout) = tree_sitter_layout(size) else {
-        return std::ptr::null_mut();
-    };
-    unsafe { tree_sitter_hand_out(System.alloc(layout), size) }
-}
-
-unsafe extern "C" fn tree_sitter_calloc(count: usize, size: usize) -> *mut c_void {
-    let Some(total) = count.checked_mul(size) else {
-        return std::ptr::null_mut();
-    };
-    let Some(layout) = tree_sitter_layout(total) else {
-        return std::ptr::null_mut();
-    };
-    unsafe { tree_sitter_hand_out(System.alloc_zeroed(layout), total) }
-}
-
-unsafe extern "C" fn tree_sitter_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
-    if ptr.is_null() {
-        return unsafe { tree_sitter_malloc(size) };
-    }
-    unsafe {
-        let block = ptr.cast::<u8>().sub(TREE_SITTER_HEADER);
-        let held = block.cast::<usize>().read();
-        let (Some(layout), Some(next_layout)) =
-            (tree_sitter_layout(held), tree_sitter_layout(size))
-        else {
-            return std::ptr::null_mut();
-        };
-        let next = System.realloc(block, layout, next_layout.size());
-        if next.is_null() {
-            return std::ptr::null_mut();
-        }
-        TREE_SITTER_LIVE_BYTES.fetch_sub(held as i64, Ordering::Relaxed);
-        tree_sitter_hand_out(next, size)
-    }
-}
-
-unsafe extern "C" fn tree_sitter_free(ptr: *mut c_void) {
-    if ptr.is_null() {
-        return;
-    }
-    unsafe {
-        let block = ptr.cast::<u8>().sub(TREE_SITTER_HEADER);
-        let held = block.cast::<usize>().read();
-        let Some(layout) = tree_sitter_layout(held) else {
-            return;
-        };
-        TREE_SITTER_LIVE_BYTES.fetch_sub(held as i64, Ordering::Relaxed);
-        System.dealloc(block, layout);
-    }
-}
-
-/// Route tree-sitter's C allocator through a counting allocator, once per
-/// process, so [`tree_sitter_live_bytes`] reports the bytes its trees hold.
-/// Only the `tree_memory_probe` calls this, in its isolated child: installing
-/// it changes every parse timing, and freeing a block allocated before it was
-/// installed would corrupt the heap.
-///
-/// # Safety
-/// Call before any tree-sitter allocations, with no concurrent tree-sitter use.
-pub(crate) unsafe fn count_tree_sitter_allocations() {
-    static INSTALLED: Once = Once::new();
-    INSTALLED.call_once(|| unsafe {
-        tree_sitter::set_allocator(Some(tree_sitter::Allocator {
-            malloc: tree_sitter_malloc,
-            calloc: tree_sitter_calloc,
-            realloc: tree_sitter_realloc,
-            free: tree_sitter_free,
-        }));
-    });
-}
-
-pub(crate) fn tree_sitter_live_bytes() -> i64 {
-    TREE_SITTER_LIVE_BYTES.load(Ordering::Relaxed)
-}
 
 // ---------------------------------------------------------------------------
 // Metrics
@@ -273,56 +167,6 @@ pub(crate) fn measure(
         (bytes_after - bytes_before, calls_after - calls_before),
         iters,
     )
-}
-
-/// Accumulates only the segments of an iteration the scenario chooses to
-/// time, so setup and the work that runs off the render thread stay out of
-/// the figure.
-#[derive(Default)]
-pub(crate) struct SegmentTimer {
-    elapsed: Duration,
-    bytes: u64,
-    calls: u64,
-}
-
-impl SegmentTimer {
-    pub(crate) fn time<R>(&mut self, op: impl FnOnce() -> R) -> R {
-        let (bytes_before, calls_before) = allocation_counters();
-        let started = Instant::now();
-        let out = op();
-        self.elapsed += started.elapsed();
-        let (bytes_after, calls_after) = allocation_counters();
-        self.bytes += bytes_after - bytes_before;
-        self.calls += calls_after - calls_before;
-        out
-    }
-}
-
-/// [`measure`] for an iteration that only times some of its segments through
-/// the [`SegmentTimer`] it is handed.
-pub(crate) fn measure_segments(
-    name: &'static str,
-    note: &'static str,
-    warmup: usize,
-    iters: usize,
-    mut op: impl FnMut(&mut SegmentTimer),
-) -> Metric {
-    for _ in 0..warmup {
-        op(&mut SegmentTimer::default());
-    }
-    let mut samples = Vec::with_capacity(iters);
-    let mut total = Duration::ZERO;
-    let mut bytes = 0u64;
-    let mut calls = 0u64;
-    for _ in 0..iters {
-        let mut timer = SegmentTimer::default();
-        op(&mut timer);
-        samples.push(timer.elapsed);
-        total += timer.elapsed;
-        bytes += timer.bytes;
-        calls += timer.calls;
-    }
-    from_samples(name, note, &mut samples, total, (bytes, calls), iters)
 }
 
 // ---------------------------------------------------------------------------

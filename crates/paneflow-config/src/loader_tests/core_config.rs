@@ -222,6 +222,24 @@ fn test_valid_minimal_config() {
 }
 
 #[test]
+fn leftover_files_tree_and_editor_keys_still_load() {
+    // Older paneflow.json files carry the removed Files rail placement and
+    // the in-app editor display block. Unknown keys are ignored; the rest of
+    // the file must still load, and the retired keys must not round-trip.
+    let config = parse_and_validate(
+        r#"{
+            "theme": "Cursor Dark",
+            "files_tree_placement": "dock",
+            "editor": {"minimap": true, "scrollbar": false}
+        }"#,
+    );
+    assert_eq!(config.theme.as_deref(), Some("Cursor Dark"));
+    let json = serde_json::to_value(&config).unwrap();
+    assert!(json.get("files_tree_placement").is_none(), "{json}");
+    assert!(json.get("editor").is_none(), "{json}");
+}
+
+#[test]
 fn test_leftover_telemetry_key_is_ignored_and_rest_of_config_is_used() {
     // Existing paneflow.json files may still contain a telemetry block
     // after the subsystem was removed. Unknown keys are ignored; the

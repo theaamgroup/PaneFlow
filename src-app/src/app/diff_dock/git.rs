@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::code::save::FileStamp;
+use super::file_save::FileStamp;
 use crate::diff::{
     DiffSyntax, DisplayRow, FileDiff, FileRowCache, RowKind, SplitRow,
     build_display_rows_with_caches, build_file_row_caches, build_split_rows_with_caches,

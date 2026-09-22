@@ -698,7 +698,6 @@ fn capture_closed_workspace_record(
             })
             .collect(),
         custom_buttons: workspace.custom_buttons.clone(),
-        files_expanded: workspace.files_expanded.clone(),
         sidebar_expanded: workspace.sidebar_expanded,
         pinned: workspace.pinned,
         managed_worktrees: workspace.managed_worktrees.clone(),
@@ -1011,7 +1010,6 @@ impl PaneFlowApp {
         self.tab_menu_open = None;
         self.pane_menu_open = None;
         self.profile_menu_open = None;
-        self.files_menu_open = None;
         self.review.dismiss_popovers();
         self.agent_sessions.sessions_menu_open = None;
         // Issue #349: the rail header's Customize Sidebar popover is a menu
@@ -1112,7 +1110,6 @@ impl PaneFlowApp {
             }
         }
 
-        self.sync_files_sidebar_session(cx);
         if self.agent_sessions.sessions_sidebar_open
             && !crate::app::pane_palette::palette_bound_sessions_survives_activation(
                 self.agent_sessions.sessions_bound_palette,
@@ -1171,7 +1168,6 @@ impl PaneFlowApp {
         // that was not the second click on that X.
         self.dismiss_inline_close_arm(cx);
         self.active_idx = idx;
-        self.sync_files_sidebar_session(cx);
         if self.agent_sessions.sessions_sidebar_open
             && !crate::app::pane_palette::palette_bound_sessions_survives_activation(
                 self.agent_sessions.sessions_bound_palette,
@@ -2189,7 +2185,6 @@ impl PaneFlowApp {
             active_tab,
             tabs,
             custom_buttons,
-            files_expanded,
             sidebar_expanded,
             pinned,
             managed_worktrees,
@@ -2229,7 +2224,6 @@ impl PaneFlowApp {
         let mut workspace =
             Workspace::restored_with_id(workspace_id, title, fallback_cwd, tabs, active_tab);
         workspace.custom_buttons = custom_buttons;
-        workspace.files_expanded = files_expanded;
         workspace.sidebar_expanded = sidebar_expanded;
         workspace.pinned = pinned;
         workspace.managed_worktrees = managed_worktrees;
@@ -3603,7 +3597,6 @@ mod tests {
             active_tab: 0,
             tabs: Vec::new(),
             custom_buttons: Vec::new(),
-            files_expanded: Vec::new(),
             sidebar_expanded: true,
             pinned: false,
             managed_worktrees,
@@ -3833,7 +3826,6 @@ mod tests {
         workspace.active_tab_mut().title = "Agents".to_string();
         workspace.active_tab_mut().title_is_automatic = true;
         assert!(workspace.open_tab(crate::workspace::Tab::new("Notes", None)));
-        workspace.files_expanded = vec![std::path::PathBuf::from("/tmp/project/src")];
         workspace.sidebar_expanded = false;
         workspace.pinned = true;
         workspace.managed_worktrees = vec![managed_worktree("/tmp/repo.worktrees/feature")];
@@ -3854,10 +3846,6 @@ mod tests {
         assert!(
             record.tabs[1].layout.is_none(),
             "an empty tab stays present as an empty tab"
-        );
-        assert_eq!(
-            record.files_expanded,
-            vec![std::path::PathBuf::from("/tmp/project/src")]
         );
         assert!(!record.sidebar_expanded);
         assert!(record.pinned);

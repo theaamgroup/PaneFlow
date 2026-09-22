@@ -3104,22 +3104,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ignore"
-version = "0.4.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b17771570a2b94107741a7b033f19132c2eee21d59d21b24d2ced26500bd66e"
-dependencies = [
- "crossbeam-deque",
- "globset",
- "log",
- "memchr",
- "regex-automata",
- "same-file",
- "walkdir",
- "winapi-util",
-]
-
-[[package]]
 name = "image"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3165,16 +3149,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "17d34b7d42178945f775e84bc4c36dde7c1c6cdfea656d3354d009056f2bb3d2"
 dependencies = [
  "hashbrown 0.15.5",
-]
-
-[[package]]
-name = "imara-diff"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f01d462f766df78ab820dd06f5eb700233c51f0f4c2e846520eaf4ba6aa5c5c"
-dependencies = [
- "hashbrown 0.15.5",
- "memchr",
 ]
 
 [[package]]
@@ -4656,9 +4630,8 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_platform",
- "ignore",
  "image",
- "imara-diff 0.1.8",
+ "imara-diff",
  "interprocess",
  "libc",
  "libproc",
@@ -4674,13 +4647,11 @@ dependencies = [
  "paneflow-mcp-install",
  "paneflow-process",
  "paneflow-terminal-ghostty",
- "paneflow-textdiff",
  "parking_lot",
  "portable-pty",
  "pulldown-cmark",
  "raw-window-handle",
  "regex",
- "ropey",
  "rust-embed",
  "sentry",
  "serde",
@@ -4805,13 +4776,6 @@ dependencies = [
  "regex",
  "serde_json",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "paneflow-textdiff"
-version = "0.7.0"
-dependencies = [
- "imara-diff 0.2.0",
 ]
 
 [[package]]
@@ -5659,16 +5623,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ropey"
-version = "1.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93411e420bcd1a75ddd1dc3caf18c23155eda2c090631a85af21ba19e97093b5"
-dependencies = [
- "smallvec",
- "str_indices",
-]
-
-[[package]]
 name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6416,12 +6370,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "str_indices"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d08889ec5408683408db66ad89e0e1f93dff55c73a4ccc71c427d5b277ee47e6"
 
 [[package]]
 name = "streaming-iterator"

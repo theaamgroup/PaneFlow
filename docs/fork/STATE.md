@@ -13,6 +13,11 @@ entries covered the 2026-09-04 deep-review sweep (PRs #372 and #373, issues
 adopted: the `PublishGate`, per-tab worktree binding, the Customize Sidebar
 menu, the pull-request marker, and the 0.3.0 cut).
 
+The Files rail, the dock code editor, `paneflow-textdiff`, and the editor
+benchmark suite are removed (#597). A clicked file path opens in the
+configured external editor. Git diff viewing and Review mode stay. The
+terminal bench and the startup bench are the performance suites that remain.
+
 **2026-09-18: the 0.7.0 cut.** 36 non-merge commits since `v0.6.1`, a minor
 bump because the release adds surfaces rather than only fixing them: the
 agent-summary overlay on `Cmd+Shift+I` (#576, summaries produced on-device by

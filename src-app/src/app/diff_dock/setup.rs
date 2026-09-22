@@ -1,16 +1,13 @@
 //! The dock's "Agent setup" tab (issue #331): the rulebook the agents running
 //! in this workspace load - instruction files, skills, rules, hooks and MCP
-//! entries - listed project-first, then global, and openable as sibling dock
-//! tabs.
+//! entries - listed project-first, then global. A click opens the file in the
+//! configured external editor.
 //!
-//! PaneFlow's version of Blume's Setup tab. The Files sidebar hides dotfiles
-//! and gitignored entries on purpose, so `.claude/`, `.codex/`, `.cursor/` and
-//! the `SKILL.md` trees are invisible there; this tab reads a fixed catalog
-//! ([`paneflow_agent_setup::catalog`]) instead of un-hiding the tree.
+//! PaneFlow's version of Blume's Setup tab. It reads a fixed catalog
+//! ([`paneflow_agent_setup::catalog`]) rather than walking the workspace.
 //!
-//! Read-only: the scan never writes, and clicking a row opens the file through
-//! [`PaneFlowApp::open_diff_file_tab`] - the same editor every other dock tab
-//! gets, undo stack and save included. Nothing here renders an MCP server's
+//! Read-only: the scan never writes, and clicking a row calls
+//! [`crate::editor::open_at_location`]. Nothing here renders an MCP server's
 //! `command` / `args` / `env` or a hook's command string.
 //!
 //! Lifecycle: one scan on open, one whenever the dock's folder changes under
@@ -46,7 +43,7 @@ const REFRESH_LABEL: &str = "Refresh agent setup";
 
 /// What a row click asks the dock to do.
 pub(crate) enum SetupViewEvent {
-    /// Open this file as a sibling tab of the same dock.
+    /// Open this path in the configured external editor.
     OpenFile(PathBuf),
 }
 
@@ -508,9 +505,11 @@ impl PaneFlowApp {
         cx.subscribe_in(
             &view,
             window,
-            |this, _view, event: &SetupViewEvent, window, cx| match event {
-                // Into the same dock, beside the inventory rather than over it.
-                SetupViewEvent::OpenFile(path) => this.open_diff_file_tab(path.clone(), window, cx),
+            |this, _view, event: &SetupViewEvent, _window, _cx| match event {
+                SetupViewEvent::OpenFile(path) => {
+                    let editor = this.cached_config.external_editor.clone();
+                    crate::editor::open_at_location(path, None, None, editor.as_deref());
+                }
             },
         )
         .detach();
@@ -535,13 +534,13 @@ impl PaneFlowApp {
 mod tests {
     use super::*;
 
-    /// The two size ceilings cannot drift: a row the inventory calls openable
-    /// is one the dock editor will actually open.
+    /// The inventory's openable cap stays aligned with the markdown viewer's
+    /// input ceiling. The dock no longer reads the file itself.
     #[test]
-    fn the_artifact_size_cap_is_the_editors_file_cap() {
+    fn the_artifact_size_cap_matches_the_shared_file_ceiling() {
         assert_eq!(
             paneflow_agent_setup::MAX_ARTIFACT_BYTES,
-            crate::app::diff_dock::code::load::MAX_FILE_BYTES
+            crate::markdown::MAX_INPUT_BYTES
         );
     }
 
@@ -613,18 +612,11 @@ mod tests {
     fn a_dock_holds_at_most_one_setup_tab(cx: &mut gpui::TestAppContext) {
         let cx = cx.add_empty_window();
         let setup = cx.new(|cx| SetupView::new(String::new(), cx));
-        let tabs = vec![
-            DiffDockTab::Changes,
-            DiffDockTab::PendingFile,
-            DiffDockTab::Setup(setup),
-        ];
-        assert_eq!(setup_tab_index(&tabs), Some(2));
-        assert_eq!(
-            setup_tab_index(&[DiffDockTab::Changes, DiffDockTab::PendingFile]),
-            None
-        );
+        let tabs = vec![DiffDockTab::Changes, DiffDockTab::Setup(setup)];
+        assert_eq!(setup_tab_index(&tabs), Some(1));
+        assert_eq!(setup_tab_index(&[DiffDockTab::Changes]), None);
         // An empty cwd settles synchronously into an empty inventory.
-        let DiffDockTab::Setup(view) = &tabs[2] else {
+        let DiffDockTab::Setup(view) = &tabs[1] else {
             unreachable!("built above")
         };
         view.read_with(cx, |view, _| {

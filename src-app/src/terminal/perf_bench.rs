@@ -11,8 +11,7 @@
 //! the conversion into the neutral `Content`, the window-free layout pass,
 //! the render-thread per-frame lookups, and the runtime loop's idle behavior.
 //! The metric type, the timing helpers, the process counters and the
-//! reporting are `crate::bench_harness`, shared with the editor bench
-//! (`app/diff_dock/code/perf_bench.rs`); allocation counts come from the test
+//! reporting are `crate::bench_harness`; allocation counts come from the test
 //! binary's recording allocator (`test_allocator`), which wraps the system
 //! allocator.
 //!

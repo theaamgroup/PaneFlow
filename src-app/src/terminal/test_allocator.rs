@@ -8,8 +8,7 @@
 //! process-wide bytes and call counts (the benchmarks report them per
 //! iteration, and they are exact where timings are not), and the live bytes
 //! (allocations minus deallocations), which is what lets a retained-memory
-//! metric such as the editor bench's `reload_200_retained_bytes` be reported
-//! at all.
+//! metric be reported at all.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;

@@ -3,17 +3,17 @@
 //!
 //! The pane header's dock button used to drop straight into the git diff, which
 //! made "open the side panel" and "review changes" the same gesture even when
-//! the user wanted a shell or a file. The picker separates the two: opening the
+//! the user wanted a shell or the agent setup list. The picker separates the two: opening the
 //! dock asks, and the answer is remembered for the workspace that gave it, so
 //! only that project's first open costs a click (Cursor / Codex both behave this
 //! way). The dock is detached per workspace ([`crate::app::cli_diff_dock`]), so
 //! the next project starts from the same question rather than inheriting an
 //! answer given for another repository.
 //!
-//! Four surfaces, matching the tabs the dock can actually host
-//! ([`super::model::DiffDockTab`]): Changes, Terminal, File, Agent setup. Nothing here opens
-//! a surface itself - each card routes to the exact entry point the tab strip's
-//! `+` menu uses, so the two doors into the dock cannot drift apart.
+//! Three surfaces, matching the tabs the dock can actually host
+//! ([`super::model::DiffDockTab`]): Changes, Terminal, and Agent setup. Nothing
+//! here opens a surface itself - each card routes to the exact entry point the
+//! tab strip's `+` menu uses, so the two doors into the dock cannot drift apart.
 
 use gpui::{
     AnyElement, ClickEvent, Context, Hsla, InteractiveElement, IntoElement, MouseButton,
@@ -63,7 +63,6 @@ fn card_ink(ui: crate::theme::UiColors) -> (Hsla, Hsla, Hsla) {
 pub(crate) enum DiffDockSurface {
     Changes,
     Terminal,
-    File,
     /// The Agent setup inventory (issue #331).
     Setup,
 }
@@ -82,9 +81,6 @@ impl PaneFlowApp {
         match surface {
             DiffDockSurface::Changes => self.open_diff_changes_tab(cx),
             DiffDockSurface::Terminal => self.open_diff_terminal_tab(window, cx),
-            // Same as the `+` menu's File row: the Files tree is the picker, and
-            // a row there opens the document as a dock tab.
-            DiffDockSurface::File => self.open_diff_file_picker(window, cx),
             DiffDockSurface::Setup => self.open_diff_setup_tab(window, cx),
         }
     }
@@ -119,7 +115,7 @@ pub(super) fn render_diff_picker_header(
 
 /// The card grid, centered in the dock body. Wraps rather than fixing a column
 /// count: at the dock's minimum width two cards fit per row, and a widened dock
-/// puts all four on one line.
+/// puts all three on one line.
 pub(super) fn render_diff_surface_picker(
     ui: crate::theme::UiColors,
     cx: &mut Context<PaneFlowApp>,
@@ -151,14 +147,6 @@ pub(super) fn render_diff_surface_picker(
                     "icons/terminal.svg",
                     "Terminal",
                     DiffDockSurface::Terminal,
-                    ui,
-                    cx,
-                ))
-                .child(card(
-                    "diff-dock-picker-file",
-                    "icons/file-text.svg",
-                    "File",
-                    DiffDockSurface::File,
                     ui,
                     cx,
                 ))

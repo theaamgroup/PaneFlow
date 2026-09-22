@@ -1,8 +1,6 @@
 //! The fixed path catalog the scan walks.
 //!
-//! This is a list, not a tree walk: the Files sidebar hides dotfiles and
-//! gitignored entries on purpose, and this crate must not become the
-//! un-filtered walk it refuses to be. Every path here is one a verified
+//! This is a list, not a tree walk. Every path here is one a verified
 //! harness actually reads. A harness whose layout nobody verified contributes
 //! no entry - see `UNMAPPED` on the surface side - rather than a guess.
 

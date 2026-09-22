@@ -1,5 +1,5 @@
 //! Per-language file icons, shared by the diff dock's file headers and the
-//! Files sidebar tree.
+//! language icon set.
 //!
 //! The assets under `icons/languages/` carry their own `fill`, so they must be
 //! painted as images (`img()` / `ImgResourceLoader`), never through `svg()`,
@@ -8,8 +8,8 @@
 /// Map a file's basename to its language icon asset path, or `None` for a
 /// name no language claims.
 ///
-/// This is the single icon policy for every surface (Files tree, diff body,
-/// diff-dock tab strip); callers supply only their own unknown-file fallback
+/// This is the single icon policy for the diff body and the diff-dock tab
+/// strip; callers supply only their own unknown-file fallback
 /// (issue #220). Full-name matches win over extensions (`Dockerfile`,
 /// `Makefile`, `angular.json`), and the React Native platform suffixes are
 /// checked before the plain `.ts`/`.js` families. There is no JavaScript
@@ -64,14 +64,13 @@ pub(crate) fn language_icon(basename: &str) -> Option<&'static str> {
 }
 
 /// [`language_icon`] with the generic document as the unknown-file fallback,
-/// as the Files tree and the diff body paint it.
+/// as the diff body paints it.
 pub(crate) fn language_icon_path(basename: &str) -> &'static str {
     language_icon(basename).unwrap_or("icons/languages/file.svg")
 }
 
-/// Cross-surface expectations shared by the `file_icons` tests and the diff
-/// dock's `file_tab_icon` tests (issue #220). `None` is "unknown file": each
-/// surface supplies its own fallback there and must agree everywhere else.
+/// Cross-surface expectations for `file_icons` tests (issue #220). `None` is
+/// "unknown file": the caller supplies its own fallback there.
 #[cfg(test)]
 pub(crate) mod cases {
     pub(crate) const CASES: &[(&str, Option<&str>)] = &[

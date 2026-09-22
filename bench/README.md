@@ -1,20 +1,19 @@
 # Performance benchmarks
 
 `bench/` holds the reproducible measurements behind PaneFlow's performance
-claims. Every number published about the terminal pipeline, the code
-editor, or the time to first frame comes from one of the suites below, run
-with the script described here, and the raw result of each run is archived
-next to the baseline it is compared against.
+claims. Every number published about the terminal pipeline or the time to
+first frame comes from one of the suites below, run with the script described
+here, and the raw result of each run is archived next to the baseline it is
+compared against.
 
-There are three suites, three baselines, and three result prefixes:
+There are two suites, two baselines, and two result prefixes:
 
 | Suite | Test | Script | Baseline | Result files |
 |---|---|---|---|---|
 | `paneflow-terminal-bench` | `terminal::perf_bench::terminal_pipeline_benchmark` | `scripts/bench-terminal.sh` | `bench/baseline.json` | `bench/results/<stamp>-<sha>.json` |
-| `paneflow-editor-bench` | `app::diff_dock::code::perf_bench::editor_pipeline_benchmark` | `scripts/bench-editor.sh` | `bench/editor-baseline.json` | `bench/results/editor-<stamp>-<sha>.json` |
 | `paneflow-startup-bench` | `startup_bench::startup_first_frame_benchmark` | `scripts/bench-startup.sh` | `bench/startup-baseline.json` | `bench/results/startup-<stamp>-<sha>.json` |
 
-All three suites share one harness, `src-app/src/bench_harness.rs`: the metric
+Both suites share one harness, `src-app/src/bench_harness.rs`: the metric
 type, the timing helpers, the JSON document, the comparison table, and the
 libproc process counters (RSS, CPU time converted from Mach ticks through
 `mach_timebase_info`). Allocations are counted by the test binary's one
@@ -70,200 +69,19 @@ tick. Later runs show the cumulative change.
 seconds waiting for a shell to settle; the timed scenarios run first either
 way, so the probes never disturb them.
 
-## Editor suite
+## Highlight caps
 
-The benchmark is the ignored test `editor_pipeline_benchmark` in
-`src-app/src/app/diff_dock/code/perf_bench.rs`. It exercises the diff dock's
-code editor without a GPU or a window: the rope document, the tree-sitter
-parse and highlight query, the run resolution the diff view shares, the
-UTF-16 conversions the input handler makes, the external-reload path, and
-the platform shaper.
-
-| Metric | Unit | What it captures |
-|---|---|---|
-| `open_300kb_highlighted` | ns | A 300 KB Rust file opened: rope build, longest-line measure, and a 2 ms fill of the first 60-row viewport. Since #427 the initial parse is deferred, so this is the work between the read and the first visible text. |
-| `open_to_first_tree_300kb` | ns | The same file from the read to `apply_parsed`: the deferred initial parse plus the viewport fill it makes possible. Everything but the apply runs off the render thread, so this is latency to color, not render-thread cost. |
-| `open_2mb_to_text` | ns | A 2 MB Rust file from the read to visible text, with the initial parse still in flight. Target under 50 ms. |
-| `open_3_7mb` | ns | A 3.7 MB Rust file opened past the 2 MB highlight cap, covering the rope build and the source-string longest-line scan. |
-| `open_markdown_injected` | ns | A 64 KB Markdown file opened, the only corpus that runs a second grammar pass through the inline injection. |
-| `keystroke_to_runs` | ns | Render-thread work of one inserted character at a pseudo-random row of 300 KB of Rust: splice, incremental parse or deferred-tree apply, then a viewport-bounded 2 ms highlight fill. Background parsing runs outside the timer. Its `p95` column is the keystroke latency target. |
-| `viewport_query_60_rows` | ns | The highlight query for one 60-row viewport, the work a viewport-bounded requery does per frame. |
-| `pagedown_stale_rows` | rows | Median rows of a 60-row viewport still uncolored after one 2 ms fill, over 20 pseudo-random jumps on a freshly opened 300 KB Rust file. |
-| `pagedown_stale_rows_max` | rows | The worst of those 20 jumps: rows the first frame after a PageDown leaves in plain text. |
-| `pagedown_frames_to_fresh` | frames | Successive 2 ms fills the worst of those 20 jumps needs before no visible row is stale. |
-| `unclosed_comment_close_ui` | ns | Render-thread work of closing an unterminated block comment at the top of the file: edit, deferred-tree apply and the first viewport fill. Background parsing is excluded. |
-| `deferred_burst_completed_parses` | count | Complete background parses after 50 zero-budget edits; superseded generations cancel, so only the latest completes. |
-| `deferred_burst_cpu` | ns | Process CPU spent running every deferred parse of that 50-edit burst after cancellation. Target below 120 ms. |
-| `deferred_burst_edit_wall` | ns | Wall time to enqueue the 50 zero-budget edits and their background parses. Target below 200 ms. |
-| `resolve_runs_3750` | ns | `resolve_runs` over 3 750 captures taken from a 10 000-character minified JSON line, the shape the diff view shares. |
-| `byte_to_utf16_eof` | ns | One byte offset converted to a UTF-16 offset at the end of a 3.7 MB document, two to four times per keystroke through `EntityInputHandler`. |
-| `to_disk_string_3_7mb` | ns | The whole 3.7 MB document rendered to the string a save writes. |
-| `theme_switch` | ns | A theme change on 300 KB of Rust: the capture color tables are rebuilt without querying tree-sitter or rewriting row runs. |
-| `shape_cold_60_rows` | ns | Sixty never-seen ASCII rows of 100 characters shaped with the editor monospace font, the cold-cache cost of one scrolled viewport. |
-| `shape_warm_60_rows` | ns | The same sixty rows shaped again, the warm-cache cost the line-layout cache serves on a second frame. |
-| `reload_200_retained_bytes` | bytes | Live allocated bytes a colored 2 MB tab still holds after 200 external reloads: document, per-row runs, and undo history. Tree-sitter trees allocate through the C allocator, so they are outside this number and the tree memory probe below counts them instead. |
-
-The corpus is `src-app/src/app/diff_dock/code/bench_corpus.rs`, seeded with
-`EDITOR_CORPUS_SEED`. It is generated, never read from the repository's own
-sources, so a run is byte-identical everywhere: synthetic Rust sized to 295 KB,
-2 MB (both under the 2 MB highlight cap, the larger by 48 bytes), and 3.7 MB
-(about 110 000 lines, past it); a single-line minified JSON document of exactly
-10 000 characters; and Markdown carrying both inline and fenced code so the
-injection pass has work to do.
-
-### The PageDown stale-row probe
-
-`pagedown_stale_rows`, `pagedown_stale_rows_max` and `pagedown_frames_to_fresh`
-turn the 2 ms highlight budget into a number. Each of the 20 jumps moves a
-60-row viewport to a pseudo-random row of the 300 KB Rust corpus, calls
-`CodeHighlighter::fill_stale_rows` with `HIGHLIGHT_FRAME_BUDGET`, records the
-rows the call left stale, then keeps calling until none is. Rows left stale are
-rows the user reads in plain text; frames-to-fresh is how many frames the
-editor needs before the viewport is fully colored, and a starved fill asks the
-view for the next frame itself (`CodeView::fill_visible_highlights` calls
-`cx.notify()`). A file past the highlight cap reports 0 stale rows in 1 frame
-and spends no budget at all, and so does a file whose initial parse has not
-landed yet: a treeless highlighter fills nothing and asks for no follow-up
-frame.
-
-### The tree memory probe and the highlight caps
-
-`MAX_HIGHLIGHT_BYTES` and `MAX_MARKDOWN_HIGHLIGHT_BYTES`
-(`src-app/src/diff/highlighter.rs`) are set by measurement, not by guess. The
-rule: **a file at its cap must hold less than 128 MiB of tree-sitter tree.**
-Both caps are read through `highlight_cap(ext)`, so the editor's
-`CodeHighlighter` and the diff view's `highlight_lines` sit behind the same
-rule.
-
-The measurement is a second ignored test, `tree_memory_probe`, in the same
-file as the editor suite. It routes tree-sitter's own C allocator to a counting
-allocator through `tree_sitter::set_allocator`, so the bytes it reports are the
-tree and nothing else. That counter is deliberately kept out of the timed
-suite: installing it would change every parse timing, and freeing a block
-allocated before it was installed would corrupt the heap. The test launches a
-fresh subprocess with an exact test filter before installing the counter
-(#516), so an earlier or concurrent parse cannot share its allocator. Run it with:
-
-```bash
-cargo test --release --locked -p paneflow-app --bin paneflow \
-  app::diff_dock::code::perf_bench::tree_memory_probe \
-  -- --ignored --exact --nocapture --test-threads=1
-```
-
-Measured on Apple Silicon (macOS 26, tree-sitter 0.27.0) on the generated
-corpus; the tree byte counts do not depend on the build profile:
-
-| Grammar | Source | Tree | Bytes of tree per source byte | Cap the 128 MiB rule allows |
-|---|---|---|---|---|
-| Rust | 295 KB | 8.70 MB | 29.5 | 4.55 MB |
-| Rust | 2 MB | 58.7 MB | 29.4 | 4.57 MB |
-| Rust | 3.7 MB | 108.4 MB | 29.3 | 4.58 MB |
-| Minified JSON | 295 KB | 16.1 MB | 54.6 | 2.46 MB |
-| Minified JSON | 2 MB | 101.6 MB | 50.8 | 2.64 MB |
-| Markdown (two passes) | 64 KB | 8.25 MB | 129.1 | 1.04 MB |
-| Markdown (two passes) | 2 MB | 254.9 MB | 127.5 | 1.05 MB |
-
-At the caps the measured grammars hold 56.0 MiB (Rust, 2 MB), 96.9 MiB (JSON,
-2 MB) and 121.8 MiB (Markdown, 1 MB, the tightest margin); on the 295 KB Rust
-corpus a one-line edit's deferred parse adds 203 KB to the 8.70 MB the first
-tree holds, and the counter returns to 8.70 MB once `apply_parsed` has run.
-
-The ratio is a property of the grammar, not of the file size, so a cap set on
-Rust alone does not hold. Minified JSON costs more than Rust per source byte,
-because a one-line document of short key-value pairs is nearly all nodes and
-no text. Markdown costs the most, because the inline injection parses the
-whole document a second time; that second pass is why it keeps a cap of its
-own. `MAX_HIGHLIGHT_BYTES` is therefore 2 MB, set by the densest single-pass
-grammar in the corpus rather than by Rust, and `MAX_MARKDOWN_HIGHLIGHT_BYTES`
-is 1 MB. The probe asserts all three caps against the budget, so raising a cap
-without re-measuring fails the test.
-
-The probe also checks the other half of the rule: a deferred parse holds a
-second tree while it is in flight, and `apply_parsed` drops the superseded
-one. That second tree costs far less than the first, because an incremental
-parse shares the subtrees the edit did not touch.
-
-These are the metrics the editor performance ports that follow this harness
-(#426 to #430) are expected to move; each of those lands with its
-`perf_bench.rs` half and re-records the baseline in the same pull request.
-
-### The shaping probe
-
-`shape_cold_60_rows` and `shape_warm_60_rows` decide whether an ASCII glyph
-grid for the editor is worth building. **The threshold is 1.0 ms cold per 60
-rows on the reference machine.** Below it, `shape_line` is not what makes
-scrolling expensive and the grid stays unbuilt; at or above it, the grid path
-is worth its complexity. Like every other timing metric, both are stored in
-nanoseconds and rendered by the table in milliseconds once they pass 1 ms, so
-the threshold reads as `1.00 ms` in the table and `1000000.0` in the
-document.
-
-The probe deliberately does not use GPUI's `TestAppContext`. That context
-installs `NoopTextSystem`, a stub that returns synthetic metrics for every
-font, so a measurement taken through it would describe the stub and not the
-platform shaper the editor actually pays for. The probe instead resolves the
-real platform text system through `gpui_platform::current_platform(true)`
-(the `font-kit` feature this fork requires on macOS) and shapes through a
-`WindowTextSystem` built on it. When that platform cannot be created, or
-when it shapes a zero-width line because no real font is available, both
-metrics are reported as unavailable through `PANEFLOW_BENCH_SKIP` lines,
-remain in the JSON with `available: false` and a null value, and the suite
-carries on. `PANEFLOW_BENCH_SKIP_SHAPE=1` skips the probe outright with the
-same unavailable result.
-
-`reload_200_retained_bytes` allocates and retains several hundred megabytes by
-design, which is the defect it measures. It runs last, after the timed
-scenarios, so it never inflates them.
-
-## Scroll frame scenario
-
-The editor suite runs without a window, so it cannot say what one wheel notch
-costs when terminals share the frame. That number comes from a separate
-ignored test, `layout::render::tests::editor_scroll_frame_by_pane_count`:
-
-```bash
-cargo test -p paneflow-app --release -- --ignored layout::render --test-threads=1
-```
-
-`--test-threads=1` is load-bearing: the scenario shares the render_content
-timing probe with the eight-pane input-to-paint gate in the same module, and
-two of them running at once would count each other's snapshots.
-
-It opens the 300 KB Rust corpus in a `CodeView` docked to the right of the pane
-grid, fills every terminal pane with `deterministic_streams()` and lets them go
-idle, places the caret at the top and scrolls away from it, then dispatches 120
-`ScrollWheelEvent` notches of `Lines(3)` spaced 8 ms apart. It repeats that for
-0, 2 and 6 terminal panes and prints one JSON line carrying
-`scroll_frame_p50_us_panes_N` and `scroll_frame_p95_us_panes_N` for each N,
-computed from GPUI's `dirty_to_draw_duration` over at least 100 frames per
-configuration. `render_content_lock_samples_panes_N` counts the terminal grid
-snapshots taken across those frames. Before issue #429 it read one snapshot per
-pane per frame, the witness that a scroll which only moved the editor still
-repainted every terminal. Issue #429 hosts each `TerminalView` behind
-`Entity::cached`, so an idle pane now takes none and the measurement asserts
-zero. `scroll_frame_p95_ratio_panes_N` is that configuration's p95 divided by
-the zero-pane p95, tracked with no threshold attached: this harness runs on
-`NoopTextSystem`, which excludes the shaping the cache skips, so it cannot see
-what the cache saves (upstream's control run moved the six-pane p95 from 1432 to
-1426 us while the snapshots went from 720 to 0). A configuration that cannot
-build its panes is reported with `scroll_frame_available_panes_N: false` and the
-others still run.
-
-**The measurement is relative, not absolute.** `TestAppContext` installs
-`NoopTextSystem`, so no platform shaping is included: the numbers compare
-configurations against each other and never bound the real cost of a frame.
-The absolute cost is read from a release profile of the running application.
-
-`terminal_share_p50_panes_6` and `terminal_share_p95_panes_6` are the fraction
-of a six-pane scroll frame that disappears at zero panes. That share is the
-decision gate for caching the terminal panes behind `ViewElement::cached`
-(#429): it is worth doing only if the share reaches 0.30, and below that the
-measured value is recorded and the idea is dropped.
+`MAX_HIGHLIGHT_BYTES` (2 MB) and `MAX_MARKDOWN_HIGHLIGHT_BYTES` (1 MB) in
+`src-app/src/diff/highlighter.rs` bound tree-sitter parsing for Changes and
+Review. They were set so a file at its cap holds less than 128 MiB of
+tree-sitter tree: minified JSON for the single-pass cap, Markdown's second
+pass for its own. The measurement that set them lived with the removed dock
+code editor. The caps stay. This tree has no probe that re-measures them.
 
 ## Startup suite
 
 The benchmark is the ignored test `startup_first_frame_benchmark` in
-`src-app/src/startup_bench.rs`. Unlike the other two suites it launches the
+`src-app/src/startup_bench.rs`. Unlike the terminal suite it launches the
 real release binary, because the cost it measures is the GPU window, the
 platform text system, and the state the app builds before its first frame,
 none of which exist in a window-free test. The app cooperates through the
@@ -336,18 +154,17 @@ process, so the harness cannot attribute a core share to it; instead the
 suite spins one thread for 250 ms before each scenario and records the
 lowest share of a core it got as `cpu_share`. Below 0.90 it prints
 `PANEFLOW_BENCH_WARNING` and `scripts/bench-startup.sh --set-baseline`
-refuses the run, exactly as the editor script does.
+refuses the run.
 
 ## Running
 
 ```bash
 scripts/bench-terminal.sh
-scripts/bench-editor.sh
 scripts/bench-startup.sh
 ```
 
-`scripts/bench-editor.sh --help` and `scripts/bench-startup.sh --help` print
-the options and the environment variables the suites honor.
+`scripts/bench-startup.sh --help` prints the options and the environment
+variables the startup suite honors.
 
 Each script builds the `paneflow` test binary under the release profile,
 records the short commit SHA, whether the worktree is dirty, and a UTC stamp,
@@ -355,18 +172,16 @@ then writes its result under `bench/results/`. The run always prints a
 Markdown table between the `PANEFLOW_BENCH_TABLE_BEGIN` and
 `PANEFLOW_BENCH_TABLE_END` markers: a comparison table when the suite's
 baseline exists, and the same table without its comparison columns when it
-does not (`bench-editor.sh` says `no baseline yet` first). That table is the
+does not. That table is the
 artifact to share.
 
 `--set-baseline` copies the fresh result over the suite's baseline. The
 committed terminal baseline is measured on the Apple Silicon development
 machine at the commit before the September 2026 terminal performance work
 (#343, #344), with nothing else running; its `git_sha` and `cpu` fields say
-which commit and machine. The editor baseline is recorded the same way, with
-the PaneFlow app closed: the running app is enough to trip the CPU-share
-check below.
+which commit and machine.
 
-`scripts/bench-editor.sh` and `scripts/bench-startup.sh` refuse
+`scripts/bench-startup.sh` refuses
 `--set-baseline` when the run reports a `cpu_share` below 0.90: a contended
 run inflates every timing it would freeze, and every later comparison against
 it would read as a false improvement. Close the competing workload and run
@@ -377,7 +192,7 @@ installed PaneFlow app closed.
 A baseline older than the code it is compared against turns every table into
 fiction.
 
-All three suites refuse to run under the debug profile, which would measure
+Both suites refuse to run under the debug profile, which would measure
 the compiler rather than the code, and exit non-zero with an explicit message.
 Set `PANEFLOW_BENCH_ALLOW_DEBUG=1` to override while developing a suite itself.
 
@@ -397,7 +212,7 @@ Two runs of the same commit differ by a few percent on the microsecond
 metrics. Treat a change below 5% as noise unless the allocation columns, which
 are deterministic, moved with it.
 
-The terminal and editor runs measure their own CPU share over the timed
+The terminal run measures its own CPU share over the timed
 scenarios (process CPU time divided by wall time, recorded as `cpu_share` in
 the result). Those scenarios are single-threaded and never sleep, so an
 uncontended run reports close to 1.0. Process CPU time comes from libproc,
@@ -456,8 +271,7 @@ reads `unavailable`.
 }
 ```
 
-The editor suite writes the same document with `"suite":
-"paneflow-editor-bench"` and its own `corpus_seed`. The startup suite writes
+The startup suite writes
 `"suite": "paneflow-startup-bench"`, a `corpus_seed` of `0x0` (it has no
 corpus), null allocation columns (the allocations happen in the child
 process), and the core-share probe as `cpu_share`. A metric with
