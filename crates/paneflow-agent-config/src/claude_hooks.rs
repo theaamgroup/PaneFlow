@@ -258,6 +258,11 @@ fn reconcile_valid_matcher_hooks(
 /// a managed group naming a nonexistent program has no legitimate reading, so
 /// removing it can never destroy live configuration.
 ///
+/// Every event array under `hooks` is visited. Claude's five events are not
+/// the whole set: Codex `hooks.json` also carries `SessionStart`, and a dead
+/// command there fails the same way (#662). Non-array event values are left
+/// untouched.
+///
 /// `program_missing` receives the command's program token (already confirmed
 /// to be a `paneflow-ai-hook` spelling). Neighboring user handlers in a shared
 /// matcher group survive, exactly as in [`remove_hooks_lenient`]. Returns
@@ -269,15 +274,16 @@ pub fn remove_dead_hooks(root: &mut Value, program_missing: &dyn Fn(&str) -> boo
     let Some(hooks) = object.get_mut("hooks").and_then(Value::as_object_mut) else {
         return false;
     };
+    let events: Vec<String> = hooks.keys().cloned().collect();
     let mut removed = false;
-    for event in CLAUDE_HOOK_EVENTS {
-        let Some(groups) = hooks.get_mut(*event).and_then(Value::as_array_mut) else {
+    for event in events {
+        let Some(groups) = hooks.get_mut(&event).and_then(Value::as_array_mut) else {
             continue;
         };
         let removed_from_event = strip_dead_handlers(groups, program_missing);
         removed |= removed_from_event;
         if removed_from_event && groups.is_empty() {
-            hooks.remove(*event);
+            hooks.remove(&event);
         }
     }
     if removed && hooks.is_empty() {
@@ -577,6 +583,36 @@ mod tests {
 
         assert!(!remove_dead_hooks(&mut root, &|_| true));
         assert_eq!(root, before);
+    }
+
+    /// Codex registers `SessionStart`, which is outside Claude's event list.
+    /// A dead command there has to be reaped from the same document shape.
+    #[test]
+    fn reaping_dead_hooks_covers_events_outside_the_claude_set() {
+        let dead = "/missing/paneflow-ai-hook";
+        let mut root = json!({
+            "hooks": {
+                "SessionStart": [{
+                    MANAGED_MARKER: true,
+                    "hooks": [{ "type": "command", "command": format!("{dead} SessionStart") }]
+                }],
+                "PreToolUse": [{
+                    "hooks": [{ "type": "command", "command": "echo user" }]
+                }]
+            }
+        });
+
+        assert!(remove_dead_hooks(&mut root, &|_| true));
+        assert_eq!(
+            root,
+            json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "hooks": [{ "type": "command", "command": "echo user" }]
+                    }]
+                }
+            })
+        );
     }
 
     #[test]

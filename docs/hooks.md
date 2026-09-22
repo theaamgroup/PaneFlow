@@ -93,7 +93,11 @@ project-local `settings.local.json` / `hooks.json` files included, left
 byte-identical - the agent still launches, hookless), an unparseable PRIMARY
 config (`opencode.json`, `~/.hermes/config.yaml` with an existing `hooks:`
 key), or a `.jsonc`-only OpenCode setup all skip the install instead of
-clobbering. The TS bridges are
+clobbering. On every wrapped-agent launch the shim also removes PaneFlow
+commands whose program is missing from that project's
+`.claude/settings.local.json` and `.codex/hooks.json` (a linked worktree's
+main checkout included) and leaves every other key, including user permissions
+and user hooks, in place. The TS bridges are
 env-gated on `PANEFLOW_SOCKET_PATH`, so they are inert when the CLI runs
 outside a PaneFlow terminal.
 

@@ -13,7 +13,7 @@ pub(crate) use agents::{
     merge_cursor_hooks, merge_gemini_hooks, merge_qoder_hooks, remove_cursor_hooks,
     remove_gemini_hooks, remove_qoder_hooks, ManagedHookConfigGuard, ManagedHookSpec,
 };
-pub(crate) use claude::HookConfigGuard;
+pub(crate) use claude::{prune_stale_project_hooks, HookConfigGuard};
 pub(crate) use codex::CodexHookConfigGuard;
 #[cfg(test)]
 pub(crate) use codex::{enable_codex_feature_flag, CODEX_HOOK_EVENTS, CODEX_TOML_MARKER};

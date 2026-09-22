@@ -139,6 +139,21 @@ impl HookConfigGuard {
     }
 }
 
+/// Drop PaneFlow commands whose program no longer exists, from the project
+/// files a wrapped agent executes before it starts (#662).
+///
+/// Claude Code and Grok both read `.claude/settings.local.json`. Codex reads
+/// `.codex/hooks.json`. A linked worktree resolves those files through the
+/// main checkout (#543), which is the copy that has to be clean. User
+/// permissions, user hooks, and commands whose program still exists stay.
+/// The Claude installer also prunes its own file; this runs for every tool,
+/// including agents that never open `HookConfigGuard`.
+pub(crate) fn prune_stale_project_hooks(cwd: &Path) {
+    let root = linked_worktree_main_checkout(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    prune_dead_project_hooks(&root.join(".claude").join("settings.local.json"));
+    prune_dead_project_hooks(&root.join(".codex").join("hooks.json"));
+}
+
 /// `.claude` directory Claude Code actually reads for `cwd` (#543).
 ///
 /// A linked git worktree resolves its project through the main checkout, so a
@@ -187,12 +202,12 @@ fn prune_dead_project_hooks(path: &Path) {
     });
     match pruned {
         Ok(true) => crate::diagnose(&format!(
-            "claude: removed stale managed hooks from {}",
+            "removed stale managed hooks from {}",
             safe_path_display(path)
         )),
         Ok(false) => {}
         Err(error) => crate::diagnose(&format!(
-            "claude: could not prune stale hooks in {}: {error}",
+            "could not prune stale hooks in {}: {error}",
             safe_path_display(path)
         )),
     }
@@ -422,5 +437,211 @@ mod tests {
             std::io::ErrorKind::InvalidData
         );
         assert_eq!(std::fs::read(path).unwrap(), [0xff]);
+    }
+
+    /// Issue #662: any wrapped agent can execute these files, so a dead
+    /// version-pinned command is removed from both of them while user
+    /// permissions and user hooks stay.
+    #[test]
+    fn stale_commands_are_pruned_from_claude_and_codex_project_files() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let dead = temp.path().join("gone/paneflow-ai-hook");
+        let live = temp.path().join("paneflow-ai-hook");
+        std::fs::File::create(&live).unwrap();
+        let claude = temp.path().join(".claude");
+        let codex = temp.path().join(".codex");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(
+            claude.join("settings.local.json"),
+            serde_json::to_string_pretty(&json!({
+                "permissions": { "allow": ["Bash"] },
+                "hooks": {
+                    "PostToolUse": [{
+                        MANAGED_MARKER: true,
+                        "hooks": [{
+                            "type": "command",
+                            "command": format!("{} PostToolUse", dead.display()),
+                        }]
+                    }],
+                    "Stop": [
+                        { "hooks": [{ "type": "command", "command": "echo user-hook" }] },
+                        {
+                            MANAGED_MARKER: true,
+                            "hooks": [{
+                                "type": "command",
+                                "command": format!("{} Stop", live.display()),
+                            }]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            codex.join("hooks.json"),
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "SessionStart": [{
+                        MANAGED_MARKER: true,
+                        "hooks": [{
+                            "type": "command",
+                            "command": format!("{} SessionStart", dead.display()),
+                        }]
+                    }],
+                    "PreToolUse": [{
+                        "hooks": [{ "type": "command", "command": "echo codex-user" }]
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        prune_stale_project_hooks(temp.path());
+
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(claude.join("settings.local.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            settings,
+            json!({
+                "permissions": { "allow": ["Bash"] },
+                "hooks": {
+                    "Stop": [
+                        { "hooks": [{ "type": "command", "command": "echo user-hook" }] },
+                        {
+                            MANAGED_MARKER: true,
+                            "hooks": [{
+                                "type": "command",
+                                "command": format!("{} Stop", live.display()),
+                            }]
+                        }
+                    ]
+                }
+            })
+        );
+        let hooks: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(codex.join("hooks.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            hooks,
+            json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "hooks": [{ "type": "command", "command": "echo codex-user" }]
+                    }]
+                }
+            })
+        );
+    }
+
+    /// Issue #662: a pane whose cwd is a linked worktree executes the main
+    /// checkout's hook files, so that is the copy that has to be reaped.
+    #[test]
+    fn worktree_launch_prunes_the_main_checkout_and_leaves_the_worktree_copy() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let main = temp.path().join("repo");
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        if !git(&["init", "-q", "-b", "main", "."], &main) {
+            eprintln!("skip: git is unavailable in this environment");
+            return;
+        }
+        std::fs::write(main.join("seed"), b"seed").unwrap();
+        assert!(git(&["add", "seed"], &main));
+        assert!(git(&["commit", "-qm", "seed"], &main));
+        let worktree = temp.path().join("repo.worktrees").join("feature");
+        assert!(git(
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                worktree.to_str().unwrap()
+            ],
+            &main
+        ));
+
+        let dead = temp.path().join("gone/paneflow-ai-hook");
+        let dead_command = format!("{} PostToolUse", dead.display());
+        let managed = json!({
+            "permissions": { "allow": ["Bash"] },
+            "hooks": {
+                "PostToolUse": [{
+                    MANAGED_MARKER: true,
+                    "hooks": [{ "type": "command", "command": &dead_command }]
+                }]
+            }
+        });
+        for root in [&main, &worktree] {
+            let claude = root.join(".claude");
+            std::fs::create_dir_all(&claude).unwrap();
+            std::fs::write(
+                claude.join("settings.local.json"),
+                serde_json::to_string_pretty(&managed).unwrap(),
+            )
+            .unwrap();
+            let codex = root.join(".codex");
+            std::fs::create_dir_all(&codex).unwrap();
+            std::fs::write(
+                codex.join("hooks.json"),
+                serde_json::to_string_pretty(&json!({
+                    "hooks": {
+                        "SessionStart": [{
+                            MANAGED_MARKER: true,
+                            "hooks": [{ "type": "command", "command": &dead_command }]
+                        }]
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        prune_stale_project_hooks(&std::fs::canonicalize(&worktree).unwrap());
+
+        let main_settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(main.join(".claude/settings.local.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            main_settings,
+            json!({ "permissions": { "allow": ["Bash"] } })
+        );
+        let main_hooks: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(main.join(".codex/hooks.json")).unwrap())
+                .unwrap();
+        assert_eq!(main_hooks, json!({}));
+
+        let worktree_settings =
+            std::fs::read_to_string(worktree.join(".claude/settings.local.json")).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&worktree_settings).unwrap(),
+            managed,
+            "the worktree-local file is not the one the agent reads"
+        );
+        let worktree_hooks = std::fs::read_to_string(worktree.join(".codex/hooks.json")).unwrap();
+        assert!(
+            worktree_hooks.contains("paneflow-ai-hook"),
+            "the worktree-local Codex file stays until that checkout is launched"
+        );
     }
 }

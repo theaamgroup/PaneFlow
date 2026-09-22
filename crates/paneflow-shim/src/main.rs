@@ -111,6 +111,13 @@ fn main() -> ExitCode {
         return ExitCode::from(127);
     };
 
+    // #662: Grok (and every other wrapped agent) executes project hook files
+    // that only the Claude installer used to reap. Drop commands whose
+    // program is gone before the agent reads them.
+    if let Ok(cwd) = env::current_dir() {
+        hooks::prune_stale_project_hooks(&cwd);
+    }
+
     // Install hook config guards before spawning the child, remove on drop.
     // The binding is held to end of `main` so destructors fire after
     // `run_real` returns; `None` is the graceful-degradation path for a
