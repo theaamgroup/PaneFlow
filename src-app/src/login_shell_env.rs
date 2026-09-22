@@ -29,9 +29,11 @@
 //!   can't run the POSIX capture script (nushell, tcsh, xonsh, …); `/bin/sh`
 //!   still sources `/etc/profile` + `/etc/profile.d` + `~/.profile`, i.e. the
 //!   system PATH;
-//! - **bounded** by a 5 s timeout so a pathological rc script can't wedge
-//!   startup, and by a 256 KiB read cap so one that writes continuously can't
-//!   balloon the capture buffer meanwhile;
+//! - **bounded** by a 5 s deadline so a pathological rc script can't wedge
+//!   startup. That deadline covers the stdout read and the reap after stdout
+//!   closes: a child that exits its pipe and keeps running is terminated
+//!   instead of holding startup in `wait`. A 256 KiB read cap stops one that
+//!   writes continuously from ballooning the capture buffer meanwhile;
 //! - **best-effort** - any failure logs and leaves the inherited PATH untouched.
 //!
 //! Safety: like [`crate::runtime_paths::augment_path_for_gui_launch`], this
@@ -46,7 +48,7 @@ pub fn load_login_shell_env() {
     use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     // A terminal launch already inherited the login PATH from its parent shell
     // - skip the (~50-200 ms) re-capture. Only GUI launches (Finder / Dock /
@@ -138,7 +140,11 @@ pub fn load_login_shell_env() {
         let _ = tx.send(buf);
     });
 
-    let buf = match rx.recv_timeout(Duration::from_secs(5)) {
+    // One deadline for the reader and for the reap after stdout closes.
+    // `recv_timeout` returning `Ok` only means the pipe hit EOF or the cap;
+    // the child can still be alive (a background job, a closed stdout).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let buf = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         Ok(buf) => {
             if buf.len() as u64 >= LOGIN_ENV_CAPTURE_CAP {
                 // The child out-wrote the cap; it may still be running (and
@@ -148,7 +154,10 @@ pub fn load_login_shell_env() {
                 );
                 terminate_login_shell_capture(&mut child);
             }
-            let _ = child.wait();
+            // `false` means the child outlived the deadline and was killed.
+            // A buffer that still holds a complete `PATH=` line is adopted
+            // below; anything incomplete leaves the inherited PATH alone.
+            let _ = reap_login_shell_capture(&mut child, deadline);
             let _ = reader.join();
             buf
         }
@@ -228,6 +237,37 @@ fn is_posix_capture_shell(shell: &str) -> bool {
 }
 
 #[cfg(unix)]
+/// Reap `child` before `deadline`. Returns `true` when it exited on its own.
+///
+/// Stdout EOF is not process exit (issue #683). `Child::wait` with no
+/// deadline blocks startup for as long as the login shell keeps running.
+/// Past the deadline the capture process group is killed, same as the
+/// reader-timeout arm, and the inherited PATH stands when the buffer never
+/// held a usable `PATH=` line.
+#[cfg(unix)]
+fn reap_login_shell_capture(child: &mut std::process::Child, deadline: std::time::Instant) -> bool {
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                log::warn!(
+                    "login-shell env: capture child still running after stdout closed; terminating"
+                );
+                terminate_login_shell_capture(child);
+                let _ = child.wait();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(error) => {
+                log::warn!("login-shell env: waiting on the capture child failed: {error}");
+                terminate_login_shell_capture(child);
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
 fn terminate_login_shell_capture(child: &mut std::process::Child) {
     let child_pid = child.id();
     if child_pid <= i32::MAX as u32 {
@@ -295,7 +335,63 @@ mod tests {
     use super::{
         LOGIN_ENV_CAPTURE_CAP, captured_path_has_system_bin, extract_path, find_subslice,
         is_launchd_default_path, is_posix_capture_shell, read_login_shell_capture,
+        reap_login_shell_capture,
     };
+    use std::os::unix::process::CommandExt as _;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    /// The capture child is its own session, matching `load_login_shell_env`,
+    /// so the process-group kill cannot reach this test.
+    fn spawn_session(script: &str) -> std::process::Child {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(script);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        cmd.spawn().expect("capture probe must spawn")
+    }
+
+    #[test]
+    fn reap_does_not_wait_out_a_child_that_closed_stdout() {
+        let mut child = spawn_session("exec >/dev/null; exec sleep 30");
+        let started = Instant::now();
+        let exited_alone =
+            reap_login_shell_capture(&mut child, started + Duration::from_millis(200));
+        let elapsed = started.elapsed();
+        assert!(
+            !exited_alone,
+            "a child that ignores stdout close must be terminated"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "reap held startup for {elapsed:?}"
+        );
+        assert!(
+            child.try_wait().ok().flatten().is_some(),
+            "the terminated child must be reaped"
+        );
+    }
+
+    #[test]
+    fn reap_collects_a_child_that_already_exited() {
+        let mut child = spawn_session("exit 0");
+        let started = Instant::now();
+        assert!(
+            reap_login_shell_capture(&mut child, started + Duration::from_secs(2)),
+            "a finished capture child is reaped without a kill"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "reaping an exited child must not burn the deadline"
+        );
+    }
 
     #[test]
     fn capture_read_is_capped_for_a_child_that_never_stops_writing() {
