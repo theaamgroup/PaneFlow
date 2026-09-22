@@ -5,7 +5,7 @@
 //! pass through its bounded command queue, so no C handle or borrowed render
 //! data crosses a thread or frame boundary.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{ErrorKind, Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -408,6 +408,11 @@ struct SessionInner {
     processed_output_bytes: AtomicUsize,
     #[cfg(test)]
     worker_crash_injected: AtomicBool,
+    /// Caller-thread seam between a scrollback scan and its result. The scan
+    /// has already copied each row's text; the hook can change the live grid
+    /// before that copy is returned. Absent from production builds.
+    #[cfg(test)]
+    search_scrollback_hook: Mutex<Option<SearchScrollbackHook>>,
     resize: Mutex<ResizeState>,
     gesture: Mutex<GestureUpdateState>,
     marks: SharedMarkRing,
@@ -417,6 +422,9 @@ struct SessionInner {
 pub(super) struct GhosttySession {
     inner: Arc<SessionInner>,
 }
+
+#[cfg(test)]
+type SearchScrollbackHook = Arc<dyn Fn() + Send + Sync>;
 
 enum RuntimeMessage {
     Output(Vec<u8>),
@@ -469,10 +477,6 @@ enum RuntimeMessage {
         start_row: usize,
         max_cells: usize,
         reply: SyncSender<Result<ghostty::SearchChunk, String>>,
-    },
-    LineTexts {
-        lines: Vec<i32>,
-        reply: SyncSender<Result<Vec<(i32, String)>, String>>,
     },
     SelectionText(SyncSender<Result<Option<String>, String>>),
     /// Resolve the OSC 8 hyperlink under a hovered cell. Answered with
@@ -1214,6 +1218,8 @@ impl GhosttySession {
                 processed_output_bytes: AtomicUsize::new(0),
                 #[cfg(test)]
                 worker_crash_injected: AtomicBool::new(false),
+                #[cfg(test)]
+                search_scrollback_hook: Mutex::new(None),
                 resize: Mutex::new(ResizeState {
                     requested: size,
                     submitted: None,
@@ -1688,13 +1694,21 @@ impl GhosttySession {
             });
     }
 
-    pub(super) fn selection_text(&self) -> Option<String> {
-        let text = self
-            .request(RuntimeMessage::SelectionText)
-            .and_then(Result::ok)
-            .flatten();
+    /// `Ok(None)` is nothing selected. `Err` is an engine failure, including a
+    /// selection over [`paneflow_terminal_ghostty`]'s copy cap, and is not the
+    /// same as an empty selection.
+    pub(super) fn selection_text(&self) -> Result<Option<String>, String> {
+        let text = match self.request(RuntimeMessage::SelectionText) {
+            Some(Ok(text)) => text,
+            Some(Err(error)) => return Err(error),
+            None => return Err(RUNTIME_UNANSWERED.to_owned()),
+        };
         let kind = self.lock_gesture().kind;
-        filter_copyable_selection_text(kind, self.selection_range(), text)
+        Ok(filter_copyable_selection_text(
+            kind,
+            self.selection_range(),
+            text,
+        ))
     }
 
     /// Drop the scrollback and clear the screen. Ghostty owns the history, so
@@ -1807,7 +1821,7 @@ impl GhosttySession {
         regex: bool,
         cancelled: &AtomicBool,
     ) -> crate::search::SearchResult {
-        self.search_scan(query, regex, cancelled).0
+        self.search_scan(query, regex, cancelled, None).0
     }
 
     /// The scan behind [`Self::search_with_cancel`], with the reason it
@@ -1816,11 +1830,17 @@ impl GhosttySession {
     /// a cancel, a superseding search, or the cell budget, which are ordinary
     /// truncation. Issue #362: a caller that has to tell a wedged runtime
     /// from a finished-but-capped scan reads it; the UI search drops it.
+    ///
+    /// `captured_lines`, when set, records each row's text the first time that
+    /// line number is read. Scrollback search keeps those strings so it does
+    /// not re-read the grid after the scan, when the same line number may
+    /// already be different output.
     fn search_scan(
         &self,
         query: &str,
         regex: bool,
         cancelled: &AtomicBool,
+        mut captured_lines: Option<&mut HashMap<i32, String>>,
     ) -> (crate::search::SearchResult, Option<String>) {
         let mut search = match ghostty::SearchEngine::new(query, regex) {
             Ok(search) => search,
@@ -1886,6 +1906,11 @@ impl GhosttySession {
             scanned_cells =
                 scanned_cells.saturating_add(chunk.lines.len().saturating_mul(chunk.cols));
             for line in chunk.lines {
+                if let Some(captured) = captured_lines.as_deref_mut() {
+                    captured
+                        .entry(line.line)
+                        .or_insert_with(|| line.text.clone());
+                }
                 if !search.push_line(line.line, &line.text, &line.char_to_column) {
                     return (search_result_from_ghostty(search.finish(false)), None);
                 }
@@ -1905,32 +1930,56 @@ impl GhosttySession {
         if query.is_empty() || max_matches == 0 {
             return Ok((Vec::new(), false));
         }
-        let (search, failure) = self.search_scan(query, false, &AtomicBool::new(false));
+        let mut texts = HashMap::new();
+        let (search, failure) =
+            self.search_scan(query, false, &AtomicBool::new(false), Some(&mut texts));
         if let Some(reason) = failure {
             return Err(reason);
         }
-        let mut seen = std::collections::HashSet::new();
+        // The map already holds the rows that matched. Anything the hook writes
+        // changes the live grid only, which is what a later `LineTexts` re-read
+        // used to observe.
+        #[cfg(test)]
+        self.run_search_scrollback_hook();
+        let mut seen = HashSet::new();
         let mut rows = Vec::new();
         let mut hit_cap = search.truncated;
         for found in &search.matches {
             if seen.insert(found.start.line.0) {
-                rows.push(found.start.line.0);
-                if rows.len() >= max_matches {
+                if rows.len() == max_matches {
                     hit_cap = true;
                     break;
                 }
+                let mut text = texts.get(&found.start.line.0).cloned().unwrap_or_default();
+                let trimmed_len = text.trim_end().len();
+                text.truncate(trimmed_len);
+                rows.push((found.start.line.0, text));
             }
         }
-        match self.request(|reply| RuntimeMessage::LineTexts { lines: rows, reply }) {
-            Some(Ok(mut lines)) => {
-                for (_, text) in &mut lines {
-                    let trimmed_len = text.trim_end().len();
-                    text.truncate(trimmed_len);
-                }
-                Ok((lines, hit_cap))
-            }
-            Some(Err(error)) => Err(format!("engine error: {error}")),
-            None => Err(RUNTIME_UNANSWERED.to_owned()),
+        Ok((rows, hit_cap))
+    }
+
+    /// Install `hook` so the next scrollback searches run it after the scan
+    /// captures line text and before the result is built. `None` removes it.
+    #[cfg(test)]
+    pub(super) fn set_search_scrollback_hook_for_test(&self, hook: Option<SearchScrollbackHook>) {
+        *self
+            .inner
+            .search_scrollback_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
+    #[cfg(test)]
+    fn run_search_scrollback_hook(&self) {
+        let hook = self
+            .inner
+            .search_scrollback_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook();
         }
     }
 
@@ -2853,13 +2902,6 @@ fn handle_terminal_command(
             let _ = reply.send(
                 terminal
                     .search_chunk(start_row, max_cells)
-                    .map_err(|error| error.to_string()),
-            );
-        }
-        RuntimeMessage::LineTexts { lines, reply } => {
-            let _ = reply.send(
-                terminal
-                    .line_texts(&lines)
                     .map_err(|error| error.to_string()),
             );
         }
