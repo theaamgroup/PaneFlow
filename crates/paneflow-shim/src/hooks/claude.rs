@@ -9,6 +9,7 @@ use paneflow_agent_config::{
     claude_settings_json, linked_worktree_main_checkout, read_optional_text,
 };
 use std::env;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,28 +211,31 @@ fn paneflow_hook_command_program_exists(command: &str) -> bool {
         .is_some_and(program_exists)
 }
 
+/// Whether `program` names a regular file, or a bare name found on `PATH`.
+///
+/// Same rule as `hook_program_exists` in `paneflow-agent-config` (#682): a
+/// bare name is present only on `PATH`, never because a same-named file sits
+/// in the process cwd. `is_file` applies only to absolute paths and to
+/// relative paths that already include a directory (`./hook`, `bin/hook`).
 fn program_exists(program: &str) -> bool {
+    let search_path = env::var_os("PATH");
+    program_exists_on_path(program, search_path.as_deref())
+}
+
+/// `search_path` is `PATH` in production and a temp directory in tests.
+fn program_exists_on_path(program: &str, search_path: Option<&OsStr>) -> bool {
     let path = Path::new(program);
-    if path.is_file() {
-        return true;
-    }
     if path.is_absolute()
         || path
             .parent()
             .is_some_and(|parent| !parent.as_os_str().is_empty())
     {
-        return false;
+        return path.is_file();
     }
-    let Some(search_path) = env::var_os("PATH") else {
+    let Some(search_path) = search_path else {
         return false;
     };
-    env::split_paths(&search_path).any(|directory| {
-        let candidate = directory.join(program);
-        if candidate.is_file() {
-            return true;
-        }
-        false
-    })
+    env::split_paths(search_path).any(|directory| directory.join(program).is_file())
 }
 
 #[cfg(test)]
@@ -403,5 +407,34 @@ mod tests {
             std::io::ErrorKind::InvalidData
         );
         assert_eq!(std::fs::read(path).unwrap(), [0xff]);
+    }
+
+    /// Issue #682, mirrored from `paneflow-agent-config`: a bare name is found
+    /// only on the search path handed in. `./paneflow-ai-hook` and an absolute
+    /// path use `is_file` on that path. The process cwd and `PATH` stay put.
+    #[test]
+    fn a_bare_hook_name_is_found_only_on_the_search_path() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        assert!(!program_exists_on_path(
+            "paneflow-ai-hook",
+            Some(bin.as_os_str())
+        ));
+        assert!(!program_exists_on_path("paneflow-ai-hook", None));
+
+        std::fs::write(bin.join("paneflow-ai-hook"), b"").unwrap();
+        assert!(program_exists_on_path(
+            "paneflow-ai-hook",
+            Some(bin.as_os_str())
+        ));
+        assert!(!program_exists_on_path("paneflow-ai-hook", None));
+
+        let absolute = bin.join("paneflow-ai-hook");
+        assert!(program_exists_on_path(absolute.to_str().unwrap(), None));
+        assert_eq!(
+            program_exists_on_path("./paneflow-ai-hook", Some(bin.as_os_str())),
+            Path::new("./paneflow-ai-hook").is_file()
+        );
     }
 }
