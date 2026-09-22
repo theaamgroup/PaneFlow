@@ -160,6 +160,12 @@ PaneFlow installations that omit `PANEFLOW_SURFACE_ID` are marked **needs repair
 run `paneflow mcp install` with the updated build and restart the Codex session.
 Install preserves any custom `env_vars` entries.
 
+A static `env` value for `PANEFLOW_MCP_SCOPE`, `PANEFLOW_SOCKET_PATH`,
+`PANEFLOW_WORKSPACE_ID`, or `PANEFLOW_SURFACE_ID` is also **needs repair**.
+Install deletes those keys and leaves every other `env` entry.
+`PANEFLOW_MCP_SCOPE = "all"` in that table would let the bridge read every
+workspace's terminal scrollback instead of the pane that launched Codex.
+
 Codex consumes **tools only** - which is why the bridge exposes everything as
 tools, not MCP resources.
 
