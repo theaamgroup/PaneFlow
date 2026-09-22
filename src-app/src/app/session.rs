@@ -1226,12 +1226,14 @@ fn without_persisted_scrollback(mut layout: LayoutNode) -> LayoutNode {
     layout
 }
 
-/// Prepare one saved tab for restore: drop scrollback, enforce the leaf and
-/// PTY caps, then remove leaves that only hosted the retired markdown viewer.
+/// Prepare one saved tab for restore: drop scrollback, remove leaves that
+/// only hosted the retired markdown viewer, then enforce the leaf and PTY
+/// caps on what remains. Counting markdown leaves against `MAX_PANES` would
+/// throw away the real terminals in the same tab.
 fn restored_tab_layout(layout: LayoutNode) -> Option<LayoutNode> {
     let layout = without_persisted_scrollback(layout);
-    let layout = validated_layout_within_cap(layout)?;
-    drop_retired_markdown_leaves(layout)
+    let layout = drop_retired_markdown_leaves(layout)?;
+    validated_layout_within_cap(layout)
 }
 
 /// Drop `surface_type: "markdown"` leaves. A pane that also holds a terminal
@@ -2020,6 +2022,36 @@ mod tests {
             restored_tab_layout(notes).is_none(),
             "a markdown-only leaf is dropped instead of becoming a terminal"
         );
+    }
+
+    /// A tab at the pane cap only because of a leftover markdown leaf keeps
+    /// its terminals. The cap runs after those leaves are gone.
+    #[test]
+    fn markdown_leaves_do_not_count_toward_the_restore_pane_cap() {
+        let terminal = || LayoutNode::Pane {
+            surfaces: vec![Default::default()],
+        };
+        let markdown = LayoutNode::Pane {
+            surfaces: vec![paneflow_config::schema::SurfaceDefinition {
+                surface_type: Some("markdown".to_string()),
+                path: Some("/tmp/NOTES.md".to_string()),
+                ..Default::default()
+            }],
+        };
+        let mut children = (0..MAX_PANES).map(|_| terminal()).collect::<Vec<_>>();
+        children.push(markdown);
+        let layout = LayoutNode::Split {
+            direction: "vertical".to_string(),
+            ratio: None,
+            ratios: None,
+            children,
+        };
+        assert_eq!(layout.leaf_count(), MAX_PANES + 1);
+
+        let restored =
+            restored_tab_layout(layout).expect("terminals stay when the extra leaf is markdown");
+        assert_eq!(restored.leaf_count(), MAX_PANES);
+        assert_eq!(layout_terminal_count(&restored), MAX_PANES);
     }
 
     #[test]
