@@ -2934,7 +2934,7 @@ mod tests {
 
     #[test]
     fn write_to_pty_buffers_input_while_display_only() {
-        // US-012 regression: the launch pad's agent picker writes the
+        // US-012 regression: an agent launch writes the
         // launch command the instant a terminal mounts - before the off-thread
         // fork promotes the PTY. The display-only notifier drops writes, so
         // without this queue the command (e.g. `claude`) is lost and the

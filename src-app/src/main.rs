@@ -1419,13 +1419,6 @@ struct PaneFlowApp {
     /// `Window` - and consumed by `drain_pending_window_actions`, the
     /// window-bearing notify observer (issue #211). One-shot.
     pending_pane_focus: Option<Entity<Pane>>,
-    /// Overlay whose close must hand the focus back before the next frame
-    /// (#584). `launch_pad_cancel` runs without a `Window` (the prompt
-    /// field's Escape reaches it deferred), so the drain runs
-    /// `restore_overlay_origin_focus` for it: the origin pane, then the first
-    /// pane, then the empty-workspace placeholder (issue #108), the same
-    /// chain every other overlay's close walks. One-shot.
-    pending_overlay_restore: Option<app::overlay_origin::OverlayKind>,
     /// Recent folders whose click-time existence probe is outstanding
     /// (issue #521): a repeat click or held `Cmd+N` on a mount that is not
     /// responding coalesces instead of spawning another probe thread.
@@ -1515,7 +1508,7 @@ struct PaneFlowApp {
     /// editor, the sidebar, the empty-workspace placeholder.
     command_palette_return_focus: Option<FocusHandle>,
     /// The pane each open overlay was opened from, keyed by overlay (#584:
-    /// theme picker, broadcast picker, Launch Pad, Pane
+    /// theme picker, broadcast picker, Pane
     /// Overview, pane palette). An overlay's own close
     /// returns the focus to its entry; the command palette reads the
     /// outermost one when it folds them (#523).
@@ -1535,12 +1528,6 @@ struct PaneFlowApp {
     broadcast_picker_renaming: Option<usize>,
     broadcast_picker_error: Option<String>,
     broadcast_picker_focus: FocusHandle,
-    /// Keyboard focus for the Agents environment branch picker so its Codex-style
-    /// search field captures typing (live filter + new-branch name). Focused on
-    /// open; focus returns to the active thread terminal on close.
-    /// EP-002 US-005 (cli-cockpit): Launch Pad modal state, `None` = closed.
-    launch_pad: Option<app::launch_pad::LaunchPadState>,
-    launch_pad_focus: FocusHandle,
     /// Issue #339: Pane Overview overlay, `None` = closed. Cards are derived
     /// from the live workspace tree on every render, never stored - a pane
     /// that closes while the overlay is open disappears at the next repaint.
@@ -1854,9 +1841,6 @@ impl PaneFlowApp {
     fn drain_pending_window_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = self.pending_pane_focus.take() {
             pane.read(cx).focus_handle(cx).focus(window, cx);
-        }
-        if let Some(kind) = self.pending_overlay_restore.take() {
-            self.restore_overlay_origin_focus(kind, window, cx);
         }
         if std::mem::take(&mut self.pending_palette_focus) {
             window.focus(&self.pane_palette_focus, cx);
@@ -2262,8 +2246,6 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_open_composer))
             .on_action(cx.listener(Self::handle_toggle_broadcast_member))
             .on_action(cx.listener(Self::handle_open_broadcast_groups))
-            // EP-002 (cli-cockpit): Launch Pad.
-            .on_action(cx.listener(Self::handle_open_launch_pad))
             .on_action(cx.listener(Self::handle_open_pane_overview))
             .on_action(cx.listener(Self::handle_open_agent_summary))
             .on_action(cx.listener(Self::handle_diff_new_terminal_tab))
@@ -2545,14 +2527,9 @@ impl Render for PaneFlowApp {
             app_content = app_content.child(self.render_broadcast_picker(cx));
         }
 
-        // EP-002 (cli-cockpit): Launch Pad modal.
-        // Mode-gated (review R3): a mode switch while a launch runs in the
-        // background must not paint cockpit chrome over Agents/Diff - the
-        // modal reappears (or finishes) back in Cli mode.
+        // Cockpit overlays stay in Cli mode so a mode switch does not paint
+        // them over Agents or Review.
         let in_cli_mode = matches!(self.mode, paneflow_config::schema::AppMode::Cli);
-        if self.launch_pad.is_some() && in_cli_mode {
-            app_content = app_content.child(self.render_launch_pad(cx));
-        }
         // Issue #339: Pane Overview (same mode gate).
         if self.agent_summary.is_some() && in_cli_mode {
             app_content = app_content.child(self.render_agent_summary(window, cx));
@@ -2931,7 +2908,6 @@ mod render_side_effect_policy_tests {
         // read, write, or call in render has to go through `self.`.
         for forbidden in [
             "self.pending_pane_focus",
-            "self.pending_overlay_restore",
             "self.pending_palette_focus",
             "self.pending_palette_launch",
             "self.prune_stale_split_palette",

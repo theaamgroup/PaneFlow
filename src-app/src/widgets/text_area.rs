@@ -246,10 +246,6 @@ pub struct TextArea {
     last_layout: Option<Arc<Vec<ShapedLineInfo>>>,
     /// Line height the lines in `last_layout` were laid out with.
     last_line_height: Pixels,
-    /// EP-002 (Launch Pad): when `true`, Enter fires `on_submit` even on an
-    /// empty buffer (optional field in a form whose Enter confirms the whole
-    /// form). Default `false` - every other consumer keeps the empty no-op.
-    submit_on_empty: bool,
     /// Inline chip decorations (US-108a). Rendered as paint-pass
     /// overlays in the `TextAreaContent` element; the underlying
     /// `content` string still carries the literal bytes the
@@ -277,15 +273,8 @@ impl TextArea {
             last_bounds: None,
             last_layout: None,
             last_line_height: px(20.),
-            submit_on_empty: false,
             decorations: Vec::new(),
         }
-    }
-
-    /// Opt into firing `on_submit` on an empty buffer (optional form field
-    /// whose Enter confirms the whole form). See [`Self::submit_on_empty`].
-    pub fn set_submit_on_empty(&mut self, value: bool) {
-        self.submit_on_empty = value;
     }
 
     /// Register a chip decoration spanning `byte_range` with display
@@ -950,10 +939,8 @@ impl TextArea {
 
     fn submit(&mut self, _: &TaSubmit, w: &mut Window, cx: &mut Context<Self>) {
         // PRD AC #2: Enter sends. AC #9 (unhappy path): empty submit is a
-        // no-op - unless the consumer opted into empty submits (EP-002
-        // Launch Pad: the prompt is OPTIONAL, so Enter in the empty field
-        // must still confirm the form instead of being swallowed here).
-        if !self.submit_on_empty && self.content.trim().is_empty() {
+        // no-op.
+        if self.content.trim().is_empty() {
             return;
         }
         let Some(cb) = self.on_submit.clone() else {

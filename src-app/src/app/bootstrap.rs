@@ -778,7 +778,6 @@ impl PaneFlowApp {
             tab_menu_open: None,
             pane_menu_open: None,
             pending_pane_focus: None,
-            pending_overlay_restore: None,
             recent_probes: crate::app::workspace_ops::RecentProbes::default(),
             profile_menu_open: None,
             agent_sessions: crate::AgentSessionsState {
@@ -836,9 +835,6 @@ impl PaneFlowApp {
             broadcast_picker_renaming: None,
             broadcast_picker_error: None,
             broadcast_picker_focus: cx.focus_handle(),
-            // EP-002 (cli-cockpit): Launch Pad closed.
-            launch_pad: None,
-            launch_pad_focus: cx.focus_handle(),
             // Issue #339: Pane Overview closed.
             pane_overview: None,
             pane_overview_focus: cx.focus_handle(),
@@ -936,18 +932,14 @@ impl PaneFlowApp {
         crate::recents::warm(cx);
 
         // Issue #518 (upstream df375ba5): warm the installed-agent cache
-        // off-thread so the first launch pad / pane palette frame never
-        // walks PATH on the GPUI thread, and repaint once the walk lands
-        // so rows stop saying "looking" (`installed_binary_scan_pending`).
-        // A launch pad opened during the walk defaulted to row 0
-        // provisionally; settle it onto the first installed agent now.
+        // off-thread so the first pane palette frame never walks PATH on
+        // the GPUI thread, and repaint once the walk lands so rows stop
+        // saying "looking" (`installed_binary_scan_pending`). A launch
+        // confirmed while the walk was pending was queued rather than
+        // waited for; replay it with the real answer.
         cx.spawn(async move |this, cx| {
             smol::unblock(crate::agent_launcher::refresh_installed_binaries).await;
             let _ = this.update(cx, |app, cx| {
-                app.launch_pad_settle_default_agent();
-                // A confirm pressed while the walk was pending was queued
-                // rather than waited for; replay it with the real answer.
-                app.launch_pad_resume_queued_confirm(cx);
                 app.pane_palette_resume_queued_launch(cx);
                 cx.notify();
             });

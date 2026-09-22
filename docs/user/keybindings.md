@@ -63,7 +63,7 @@ load. `+` and `-` both parse as separators.
 
 ## Default binding reference
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 83 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in CLAUDE.md drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 82 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in CLAUDE.md drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 
@@ -87,7 +87,7 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 83 ac
 | `Cmd+Shift+I` | Fleet agent summary (on-device, one line per agent pane) | Global |
 | `Cmd+Shift+G` | Diff view | Global |
 | `Cmd+J` | New terminal tab (diff dock; `secondary-j`) | Global, not Terminal/TextInput |
-| `Cmd+Shift+Space` / `Cmd+Shift+L` | Composer / launch pad | Global |
+| `Cmd+Shift+Space` | Composer | Global |
 | `Cmd+Shift+B` / `Cmd+Shift+M` | Toggle broadcast member / broadcast groups | Global |
 | `Cmd+Shift+O` | Command palette (every context-free action with its live binding; `app/command_palette.rs`, #523; upstream's `Cmd+Shift+P` is Pane Overview here) | Global |
 | `Cmd+Shift+F` | Maximize / restore the Changes dock (`toggle_diff_dock_maximize`; no-op while the dock is not visible) | Global |

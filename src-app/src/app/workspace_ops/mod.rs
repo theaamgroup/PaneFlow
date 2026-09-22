@@ -1398,7 +1398,7 @@ impl PaneFlowApp {
     ///
     /// EP-003: the workspace is born empty - no tab, no pane, no PTY. Opening
     /// a project is a filing gesture, not a request to run a shell; the user
-    /// picks what runs in it from the folder's `+` action or the launch pad.
+    /// picks what runs in it from the folder's `+` action or the new-pane picker.
     #[allow(dead_code)]
     pub(crate) fn create_workspace(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.session_restore.is_some() {

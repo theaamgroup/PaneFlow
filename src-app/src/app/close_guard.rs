@@ -102,7 +102,7 @@ pub(crate) enum CloseTarget {
     Tab { workspace_id: u64, tab_id: u64 },
     Pane {
         /// WEAK, like every sibling overlay that parks a pane target
-        /// (`composer.rs`, `launch_pad.rs`, `pane_palette.rs`): a pending
+        /// (`composer.rs`, `pane_palette.rs`): a pending
         /// close must not be the thing keeping a pane - and therefore its PTY
         /// and its unreaped child - alive. The render stand-down clears a dead
         /// target, but it is render-gated, and an IPC `workspace.close`

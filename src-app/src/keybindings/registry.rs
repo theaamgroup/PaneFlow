@@ -564,14 +564,6 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         description: "Broadcast groups",
         group: ShortcutGroup::Agents,
     },
-    // EP-002 (CLI Cockpit): triage & launch.
-    ActionMeta {
-        name: "open_launch_pad",
-        factory: || Box::new(crate::OpenLaunchPad),
-        context: "",
-        description: "Launch Pad",
-        group: ShortcutGroup::Agents,
-    },
     // Keep the overview with pane navigation so its visible button name is easy to find.
     ActionMeta {
         name: "open_pane_overview",

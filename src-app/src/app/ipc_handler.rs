@@ -863,6 +863,16 @@ fn find_terminal_in_tree(
 /// `target_workspace` permits a split to reuse a record already owned by the
 /// workspace it extends, but every other live, undo, or retiring owner is a
 /// conflict.
+///
+/// No production caller remains (issue #603). The check stays with the
+/// managed-worktree lifecycle.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "creation-time ownership check has no production caller; the lifecycle stays"
+    )
+)]
 fn managed_worktree_path_conflicts(
     path: &std::path::Path,
     target_workspace: Option<usize>,
@@ -1813,6 +1823,11 @@ impl PaneFlowApp {
         Ok(terminal)
     }
 
+    /// Creation-time ownership check. No production caller remains (issue #603).
+    #[allow(
+        dead_code,
+        reason = "creation-time ownership check has no production caller; the lifecycle stays"
+    )]
     pub(crate) fn managed_worktree_conflicts(
         &self,
         path: &std::path::Path,
@@ -6533,7 +6548,7 @@ mod tests {
         let before = leaf_ids(&ws, 0);
 
         // `can_add_pane` is the shared guard every create site consults - the
-        // keyboard split, drop-to-split, the launch pad and workspace templates.
+        // keyboard split, drop-to-split, and workspace templates.
         assert!(!ws.tabs()[0].can_add_pane(), "the saturated tab refuses");
         let extra = new_pane(cx);
         if ws.tabs()[0].can_add_pane() {

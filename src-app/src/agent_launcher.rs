@@ -3,7 +3,7 @@
 //! cmux-derived set: Grok, Amp, Cursor, Gemini, Kiro, Antigravity,
 //! Copilot, CodeBuddy, Factory, Qoder, Openclaw, DeepSeek Harness, plus Muse Code). Both the tab-bar
 //! launcher buttons
-//! (`pane.rs`) and the launch pad iterate this single
+//! (`pane.rs`) and the new-pane picker iterate this single
 //! source of truth so the per-agent visibility gate and the "respect
 //! bypass" contract can never drift between them.
 //!
@@ -262,7 +262,7 @@ impl TerminalAgent {
         }
     }
 
-    /// Whether this launcher is shown in the tab bar / launch pad.
+    /// Whether this launcher is shown in the tab bar and the new-pane picker.
     ///
     /// Tri-state on the `*_button_visible` config key:
     /// - `Some(true)`  - user explicitly enabled it: always shown.
@@ -480,7 +480,7 @@ impl TerminalAgent {
     }
 
     /// Visible variants for the given config, in display order. Drives
-    /// both the launch pad and (via the same gates) the tab bar.
+    /// both the new-pane picker and (via the same gates) the tab bar.
     pub fn visible(config: &PaneFlowConfig) -> Vec<TerminalAgent> {
         TerminalAgent::ALL
             .into_iter()
@@ -810,6 +810,11 @@ fn installed_binaries() -> &'static InstalledBinaries {
 fn installed_binaries_contains(binary: &'static str) -> bool {
     installed_binaries().contains(binary)
 }
+
+/// Shown in place of a "not installed" verdict while the first PATH walk
+/// for agent CLIs is still running (issue #518). The new-pane picker and
+/// the workspace template editor share it.
+pub(crate) const AGENT_SCAN_PENDING_COPY: &str = "Looking for agent CLIs on this machine.";
 
 /// `true` while no PATH walk has published yet, so the UI can say it is
 /// still looking instead of claiming nothing is installed (issue #518).

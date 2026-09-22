@@ -297,7 +297,7 @@ impl PaneFlowApp {
     pub(crate) fn save_session_blocking(&self, cx: &App) -> bool {
         crate::window_state::save();
         // Staged restore has not finished rewriting `session.json`. Returning
-        // true here would let Launch Pad / worktree teardown treat the old
+        // true here would let worktree teardown treat the old
         // file as a durable journal of the in-memory mutation.
         if self.session_restore.is_some() {
             return false;

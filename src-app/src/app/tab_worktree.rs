@@ -118,7 +118,7 @@ impl WorktreeStates {
 /// bound to it would then spawn every pane into a missing directory. One the
 /// retirement journal already names is going now. A workspace's own managed
 /// checkouts are fine: their lifetime belongs to the same workspace.
-/// Prefix matches both ways, like the LaunchPad ownership check,
+/// Prefix matches both ways, like the managed-worktree ownership check,
 /// so a binding cannot sit under or over an owned path either.
 fn binding_refusal(
     path: &std::path::Path,
@@ -914,7 +914,7 @@ mod tests {
     #[test]
     fn a_tab_cannot_bind_to_a_checkout_another_workspace_owns_or_is_retiring() {
         // Issue #347 review, finding 3: the picker bound to any listing entry
-        // holding the branch, including a checkout Launch Pad created for
+        // holding the branch, including a managed checkout owned by
         // another workspace - which is removed when that workspace closes.
         let feat = PathBuf::from("/repo.worktrees/feat-x");
         let owned = vec![(0usize, feat.clone())];

@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn the_menu_never_submits_the_handoff() {
-        // The prefill is the settle-poll path shared with Launch Pad, and no
+        // The prefill is the settle-poll path, and no
         // carriage return or deferred submit is scheduled after it.
         let src = include_str!("sessions_context_menu.rs")
             .split("#[cfg(test)]")

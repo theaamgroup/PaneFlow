@@ -1,7 +1,7 @@
 //! Per-overlay focus origin (issue #584).
 //!
 //! Every overlay that takes the focus (theme picker, broadcast picker,
-//! Launch Pad, Pane Overview, the pane palette, the agent summary)
+//! Pane Overview, the pane palette, the agent summary)
 //! records the pane it was opened from, keyed by the overlay, so that:
 //!
 //! - its own close hands focus back to that pane, not to the first leaf;
@@ -27,7 +27,6 @@ use crate::pane::Pane;
 pub(crate) enum OverlayKind {
     ThemePicker,
     BroadcastPicker,
-    LaunchPad,
     PaneOverview,
     PanePalette,
     AgentSummary,
@@ -122,7 +121,6 @@ impl PaneFlowApp {
         match kind {
             OverlayKind::ThemePicker => self.show_theme_picker,
             OverlayKind::BroadcastPicker => self.broadcast_picker_open,
-            OverlayKind::LaunchPad => self.launch_pad.is_some(),
             OverlayKind::PaneOverview => self.pane_overview.is_some(),
             OverlayKind::PanePalette => self.pane_palette.is_some(),
             OverlayKind::AgentSummary => self.agent_summary.is_some(),
@@ -135,7 +133,6 @@ impl PaneFlowApp {
         [
             OverlayKind::ThemePicker,
             OverlayKind::BroadcastPicker,
-            OverlayKind::LaunchPad,
             OverlayKind::PaneOverview,
             OverlayKind::PanePalette,
             OverlayKind::AgentSummary,
@@ -313,22 +310,22 @@ mod tests {
         let b = make_pane(cx);
         let mut origins = OverlayOrigins::default();
         origins.remember(OverlayKind::BroadcastPicker, Some(b.downgrade()));
-        origins.remember(OverlayKind::LaunchPad, Some(a.downgrade()));
+        origins.remember(OverlayKind::PanePalette, Some(a.downgrade()));
         assert_eq!(origins.outermost(|_| true), Some(b.clone()));
         // Only open overlays count: a stale bottom entry never wins.
         assert_eq!(
-            origins.outermost(|kind| kind == OverlayKind::LaunchPad),
+            origins.outermost(|kind| kind == OverlayKind::PanePalette),
             Some(a.clone())
         );
-        origins.retain_open(|kind| kind == OverlayKind::LaunchPad);
-        assert_eq!(origins.kinds(), vec![OverlayKind::LaunchPad]);
+        origins.retain_open(|kind| kind == OverlayKind::PanePalette);
+        assert_eq!(origins.kinds(), vec![OverlayKind::PanePalette]);
         // Re-opening replaces the kind's own entry and nothing else.
-        origins.remember(OverlayKind::LaunchPad, Some(b.downgrade()));
-        assert_eq!(origins.kinds(), vec![OverlayKind::LaunchPad]);
-        assert_eq!(origins.take(OverlayKind::LaunchPad), Some(b));
+        origins.remember(OverlayKind::PanePalette, Some(b.downgrade()));
+        assert_eq!(origins.kinds(), vec![OverlayKind::PanePalette]);
+        assert_eq!(origins.take(OverlayKind::PanePalette), Some(b));
         // `None` records nothing but still forgets the previous entry.
-        origins.remember(OverlayKind::LaunchPad, Some(a.downgrade()));
-        origins.remember(OverlayKind::LaunchPad, None);
+        origins.remember(OverlayKind::PanePalette, Some(a.downgrade()));
+        origins.remember(OverlayKind::PanePalette, None);
         assert!(origins.kinds().is_empty());
     }
 
@@ -434,24 +431,6 @@ mod tests {
                 "{module}: Escape must restore: `{escape}`"
             );
         }
-        // The Launch Pad's cancel has no `Window` (the prompt field's Escape
-        // is deferred), so it parks the restore in `pending_overlay_restore`
-        // and the window-bearing drain walks the shared chain, placeholder
-        // fallback included.
-        let launch_pad = production(include_str!("launch_pad.rs"));
-        assert!(
-            launch_pad
-                .contains("self.remember_overlay_origin(OverlayKind::LaunchPad, window, cx);")
-        );
-        assert!(
-            launch_pad.contains("self.pending_overlay_restore = Some(OverlayKind::LaunchPad);"),
-            "launch_pad_cancel must return the focus to the origin pane through the drain"
-        );
-        assert!(
-            main.contains("if let Some(kind) = self.pending_overlay_restore.take() {")
-                && main.contains("self.restore_overlay_origin_focus(kind, window, cx);"),
-            "the drain must restore a parked overlay through the shared chain"
-        );
         // The pane palette records both open paths and forgets on every take.
         let pane_palette = production(include_str!("pane_palette.rs"));
         assert!(

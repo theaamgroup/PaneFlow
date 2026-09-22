@@ -1870,7 +1870,7 @@ mod tests {
     /// its PTY and its unreaped child - alive.
     ///
     /// Every sibling overlay that parks a pane target holds it weakly for the
-    /// same reason (`composer.rs`, `launch_pad.rs`, `pane_palette.rs`). The
+    /// same reason (`composer.rs`, `pane_palette.rs`). The
     /// render stand-down that clears a dead target is render-GATED, so an IPC
     /// `workspace.close` against a minimised window can leave the frame that
     /// would run it arbitrarily far away.

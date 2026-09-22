@@ -21,7 +21,6 @@ pub mod diff_sidebar;
 pub mod drag;
 pub mod event_handlers;
 pub mod ipc_handler;
-pub mod launch_pad;
 pub mod notifications;
 pub(crate) mod overlay_origin;
 pub mod pane_overview;
@@ -42,5 +41,3 @@ pub mod theme_picker;
 pub mod workspace_ops;
 
 pub(crate) mod work_review;
-
-pub(crate) mod issue_task;

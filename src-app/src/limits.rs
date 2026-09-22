@@ -10,7 +10,7 @@
 //! would only churn its many import sites for no behavioral gain:
 //!
 //! - **`MAX_PANES`** (32) - [`crate::layout::MAX_PANES`]. Live UI create cap
-//!   (split / drop-to-split / LaunchPad) ↔ read
+//!   (split / drop-to-split) ↔ read
 //!   cap in [`paneflow_config::schema::validate_layout`] (US-011) and at session
 //!   restore (US-009). With the tab hierarchy it bounds a *tab*, not a
 //!   workspace: every create site counts the targeted tab's leaves, and a

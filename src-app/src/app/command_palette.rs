@@ -39,8 +39,8 @@ pub(crate) struct CommandMatch {
 }
 
 /// Every whitespace-separated term of `query` must be a prefix of some word
-/// of `haystack`, in any order; both sides are compared lowercase. `laun`
-/// finds `Launch Pad`; `riz` does not find `Split horizontal`, because the
+/// of `haystack`, in any order; both sides are compared lowercase. `pan`
+/// finds `Pane overview`; `riz` does not find `Split horizontal`, because the
 /// filter is on whole words, not substrings.
 fn matches_query(haystack: &str, query: &str) -> bool {
     let words: Vec<String> = haystack.split_whitespace().map(str::to_lowercase).collect();
@@ -81,16 +81,12 @@ impl PaneFlowApp {
         }
         // Stacking: the chord can arrive while another overlay owns the
         // focus (Pane Overview, the theme picker, the
-        // broadcast picker, pane search, the Launch Pad). None of those is a
+        // broadcast picker, pane search). None of those is a
         // descendant of a pane, so capturing focus now would hand it back to
         // the overlay before dispatch and leave Split / Close pane without a
         // target. Fold each one first, through its own focus-restoring close
         // where it has one, so the capture below sees the pane the overlay
-        // was opened from. A Launch Pad mid-run keeps its modal up (it
-        // refuses Escape too), so the palette does not open over it.
-        if self.launch_pad.as_ref().is_some_and(|lp| lp.running) {
-            return;
-        }
+        // was opened from.
         if self.command_palette_blocked() {
             return;
         }
@@ -102,13 +98,6 @@ impl PaneFlowApp {
         // a read after them always comes up empty.
         let origin_pane = self.outermost_open_overlay_origin();
         let mut folded_without_restore = false;
-        if self.launch_pad.is_some() {
-            // Not `launch_pad_cancel`: that parks a restore in
-            // `pending_overlay_restore`, which would pull the focus off the
-            // palette at the next drain.
-            self.launch_pad_dismiss(cx);
-            folded_without_restore = true;
-        }
         // A split or tab pane palette hands the focus back to its target
         // pane or the element that held it; the picker holding the
         // workspace's only surface refuses to close (issue #522) and the
@@ -164,7 +153,7 @@ impl PaneFlowApp {
         };
         // After a fold the outermost origin comes first: a restoring close
         // has put the focus on its own origin, which for an inner overlay is
-        // an inherited one, and a Launch Pad fold restores nothing. Without a
+        // an inherited one. Without a
         // fold `origin_pane` is `None` and the pane owning the focus leads
         // as before.
         self.command_palette_return_pane = origin_pane
@@ -554,7 +543,7 @@ mod tests {
 
     #[test]
     fn a_query_matches_on_a_prefix_of_a_word() {
-        assert!(matches_query("Launch Pad", "laun"));
+        assert!(matches_query("Pane overview", "pan"));
     }
 
     #[test]
@@ -586,13 +575,13 @@ mod tests {
             entry("split_horizontally", "⌘⇧D", "Split horizontal"),
             entry("terminal_copy", "⌘C", "Copy"),
             entry(OPEN_COMMAND_PALETTE_ACTION, "⌘⇧O", "Command palette"),
-            entry("open_launch_pad", "Unassigned", "Launch Pad"),
+            entry("open_pane_overview", "Unassigned", "Pane overview"),
         ];
         let rows = command_matches(&entries, "");
         let names: Vec<&str> = rows.iter().map(|m| m.action_name).collect();
         assert_eq!(
             names,
-            vec!["open_launch_pad", "split_horizontally"],
+            vec!["open_pane_overview", "split_horizontally"],
             "context-free actions only, sorted by description, never the palette itself"
         );
         assert_eq!(rows[0].shortcut, None, "an Unassigned row carries no chord");
@@ -604,7 +593,7 @@ mod tests {
         let entries = vec![
             entry("split_horizontally", "⌘⇧D", "Split horizontal"),
             entry("split_vertically", "⌘⇧E", "Split vertical"),
-            entry("open_launch_pad", "⌘⇧L", "Launch Pad"),
+            entry("open_composer", "⌘⇧Space", "Open prompt composer"),
         ];
         let rows = command_matches(&entries, "vert split");
         assert_eq!(rows.len(), 1);
@@ -668,9 +657,7 @@ mod tests {
             .next()
             .expect("production half of the palette module");
         for needle in [
-            // Stacking: sibling overlays fold before the capture, and a
-            // mid-run Launch Pad keeps the palette closed.
-            "if self.launch_pad.as_ref().is_some_and(|lp| lp.running) {",
+            // Stacking: sibling overlays fold before the capture.
             // A modal dialog or the Settings surface keeps the palette closed.
             "if self.command_palette_blocked() {",
             "self.settings_section.is_some()",
@@ -679,7 +666,6 @@ mod tests {
             "|| self.system_info_dialog.is_some()",
             ".is_some_and(|p| p.style == crate::app::close_guard::ConfirmStyle::Modal)",
             "|| self.work_review.is_some()",
-            "self.launch_pad_dismiss(cx);",
             // Issue #584: the split pane palette folds like its siblings.
             "self.close_pane_palette(window, cx);",
             "self.close_pane_overview_and_restore_focus(window, cx);",
@@ -722,7 +708,6 @@ mod tests {
             .find("let origin_pane = self.outermost_open_overlay_origin();")
             .expect("the palette reads the outermost overlay origin");
         for closer in [
-            "self.launch_pad_dismiss(cx);",
             "self.close_pane_palette(window, cx);",
             "self.close_pane_overview_and_restore_focus(window, cx);",
             "self.close_theme_picker(cx);",

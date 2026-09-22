@@ -32,7 +32,7 @@ pub(crate) struct ReviewState {
     pub(crate) layout: Option<LayoutTree>,
     pub(crate) saved_layout: Option<LayoutTree>,
     /// Issue #475: weak, like every other transient pane reference in the
-    /// app (`PendingClose`, the pane palette, the composer, the launch pad).
+    /// app (`PendingClose`, the pane palette, the composer).
     /// The read chokepoint `review_active_pane` already treats this as a
     /// reference - it filters by `review_contains_pane` before handing the
     /// pane out - so nothing here should keep a `DiffView` and its watchers
