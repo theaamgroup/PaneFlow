@@ -602,9 +602,10 @@ impl PaneFlowApp {
         crate::startup_trace::on_session_restored(window);
         // Issue #686: `save_session` returns while `session_restore` is set,
         // so a mutation during staged restore never reached disk. The gate
-        // is clear now. Publish the in-memory session, including those
-        // mutations, without waiting for a later user action.
-        self.save_session(cx);
+        // is clear now. Write synchronously: the detached debounce can still
+        // be lost if the process exits before it fires, which is the hole
+        // this finish path exists to close.
+        let _ = self.save_session_blocking(cx);
         cx.notify();
     }
 
@@ -2681,8 +2682,8 @@ mod tests {
             .find("self.session_restore.take()")
             .expect("finish must take the restore gate");
         let save_at = finish
-            .rfind("self.save_session(cx)")
-            .expect("finish must publish the in-memory session");
+            .rfind("self.save_session_blocking(cx)")
+            .expect("finish must publish the in-memory session before returning");
         assert!(
             take_at < save_at,
             "the save must run after session_restore is cleared: {finish}"
