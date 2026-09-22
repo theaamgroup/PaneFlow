@@ -193,7 +193,11 @@ pub(crate) struct Cli<'a> {
 /// the file now holds the expected state. Returns `Some(outcome)` only when
 /// it does; `None` means the caller must run its locked direct edit: the
 /// CLI is unavailable, failed, or exited 0 without producing the expected
-/// file (issue #215).
+/// file (issue #215). On that failed or unverified path the snapshot from
+/// this call is put back first, so the fallback merges the pre-CLI bytes
+/// and does not replace `.bak` with the CLI's rewrite (issue #684). An
+/// unavailable CLI returns before any backup and does not restore an older
+/// `.bak`.
 fn cli_then_verify<T>(
     cli: &Cli<'_>,
     argv: &[&str],
@@ -204,7 +208,9 @@ fn cli_then_verify<T>(
     if !cli.available {
         return Ok(None);
     }
-    io::backup(cli.path)?;
+    // Only this invocation's snapshot is restored. `None` means the file
+    // was absent; it must not be confused with a stale `.bak` on disk.
+    let backup = io::backup(cli.path)?;
     let what: Vec<&str> = argv.iter().copied().take(2).collect();
     let what = format!("`{} {}`", cli.name, what.join(" "));
     let file = cli.file;
@@ -221,7 +227,30 @@ fn cli_then_verify<T>(
             log::warn!("paneflow mcp: {what} failed ({e:#}); falling back to direct {file} edit");
         }
     }
+    restore_pre_cli_snapshot(cli.path, backup.as_deref())?;
     Ok(None)
+}
+
+/// Put the pre-CLI file back so a fallback merge does not read the CLI's rewrite.
+///
+/// `backup` is the [`io::backup`] result from this invocation only. `Some`
+/// copies that snapshot onto `path`. `None` means `path` did not exist, so a
+/// file the CLI created is removed and the fallback starts from absence.
+fn restore_pre_cli_snapshot(path: &Path, backup: Option<&Path>) -> Result<()> {
+    match backup {
+        Some(bak) => {
+            std::fs::copy(bak, path).with_context(|| {
+                format!("restore {} from {} failed", path.display(), bak.display())
+            })?;
+        }
+        None => {
+            if path.exists() {
+                std::fs::remove_file(path)
+                    .with_context(|| format!("remove CLI-created {} failed", path.display()))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn install_outcome(had_prior: bool) -> InstallOutcome {
@@ -923,6 +952,59 @@ mod tests {
         assert_eq!(after["mcpServers"]["other"]["command"], json!("x"));
         assert_eq!(after["theme"], json!("dark"));
         assert_eq!(after["mcpServers"]["paneflow"]["command"], json!("/p"));
+    }
+
+    /// Issue #684: a CLI that exits 0 after dropping sibling keys must not be
+    /// the document the fallback merge reads, and `.bak` must stay the
+    /// pre-CLI bytes even after `write_if_changed_unlocked` rewrites it.
+    #[test]
+    fn fallback_merge_starts_from_the_pre_cli_snapshot() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        let pre_cli = serde_json::to_vec(&json!({
+            "theme": "dark",
+            "mcpServers": { "other": { "command": "keep-me" } }
+        }))
+        .unwrap();
+        std::fs::write(&path, &pre_cli).unwrap();
+
+        let bak = io::backup(&path)
+            .unwrap()
+            .expect("existing file is backed up");
+
+        // A bad CLI drops the sibling and leaves an entry verification rejects.
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "mcpServers": {
+                    "paneflow": {
+                        "command": "/bridge",
+                        "env": { "PANEFLOW_SOCKET_PATH": "/tmp/x.sock" }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        restore_pre_cli_snapshot(&path, Some(&bak)).unwrap();
+        assert_eq!(
+            json_install(
+                &path,
+                "mcpServers",
+                json!({ "command": "/bridge", "args": [] })
+            )
+            .unwrap(),
+            InstallOutcome::Installed
+        );
+
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(after["theme"], json!("dark"));
+        assert_eq!(after["mcpServers"]["other"]["command"], json!("keep-me"));
+        assert_eq!(after["mcpServers"]["paneflow"]["command"], json!("/bridge"));
+        assert!(after["mcpServers"]["paneflow"].get("env").is_none());
+        assert_eq!(std::fs::read(&bak).unwrap(), pre_cli);
     }
 
     #[test]
