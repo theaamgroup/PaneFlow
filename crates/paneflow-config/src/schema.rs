@@ -608,36 +608,43 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_show_pr_is_off_by_default_and_tolerant() {
-        // Issue #350: the pull-request marker costs a `gh` subprocess per
-        // branch, so an absent key must leave it off.
+    fn sidebar_show_pr_is_accepted_and_ignored() {
+        // Issue #606: the key stays so an older paneflow.json still loads
+        // (`sidebar_show` has additionalProperties: false in the published
+        // schema). It does not turn any rail line on.
         let cfg: PaneFlowConfig = serde_json::from_str(r#"{}"#).unwrap();
-        assert!(!cfg.sidebar_show.pr_enabled());
+        assert!(cfg.sidebar_show.pr.is_none());
         assert_eq!(cfg.sidebar_show, SidebarShow::default());
+        assert!(cfg.sidebar_show.branch_enabled());
+        assert!(!cfg.sidebar_show.diffstat_enabled());
+        assert!(!cfg.sidebar_show.indent_guide_enabled());
 
         let cfg: PaneFlowConfig =
             serde_json::from_str(r#"{"sidebar_show": {"pr": true}}"#).unwrap();
-        assert!(cfg.sidebar_show.pr_enabled());
+        assert_eq!(cfg.sidebar_show.pr, Some(true));
+        assert!(cfg.sidebar_show.branch_enabled());
+        assert!(!cfg.sidebar_show.diffstat_enabled());
+        assert!(!cfg.sidebar_show.indent_guide_enabled());
 
         // An explicit null is the default, not an error.
         let cfg: PaneFlowConfig =
             serde_json::from_str(r#"{"sidebar_show": {"pr": null}}"#).unwrap();
-        assert!(!cfg.sidebar_show.pr_enabled());
+        assert!(cfg.sidebar_show.pr.is_none());
 
         // A malformed field costs that field, never the rest of the file.
         let cfg: PaneFlowConfig =
             serde_json::from_str(r#"{"theme": "One Dark", "sidebar_show": {"pr": "yes"}}"#)
                 .unwrap();
-        assert!(!cfg.sidebar_show.pr_enabled());
+        assert!(cfg.sidebar_show.pr.is_none());
         assert_eq!(cfg.theme.as_deref(), Some("One Dark"));
 
         // A wholly malformed object costs the setting, not the file.
         let cfg: PaneFlowConfig =
             serde_json::from_str(r#"{"theme": "One Dark", "sidebar_show": "detailed"}"#).unwrap();
-        assert!(!cfg.sidebar_show.pr_enabled());
+        assert!(cfg.sidebar_show.pr.is_none());
         assert_eq!(cfg.theme.as_deref(), Some("One Dark"));
 
-        // Round trip: the switch survives serialization under its own key.
+        // Round trip: the leftover key survives serialization under its own name.
         let json = serde_json::to_value(&cfg).unwrap();
         assert_eq!(
             json["sidebar_show"],
@@ -652,19 +659,21 @@ mod tests {
         };
         let back: PaneFlowConfig =
             serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
-        assert!(back.sidebar_show.pr_enabled());
+        assert_eq!(back.sidebar_show.pr, Some(true));
+        assert!(back.sidebar_show.branch_enabled());
+        assert!(!back.sidebar_show.diffstat_enabled());
     }
 
     #[test]
     fn sidebar_show_branch_stays_on_and_the_other_lines_stay_off_by_default() {
         // Issue #349: a 0.2.1 paneflow.json with no `sidebar_show` must render
         // the rail exactly as before - the branch painted, no diffstat, no
-        // indent guide, no PR marker - so absent means `true` for `branch`
-        // alone and `false` for its three siblings.
+        // indent guide. `pr` is not a live line. Absent means `true` for
+        // `branch` alone and `false` for diffstat and the indent guide.
         let cfg: PaneFlowConfig = serde_json::from_str(r#"{}"#).unwrap();
         assert!(cfg.sidebar_show.branch_enabled());
         assert!(!cfg.sidebar_show.diffstat_enabled());
-        assert!(!cfg.sidebar_show.pr_enabled());
+        assert!(cfg.sidebar_show.pr.is_none());
         assert!(!cfg.sidebar_show.indent_guide_enabled());
 
         // An explicit null is the default, not an error, and the defaults of

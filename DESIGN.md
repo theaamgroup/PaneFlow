@@ -570,9 +570,11 @@ entries, an `Open recent` list (11 px `muted` heading, up to eight
 A workspace is a folder row; its tabs are child rows with inline rename, hover
 actions, and reorder by drag. The branch and the diffstat are **meta lines
 beneath** the tab title, not inline in it; a split tab prints one labeled line
-per terminal. `branch` defaults on; `diffstat`, `pr`, and `indent_guide`
-default off, all four toggled from the Customize Sidebar menu's `Show`
-submenu, whose parent also carries `Expand all` and `Collapse all`.
+per terminal. The branch line uses the branch icon. `branch` defaults on;
+`diffstat` and `indent_guide` default off, toggled from the Customize Sidebar
+menu's `Show` submenu, whose parent also carries `Expand all` and `Collapse
+all`. `sidebar_show.pr` is accepted and ignored so an older `paneflow.json`
+still loads; it does not change the icon.
 
 With the indent guide enabled, a tab without an agent badge insets its shell
 22 px (the 14 px folder slot plus the 8 px title gap) and omits that blank
@@ -590,11 +592,9 @@ Names typed by the user take precedence and survive terminal title changes.
 Older saved labels without provenance are treated as manual. Split tabs keep
 their stored name, including when one of their panes is zoomed.
 
-With `sidebar_show.pr` enabled, restored tabs reuse the last known PR marker
-from `session.json` as soon as their checkout branch is available. Session
-answers are immediately stale: startup refreshes them in the background,
-then the normal five-minute cache window applies. Unknown saved states are
-ignored; a restored value never replaces a live lookup result (#494).
+Sidebar rows show the branch icon. Pull-request state is not drawn in the
+sidebar. An older `session.json` may still carry `TabSession.pull_request`;
+it loads and current saves omit it. The session schema stays v2.
 
 Agent status occupies a 48 px slot when an agent needs input, 28 px when a row
 carries more than one agent, and 20 px otherwise, with 11 px glyphs: an amber

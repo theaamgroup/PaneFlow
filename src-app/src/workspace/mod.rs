@@ -666,7 +666,8 @@ impl Workspace {
                 unread: self
                     .agent_completion_notification
                     .is_unread_for(&tab.surface_ids(cx)),
-                // Filled in by `build_session_state`, which owns the PR cache.
+                // Older session.json files may still carry this. Current saves
+                // leave it unset so the key is omitted.
                 pull_request: None,
             })
             .collect()

@@ -394,11 +394,6 @@ impl PaneFlowApp {
                                 if changed && !refreshed_diff {
                                     cx.notify();
                                 }
-                                // Same pass as the git state, and gated on
-                                // the switch: the branches are already
-                                // resolved here, and a lookup only fires once
-                                // its cache entry has aged out (issue #350).
-                                app.refresh_pull_requests(cx);
                             })
                         });
                         if apply.is_err() {
@@ -547,11 +542,6 @@ impl PaneFlowApp {
                             if changed && !refreshed_diff {
                                 cx.notify();
                             }
-                            // Same tick as the git state, and gated on the
-                            // switch: the branches are already resolved here,
-                            // and a lookup only fires once its cache entry
-                            // has aged out (issue #350).
-                            app.refresh_pull_requests(cx);
                         })
                     });
                     if apply.is_err() {
@@ -772,7 +762,6 @@ impl PaneFlowApp {
             workspace_menu_open: None,
             worktree_states: crate::app::tab_worktree::WorktreeStates::default(),
             branch_checkout_pending: None,
-            pr_states: crate::app::pull_request::PrStates::default(),
             sidebar_customize_menu_open: false,
             sidebar_show_submenu_open: false,
             tab_menu_open: None,

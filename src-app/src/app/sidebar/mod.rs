@@ -2364,10 +2364,6 @@ impl PaneFlowApp {
                 continue;
             };
             let branch = &git.branch;
-            let pr = git
-                .repo_root
-                .as_deref()
-                .and_then(|repo_root| self.pull_request_for(repo_root, branch));
             let title = crate::pane::Pane::surface_title(&pane.surface, cx);
             let label = if panes.len() > 1 {
                 format!("{title}: {branch}")
@@ -2399,16 +2395,10 @@ impl PaneFlowApp {
                         svg()
                             .size(px(10.))
                             .flex_none()
-                            .path(match pr {
-                                Some(_) => "icons/git-pull-request.svg",
-                                None => "icons/git-branch-sidebar.svg",
-                            })
+                            .path("icons/git-branch-sidebar.svg")
                             .text_color(
-                                match pr {
-                                    Some(pr) => pr.state.color(ui),
-                                    None => ui.muted,
-                                }
-                                .opacity(sidebar_tab_title_opacity(is_active_workspace)),
+                                ui.muted
+                                    .opacity(sidebar_tab_title_opacity(is_active_workspace)),
                             ),
                     )
                     .child(
@@ -4326,7 +4316,7 @@ mod tests {
     }
 
     #[test]
-    fn branch_labels_belong_to_terminal_rows_and_keep_pr_markers() {
+    fn branch_labels_belong_to_terminal_rows_and_use_the_branch_icon() {
         let production = include_str!("mod.rs").split("#[cfg(test)]").next().unwrap();
         let tab = source_slice(
             production,
@@ -4337,10 +4327,13 @@ mod tests {
         assert!(tab.contains(".terminal_branches"));
         assert!(tab.contains(".get(cwd)"));
         assert!(tab.contains("sidebar_show.branch_enabled()"));
-        assert!(tab.contains("self.pull_request_for(repo_root, branch)"));
-        assert!(tab.contains("icons/git-pull-request.svg"));
         assert!(tab.contains("icons/git-branch-sidebar.svg"));
-        assert!(tab.contains("pr.state.color(ui)"));
+        assert!(
+            !tab.contains("icons/git-pull-request.svg"),
+            "sidebar rows show the branch icon, not a pull-request glyph"
+        );
+        assert!(!tab.contains("pull_request_for"));
+        assert!(!tab.contains("pr.state.color"));
         let meta = source_slice(
             production,
             "fn render_workspace_meta_row(",

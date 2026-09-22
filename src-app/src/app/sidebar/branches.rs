@@ -9,21 +9,15 @@ use crate::PaneFlowApp;
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct TerminalBranch {
     pub branch: String,
-    pub repo_root: Option<std::path::PathBuf>,
 }
 
 fn probe_branches(cwds: HashSet<String>) -> HashMap<String, TerminalBranch> {
     cwds.into_iter()
         .map(|cwd| {
-            let (branch, repo_root) = crate::workspace::find_git_dir(&cwd)
-                .map(|dir| {
-                    (
-                        crate::workspace::parse_head(&dir).0,
-                        crate::workspace::resolve_repo_root(&dir).0,
-                    )
-                })
+            let branch = crate::workspace::find_git_dir(&cwd)
+                .map(|dir| crate::workspace::parse_head(&dir).0)
                 .unwrap_or_default();
-            (cwd, TerminalBranch { branch, repo_root })
+            (cwd, TerminalBranch { branch })
         })
         .collect()
 }
@@ -74,7 +68,6 @@ impl PaneFlowApp {
                             && app.terminal_branches != branches
                         {
                             app.terminal_branches = branches;
-                            app.refresh_pull_requests(cx);
                             cx.notify();
                         }
                     })
@@ -134,8 +127,6 @@ mod tests {
         assert_eq!(branches[&main].branch, "main");
         assert_eq!(branches[&worktree].branch, "feature/one");
         assert_eq!(branches[&plain].branch, "");
-        assert_eq!(branches[&main].repo_root, branches[&worktree].repo_root);
-        assert!(branches[&plain].repo_root.is_none());
         std::fs::write(linked_git.join("HEAD"), "ref: refs/heads/feature/two\n").unwrap();
         let branches = probe_branches(cwds);
         assert_eq!(branches[&main].branch, "main");

@@ -172,15 +172,16 @@ pub struct TabSession {
     /// and `false` is skipped on write.
     #[serde(default, skip_serializing_if = "is_false")]
     pub unread: bool,
-    /// The last known pull request of the tab's branch, drawn at launch and
-    /// corrected in the background. Additive on v2; skipped while `None`.
+    /// Older `session.json` files may still record the tab's last known pull
+    /// request. Current saves leave it unset. Additive on v2, so
+    /// [`SESSION_SCHEMA_VERSION`] does not move; skipped while `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request: Option<PullRequestSession>,
 }
 
-/// A tab's pull request as `session.json` remembers it: the branch it was
-/// looked up for, the number, and GitHub's state word (`open`, `draft`,
-/// `merged`, `closed`).
+/// A tab's pull request as an older `session.json` stored it: the branch it
+/// was looked up for, the number, and the state word (`open`, `draft`,
+/// `merged`, `closed`). Decode still accepts it. Current saves omit the key.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PullRequestSession {
     pub branch: String,
