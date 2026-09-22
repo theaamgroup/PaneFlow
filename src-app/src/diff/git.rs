@@ -373,8 +373,8 @@ pub(crate) fn is_git_worktree(worktree_dir: &Path) -> Result<bool, String> {
 
 fn repository_discovery_command(worktree_dir: &Path) -> std::process::Command {
     let mut cmd = crate::workspace::worktree::git_command();
-    cmd.args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(worktree_dir)
+    crate::workspace::worktree::git_subcommand(&mut cmd, &["rev-parse", "--is-inside-work-tree"]);
+    cmd.current_dir(worktree_dir)
         // Keep the two expected non-repository diagnostics locale-independent.
         .env("LC_ALL", "C")
         .env("LANGUAGE", "C");
@@ -1823,6 +1823,52 @@ fn compute_file_stats_against_within(
 pub(crate) mod tests {
     use super::*;
     use std::sync::{Mutex, Once};
+
+    /// Issue #681: discovery must run real `rev-parse`, not a repo
+    /// `alias.rev-parse` shell command.
+    #[test]
+    fn repository_discovery_ignores_a_shell_alias_for_rev_parse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let marker = tmp.path().join("ALIAS_RAN");
+        let script = tmp.path().join("alias.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf ran >> '{}'\necho false\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let init = crate::workspace::worktree::git_command();
+        let mut init = init;
+        crate::workspace::worktree::git_subcommand(&mut init, &["init"]);
+        init.current_dir(&repo);
+        assert!(init.output().unwrap().status.success(), "git init");
+
+        let alias = format!("!{}", script.display());
+        let mut config = crate::workspace::worktree::git_command();
+        crate::workspace::worktree::git_subcommand(
+            &mut config,
+            &["config", "alias.rev-parse", &alias],
+        );
+        config.current_dir(&repo);
+        assert!(
+            config.output().unwrap().status.success(),
+            "config alias.rev-parse"
+        );
+
+        assert!(is_git_worktree(&repo).unwrap());
+        assert!(
+            !marker.exists(),
+            "alias.rev-parse ran during repository discovery"
+        );
+    }
 
     #[test]
     fn repository_discovery_fails_closed_on_exhausted_budget() {
