@@ -199,7 +199,6 @@ impl PaneFlowApp {
     /// The render root also folds an open palette the frame any of these
     /// appears over it. The next one registers here:
     ///
-    /// - Custom Buttons (`custom_buttons_modal`, priority 8)
     /// - About (`show_about_dialog`, priority 10)
     /// - System Info (`system_info_dialog`, priority 10)
     /// - the modal close-confirm (`pending_close` with `ConfirmStyle::Modal`,
@@ -208,7 +207,6 @@ impl PaneFlowApp {
     /// - Settings (`settings_section`)
     pub(crate) fn command_palette_blocked(&self) -> bool {
         self.settings_section.is_some()
-            || self.custom_buttons_modal.is_some()
             || self.show_about_dialog
             || self.system_info_dialog.is_some()
             || self
@@ -652,7 +650,6 @@ mod tests {
             // A modal dialog or the Settings surface keeps the palette closed.
             "if self.command_palette_blocked() {",
             "self.settings_section.is_some()",
-            "self.custom_buttons_modal.is_some()",
             "|| self.show_about_dialog",
             "|| self.system_info_dialog.is_some()",
             ".is_some_and(|p| p.style == crate::app::close_guard::ConfirmStyle::Modal)",

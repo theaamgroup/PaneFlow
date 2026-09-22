@@ -198,7 +198,7 @@ part of the contract: **1** settings selects · **2** toasts · **3** menus
 (branch, new tab, dock options, Customize Sidebar, palette branch) · **4**
 Composer, the dock layout submenu, the diff feedback flash
 (`diff/view/interaction.rs`) · **6** full-surface overlays · **8**
-Custom Buttons and the Review-with-agent popover · **10** dialogs ·
+the Review-with-agent popover · **10** dialogs ·
 **11** close confirm. A new overlay picks the rung that matches its kind rather
 than inventing one.
 
@@ -214,7 +214,6 @@ explicit priority.
 | Composer | Scrim over the whole pane, panel docked at its bottom | Black scrim at 0.25 on the 20 px squircle; panel on `overlay` with margin 8, padding 8, gap 6, 1 px border, radius 8, `shadow_lg`; header chips 10 px; input max height 180 | `pane.rs:690-732` |
 | Pane Overview | Horizontally centered, top-anchored at 24 (`OVERVIEW_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; 312.5 by 192.5 cards, gap 10, radius 8, grid padding 16 | `app/pane_overview/mod.rs:36-41,486-559` |
 | Broadcast groups | Horizontally centered, top-anchored at 96 | 420 wide, radius 8, black 0.4 scrim | `app/broadcast.rs:432-439` |
-| Custom Buttons | Horizontally centered, top-anchored at 72 | 560 wide, radius 10, black 0.45 scrim | `app/custom_buttons_modal.rs:489-543` |
 | Close confirm | Centered | 360 wide, radius 10, padding 16, gap 10 | `app/close_confirm.rs:922-931` |
 | Menus and selects | Deferred, anchored under the trigger | Squircle 18, list padding 4, item height 28 | `settings/components.rs:482,551,627` |
 | Tooltip | After 800 ms | Squircle 14 on the title bar color with a 1 px `border` at full alpha | `ui_primitives.rs:494,524,539-549` |
@@ -341,7 +340,6 @@ to the surfaces named:
 | `#232323` / `#ffffff` | Settings card fill, keyed on `background.l > 0.5` | Card sits one step above `base` in either lightness |
 | `0x2c2c2c` / `0x8b8b8b` / `0xb9b9b9` | Surface picker ink on dark themes | **Contextual**, `app/diff_dock/surface_picker.rs:49-59` |
 | `0x2d8c4a` / `0x5cff8a` / `0x021608` (and its inset shadow pair) | About dialog CRT credit plate | **Contextual** period piece, `app/about_dialog.rs:187-258` |
-| `0x323232` | Custom Buttons icon picker, selected tile | **Migration**: predates the `UiColors` roles and should move onto one, `app/custom_buttons_modal.rs:895` |
 | `0x89b4facc` on `0x1e1e2e` | Terminal copy-mode `COPY` badge | **Migration**: a leftover Catppuccin pair, `terminal/view.rs:1902-1903` |
 | `0x383838` | Dark terminal panel ground (`codex_panel_background_for_terminal`) | **Migration**: the light arm already uses `subtle`, `terminal/element/mod.rs:230-236` |
 | `0x2fd7f2` | Settings ▸ Terminal, the "uses theme" scheme chip | **Migration**: should be `accent`, `settings/tabs/terminal.rs:593-598` |
@@ -916,7 +914,7 @@ the workspace's sole paneless tab cannot close, so the command palette opens
 over it and hands the keyboard back to it when it closes; the dispatched
 action lands on the pane the outermost folded overlay was opened from; the
 chord is inert while a modal
-dialog or the Settings surface is open, About, System Info, Custom Buttons,
+dialog or the Settings surface is open, About, System Info,
 close confirm, Work Review, Settings, while any of those opened over the
 palette closes it), and upstream's `secondary-shift-p` is
 Pane Overview in this fork. The Workspaces rail's empty state names it beside `Open folder`.
@@ -1018,9 +1016,8 @@ a single default action — System Info is the standing exception, with two
 footer buttons and no default (7.4).
 
 Not every overlay has an opening chord, and the table below is the whole set
-that does. Custom Buttons opens only from the workspace context menu. About,
-System Info, and Check for Updates are menu-bar only (6.1's list of twelve
-unassignable actions). A **new** overlay SHOULD take
+that does. About, System Info, and Check for Updates are menu-bar only
+(6.1's list of twelve unassignable actions). A **new** overlay SHOULD take
 a chord or a menu item, and MUST NOT rely on a surface that has neither.
 
 | Surface | Default |
@@ -1186,7 +1183,7 @@ arrow-navigable.
 This paragraph covers the three origin-tracked overlays, the `OverlayKind`
 variants in `app/overlay_origin.rs`: broadcast picker, Pane Overview, and the
 pane palette. The
-modal dialogs (About, System Info, Custom Buttons, close confirm, Work
+modal dialogs (About, System Info, close confirm, Work
 Review), and the diff branch menu keep their own
 restore paths and are not part of it. Dismissing a tracked overlay (Escape,
 an outside click on its scrim, its toggle chord, or a committed choice)

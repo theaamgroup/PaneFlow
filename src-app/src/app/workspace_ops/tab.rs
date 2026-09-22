@@ -126,8 +126,8 @@ impl PaneFlowApp {
     /// [`crate::workspace::MAX_TABS_PER_WORKSPACE`].
     ///
     /// EP-005: `profile` and `command` are passed in rather than derived from
-    /// an agent, so the preset palette opens a shell, an agent, an agent
-    /// variant or a custom command through one implementation.
+    /// an agent, so the preset palette opens a shell or an agent through one
+    /// implementation.
     pub(crate) fn open_tab_with_surface(
         &mut self,
         ws_idx: usize,
@@ -163,9 +163,8 @@ impl PaneFlowApp {
             self.show_toast("Worktree is still being retired", cx);
             return false;
         }
-        // A preset label reaches the sidebar verbatim, and a custom command's
-        // name is user input: strip CLI decoration (spinners, zero-width
-        // glyphs) the way every other title path does.
+        // A preset label reaches the sidebar verbatim: strip CLI decoration
+        // (spinners, zero-width glyphs) the way every other title path does.
         let title = crate::sidebar_title::clean_sidebar_title(&title).unwrap_or_default();
         let terminal =
             cx.new(|cx| TerminalView::with_cwd_and_profile(ws_id, cwd, None, profile, cx));

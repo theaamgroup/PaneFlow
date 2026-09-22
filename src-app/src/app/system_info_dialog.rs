@@ -163,7 +163,7 @@ impl PaneFlowApp {
         );
 
         // Codex-quiet heading: no divider, no header fill. Hierarchy comes
-        // from type and spacing, the way `custom_buttons_modal` does it.
+        // from type and spacing.
         let header = div()
             .flex()
             .flex_row()

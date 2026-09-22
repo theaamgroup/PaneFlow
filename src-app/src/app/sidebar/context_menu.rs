@@ -34,16 +34,16 @@ fn context_menu_divider(ui: crate::theme::UiColors) -> gpui::Div {
         .bg(menu_divider_color(ui))
 }
 
-/// Fixed rows are pin/unpin, reveal, copy path, manage custom buttons, and
-/// close, plus mute/unmute and an optional Mark as read row. `visible_editor_rows`
-/// is the single Open in editor row (always 1). The divider before Reveal
-/// exists only when that row does.
+/// Fixed rows are pin/unpin, reveal, copy path, mute/unmute, and close,
+/// plus an optional Mark as read row. `visible_editor_rows` is the single
+/// Open in editor row (always 1). The divider before Reveal exists only
+/// when that row does.
 fn workspace_context_menu_counts(
     visible_editor_rows: usize,
     service_rows: usize,
     has_unread: bool,
 ) -> (usize, usize) {
-    let menu_rows = visible_editor_rows + 6 + service_rows + usize::from(has_unread);
+    let menu_rows = visible_editor_rows + 5 + service_rows + usize::from(has_unread);
     let separator_rows = 3 + usize::from(service_rows > 0) + usize::from(visible_editor_rows > 0);
     (menu_rows, separator_rows)
 }
@@ -322,18 +322,6 @@ impl PaneFlowApp {
             ui,
             cx.listener(move |this, _: &ClickEvent, _window, cx| {
                 this.copy_workspace_path(idx, cx);
-                cx.stop_propagation();
-            }),
-        ));
-
-        // Manage Custom Buttons - opens the per-workspace button editor modal.
-        context_menu = context_menu.child(self.render_select_menu_item(
-            "workspace-context-custom-buttons".into(),
-            "Manage Custom Buttons…",
-            None,
-            ui,
-            cx.listener(move |this, _: &ClickEvent, window, cx| {
-                this.open_custom_buttons_modal(idx, window, cx);
                 cx.stop_propagation();
             }),
         ));
@@ -1054,15 +1042,15 @@ mod tests {
 
     #[test]
     fn workspace_menu_geometry_uses_filtered_editor_rows() {
-        assert_eq!(workspace_context_menu_counts(4, 0, false), (10, 4));
-        assert_eq!(workspace_context_menu_counts(2, 0, false), (8, 4));
-        assert_eq!(workspace_context_menu_counts(0, 0, false), (6, 3));
+        assert_eq!(workspace_context_menu_counts(4, 0, false), (9, 4));
+        assert_eq!(workspace_context_menu_counts(2, 0, false), (7, 4));
+        assert_eq!(workspace_context_menu_counts(0, 0, false), (5, 3));
     }
 
     #[test]
     fn workspace_menu_geometry_counts_service_and_editor_dividers_independently() {
-        assert_eq!(workspace_context_menu_counts(4, 2, false), (12, 5));
-        assert_eq!(workspace_context_menu_counts(0, 2, false), (8, 4));
+        assert_eq!(workspace_context_menu_counts(4, 2, false), (11, 5));
+        assert_eq!(workspace_context_menu_counts(0, 2, false), (7, 4));
     }
     #[test]
     fn workspace_notification_menu_routes_are_separate_from_tab_badges() {

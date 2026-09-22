@@ -64,7 +64,7 @@ pub(crate) const MAX_WORKSPACES: usize = 32;
 pub(crate) const MAX_TABS_PER_WORKSPACE: usize = 32;
 
 use gpui::{App, Entity, Window};
-use paneflow_config::schema::{ButtonCommand, LayoutNode, TabSession};
+use paneflow_config::schema::{LayoutNode, TabSession};
 
 use crate::ai_types::AgentSession;
 use crate::layout::LayoutTree;
@@ -229,9 +229,6 @@ pub struct Workspace {
     /// is `TerminalAgent::ALL` binaries (18), unified from the historical
     /// 3-name `AI_PROCESS_NAMES` list.
     pub detected_agents: std::collections::HashSet<String>,
-    /// User-defined New pane palette buttons for this workspace.
-    /// Rendered after the 2 built-in defaults (Claude / Codex).
-    pub custom_buttons: Vec<ButtonCommand>,
     /// Git worktrees Paneflow created for this workspace's panes. Torn
     /// down - clean ones only, branch never deleted - when the workspace
     /// closes; persisted in `session.json` so a crash keeps the ownership
@@ -323,7 +320,6 @@ impl Workspace {
             agent_sessions: std::collections::HashMap::new(),
             agent_completion_notification: AgentCompletionNotification::default(),
             detected_agents: std::collections::HashSet::new(),
-            custom_buttons: Vec::new(),
             managed_worktrees: Vec::new(),
             sidebar_expanded: true,
             muted: false,

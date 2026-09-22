@@ -2,9 +2,8 @@
 //!
 //! One entry point for the moment the user decides *what* to launch. The
 //! picker is a pure view over catalogues that already exist - the default
-//! shell, the agents made visible in Settings -> AI Agent
-//! ([`TerminalAgent::visible`]), and the workspace's custom command buttons
-//! ([`paneflow_config::schema::ButtonCommand`]). Nothing new is written to
+//! shell and the agents made visible in Settings -> AI Agent
+//! ([`TerminalAgent::visible`]). Nothing new is written to
 //! `paneflow.json`: US-015 forbids a `presets` table, and every agent command
 //! comes back from [`TerminalAgent::launch_command`] so the Claude bypass
 //! setting keeps being honored instead of being reimplemented here.
@@ -23,7 +22,7 @@ use gpui::{
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseUpEvent, ParentElement,
     ScrollHandle, SharedString, Styled, WeakEntity, Window, deferred, div, prelude::*, px, svg,
 };
-use paneflow_config::schema::{ButtonCommand, PaneFlowConfig, TerminalSurfaceProfile};
+use paneflow_config::schema::{PaneFlowConfig, TerminalSurfaceProfile};
 
 use crate::PaneFlowApp;
 use crate::agent_launcher::TerminalAgent;
@@ -73,14 +72,13 @@ struct BranchOption {
     needs_checkout: bool,
 }
 
-/// The three catalogues the picker projects (US-015). No fourth source, and
+/// The two catalogues the picker projects (US-015). No third source, and
 /// no persistence of its own.
 #[derive(Debug, Clone)]
 pub(crate) enum PresetSource {
     /// The configured default shell, launched as a plain terminal surface.
     Shell,
     Agent(TerminalAgent),
-    Custom(ButtonCommand),
 }
 
 /// One picker button.
@@ -92,15 +90,12 @@ pub(crate) struct Preset {
 
 /// What identifies a row across rebuilds of the catalogue. The keyboard
 /// cursor is kept by key, not by position (issue #518): the cold PATH walk
-/// inserts agent rows ahead of the custom commands once it publishes, and a
-/// numeric index taken before that frame would then name a different row.
+/// inserts agent rows once it publishes, and a numeric index taken before
+/// that frame would then name a different row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PresetKey {
     Shell,
     Agent(TerminalAgent),
-    /// A custom command by its stable `ButtonCommand::id`, which survives
-    /// renames and reorders.
-    Custom(String),
 }
 
 impl Preset {
@@ -108,7 +103,6 @@ impl Preset {
         match &self.source {
             PresetSource::Shell => PresetKey::Shell,
             PresetSource::Agent(agent) => PresetKey::Agent(*agent),
-            PresetSource::Custom(button) => PresetKey::Custom(button.id.clone()),
         }
     }
 
@@ -116,13 +110,6 @@ impl Preset {
         match &self.source {
             PresetSource::Shell => "icons/terminal.svg".into(),
             PresetSource::Agent(agent) => agent.icon_path().into(),
-            PresetSource::Custom(button) => {
-                if button.icon.is_empty() {
-                    "icons/terminal.svg".into()
-                } else {
-                    SharedString::from(button.icon.clone())
-                }
-            }
         }
     }
 
@@ -149,7 +136,6 @@ impl Preset {
         match &self.source {
             PresetSource::Shell => None,
             PresetSource::Agent(agent) => Some(agent.launch_command(config)),
-            PresetSource::Custom(button) => Some(button.command.clone()),
         }
     }
 
@@ -301,11 +287,14 @@ fn new_tab_checkout_failure_toast(branch: &str, error: &str) -> String {
 }
 
 impl PaneFlowApp {
-    /// Build the picker catalogue for `ws_idx` (US-015): Terminal first, then
-    /// the visible agents in `TerminalAgent::ALL` order, then the workspace's
-    /// custom commands. A workspace without custom commands simply ends after
-    /// the agents - there is no empty section.
+    /// Build the picker catalogue (US-015): Terminal first, then the visible
+    /// agents in `TerminalAgent::ALL` order. `ws_idx` must name a live
+    /// workspace; a gone one yields no rows, so a keypress cannot launch
+    /// into it. The rows themselves do not vary by workspace.
     pub(crate) fn pane_palette_presets(&self, ws_idx: usize) -> Vec<Preset> {
+        if self.workspaces.get(ws_idx).is_none() {
+            return Vec::new();
+        }
         let mut presets = vec![Preset {
             label: "Terminal".to_string(),
             source: PresetSource::Shell,
@@ -326,12 +315,6 @@ impl PaneFlowApp {
                 source: PresetSource::Agent(agent),
             }),
         );
-        if let Some(ws) = self.workspaces.get(ws_idx) {
-            presets.extend(ws.custom_buttons.iter().map(|button| Preset {
-                label: button.name.clone(),
-                source: PresetSource::Custom(button.clone()),
-            }));
-        }
         presets
     }
 
@@ -810,10 +793,9 @@ impl PaneFlowApp {
 
     /// Launch `preset` where the picker stands. The row that was clicked or
     /// confirmed is passed by value, never re-resolved from its painted index:
-    /// the cold PATH walk (issue #518) inserts agent rows ahead of the custom
-    /// commands once it publishes, so an index captured from the pre-scan
-    /// frame would launch a newly inserted agent instead of the custom
-    /// command the user chose.
+    /// the cold PATH walk (issue #518) inserts agent rows once it publishes,
+    /// so an index captured from the pre-scan frame would launch a newly
+    /// inserted agent instead of the shell or agent row the user chose.
     pub(crate) fn pane_palette_launch(
         &mut self,
         preset: Preset,
@@ -1418,34 +1400,29 @@ fn resolve_selected(presets: &[Preset], key: &PresetKey) -> Option<usize> {
 mod tests {
     use super::*;
 
-    /// Issue #518: a custom row highlighted before the cold PATH walk
-    /// publishes must still be the row Enter launches once the walk inserts
-    /// agent rows ahead of it, and a row that vanished resolves to nothing
-    /// rather than to the row that took its index.
+    /// Issue #518: a row highlighted before the cold PATH walk publishes must
+    /// still be the row Enter launches once the walk inserts agent rows, and
+    /// a row that vanished resolves to nothing rather than to the row that
+    /// took its index.
     #[test]
-    fn keyboard_cursor_keeps_the_custom_row_when_the_cold_scan_inserts_agents() {
+    fn keyboard_cursor_keeps_the_row_when_the_cold_scan_inserts_agents() {
         let shell = Preset {
             label: "Terminal".into(),
             source: PresetSource::Shell,
         };
-        let custom = Preset {
-            label: "Serve".into(),
-            source: PresetSource::Custom(ButtonCommand {
-                id: "serve".into(),
-                name: "Serve".into(),
-                command: "npm run dev".into(),
-                ..Default::default()
-            }),
+        let claude = Preset {
+            label: "Claude Code".into(),
+            source: PresetSource::Agent(TerminalAgent::ClaudeCode),
         };
-        let agent = Preset {
+        let codex = Preset {
             label: "Codex".into(),
             source: PresetSource::Agent(TerminalAgent::Codex),
         };
-        let before = vec![shell.clone(), custom.clone()];
-        let key = custom.key();
+        let before = vec![shell.clone(), claude.clone()];
+        let key = claude.key();
         assert_eq!(resolve_selected(&before, &key), Some(1));
 
-        let after = vec![shell.clone(), agent.clone(), custom.clone()];
+        let after = vec![shell.clone(), codex.clone(), claude.clone()];
         assert_eq!(
             resolve_selected(&after, &key),
             Some(2),
@@ -1453,9 +1430,9 @@ mod tests {
         );
         // An agent highlighted while it read `looking` and then dropped by
         // the walk: Enter must be inert, not launch the row at its index.
-        let vanished = agent.key();
+        let vanished = codex.key();
         assert_eq!(
-            resolve_selected(&[shell.clone(), custom.clone()], &vanished),
+            resolve_selected(&[shell.clone(), claude.clone()], &vanished),
             None
         );
         assert_eq!(resolve_selected(&[], &key), None);
@@ -1546,15 +1523,12 @@ mod tests {
         assert!(!palette_holds_last_surface(None, &[]));
     }
 
-    /// Source-text assertion: `close_pane_palette` needs a live `Window`, so
-    /// the guard's position is pinned here. It must run before
-    /// Issue #518: the cold PATH walk inserts agent rows ahead of a
-    /// workspace's custom commands once it publishes, so a launch must carry
-    /// the `Preset` the user saw rather than re-resolve a painted index, and
-    /// the row painter must read the non-blocking snapshot, never the
-    /// confirm's blocking `ensure_launchable`.
+    /// Issue #518: the cold PATH walk inserts agent rows once it publishes,
+    /// so a launch must carry the `Preset` the user saw rather than
+    /// re-resolve a painted index, and the row painter must read the
+    /// non-blocking snapshot, never the confirm's blocking `ensure_launchable`.
     #[test]
-    fn click_keeps_the_custom_row_when_the_cold_scan_inserts_agents() {
+    fn click_keeps_the_row_when_the_cold_scan_inserts_agents() {
         let src = include_str!("pane_palette.rs");
         assert!(
             src.contains("fn pane_palette_launch(&mut self, preset: Preset,"),

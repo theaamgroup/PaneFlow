@@ -178,7 +178,11 @@ impl PaneFlowApp {
                     active_tab: ws.active_tab_idx(),
                     legacy_layout: None,
                     legacy_empty: false,
-                    custom_buttons: ws.custom_buttons.clone(),
+                    // Issue #608: older session.json files may still carry
+                    // `custom_buttons`. The field stays on `WorkspaceSession`
+                    // so those files load. Nothing reads the vec, and an empty
+                    // one is skipped on write. `SESSION_SCHEMA_VERSION` stays.
+                    custom_buttons: Vec::new(),
                     // EP-002 (orchestration-v2): persist worktree ownership so
                     // a crash/restart keeps the teardown + prune record.
                     managed_worktrees: ws
@@ -745,7 +749,6 @@ impl PaneFlowApp {
         let mut workspace =
             Workspace::restored_with_id(ws_id, title.clone(), cwd, tabs, ws_session.active_tab);
 
-        workspace.custom_buttons = ws_session.custom_buttons.clone();
         // Issue #107: restore the sidebar pin. Additive on v2 - an older
         // session has no key and deserializes to `false` (unpinned).
         workspace.pinned = ws_session.pinned;
@@ -1508,8 +1511,8 @@ fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::Sessio
         }
     };
     if let Some(parent) = path.parent() {
-        // Owner-only: session.json stores absolute workspace cwds, tab titles,
-        // and custom-button commands. `mode` only applies to directories this
+        // Owner-only: session.json stores absolute workspace cwds and tab
+        // titles. `mode` only applies to directories this
         // call creates; a pre-existing parent keeps its mode.
         match std::fs::DirBuilder::new()
             .recursive(true)
@@ -2963,8 +2966,8 @@ mod tests {
         assert!(loaded.workspaces.is_empty());
     }
 
-    /// session.json carries absolute workspace cwds, tab titles, and
-    /// custom-button commands, so it must be owner-only on disk: 0600 for
+    /// session.json carries absolute workspace cwds and tab titles, so it
+    /// must be owner-only on disk: 0600 for
     /// the file (also when it replaces a looser pre-existing one) and 0700
     /// for a parent directory this writer had to create.
     #[test]
@@ -3219,7 +3222,6 @@ mod tests {
                 index: 0,
                 active_tab: 0,
                 tabs: Vec::new(),
-                custom_buttons: Vec::new(),
                 sidebar_expanded: true,
                 pinned: false,
                 managed_worktrees: vec![closed_worktree],

@@ -302,6 +302,31 @@ fn leftover_commands_array_still_loads() {
 }
 
 #[test]
+fn leftover_custom_buttons_still_load() {
+    // Issue #608: per-workspace custom buttons were never a paneflow.json
+    // field. An older file that still carries the key must load. Unknown
+    // top-level keys are ignored, the rest of the file is used, and the
+    // retired key does not round-trip. The published schema's
+    // `additionalProperties: false` is an editor aid, not a runtime check.
+    let config = parse_and_validate(
+        r#"{
+            "theme": "Cursor Dark",
+            "custom_buttons": [
+                {
+                    "id": "serve",
+                    "name": "Serve",
+                    "icon": "icons/rocket.svg",
+                    "command": "npm run dev"
+                }
+            ]
+        }"#,
+    );
+    assert_eq!(config.theme.as_deref(), Some("Cursor Dark"));
+    let json = serde_json::to_value(&config).unwrap();
+    assert!(json.get("custom_buttons").is_none(), "{json}");
+}
+
+#[test]
 fn test_leftover_telemetry_key_is_ignored_and_rest_of_config_is_used() {
     // Existing paneflow.json files may still contain a telemetry block
     // after the subsystem was removed. Unknown keys are ignored; the

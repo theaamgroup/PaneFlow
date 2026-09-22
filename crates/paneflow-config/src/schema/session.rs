@@ -236,7 +236,10 @@ pub struct WorkspaceSession {
     /// once the migration has run, so v2 never writes the key.
     #[serde(rename = "empty", default, skip_serializing_if = "is_false")]
     pub legacy_empty: bool,
-    /// User-defined command buttons rendered in this workspace's tab bar.
+    /// Leftover per-workspace command buttons (issue #608). Older
+    /// `session.json` files still decode this key. The app does not render
+    /// or edit the vec, and an empty one is omitted on write. Additive on
+    /// v2: [`SESSION_SCHEMA_VERSION`] must not move for it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_buttons: Vec<ButtonCommand>,
     /// Git worktrees Paneflow created for this workspace
@@ -402,8 +405,9 @@ pub struct ManagedWorktreeDef {
     pub directory_identity: Option<String>,
 }
 
-/// A user-defined command button rendered in a workspace's tab bar.
-/// Clicking the button sends `{command}\r` to the active terminal.
+/// Leftover shape of a per-workspace command button (issue #608).
+/// Still decoded from older `session.json` files. The app does not render
+/// or write these.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ButtonCommand {

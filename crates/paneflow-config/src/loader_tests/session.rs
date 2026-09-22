@@ -689,6 +689,50 @@ fn leftover_expanded_paths_still_load() {
     );
 }
 
+/// Issue #608: a session.json that still lists per-workspace custom buttons
+/// must load. The vec is decoded, siblings survive, and a save that clears
+/// the vec omits the key. `SESSION_SCHEMA_VERSION` stays at 2.
+#[test]
+fn session_custom_buttons_still_load() {
+    let json = r#"{
+        "version": 2,
+        "active_workspace": 0,
+        "workspaces": [{
+            "title": "paneflow",
+            "cwd": "/home/user/dev/paneflow",
+            "pinned": true,
+            "custom_buttons": [{
+                "id": "serve",
+                "name": "Serve",
+                "icon": "icons/rocket.svg",
+                "command": "npm run dev"
+            }]
+        }]
+    }"#;
+    let state: SessionState = serde_json::from_str(json).unwrap();
+    assert_eq!(state.version, SESSION_SCHEMA_VERSION);
+    assert_eq!(state.workspaces.len(), 1);
+    assert_eq!(state.workspaces[0].title, "paneflow");
+    assert_eq!(state.workspaces[0].cwd, "/home/user/dev/paneflow");
+    assert!(state.workspaces[0].pinned);
+    assert_eq!(state.workspaces[0].custom_buttons.len(), 1);
+    assert_eq!(state.workspaces[0].custom_buttons[0].id, "serve");
+    assert_eq!(state.workspaces[0].custom_buttons[0].name, "Serve");
+    assert_eq!(
+        state.workspaces[0].custom_buttons[0].icon,
+        "icons/rocket.svg"
+    );
+    assert_eq!(state.workspaces[0].custom_buttons[0].command, "npm run dev");
+
+    let mut cleared = state;
+    cleared.workspaces[0].custom_buttons.clear();
+    let written = serde_json::to_value(&cleared).unwrap();
+    assert!(
+        written["workspaces"][0].get("custom_buttons").is_none(),
+        "{written}"
+    );
+}
+
 #[test]
 fn workspace_pinned_defaults_to_false_when_the_key_is_absent() {
     // A session.json written before the field existed.
