@@ -172,7 +172,8 @@ pub fn load_login_shell_env() {
     match extract_path(&buf, MARKER.as_bytes()) {
         Some(path) if !captured_path_has_system_bin(&path) => {
             log::warn!(
-                "login-shell env: PATH captured from {capture_shell:?} lacks /usr/bin and /bin ({path:?}); keeping the inherited PATH"
+                "login-shell env: PATH captured from {capture_shell:?} lacks /usr/bin and /bin ({} bytes); keeping the inherited PATH",
+                path.len()
             );
         }
         Some(path) if !path.is_empty() => {
