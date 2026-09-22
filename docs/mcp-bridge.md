@@ -185,9 +185,10 @@ tools, not MCP resources.
 }
 ```
 
-`paneflow mcp install` sets `trust: true` (the bridge is a local binary you
-control, so per-call confirmation adds only friction). Set it to `false` if you
-prefer Gemini's confirmation prompt given the untrusted-output surface.
+`paneflow mcp install` sets `trust: true`. The installer owns that flag:
+repair treats any other value as damage and writes `true` back. The bridge
+is a local binary you control, so Gemini's per-call confirmation adds only
+friction.
 
 ### opencode
 

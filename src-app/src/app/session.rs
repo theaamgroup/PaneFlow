@@ -600,6 +600,12 @@ impl PaneFlowApp {
         self.resume_pending_worktree_teardowns(cx);
         self.focus_restored_session(window, cx);
         crate::startup_trace::on_session_restored(window);
+        // Issue #686: `save_session` returns while `session_restore` is set,
+        // so a mutation during staged restore never reached disk. The gate
+        // is clear now. Write synchronously: the detached debounce can still
+        // be lost if the process exits before it fires, which is the hole
+        // this finish path exists to close.
+        let _ = self.save_session_blocking(cx);
         cx.notify();
     }
 
@@ -2658,6 +2664,38 @@ mod tests {
             save_seq.load(SeqCst),
             deferred,
             "deferred write must be skipped after a quit-time bump"
+        );
+    }
+
+    /// Issue #686: a mutation while staged restore is in progress is refused
+    /// by `save_session`, and `finish_session_restore` used to clear the gate
+    /// without writing. The finish path must save only after the take.
+    #[test]
+    fn finish_session_restore_writes_the_session_after_clearing_the_gate() {
+        let src = include_str!("session.rs");
+        let finish = crate::source_probe::source_slice(
+            src,
+            "fn finish_session_restore(",
+            "fn apply_restored_diff_mode(",
+        );
+        let take_at = finish
+            .find("self.session_restore.take()")
+            .expect("finish must take the restore gate");
+        let save_at = finish
+            .rfind("self.save_session_blocking(cx)")
+            .expect("finish must publish the in-memory session before returning");
+        assert!(
+            take_at < save_at,
+            "the save must run after session_restore is cleared: {finish}"
+        );
+        let save = crate::source_probe::source_slice(
+            src,
+            "pub(crate) fn save_session(",
+            "pub(crate) fn save_session_blocking(",
+        );
+        assert!(
+            save.contains("if self.session_restore.is_some()"),
+            "a save during staged restore must still not publish session.json: {save}"
         );
     }
 
