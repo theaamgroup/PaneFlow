@@ -182,7 +182,9 @@ pub struct PaneFlowConfig {
     /// External editor for terminal file links and the workspace Open in editor
     /// action. An explicit command takes precedence over `$VISUAL` and
     /// `$EDITOR`; a failed file-link launch falls through to those variables,
-    /// CLI probes, then the macOS file handler.
+    /// the GUI CLI probes, then the macOS file handler. Terminal editors
+    /// (`hx`, `nvim`, `vim`, `emacs`) are not launched from that detached
+    /// fallback; set this value, `$VISUAL`, or `$EDITOR` to use one.
     /// `auto` (or an absent value) starts with the environment variables.
     /// `system` uses only the macOS handler, without a line/column target.
     /// Commands may include quoted paths and flags; no shell is invoked.

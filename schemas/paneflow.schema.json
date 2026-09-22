@@ -219,7 +219,7 @@
     },
     "external_editor": {
       "type": ["string", "null"],
-      "description": "Editor command for terminal file links and for opening a workspace in the configured editor, before VISUAL and EDITOR. 'auto' or null tries VISUAL, EDITOR, then code, cursor, zed, subl, code-insiders, windsurf, hx, nvim, vim, emacs, and the OS opener. Failed file-link commands fall through. 'system' uses only the OS opener (no line/column). Commands may include quoted paths and flags; no shell is invoked.",
+      "description": "Editor command for terminal file links and for opening a workspace in the configured editor, before VISUAL and EDITOR. 'auto' or null tries VISUAL, EDITOR, then the GUI CLIs code, cursor, zed, subl, code-insiders, and windsurf, then the macOS handler. Terminal editors (hx, nvim, vim, emacs) are not launched from that detached fallback; set this value, VISUAL, or EDITOR to use one. Failed file-link commands fall through. 'system' uses only the OS opener (no line/column). Commands may include quoted paths and flags; no shell is invoked.",
       "default": "auto"
     },
     "shortcuts": {
