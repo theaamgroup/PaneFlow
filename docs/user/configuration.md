@@ -15,7 +15,7 @@ build does not read the release config. There is no environment variable
 that overrides the config location.
 
 Most keys hot-reload on save. `window_backdrop`
-is read once at startup and need a restart. Invalid JSON at startup logs
+is read once at startup and needs a restart. Invalid JSON at startup logs
 a warning and falls back to defaults; an invalid save during hot reload
 keeps the last valid config.
 
