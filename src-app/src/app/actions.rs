@@ -151,11 +151,7 @@ actions!(
         // workspace and tab, grouped, with a cropped live preview each.
         // Global context: a terminal holds focus nearly all the time, so a
         // scoped binding would be dead exactly when it is wanted.
-        OpenPaneOverview,
-        // Issue #576: fleet agent summary - one line per agent pane saying
-        // what it is doing, generated on-device. Global for the same reason
-        // Pane Overview is: a terminal holds focus nearly all the time.
-        OpenAgentSummary
+        OpenPaneOverview
     ]
 );
 
@@ -169,7 +165,7 @@ mod tests {
     #[test]
     fn claude_md_action_count_matches_the_actions_macro() {
         let declared = actions_macro_entries(include_str!("actions.rs"));
-        assert_eq!(declared, 82, "review action surface is pinned");
+        assert_eq!(declared, 81, "review action surface is pinned");
 
         let claude_md = include_str!("../../../CLAUDE.md");
         for phrase in ["GPUI action types", "actions total"] {

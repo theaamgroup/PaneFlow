@@ -110,20 +110,6 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$FRAMEWORKS_DIR"
 install -m 0755 "$BIN" "$MACOS_DIR/paneflow"
 install -m 0644 "$ICNS_SRC" "$RESOURCES_DIR/PaneFlow.icns"
 
-# Issue #576: the on-device summariser sidecar, built by src-app/build.rs and
-# left beside the release binary. It goes in MacOS/ rather than Resources/ so
-# the app's Developer ID signature and notarization cover it with no separate
-# codesign step. Absence is not fatal: a bundle without it degrades to an
-# explanatory line in the agent summary overlay, and build.rs already warns
-# when swiftc could not produce it.
-SUMMARIZER="$(dirname "$BIN")/paneflow-summarize"
-if [ -f "$SUMMARIZER" ]; then
-  install -m 0755 "$SUMMARIZER" "$MACOS_DIR/paneflow-summarize"
-else
-  printf 'warning: %s not found; agent summaries will be unavailable in this bundle\n' \
-    "$SUMMARIZER" >&2
-fi
-
 # Sparkle is fetched from its pinned official release and checksum-verified by
 # sparkle-dist.sh. `ditto` preserves the framework's version symlinks and
 # executable modes; flattening those breaks both dyld and the code signature.

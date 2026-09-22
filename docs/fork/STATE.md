@@ -18,6 +18,7 @@ benchmark suite are removed (#597). A clicked file path opens in the
 configured external editor. Git diff viewing and Review mode stay. The
 terminal bench and the startup bench are the performance suites that remain.
 The in-app Markdown viewer is removed (#598): a Cmd-clicked `.md` path opens in the external editor, and tree-sitter Markdown highlighting in Changes and Review stays.
+The fleet agent summary (`Cmd+Shift+I`) and its Swift sidecar are removed (#605). Pane overview stays.
 
 **2026-09-18: the 0.7.0 cut.** 36 non-merge commits since `v0.6.1`, a minor
 bump because the release adds surfaces rather than only fixing them: the
@@ -30,14 +31,12 @@ hooked agent launchers - DeepSeek Harness (#527) and Muse Code (#528), both
 off by default. Startup lost the 900 ms splash (#517) and the cold
 installed-agent scan came off the render thread (#518). `MAX_WORKSPACES` went
 20 -> 32 and the create path now reports the cap (#572). Every overlay restores
-focus to the pane it was opened from (#584). #586 is the trap worth
-remembering: release.yml pins Xcode 16.4 for Metal, that SDK predates
-`FoundationModels`, and every shipped sidecar would have answered "This build
-has no Foundation Models support" - `scripts/select-summarizer-sdk.sh` now
-picks the newest installed Xcode whose SDK carries the framework for that one
-`swiftc` call, and `scripts/verify-summarizer-sidecar.sh` fails the run if the
-built sidecar does not weak-link it. Curated notes live in
-`docs/releases/v0.7.0.md`.
+focus to the pane it was opened from (#584). #586 was the sidecar SDK trap
+on that cut: release.yml pinned Xcode 16.4 for Metal, and that SDK predates
+`FoundationModels`, so a sidecar compiled with it would have answered "This
+build has no Foundation Models support". The overlay and sidecar were removed
+later (#605); a release no longer selects, builds, or verifies them. Curated
+notes for the cut live in `docs/releases/v0.7.0.md`.
 
 Pre-flight verification on `main` at `1497db7e` (the commit the bump sits on),
 warm `target/`: `cargo build` exit 0; `cargo test --workspace --no-fail-fast`

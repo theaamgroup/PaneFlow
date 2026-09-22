@@ -1,7 +1,7 @@
 //! Per-overlay focus origin (issue #584).
 //!
 //! Every overlay that takes the focus (broadcast picker, Pane Overview, the
-//! pane palette, the agent summary) records the pane it was opened from,
+//! pane palette) records the pane it was opened from,
 //! keyed by the overlay, so that:
 //!
 //! - its own close hands focus back to that pane, not to the first leaf;
@@ -28,7 +28,6 @@ pub(crate) enum OverlayKind {
     BroadcastPicker,
     PaneOverview,
     PanePalette,
-    AgentSummary,
 }
 
 /// Insertion-ordered origins, outermost first. One entry per overlay kind:
@@ -121,7 +120,6 @@ impl PaneFlowApp {
             OverlayKind::BroadcastPicker => self.broadcast_picker_open,
             OverlayKind::PaneOverview => self.pane_overview.is_some(),
             OverlayKind::PanePalette => self.pane_palette.is_some(),
-            OverlayKind::AgentSummary => self.agent_summary.is_some(),
         }
     }
 
@@ -132,7 +130,6 @@ impl PaneFlowApp {
             OverlayKind::BroadcastPicker,
             OverlayKind::PaneOverview,
             OverlayKind::PanePalette,
-            OverlayKind::AgentSummary,
         ]
         .into_iter()
         .filter(|kind| self.overlay_is_open(*kind))
@@ -332,10 +329,10 @@ mod tests {
         let mut origins = OverlayOrigins::default();
         {
             let gone = make_pane(cx);
-            origins.remember(OverlayKind::AgentSummary, Some(gone.downgrade()));
+            origins.remember(OverlayKind::PaneOverview, Some(gone.downgrade()));
         }
         // The only strong handle is out of scope; the weak one is dead.
-        assert_eq!(origins.take(OverlayKind::AgentSummary), None);
+        assert_eq!(origins.take(OverlayKind::PaneOverview), None);
         assert!(origins.kinds().is_empty());
     }
 
@@ -398,12 +395,6 @@ mod tests {
                 production(include_str!("pane_overview/mod.rs")),
                 "OverlayKind::PaneOverview",
                 "self.close_pane_overview_and_restore_focus(window, cx);",
-            ),
-            (
-                "agent_summary/mod.rs",
-                production(include_str!("agent_summary/mod.rs")),
-                "OverlayKind::AgentSummary",
-                "\"escape\" => self.close_agent_summary_and_restore_focus(window, cx),",
             ),
         ] {
             let remember = format!("self.remember_overlay_origin({kind}, window, cx);");
