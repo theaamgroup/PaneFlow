@@ -40,8 +40,8 @@ const MAX_COMPOSER_TEXT: usize = 64 * 1024;
 /// treats in-envelope newlines as literal input, and a target without
 /// bracketed-paste awareness never sees a trailing CR it could read as a
 /// submit. Oversized drafts are truncated at a char boundary (64 KiB,
-/// IPC parity). Returns `(normalized, was_truncated)`. Shared with the
-/// Launch Pad prompt (EP-002), which feeds the same PTY prefill path.
+/// IPC parity). Returns `(normalized, was_truncated)`. The composer
+/// feeds the same PTY prefill path.
 pub(crate) fn normalize_composer_text(text: &str) -> (String, bool) {
     let mut t = text.replace("\r\n", "\n").replace('\r', "\n");
     while t.ends_with('\n') {

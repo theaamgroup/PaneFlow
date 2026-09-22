@@ -382,11 +382,6 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "open_broadcast_groups",
         context: None,
     },
-    DefaultBinding {
-        key: "secondary-shift-l",
-        action_name: "open_launch_pad",
-        context: None,
-    },
     // Pane Overview is global because a terminal usually owns the focus.
     DefaultBinding {
         key: "secondary-shift-p",

@@ -172,7 +172,7 @@ impl Preset {
             // (`PanePaletteState::launch_queued`) and replayed by the boot
             // warm's completion, so the Enter is not dropped either.
             PresetSource::Agent(_) if self.awaits_scan() => {
-                Err(crate::app::launch_pad::AGENT_SCAN_PENDING_COPY.to_string())
+                Err(crate::agent_launcher::AGENT_SCAN_PENDING_COPY.to_string())
             }
             PresetSource::Agent(agent) if !agent.is_installed() => Err(format!(
                 "{} is not installed - install its CLI, or hide it in Settings > AI Agent",
@@ -1609,6 +1609,42 @@ mod tests {
         assert!(
             looks.contains("agent.is_installed()") && !looks.contains("is_installed_now"),
             "looks_launchable never blocks: {looks}"
+        );
+    }
+
+    /// Issue #518: confirm must not wait for the first PATH walk on the GPUI
+    /// thread, and an Enter during the walk is queued for the boot warm.
+    #[test]
+    fn confirm_does_not_block_on_the_cold_walk_and_is_replayed_when_it_lands() {
+        let src = include_str!("pane_palette.rs");
+        let launchable = src
+            .split("fn ensure_launchable(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("ensure_launchable exists");
+        assert!(
+            !launchable.contains("is_installed_now()"),
+            "ensure_launchable must not wait on the GPUI thread: {launchable}"
+        );
+        let launch = src
+            .split("pub(crate) fn pane_palette_launch(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("pane_palette_launch exists");
+        assert!(
+            launch.contains("palette.launch_queued = Some(preset.clone());"),
+            "pane_palette_launch queues a launch made during the walk: {launch}"
+        );
+
+        let boot = include_str!("bootstrap.rs");
+        let warm = boot
+            .split("smol::unblock(crate::agent_launcher::refresh_installed_binaries).await;")
+            .nth(1)
+            .and_then(|rest| rest.split(".detach();").next())
+            .expect("the boot warm awaits the first walk");
+        assert!(
+            warm.contains("app.pane_palette_resume_queued_launch(cx);"),
+            "the boot warm's completion must replay queued launches: {warm}"
         );
     }
 

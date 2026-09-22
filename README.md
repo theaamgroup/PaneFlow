@@ -33,8 +33,8 @@ your test runner.
 
 1. Create a workspace with `Cmd+Shift+N` and navigate to your project in
    its terminal.
-2. Start an agent from the terminal, or open the agent launcher with
-   `Cmd+Shift+L`.
+2. Start an agent from the terminal, or open the new-pane picker with
+   `Cmd+Option+T` and choose an agent.
 3. Split the pane with `Cmd+Shift+D` or `Cmd+Shift+E` to run another agent,
    tests, or a development server alongside it.
 4. Press `Cmd+Shift+J` to jump to an agent waiting for input.
@@ -70,11 +70,10 @@ shortcuts in **Settings → Keyboard Shortcuts**.
 | New workspace | `Cmd+Shift+N` |
 | Jump to workspace 1–9 | `Cmd+1`–`Cmd+9` |
 | Next workspace | `Ctrl+Tab` |
-| New tab / close tab | `Cmd+Option+T` / `Cmd+W` |
+| New tab (shell, agent, or command) / close tab | `Cmd+Option+T` / `Cmd+W` |
 | Split horizontally / vertically | `Cmd+Shift+D` / `Cmd+Shift+E` |
 | Close pane | `Cmd+Shift+W` |
 | Move focus between panes | `Option+Arrow` |
-| Launch an agent | `Cmd+Shift+L` |
 | Jump to next waiting agent | `Cmd+Shift+J` |
 | Open Review | `Cmd+Shift+G` |
 | Show or hide sidebar | `Cmd+Option+B` |

@@ -117,7 +117,7 @@ pub struct FileDiffStat {
 
 /// Map the shared `git worktree list --porcelain` parser into Review
 /// [`Worktree`]s. HEAD-less and bare entries are kept (a `worktree ` line is
-/// enough) so this listing matches Launch Pad / managed teardown.
+/// enough) so this listing matches managed teardown.
 pub fn parse_worktrees_from_str(raw: &str, main_worktree_path: Option<&Path>) -> Vec<Worktree> {
     crate::workspace::worktree::parse_worktree_porcelain(raw)
         .into_iter()
@@ -1813,7 +1813,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             workspace_paths, diff_paths,
-            "Launch Pad and Review must list the same worktrees"
+            "Review and managed teardown must list the same worktrees"
         );
         assert_eq!(
             workspace_paths,

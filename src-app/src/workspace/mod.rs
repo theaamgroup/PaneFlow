@@ -232,8 +232,7 @@ pub struct Workspace {
     /// User-defined New pane palette buttons for this workspace.
     /// Rendered after the 2 built-in defaults (Claude / Codex).
     pub custom_buttons: Vec<ButtonCommand>,
-    /// Git worktrees Paneflow created for this workspace's panes via
-    /// Launch Pad. Torn
+    /// Git worktrees Paneflow created for this workspace's panes. Torn
     /// down - clean ones only, branch never deleted - when the workspace
     /// closes; persisted in `session.json` so a crash keeps the ownership
     /// record. Empty when the workspace owns no managed worktrees.

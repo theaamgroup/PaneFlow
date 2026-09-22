@@ -198,7 +198,7 @@ part of the contract: **1** settings selects · **2** toasts · **3** menus
 (branch, new tab, dock options, Customize Sidebar, palette branch) · **4**
 profile menu, Composer, dock options, the diff feedback flash
 (`diff/view/interaction.rs`) · **6** full-surface overlays · **8**
-Launch Pad, Custom Buttons and the Review-with-agent popover · **10** dialogs ·
+Custom Buttons and the Review-with-agent popover · **10** dialogs ·
 **11** close confirm. A new overlay picks the rung that matches its kind rather
 than inventing one.
 
@@ -209,7 +209,6 @@ explicit priority.
 
 | Overlay | Placement | Shell | Source |
 | --- | --- | --- | --- |
-| Launch Pad | Horizontally centered, **top-anchored at 72**, over a full-window black 0.4 backdrop | Card 520 wide, radius 10; agent list, GitHub issue row, branch field, prompt field, footer hint, one tinted accent button | `app/launch_pad.rs:872-908` |
 | Pane palette | Fills an empty tab, titled `New pane` | A centered 260 px column on a 20 px squircle of the terminal background: 13 px Semibold title, an optional branch row 28 tall, preset rows 34 tall with a 14 px agent mark, gap 2, list capped at 420 tall, inline error at 11 px | `app/pane_palette.rs:36-40,654-782,1021-1059` |
 | Diff dock surface picker | Fills a fresh dock, under a 40 px header band carrying only the dock close button | **Three** cards 122 by 98, gap 12, radius 10, grid padding 16, icon gap 8; the grid wraps rather than fixing a column count | `app/diff_dock/surface_picker.rs:29-39,62-69,99-126` |
 | Composer | Scrim over the whole pane, panel docked at its bottom | Black scrim at 0.25 on the 20 px squircle; panel on `overlay` with margin 8, padding 8, gap 6, 1 px border, radius 8, `shadow_lg`; header chips 10 px; input max height 180 | `pane.rs:690-732` |
@@ -370,8 +369,8 @@ neutral `text` tints.
 | About dialog | 10 | round | 1 px, plus `shadow_lg`; **Migration** |
 | Filter field, settings control, select trigger, toast, composer, drop overlay, drop placeholder, theme mockup inner frame | 8 | round | drop overlay 2 px blue |
 | About close button | 7 | round | none |
-| Toolbar pill, sidebar IPC banner, sidebar hover action button, sidebar branch chip, launch pad field, title bar menu trigger, dock tab close slot | 6 | round | IPC banner 1 px `border` |
-| Title bar sidebar toggle, launch pad primary button | 5 | round | none |
+| Toolbar pill, sidebar IPC banner, sidebar hover action button, sidebar branch chip, title bar menu trigger, dock tab close slot | 6 | round | IPC banner 1 px `border` |
+| Title bar sidebar toggle | 5 | round | none |
 | Icon button, composer chip, sidebar context menu row | 4 | round | none |
 | Scrollbar thumb, header chip, filter clear | 3 | round | none |
 
@@ -875,21 +874,7 @@ Tooltips are squircle 14 on the title bar color, padding 8 by 6, small text,
 shown after 800 ms through `delayed_tooltip`. Their border is `border` at
 **full** alpha, unlike the menu's 0.6.
 
-### 5.7 Launch Pad, Composer, palette
-
-**Launch Pad** is 520 wide at radius 10, horizontally centered but anchored
-72 px from the top over a full-window black 0.4 backdrop. It stacks an `Agent`
-list (max height 180, radius 6, 13 px marks, 12 px rows, disabled rows marked
-`not installed` at 10 px - or `looking` while the first PATH walk for agent
-CLIs is still running, with `Looking for agent CLIs on this machine.` as an
-11 px `muted` line under the list), a fork-only GitHub issue row with a `Load issue`
-button, a `New branch` field, an optional `Prompt` field (max height 140), the
-footer hint `Enter: load or create · Tab: fields · Esc: cancel`, and a confirm
-button whose label is tri-state: `Create worktree + launch`, `Creating…`,
-`Loading issue…`. That button is **tinted, not filled** — `accent` at 0.15
-behind `accent` text. Tab cycles the three text fields; the agent list is
-mouse-driven; Escape and outside clicks are refused while a worktree run is in
-flight.
+### 5.7 Composer, palette
 
 **The Composer** dims the whole pane under a 0.25 black scrim and docks a
 bordered panel on `overlay` at the bottom: a `Composer` label at 11 px Medium,
@@ -928,8 +913,8 @@ It never lists itself, opening it folds any other open overlay first (the
 pane palette included, except the §5.7 last-surface case: a pane palette on
 the workspace's sole paneless tab cannot close, so the command palette opens
 over it and hands the keyboard back to it when it closes; the dispatched
-action lands on the pane the outermost folded overlay was opened from; a
-Launch Pad mid-run keeps it closed, and the chord is inert while a modal
+action lands on the pane the outermost folded overlay was opened from; the
+chord is inert while a modal
 dialog or the Settings surface is open, About, System Info, Custom Buttons,
 close confirm, Work Review, Settings, while any of those opened over the
 palette closes it), and upstream's `secondary-shift-p` is
@@ -1093,7 +1078,7 @@ a chord or a menu item, and MUST NOT rely on a surface that has neither.
 | Primary sidebar | `secondary-alt-b` |
 | Maximize / restore the Changes dock | `secondary-shift-f` |
 | New terminal tab (dock) | `secondary-j` |
-| Composer, Launch Pad | `secondary-shift-space`, `secondary-shift-l` |
+| Composer | `secondary-shift-space` |
 | Command palette | `secondary-shift-o` |
 | Jump to next waiting agent | `secondary-shift-j` |
 | Broadcast groups, toggle member | `secondary-shift-m`, `secondary-shift-b` |
@@ -1224,10 +1209,8 @@ row washes carry no floor today.
 ### 7.4 Keyboard-operable surfaces
 
 These answer arrows, Enter, and Escape in full: Pane Overview
-(two-dimensional), sessions rail, theme picker, pane palette, work review, and broadcast groups. Launch
-Pad, the diff branch menu, close confirm, and About answer Escape and Enter
-only; Launch Pad additionally cycles its text fields with Tab, and its agent
-list is mouse-driven by design. **System Info is Escape-only** — it carries
+(two-dimensional), sessions rail, theme picker, pane palette, work review, and broadcast groups. The diff branch menu, close confirm, and About answer Escape and Enter
+only. **System Info is Escape-only** — it carries
 two footer buttons, Close and Copy, and neither is the default, so Enter is
 deliberately ignored. The pane palette's one exception is the last-surface case
 in §5.7: on a workspace's sole paneless tab Escape does nothing, because there is
@@ -1237,8 +1220,8 @@ A new overlay MUST at minimum dismiss on Escape, and MUST confirm on Enter
 when it has a single default action. A new list surface SHOULD be
 arrow-navigable.
 
-This paragraph covers the six origin-tracked overlays, the `OverlayKind`
-variants in `app/overlay_origin.rs`: theme picker, broadcast picker, Launch Pad, Pane Overview, the pane palette, and
+This paragraph covers the five origin-tracked overlays, the `OverlayKind`
+variants in `app/overlay_origin.rs`: theme picker, broadcast picker, Pane Overview, the pane palette, and
 the agent summary. The
 modal dialogs (About, System Info, Custom Buttons, close confirm, Work
 Review), and the diff branch menu keep their own
@@ -1250,8 +1233,7 @@ Each tracked overlay keeps its own origin: one opened over another inherits the 
 overlay's origin, and closing the inner one leaves the outer one's in place,
 so the focus lands on the same pane whichever closes last. An activation that
 teleports (a Pane Overview card)
-lands on its target instead, and a Launch Pad run lands on the pane it
-created. A new cockpit overlay of this kind (a focus-taking surface over the
+lands on its target instead. A new cockpit overlay of this kind (a focus-taking surface over the
 pane grid) MUST add an `OverlayKind`, record its origin before it takes the
 focus, and restore through it.
 
@@ -1325,8 +1307,7 @@ review would raise anywhere.
   content, not the chips from each other.
 - Identity pills, badges, or logos in the pane header. The sidebar owns
   identity.
-- Accent fills on anything larger than a button — and the Launch Pad's primary
-  button is *tinted*, not filled, so it is the ceiling in both senses.
+- Accent fills on anything larger than a button.
 - Hue in a neutral. If a gray reads warm or cool, it is a bug unless the preset
   is Claude, whose paper and graphite are the identity.
 - A new radius, a new text size, or a new hover color. Pick from 4.4, 4.6, 4.3.

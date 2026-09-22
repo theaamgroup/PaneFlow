@@ -32,7 +32,7 @@ struct AgentToggleRow {
 
 /// Settings-only order. This deliberately differs from the frozen launcher
 /// order in [`TerminalAgent::ALL`]: Grok sits directly after Codex here, while
-/// tab bars, Launch Pad, and status surfaces retain their established order.
+/// tab bars and status surfaces retain their established order.
 const SETTINGS_AGENT_ORDER: &[AgentToggleRow] = &[
     AgentToggleRow {
         id: "row-claude-visible",

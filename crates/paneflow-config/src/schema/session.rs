@@ -238,7 +238,7 @@ pub struct WorkspaceSession {
     /// User-defined command buttons rendered in this workspace's tab bar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_buttons: Vec<ButtonCommand>,
-    /// Git worktrees Paneflow created for this workspace via Launch Pad
+    /// Git worktrees Paneflow created for this workspace
     /// (EP-002, prd-orchestration-v2). Persisted so a crash/restart keeps the
     /// ownership record (teardown at close, `git worktree prune` at startup).
     /// Additive and optional.

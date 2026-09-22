@@ -138,9 +138,7 @@ actions!(
         OpenComposer,
         ToggleBroadcastMember,
         OpenBroadcastGroups,
-        // Launch Pad opens a worktree, split, agent and prompt in one modal.
         ToggleDiffDockMaximize,
-        OpenLaunchPad,
         // The diff dock's `+` menu advertises Ctrl+J on its Terminal row.
         // No-op unless the dock is open, and scoped away from terminals and
         // text widgets so a shell keeps its own Ctrl+J (LF).
@@ -171,7 +169,7 @@ mod tests {
     #[test]
     fn claude_md_action_count_matches_the_actions_macro() {
         let declared = actions_macro_entries(include_str!("actions.rs"));
-        assert_eq!(declared, 83, "review action surface is pinned");
+        assert_eq!(declared, 82, "review action surface is pinned");
 
         let claude_md = include_str!("../../../CLAUDE.md");
         for phrase in ["GPUI action types", "actions total"] {

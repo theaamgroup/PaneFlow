@@ -85,8 +85,8 @@ copy, diff navigation) are not listed, and the palette never lists itself.
 Opening it over another overlay folds that overlay first, and the action lands
 on the pane you were in before it opened. The one exception is a New pane
 picker on a workspace's only tab: it has nowhere to fold to, so the palette
-opens over it. Dismissing Pane Overview, the theme or
-broadcast picker or the Launch Pad also returns you to the pane
+opens over it. Dismissing Pane Overview or the theme or
+broadcast picker also returns you to the pane
 you opened it from.
 With no workspace open, the sidebar's empty state also carries a
 **Command palette** row.
@@ -95,14 +95,6 @@ With no workspace open, the sidebar's empty state also carries a
 
 Clone a repository in a terminal with `gh repo clone OWNER/REPO` or
 `git clone URL`, then open its folder as a workspace.
-
-## Start a task from an issue
-
-In the agent Launch Pad (`Cmd+Shift+L`), enter a GitHub issue number or HTTPS
-issue URL and choose **Load issue**. PaneFlow fills a suggested branch name
-and an editable task prompt. Review those fields and choose your agent before
-creating the worktree. Loading the issue does not launch anything. Issue URLs
-must refer to the open project's repository.
 
 ## Automatic updates
 
@@ -217,9 +209,9 @@ from inside a pane, only that pane's tab takes on the new checkout - the
 sibling tabs keep the branch they were on.
 
 A checkout made from the palette or the tab menu is yours: closing the
-workspace never removes it (`git worktree list` still shows it), unlike
-the managed worktrees the Launch Pad creates, which are
-torn down with their workspace when clean. Remove it with
+workspace never removes it (`git worktree list` still shows it). A managed
+worktree recorded from an earlier session is still torn down with its
+workspace when clean. Remove a palette checkout with
 `git worktree remove` when you are done.
 
 ## Agent chat

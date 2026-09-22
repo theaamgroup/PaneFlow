@@ -1,9 +1,7 @@
 //! Git worktree-per-agent management (EP-002, prd-orchestration-v2).
 //!
-//! Launch Pad creates a git worktree in a sibling directory of the repo,
-//! copies the top-level gitignored `.env*` files, and spawns a pane with the
-//! worktree as its cwd. The app records ownership ([`ManagedWorktree`]).
-//! Closing transfers that
+//! PaneFlow records ownership of the checkouts it created
+//! ([`ManagedWorktree`]). Closing transfers that
 //! ownership to the undo record; retirement happens when the record is evicted
 //! or on final quit, and removes the worktree only IF it is clean.
 //!
@@ -140,6 +138,16 @@ impl WorktreeIdentity {
     }
 }
 
+/// Directory identity for a new managed-worktree record. Teardown compares
+/// through [`WorktreeIdentity::from_path`] directly; this wrapper stays for
+/// the creation path, which has no production caller (issue #603).
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "creation-time identity capture has no production caller; the lifecycle stays"
+    )
+)]
 pub(crate) fn worktree_identity(path: &Path) -> Result<WorktreeIdentity, String> {
     WorktreeIdentity::from_path(path)
 }
@@ -546,7 +554,7 @@ pub(crate) fn pending_managed_worktree_from_persisted_record(
 /// One entry of `git worktree list --porcelain`.
 ///
 /// A `worktree ` line is enough to keep the entry. Bare and other HEAD-less
-/// checkouts are included so Launch Pad collision checks and the Review
+/// checkouts are included so collision checks and the Review
 /// Worktree-scope picker list the same set.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorktreeEntry {
@@ -808,9 +816,8 @@ pub enum BranchCheckout {
 /// Split from [`prepare_branch_checkout`] so the collision rules are testable
 /// without a repository. `Existing` first: git refuses a second worktree on the
 /// same branch, so reusing the one that holds it is the only way selecting an
-/// already-checked-out branch can work at all. The path rules are the Launch
-/// Pad's (`launch_pad_worktree_plan`): the slug directory, or the hashed one
-/// when the slug is already claimed by another branch.
+/// already-checked-out branch can work at all. The path is the slug directory,
+/// or the hashed one when the slug is already claimed by another branch.
 pub fn plan_branch_checkout(
     entries: &[WorktreeEntry],
     repo_root: &Path,
@@ -878,9 +885,8 @@ pub fn prepare_branch_checkout(repo_root: &Path, branch: &str) -> Result<PathBuf
                 ));
             }
             git_worktree_add(repo_root, &path, branch, false)?;
-            // Same courtesy the Launch Pad extends its
-            // worktrees: a checkout without the repository's gitignored
-            // `.env*` cannot run the app it holds. Best-effort by design.
+            // A checkout without the repository's gitignored `.env*` cannot
+            // run the app it holds. Best-effort by design.
             let _ = copy_env_files(repo_root, &path);
             Ok(path)
         }
@@ -912,6 +918,16 @@ fn git_worktree_add(
 /// `git worktree add <path> [-b] <branch>`, then the owner marker that makes
 /// the checkout a [`ManagedWorktree`]. `create_branch` chooses between
 /// branching off HEAD (`-b`) and checking out the existing branch.
+///
+/// No production caller remains (issue #603). Session restore and workspace
+/// retirement still own the records this writes.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "managed checkout creation has no production caller; the lifecycle stays"
+    )
+)]
 pub fn add_worktree(
     repo_root: &Path,
     path: &Path,
@@ -928,6 +944,13 @@ pub fn add_worktree(
     Ok(())
 }
 
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "only called by add_worktree, which has no production caller"
+    )
+)]
 fn add_worktree_marker_failure(marker_error: String, rollback: Result<(), String>) -> String {
     match rollback {
         Ok(()) => marker_error,

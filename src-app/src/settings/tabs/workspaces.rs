@@ -1093,7 +1093,7 @@ impl PaneFlowApp {
         let visible = TerminalAgent::visible(&self.cached_config);
         if visible.is_empty() && scan_pending {
             self.workspace_template_status =
-                Some(crate::app::launch_pad::AGENT_SCAN_PENDING_COPY.to_string());
+                Some(crate::agent_launcher::AGENT_SCAN_PENDING_COPY.to_string());
             cx.notify();
             return;
         }
@@ -1189,7 +1189,7 @@ impl PaneFlowApp {
                 let visible = TerminalAgent::visible(&self.cached_config);
                 if pane.agent.is_none() && visible.is_empty() && scan_pending {
                     self.workspace_template_status =
-                        Some(crate::app::launch_pad::AGENT_SCAN_PENDING_COPY.to_string());
+                        Some(crate::agent_launcher::AGENT_SCAN_PENDING_COPY.to_string());
                     cx.notify();
                     return;
                 }
@@ -1648,7 +1648,7 @@ impl PaneFlowApp {
                     let Some(agent) = TerminalAgent::visible(&self.cached_config).first().copied()
                     else {
                         if scan_pending {
-                            return Err(crate::app::launch_pad::AGENT_SCAN_PENDING_COPY.to_string());
+                            return Err(crate::agent_launcher::AGENT_SCAN_PENDING_COPY.to_string());
                         }
                         return Err("enable at least one AI Agent first".to_string());
                     };
@@ -2477,4 +2477,48 @@ fn template_summary(workspace: &WorkspaceDefinition) -> String {
         .count();
     let shells = panes.len().saturating_sub(agents + commands);
     format!("{agents} agents · {commands} commands · {shells} shells")
+}
+
+/// Issue #518: workspace template edits run on the GPUI thread, so they read
+/// the installed-agent snapshot and refuse with the looking copy while the
+/// first PATH walk is still pending.
+#[cfg(test)]
+mod scan_pending_tests {
+    #[test]
+    fn template_edits_read_the_snapshot_and_refuse_while_the_walk_is_pending() {
+        let settings = include_str!("workspaces.rs");
+        // The needle is split so this test file does not contain it.
+        let blocking_lookup = ["visible", "_now("].concat();
+        assert!(
+            !settings.contains(&blocking_lookup),
+            "Settings click handlers read the snapshot, never the blocking lookup"
+        );
+        for site in [
+            "fn add_workspace_template_pane(",
+            "fn set_workspace_template_pane_kind(",
+            "PaneKind::Agent => {\n                pane.command = None;\n                pane.prompt = (!prompt.is_empty())",
+        ] {
+            let body = settings
+                .split(site)
+                .nth(1)
+                .and_then(|rest| rest.split("\n    }\n").next())
+                .expect("workspace template site exists");
+            assert!(
+                body.contains("installed_binary_scan_pending()")
+                    && body.contains("AGENT_SCAN_PENDING_COPY"),
+                "`{site}` must refuse with the looking copy while the walk is pending: {body}"
+            );
+            let pending_at = body
+                .find("installed_binary_scan_pending()")
+                .expect("checked above");
+            let snapshot_at = body
+                .find("TerminalAgent::visible(")
+                .expect("workspace template site reads the snapshot");
+            assert!(
+                pending_at < snapshot_at,
+                "`{site}` reads the pending flag before the snapshot, or a publish between \
+                 the two locks bypasses the guard: {body}"
+            );
+        }
+    }
 }

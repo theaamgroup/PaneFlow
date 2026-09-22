@@ -196,7 +196,7 @@ pub struct PaneFlowConfig {
     pub external_editor: Option<String>,
     /// When `Some(true)`, the Claude Code terminal launcher adds
     /// `--permission-mode bypassPermissions` to the spawned CLI in the tab bar,
-    /// Launch Pad, and session resume paths.
+    /// the new-pane picker, and session resume paths.
     ///
     /// `Some(false)` or `None` (the default) keeps the per-tool confirmation
     /// prompts enabled.
