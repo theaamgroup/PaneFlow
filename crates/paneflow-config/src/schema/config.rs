@@ -329,9 +329,10 @@ pub struct PaneFlowConfig {
 /// Customize Sidebar menu (issue #349) or by hand.
 ///
 /// The defaults are the rail as it shipped before the menu existed (issue
-/// #349): the branch painted, no diffstat, no pull-request marker, no indent
-/// guide. So a `paneflow.json` without this key renders exactly as it did,
-/// and only `branch` reads an absent value as `true`.
+/// #349): the branch painted, no diffstat, no indent guide. `pr` is a
+/// leftover key, accepted and ignored (issue #606). So a `paneflow.json`
+/// without this key renders exactly as it did, and only `branch` reads an
+/// absent value as `true`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SidebarShow {
@@ -346,10 +347,10 @@ pub struct SidebarShow {
     /// before the switch existed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub diffstat: Option<bool>,
-    /// Mark a branch that already has a pull request: its icon becomes the
-    /// pull-request glyph, in GitHub's color for the request's state. Needs
-    /// the `gh` CLI, and answers for GitHub remotes only. `None` is `false`,
-    /// and while it is off no `gh` process is ever spawned (issue #350).
+    /// Accepted and ignored (issue #606). Older files set this to replace the
+    /// branch icon with a pull-request glyph. The published schema sets
+    /// `additionalProperties: false` on this object, so dropping the key would
+    /// reject those files. The sidebar does not read it.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub pr: Option<bool>,
     /// Draw a hairline under a workspace's folder icon, running down its tab
@@ -368,11 +369,6 @@ impl SidebarShow {
     /// Whether the diffstat is on. Absent means off.
     pub fn diffstat_enabled(&self) -> bool {
         self.diffstat.unwrap_or(false)
-    }
-
-    /// Whether the pull-request marker is on. Absent means off.
-    pub fn pr_enabled(&self) -> bool {
-        self.pr.unwrap_or(false)
     }
 
     /// Whether the rail draws its indent hairline. Absent means off.

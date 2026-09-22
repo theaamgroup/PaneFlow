@@ -1401,10 +1401,6 @@ struct PaneFlowApp {
     /// time: the picker names it while git works, and refuses to launch a pane
     /// that would otherwise start in the checkout being left behind.
     pub(crate) branch_checkout_pending: Option<String>,
-    /// Pull request per `(repository, branch)` the rail shows (issue #350),
-    /// read through `gh` only while `sidebar_show.pr` is on. Refreshed by the
-    /// same ticks that refresh the git state, never from a render.
-    pub(crate) pr_states: crate::app::pull_request::PrStates,
     /// Whether the rail header's Customize Sidebar popover is up (issue #349).
     pub(crate) sidebar_customize_menu_open: bool,
     /// Whether that popover's "Show" submenu is unfolded. Closing the parent

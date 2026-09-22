@@ -172,23 +172,9 @@ impl PaneFlowApp {
                     // folder is a single tab with `layout: null`, which v2
                     // reads as "no pane" - the EP-003 `empty` marker existed
                     // only because v1 could not express that.
-                    tabs: ws
-                        .serialize_tabs_without_scrollback(cx)
-                        .into_iter()
-                        .zip(ws.tabs())
-                        .map(|(mut tab_session, tab)| {
-                            // Issue #489: the tab's last known pull request,
-                            // drawn at launch and corrected in the background.
-                            tab_session.pull_request = self.tab_pull_request(ws, tab).map(|pr| {
-                                paneflow_config::schema::PullRequestSession {
-                                    branch: self.tab_row_branch(ws, tab),
-                                    number: pr.number,
-                                    state: pr.state.wire_str().to_string(),
-                                }
-                            });
-                            tab_session
-                        })
-                        .collect(),
+                    // `pull_request` stays unset. Older session.json files still
+                    // decode it; current saves omit the key.
+                    tabs: ws.serialize_tabs_without_scrollback(cx),
                     active_tab: ws.active_tab_idx(),
                     legacy_layout: None,
                     legacy_empty: false,
@@ -562,7 +548,6 @@ impl PaneFlowApp {
                     &ws_session,
                     &mut self.workspaces,
                     &mut pending.worktree_owners,
-                    &mut self.pr_states,
                     cx,
                 )
             };
@@ -608,7 +593,6 @@ impl PaneFlowApp {
                 cx,
             );
         }
-        self.refresh_pull_requests(cx);
         self.resume_pending_worktree_teardowns(cx);
         self.focus_restored_session(window, cx);
         crate::startup_trace::on_session_restored(window);
@@ -684,7 +668,6 @@ impl PaneFlowApp {
         ws_session: &paneflow_config::schema::WorkspaceSession,
         workspaces: &mut [Workspace],
         worktree_owners: &mut std::collections::HashMap<PathBuf, usize>,
-        pr_states: &mut super::pull_request::PrStates,
         cx: &mut Context<Self>,
     ) -> Workspace {
         let mut cwd = restored_workspace_cwd(&ws_session.cwd);
@@ -710,7 +693,6 @@ impl PaneFlowApp {
             );
         }
         let mut tabs = Vec::new();
-        let mut pull_request_seeds = Vec::new();
         let mut unread_surfaces: Vec<u64> = Vec::new();
         let mut workspace_terminals = 0usize;
         let mut warned_terminal_cap = false;
@@ -748,18 +730,6 @@ impl PaneFlowApp {
                     Self::spawn_pane_from_surfaces(ws_id, surfaces, &spawn_root, cx)
                 })
             });
-            if let Some(pr) = tab_session.pull_request.as_ref()
-                && !pr.branch.is_empty()
-                && let Some(state) = super::pull_request::PrState::from_wire(&pr.state)
-            {
-                pull_request_seeds.push((
-                    pr.branch.clone(),
-                    super::pull_request::PullRequest {
-                        number: pr.number,
-                        state,
-                    },
-                ));
-            }
             tabs.push(
                 Tab::restored(tab_session.title.clone(), root, bound)
                     .with_automatic_title(tab_session.title_is_automatic),
@@ -775,13 +745,6 @@ impl PaneFlowApp {
         let mut workspace =
             Workspace::restored_with_id(ws_id, title.clone(), cwd, tabs, ws_session.active_tab);
 
-        // The repository root is resolved synchronously by the constructor.
-        // Seed before publishing this workspace in the next restore frame (#494).
-        if let Some(repo_root) = workspace.repo_root.as_ref() {
-            for (branch, pr) in pull_request_seeds {
-                pr_states.seed(&repo_root.to_string_lossy(), &branch, pr);
-            }
-        }
         workspace.custom_buttons = ws_session.custom_buttons.clone();
         // Issue #107: restore the sidebar pin. Additive on v2 - an older
         // session has no key and deserializes to `false` (unpinned).
@@ -2022,6 +1985,84 @@ mod tests {
             restored_tab_layout(notes).is_none(),
             "a markdown-only leaf is dropped instead of becoming a terminal"
         );
+    }
+
+    /// Issue #606: an older session.json may still carry `pull_request`, and
+    /// an older paneflow.json may still carry `sidebar_show.pr`. Both load.
+    /// The session schema stays v2. The stored `pr` value is not a live switch.
+    #[test]
+    fn legacy_pull_request_session_and_sidebar_show_pr_still_load() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_path = tmp.path().join("session.json");
+        let config_path = tmp.path().join("paneflow.json");
+        std::fs::write(
+            &session_path,
+            r#"{
+                "version": 2,
+                "active_workspace": 0,
+                "workspaces": [{
+                    "title": "demo",
+                    "cwd": "/tmp/repo",
+                    "tabs": [
+                        {
+                            "title": "work",
+                            "pull_request": {
+                                "branch": "feat/parser",
+                                "number": 46,
+                                "state": "open"
+                            }
+                        },
+                        {
+                            "title": "followup",
+                            "pull_request": {
+                                "branch": "feat/followup",
+                                "number": 47,
+                                "state": "draft"
+                            }
+                        }
+                    ]
+                }]
+            }"#,
+        )
+        .expect("seed session.json");
+        std::fs::write(
+            &config_path,
+            r#"{
+                "theme": "PaneFlow Dark",
+                "sidebar_show": {"pr": true, "branch": false, "diffstat": true}
+            }"#,
+        )
+        .expect("seed paneflow.json");
+
+        let (state, info) = PaneFlowApp::load_session_at(&session_path);
+        assert!(
+            info.is_none(),
+            "a session.json carrying pull_request entries is not corruption"
+        );
+        let state = state.expect("session.json loads");
+        assert_eq!(
+            state.version,
+            paneflow_config::schema::SESSION_SCHEMA_VERSION,
+            "keeping pull_request decodable must not bump the session schema"
+        );
+        assert_eq!(paneflow_config::schema::SESSION_SCHEMA_VERSION, 2);
+        let tabs = &state.workspaces[0].tabs;
+        assert_eq!(tabs.len(), 2);
+        let first = tabs[0].pull_request.as_ref().expect("first entry kept");
+        assert_eq!(first.branch, "feat/parser");
+        assert_eq!(first.number, 46);
+        assert_eq!(first.state, "open");
+        let second = tabs[1].pull_request.as_ref().expect("second entry kept");
+        assert_eq!(second.branch, "feat/followup");
+        assert_eq!(second.number, 47);
+        assert_eq!(second.state, "draft");
+
+        let cfg = paneflow_config::loader::load_config_from_path(&config_path);
+        assert_eq!(cfg.theme.as_deref(), Some("PaneFlow Dark"));
+        assert_eq!(cfg.sidebar_show.pr, Some(true));
+        assert!(!cfg.sidebar_show.branch_enabled());
+        assert!(cfg.sidebar_show.diffstat_enabled());
+        assert!(!cfg.sidebar_show.indent_guide_enabled());
     }
 
     /// A tab at the pane cap only because of a leftover markdown leaf keeps

@@ -9,8 +9,9 @@
 //! The submenu is a set of independent checks rather than a "compact /
 //! detailed" pair, because that is what the menu is: one switch per thing a
 //! row shows. The defaults are the rail before the menu existed - the branch
-//! on, everything else off - which is what a fresh install and a
-//! `paneflow.json` without `sidebar_show` get.
+//! on, diffstat and indent guide off - which is what a fresh install and a
+//! `paneflow.json` without `sidebar_show` get. `sidebar_show.pr` still loads
+//! and is not a switch here.
 //!
 //! Not a Settings entry point: issue #105 keeps every Settings affordance out
 //! of the sidebar, and this menu only writes the `sidebar_show` object and
@@ -75,10 +76,10 @@ impl PaneFlowApp {
     }
 
     /// Flip one of the rail's optional lines and persist the whole object.
-    /// All four keys are written, because [`crate::config_writer`] merges by
+    /// The live keys are written, because [`crate::config_writer`] merges by
     /// top-level key and would otherwise drop the siblings - and because a
     /// `branch` turned off has to land as an explicit `false`, its absent
-    /// value meaning `true` (issue #349).
+    /// value meaning `true` (issue #349). The ignored `pr` key is not written.
     fn toggle_sidebar_show(&mut self, line: SidebarShowLine, cx: &mut Context<Self>) {
         // Hold the menu open across the flip. The popover's `on_mouse_up_out`
         // runs in the capture phase of this very release - the submenu is
@@ -93,7 +94,6 @@ impl PaneFlowApp {
         match line {
             SidebarShowLine::Branch => show.branch = Some(!show.branch_enabled()),
             SidebarShowLine::Diffstat => show.diffstat = Some(!show.diffstat_enabled()),
-            SidebarShowLine::Pr => show.pr = Some(!show.pr_enabled()),
             SidebarShowLine::IndentGuide => {
                 show.indent_guide = Some(!show.indent_guide_enabled());
             }
@@ -101,7 +101,6 @@ impl PaneFlowApp {
         let value = serde_json::json!({
             "branch": show.branch_enabled(),
             "diffstat": show.diffstat_enabled(),
-            "pr": show.pr_enabled(),
             "indent_guide": show.indent_guide_enabled(),
         });
         if !crate::config_writer::save_config_values_checked([("sidebar_show", value)]) {
@@ -111,10 +110,6 @@ impl PaneFlowApp {
         // The file write comes back through the config watcher on a later
         // tick; the switch has to show its effect on this frame.
         self.cached_config.sidebar_show = show;
-        // Read the pull requests now rather than at the next git tick: a
-        // switch whose effect appears half a minute later reads as broken.
-        // A no-op while `pr` is off (issue #350).
-        self.refresh_pull_requests(cx);
         cx.notify();
     }
 
@@ -144,7 +139,6 @@ impl PaneFlowApp {
 enum SidebarShowLine {
     Branch,
     Diffstat,
-    Pr,
     IndentGuide,
 }
 
@@ -318,14 +312,6 @@ fn render_show_submenu(
             cx,
         ))
         .child(render_show_option(
-            "PR",
-            "icons/git-pull-request.svg",
-            SidebarShowLine::Pr,
-            show.pr_enabled(),
-            ui,
-            cx,
-        ))
-        .child(render_show_option(
             "Indent guide",
             "icons/list.svg",
             SidebarShowLine::IndentGuide,
@@ -360,7 +346,6 @@ fn render_show_option(
     let id = match line {
         SidebarShowLine::Branch => "sidebar-show-branch",
         SidebarShowLine::Diffstat => "sidebar-show-diffstat",
-        SidebarShowLine::Pr => "sidebar-show-pr",
         SidebarShowLine::IndentGuide => "sidebar-show-indent-guide",
     };
 
@@ -426,10 +411,10 @@ mod tests {
         );
     }
 
-    /// Every flip writes all four keys: `branch` defaults to `true` when
+    /// Every flip writes the live keys: `branch` defaults to `true` when
     /// absent, so turning it off has to land as an explicit `false`, and the
     /// writer merges by top-level key, so a partial object would drop the
-    /// siblings.
+    /// siblings. `pr` is not a switch and is not written.
     #[test]
     fn every_flip_writes_the_whole_sidebar_show_object() {
         let production = include_str!("customize_menu.rs")
@@ -440,7 +425,6 @@ mod tests {
         for key in [
             "\"branch\": show.branch_enabled(),",
             "\"diffstat\": show.diffstat_enabled(),",
-            "\"pr\": show.pr_enabled(),",
             "\"indent_guide\": show.indent_guide_enabled(),",
         ] {
             assert!(
@@ -448,6 +432,10 @@ mod tests {
                 "toggle_sidebar_show must write `{key}`"
             );
         }
+        assert!(
+            !toggle.contains("\"pr\""),
+            "toggle_sidebar_show must not write the ignored pr key"
+        );
         assert!(
             toggle.contains("save_config_values_checked([(\"sidebar_show\", value)])"),
             "the object is persisted through config_writer's read-modify-write"

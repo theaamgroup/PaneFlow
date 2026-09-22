@@ -24,7 +24,6 @@ pub mod notifications;
 pub(crate) mod overlay_origin;
 pub mod pane_overview;
 pub mod pane_palette;
-pub mod pull_request;
 pub mod review;
 pub mod session;
 pub mod sessions_context_menu;

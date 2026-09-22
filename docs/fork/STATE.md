@@ -586,20 +586,18 @@ where the evidence is:
   `mark_as_read_is_offered_only_to_a_badged_tab_and_clears_it`.
 - **Customize Sidebar** (#349, commit `36ca19ad`;
   `sidebar/customize_menu.rs`). A "Show" submenu over `sidebar_show`
-  (`crates/paneflow-config/src/schema/config.rs::SidebarShow`; defaults
-  `branch` true, `diffstat` / `pr` / `indent_guide` false, so a config with
-  no key renders as before) plus Expand all / Collapse all; every flip
-  writes the whole object through `config_writer`
+  (`crates/paneflow-config/src/schema/config.rs::SidebarShow`; `branch`
+  defaults on, `diffstat` and `indent_guide` default off). `pr` remains in
+  the object and is ignored (#606). Expand all / Collapse all stay; every
+  flip writes the live keys through `config_writer`
   (`every_flip_writes_the_whole_sidebar_show_object`,
   `the_customize_menu_offers_no_settings_affordance`). Per-workspace fold
   state persists as `WorkspaceSession.sidebar_collapsed`.
-- **Pull-request marker** (#350, commit `e7d1a6b6`;
-  `src-app/src/app/pull_request.rs`). `gh pr list --json
-  number,state,isDraft` behind `sidebar_show.pr`, off by default, cached
-  with a TTL, one failed repository blacklisted on its own; `gh` is never
-  spawned while the switch is off
-  (`the_switch_gates_the_lookup_before_gh_is_consulted`,
-  `a_failed_lookup_blacklists_only_that_repository`).
+- **Sidebar pull-request marker removed** (#606). Rows show the branch
+  icon. `sidebar_show.pr` stays accepted because that object's published
+  schema sets `additionalProperties` to false. `TabSession.pull_request`
+  still loads and is not written; `SESSION_SCHEMA_VERSION` stays 2. Pinned
+  by `legacy_pull_request_session_and_sidebar_show_pr_still_load`.
 - **Session schema stays v2** (`SESSION_SCHEMA_VERSION` in
   `crates/paneflow-config/src/schema/session.rs`): `TabSession.worktree`
   and `WorkspaceSession.sidebar_collapsed` are additive, written only when
