@@ -18,7 +18,7 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla, IntoElement,
     KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point, Render, ShapedLine, SharedString, Style, Styled, TextRun, UTF16Selection,
+    Pixels, Point, Render, Role, ShapedLine, SharedString, Style, Styled, TextRun, UTF16Selection,
     UnderlineStyle, Window, actions, div, fill, hsla, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -843,6 +843,12 @@ impl Render for TextInput {
         let selection = hsla(ui.accent.h, ui.accent.s, ui.accent.l, 0.28);
 
         div()
+            // Issue #658: the placeholder is the accessible name. The value is
+            // the contents, including an empty string, not the placeholder again.
+            .id(("text-input", cx.entity_id()))
+            .role(Role::TextInput)
+            .aria_label(self.placeholder.clone())
+            .aria_value(self.content.clone())
             .w_full()
             .key_context("TextInput")
             .track_focus(&self.focus_handle(cx))
@@ -890,6 +896,8 @@ impl Focusable for TextInput {
 
 #[cfg(test)]
 mod tests {
+    use gpui::AppContext;
+
     use super::TextInput;
 
     #[test]
@@ -941,6 +949,56 @@ mod tests {
         assert_eq!(
             TextInput::previous_word_boundary(text, text.len()),
             "héllo ".len()
+        );
+    }
+
+    struct FieldA11y {
+        id: gpui::ElementId,
+        role: Option<gpui::Role>,
+        label: Option<String>,
+        value: Option<String>,
+    }
+
+    fn field_a11y(
+        input: &mut TextInput,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<TextInput>,
+    ) -> FieldA11y {
+        use gpui::{Element, IntoElement, Render};
+
+        let element = Render::render(input, window, cx).into_element();
+        let mut node = gpui::accesskit::Node::new(gpui::accesskit::Role::Unknown);
+        element.write_a11y_info(&mut node);
+        FieldA11y {
+            id: element
+                .id()
+                .expect("text input must expose its own element id"),
+            role: element.a11y_role(),
+            label: node.label().map(str::to_owned),
+            value: node.value().map(str::to_owned),
+        }
+    }
+
+    /// Issue #658: find, Settings search, and shortcut search focus this
+    /// widget. VoiceOver needs a text-field role, the placeholder as the
+    /// name, and the contents as the value (empty, not the placeholder).
+    #[gpui::test]
+    fn text_input_is_a_named_text_field(cx: &mut gpui::TestAppContext) {
+        let (filled, cx) = cx.add_window_view(|_, cx| TextInput::new("query", "Find", cx));
+        let empty = cx.new(|cx| TextInput::new("", "Find", cx));
+
+        let filled = filled.update_in(cx, field_a11y);
+        let empty = empty.update_in(cx, field_a11y);
+
+        assert_eq!(filled.role, Some(gpui::Role::TextInput));
+        assert_eq!(filled.label.as_deref(), Some("Find"));
+        assert_eq!(filled.value.as_deref(), Some("query"));
+        assert_eq!(empty.role, Some(gpui::Role::TextInput));
+        assert_eq!(empty.label.as_deref(), Some("Find"));
+        assert_eq!(empty.value.as_deref(), Some(""));
+        assert_ne!(
+            filled.id, empty.id,
+            "two text inputs must not share an element id"
         );
     }
 }
