@@ -292,6 +292,7 @@ impl PaneFlowApp {
                                     files_changed: built.file_count,
                                     insertions: built.added as usize,
                                     deletions: built.removed as usize,
+                                    ..crate::workspace::GitDiffStats::default()
                                 };
                                 app.apply_git_stats_for_cwd(&cwd, stats);
                                 let reset_snapshot_state =
