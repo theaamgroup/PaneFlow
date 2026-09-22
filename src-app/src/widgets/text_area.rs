@@ -39,8 +39,9 @@ use gpui::{
     ElementInputHandler, EntityInputHandler, FocusHandle, Focusable, Font, GlobalElementId, Hitbox,
     HitboxBehavior, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId, Length,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
-    Render, SharedString, Size, Style, Styled, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
-    WeakEntity, Window, WrappedLine, actions, div, fill, point, prelude::*, px, relative, size,
+    Render, Role, SharedString, Size, Style, Styled, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, WeakEntity, Window, WrappedLine, actions, div, fill, point, prelude::*, px,
+    relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -1129,7 +1130,12 @@ impl Render for TextArea {
         };
 
         div()
-            .id("paneflow-text-area")
+            // Issue #658: one id per area. The placeholder names the field;
+            // the value is the contents, including an empty string.
+            .id(("text-area", cx.entity_id()))
+            .role(Role::TextInput)
+            .aria_label(self.placeholder.clone())
+            .aria_value(self.content.clone())
             .key_context("PaneflowTextArea")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::backspace))
@@ -2446,6 +2452,59 @@ mod tests {
             area.read_with(cx, |area, _cx| area.cursor_offset()),
             "alpha gamma".len(),
             "Option+Right must move to the end of the next word"
+        );
+    }
+
+    struct FieldA11y {
+        id: gpui::ElementId,
+        role: Option<gpui::Role>,
+        label: Option<String>,
+        value: Option<String>,
+    }
+
+    fn field_a11y(
+        area: &mut TextArea,
+        window: &mut Window,
+        cx: &mut Context<TextArea>,
+    ) -> FieldA11y {
+        use gpui::{Element, IntoElement, Render};
+
+        let element = Render::render(area, window, cx).into_element();
+        let mut node = gpui::accesskit::Node::new(gpui::accesskit::Role::Unknown);
+        element.write_a11y_info(&mut node);
+        FieldA11y {
+            id: element
+                .id()
+                .expect("text area must expose its own element id"),
+            role: element.a11y_role(),
+            label: node.label().map(str::to_owned),
+            value: node.value().map(str::to_owned),
+        }
+    }
+
+    /// Issue #658: the Composer prompt must be a named text field, and two
+    /// areas in one window must not share the old global element id.
+    #[gpui::test]
+    fn text_area_is_a_named_text_field(cx: &mut gpui::TestAppContext) {
+        let (filled, cx) = cx.add_window_view(|_, cx| {
+            let mut area = TextArea::new("Message", cx);
+            area.set_value("draft", cx);
+            area
+        });
+        let empty = cx.new(|cx| TextArea::new("Message", cx));
+
+        let filled = filled.update_in(cx, field_a11y);
+        let empty = empty.update_in(cx, field_a11y);
+
+        assert_eq!(filled.role, Some(Role::TextInput));
+        assert_eq!(filled.label.as_deref(), Some("Message"));
+        assert_eq!(filled.value.as_deref(), Some("draft"));
+        assert_eq!(empty.role, Some(Role::TextInput));
+        assert_eq!(empty.label.as_deref(), Some("Message"));
+        assert_eq!(empty.value.as_deref(), Some(""));
+        assert_ne!(
+            filled.id, empty.id,
+            "two text areas must not share an element id"
         );
     }
 }
