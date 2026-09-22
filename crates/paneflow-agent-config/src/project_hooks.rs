@@ -83,6 +83,7 @@ pub fn prune_dead_hook_file(path: &Path) -> Result<bool> {
     })
 }
 
+/// Hook files under `cwd`, its checkout root, and a linked worktree's main checkout.
 fn project_hook_config_paths(cwd: &Path) -> Vec<PathBuf> {
     let root = git_checkout_root(cwd);
     let mut paths = Vec::new();
@@ -103,18 +104,21 @@ fn project_hook_config_paths(cwd: &Path) -> Vec<PathBuf> {
     paths
 }
 
+/// Append the Claude and Codex project hook paths for `directory`.
 fn push_project_hook_files(paths: &mut Vec<PathBuf>, directory: &Path) {
     for relative in PROJECT_HOOK_FILES {
         paths.push(directory.join(relative));
     }
 }
 
+/// Directory from `cwd` upward whose `.git` entry marks the checkout, if any.
 fn git_checkout_root(cwd: &Path) -> Option<PathBuf> {
     cwd.ancestors()
         .find(|ancestor| ancestor.join(".git").exists())
         .map(Path::to_path_buf)
 }
 
+/// Whether `path` itself is a symlink, without following it.
 fn is_symlink(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
 }
@@ -129,6 +133,7 @@ fn hook_program_is_missing(program: &str) -> bool {
     !hook_program_exists(program)
 }
 
+/// Whether `program` names a regular file, or a bare name found on `PATH`.
 fn hook_program_exists(program: &str) -> bool {
     let path = Path::new(program);
     if path.is_file() {
@@ -153,6 +158,7 @@ mod tests {
     use crate::claude_hooks::MANAGED_MARKER;
     use serde_json::json;
 
+    /// Write `value` as pretty JSON, creating parent directories as needed.
     fn write_hooks(path: &Path, value: &Value) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
@@ -160,6 +166,7 @@ mod tests {
         std::fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap();
     }
 
+    /// Parse `path` back into JSON.
     fn read_hooks(path: &Path) -> Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
@@ -247,6 +254,7 @@ mod tests {
         assert!(read_hooks(&outside).get("hooks").is_some());
     }
 
+    /// A command whose binary exists, and a symlinked config, are not rewritten.
     #[test]
     fn a_live_hook_program_and_a_symlink_are_left_alone() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -273,6 +281,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
     }
 
+    /// Invalid JSON is left byte-for-byte alone.
     #[test]
     fn an_unparseable_hook_file_is_not_rewritten() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -346,6 +355,7 @@ mod tests {
         assert_eq!(read_hooks(&worktree_hooks), json!({}));
     }
 
+    /// A quoted path round-trips to the program token and counts as missing.
     #[test]
     fn quoted_missing_programs_count_as_dead() {
         let raw = "/tmp/backup(1)/paneflow-ai-hook";
