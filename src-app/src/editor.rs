@@ -219,8 +219,8 @@ pub(crate) enum WorkspaceEditorLaunch {
 /// The editor `OpenWorkspaceInEditor` launches for a workspace directory.
 ///
 /// Same order as [`open_at_location`]: an explicit `external_editor`, else
-/// `$VISUAL`, else `$EDITOR`, else the first [`FALLBACK_PROBES`] entry
-/// `installed` accepts. Does not spawn. A later spawn failure does not try
+/// `$VISUAL`, else `$EDITOR`, else the first GUI [`FALLBACK_PROBES`] entry
+/// `installed` accepts. Terminal editors are skipped. Does not spawn. A later spawn failure does not try
 /// the next candidate; the workspace path reports that one launch. There is
 /// no per-editor chord; this is the only workspace-open command.
 pub(crate) fn workspace_editor_launch(
@@ -239,14 +239,26 @@ pub(crate) fn workspace_editor_launch(
         return WorkspaceEditorLaunch::Command { bin, args };
     }
     for probe in FALLBACK_PROBES {
-        if installed(probe) {
-            return WorkspaceEditorLaunch::Command {
-                bin: (*probe).to_string(),
-                args: Vec::new(),
-            };
+        if terminal_only_editor(probe) || !installed(probe) {
+            continue;
         }
+        return WorkspaceEditorLaunch::Command {
+            bin: (*probe).to_string(),
+            args: Vec::new(),
+        };
     }
     WorkspaceEditorLaunch::System
+}
+
+/// Vim, Helix, and Emacs need a terminal. A detached GUI launch has none, so
+/// probing them succeeds (`/usr/bin/vim` ships with macOS) and never reaches
+/// the system file handler (issue #698). An explicit `external_editor`,
+/// `$VISUAL`, or `$EDITOR` still launches them.
+fn terminal_only_editor(name: &str) -> bool {
+    matches!(
+        EditorKind::from_binary_name(name),
+        EditorKind::VimFamily | EditorKind::Helix | EditorKind::Emacs
+    )
 }
 
 /// Open `path` in the user's preferred editor at the given location.
@@ -277,8 +289,11 @@ pub fn open_at_location(
         }
     }
 
-    // 2. Fallback probe
+    // 2. Fallback probe. Skip terminal-only editors; they have no TTY here.
     for probe in FALLBACK_PROBES {
+        if terminal_only_editor(probe) {
+            continue;
+        }
         let found = resolve_editor_command(probe);
         if found == PathBuf::from(probe) {
             continue;
@@ -374,14 +389,38 @@ mod tests {
         );
         assert_eq!(
             workspace_editor_launch(None, None, None, |command| command == "hx"),
+            WorkspaceEditorLaunch::System
+        );
+        assert_eq!(
+            workspace_editor_launch(None, None, None, |command| command == "code"),
             WorkspaceEditorLaunch::Command {
-                bin: "hx".into(),
+                bin: "code".into(),
                 args: Vec::new(),
             }
         );
         assert_eq!(
             workspace_editor_launch(Some("system"), Some("zed"), Some("code"), |_| true),
             WorkspaceEditorLaunch::System
+        );
+    }
+
+    /// Issue #698: `/usr/bin/vim` is always installed. The detached fallback
+    /// must leave it alone and use the macOS handler instead.
+    #[test]
+    fn open_at_location_fallback_skips_terminal_only_editors() {
+        assert_eq!(
+            workspace_editor_launch(None, None, None, |command| {
+                matches!(command, "vim" | "nvim" | "hx" | "emacs")
+            }),
+            WorkspaceEditorLaunch::System
+        );
+        assert_eq!(
+            workspace_editor_launch(None, None, None, |command| command == "vim"
+                || command == "zed"),
+            WorkspaceEditorLaunch::Command {
+                bin: "zed".into(),
+                args: Vec::new(),
+            }
         );
     }
 
