@@ -488,10 +488,11 @@ fn render_diff_branch_menu_status(
 /// with the tab worktree picker (issue #347) so the app has one branch reader.
 pub(crate) fn list_branches(cwd: &str) -> Result<Vec<String>, String> {
     let mut command = crate::workspace::worktree::git_command();
-    command
-        .args(["branch", "--format=%(refname:short)"])
-        .current_dir(cwd)
-        .env("GIT_TERMINAL_PROMPT", "0");
+    crate::workspace::worktree::git_subcommand(
+        &mut command,
+        &["branch", "--format=%(refname:short)"],
+    );
+    command.current_dir(cwd).env("GIT_TERMINAL_PROMPT", "0");
 
     let output =
         paneflow_process::run_with_timeout(command, BRANCH_GIT_DEADLINE, BRANCH_GIT_OUTPUT_CAP)
@@ -516,10 +517,8 @@ fn switch_branch(
     branch: &str,
 ) -> Result<(String, bool, crate::workspace::GitDiffStats), String> {
     let mut command = crate::workspace::worktree::git_command();
-    command
-        .args(["switch", "--", branch])
-        .current_dir(cwd)
-        .env("GIT_TERMINAL_PROMPT", "0");
+    crate::workspace::worktree::git_subcommand(&mut command, &["switch", "--", branch]);
+    command.current_dir(cwd).env("GIT_TERMINAL_PROMPT", "0");
 
     let output =
         paneflow_process::run_with_timeout(command, BRANCH_GIT_DEADLINE, BRANCH_GIT_OUTPUT_CAP)
