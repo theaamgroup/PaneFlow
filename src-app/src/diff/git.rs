@@ -23,11 +23,57 @@ use super::engine::{DiffHunk, compute_hunks};
 thread_local! {
     static GIT_COMMANDS: std::cell::RefCell<Vec<String>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// When set, `rev-parse --verify HEAD` fails as a deadline without spawning.
+    static INJECT_HEAD_REV_PARSE_TIMEOUT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    /// Paths appended to an untracked listing. Git never emits FIFOs; the
+    /// read-budget tests push one through the listing the loops already walk.
+    static EXTRA_UNTRACKED_PATHS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
 fn take_git_commands() -> Vec<String> {
     GIT_COMMANDS.with(|cmds| std::mem::take(&mut *cmds.borrow_mut()))
+}
+
+/// Arms [`INJECT_HEAD_REV_PARSE_TIMEOUT`] until dropped, including on panic,
+/// so a later test on this thread sees real `rev-parse`.
+#[cfg(test)]
+struct HeadRevParseTimeoutGuard;
+
+#[cfg(test)]
+impl HeadRevParseTimeoutGuard {
+    fn arm() -> Self {
+        INJECT_HEAD_REV_PARSE_TIMEOUT.with(|flag| flag.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for HeadRevParseTimeoutGuard {
+    fn drop(&mut self) {
+        INJECT_HEAD_REV_PARSE_TIMEOUT.with(|flag| flag.set(false));
+    }
+}
+
+/// Arms [`EXTRA_UNTRACKED_PATHS`] until dropped.
+#[cfg(test)]
+struct ExtraUntrackedGuard;
+
+#[cfg(test)]
+impl ExtraUntrackedGuard {
+    fn arm(paths: Vec<String>) -> Self {
+        EXTRA_UNTRACKED_PATHS.with(|extra| *extra.borrow_mut() = paths);
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ExtraUntrackedGuard {
+    fn drop(&mut self) {
+        EXTRA_UNTRACKED_PATHS.with(|extra| extra.borrow_mut().clear());
+    }
 }
 
 /// A git worktree as reported by `git worktree list --porcelain`.
@@ -175,7 +221,7 @@ fn record_git_args(_args: &[&str]) {}
 
 fn run_git_timed(dir: &Path, args: &[&str], deadline: Duration) -> Result<Vec<u8>, String> {
     record_git_args(args);
-    if deadline.is_zero() {
+    if deadline.is_zero() || injected_head_rev_parse_timeout(args) {
         return Err("git diff exceeded its deadline".to_string());
     }
     let mut cmd = crate::workspace::worktree::git_command();
@@ -217,6 +263,21 @@ fn run_git_stdin_timed(
             )
         })?;
     git_stdout(args, output)
+}
+
+/// Test-only stand-in for a `rev-parse --verify HEAD` that hits its deadline.
+/// Other commands, including `rev-parse --show-toplevel`, still spawn.
+#[cfg(test)]
+fn injected_head_rev_parse_timeout(args: &[&str]) -> bool {
+    INJECT_HEAD_REV_PARSE_TIMEOUT.with(|flag| flag.get())
+        && args.contains(&"rev-parse")
+        && args.contains(&"--verify")
+        && args.contains(&"HEAD")
+}
+
+#[cfg(not(test))]
+fn injected_head_rev_parse_timeout(_args: &[&str]) -> bool {
+    false
 }
 
 fn git_stdout(args: &[&str], output: paneflow_process::BoundedOutput) -> Result<Vec<u8>, String> {
@@ -577,12 +638,16 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 }
 
 /// Hash the untracked inputs of `worktree_dir`, or `None` when the untracked
-/// scan fails or exceeds `deadline`: an exhausted scan must not fingerprint
-/// like an empty untracked set.
+/// scan, a stat, or a read fails or exceeds `deadline`. An exhausted budget
+/// must not fingerprint like an empty untracked set, and a stalled open must
+/// not be hashed as a partial read.
 fn hash_untracked_inputs(worktree_dir: &Path, deadline: Duration) -> Option<u64> {
     use std::hash::{Hash as _, Hasher as _};
     use std::io::Read as _;
 
+    let budget = GitBudget {
+        deadline_at: Instant::now() + deadline,
+    };
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let (paths, truncated) =
         match list_untracked_limited_timed(worktree_dir, MAX_FILE_COUNT + 1, deadline) {
@@ -595,33 +660,83 @@ fn hash_untracked_inputs(worktree_dir: &Path, deadline: Duration) -> Option<u64>
     truncated.hash(&mut h);
     for path in paths {
         path.hash(&mut h);
-        if is_skipped_name(&path) || is_too_large(worktree_dir, &path) {
+        if is_skipped_name(&path) {
+            "stub".hash(&mut h);
+            continue;
+        }
+        let too_large = match is_too_large_within(&budget, worktree_dir, &path) {
+            Ok(too_large) => too_large,
+            Err(e) => {
+                log::warn!("git: fingerprint untracked stat failed: {e}");
+                return None;
+            }
+        };
+        if too_large {
             "stub".hash(&mut h);
             continue;
         }
         let abs = worktree_dir.join(&path);
-        match std::fs::symlink_metadata(&abs) {
+        let meta = match fs_within(&budget, "untracked metadata", {
+            let abs = abs.clone();
+            move || std::fs::symlink_metadata(&abs)
+        }) {
+            Ok(meta) => meta,
+            Err(e) => {
+                log::warn!("git: fingerprint untracked metadata failed: {e}");
+                return None;
+            }
+        };
+        match meta {
             Ok(meta) if meta.file_type().is_symlink() => {
                 "symlink".hash(&mut h);
-                if let Ok(target) = std::fs::read_link(&abs) {
-                    target.to_string_lossy().hash(&mut h);
+                match fs_within(&budget, "untracked symlink", {
+                    let abs = abs.clone();
+                    move || std::fs::read_link(&abs)
+                }) {
+                    Ok(Ok(target)) => {
+                        target.to_string_lossy().hash(&mut h);
+                    }
+                    Ok(Err(_)) => {}
+                    Err(e) => {
+                        log::warn!("git: fingerprint untracked symlink failed: {e}");
+                        return None;
+                    }
                 }
             }
-            Ok(_) => match std::fs::File::open(&abs) {
-                Ok(file) => {
-                    let mut bytes = Vec::new();
-                    let read_ok = file
-                        .take(MAX_FILE_BYTES + 1)
-                        .read_to_end(&mut bytes)
-                        .is_ok();
-                    read_ok.hash(&mut h);
-                    (bytes.len() as u64 > MAX_FILE_BYTES).hash(&mut h);
-                    h.write(&bytes);
+            Ok(_) => {
+                let read =
+                    match fs_within(
+                        &budget,
+                        "untracked read",
+                        move || match std::fs::File::open(&abs) {
+                            Ok(file) => {
+                                let mut bytes = Vec::new();
+                                let read_ok = file
+                                    .take(MAX_FILE_BYTES + 1)
+                                    .read_to_end(&mut bytes)
+                                    .is_ok();
+                                Ok((read_ok, bytes))
+                            }
+                            Err(err) => Err(err.kind()),
+                        },
+                    ) {
+                        Ok(read) => read,
+                        Err(e) => {
+                            log::warn!("git: fingerprint untracked read failed: {e}");
+                            return None;
+                        }
+                    };
+                match read {
+                    Ok((read_ok, bytes)) => {
+                        read_ok.hash(&mut h);
+                        (bytes.len() as u64 > MAX_FILE_BYTES).hash(&mut h);
+                        h.write(&bytes);
+                    }
+                    Err(kind) => {
+                        kind.hash(&mut h);
+                    }
                 }
-                Err(err) => {
-                    err.kind().hash(&mut h);
-                }
-            },
+            }
             Err(err) => {
                 err.kind().hash(&mut h);
             }
@@ -793,8 +908,30 @@ fn list_untracked_limited_timed(
         };
         paths.push(path);
     }
+    append_test_untracked(&mut paths, &mut truncated, limit);
     Ok((paths, truncated))
 }
+
+/// Git's untracked scan only emits regular files and symlinks, so a FIFO never
+/// appears in `ls-files` output. Tests that must budget a blocking open append
+/// the FIFO here, after the real listing, and only on the calling thread.
+#[cfg(test)]
+fn append_test_untracked(paths: &mut Vec<String>, truncated: &mut bool, limit: usize) {
+    EXTRA_UNTRACKED_PATHS.with(|extra| {
+        for path in extra.borrow().iter() {
+            if paths.len() >= limit {
+                *truncated = true;
+                break;
+            }
+            if !paths.iter().any(|existing| existing == path) {
+                paths.push(path.clone());
+            }
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn append_test_untracked(_paths: &mut Vec<String>, _truncated: &mut bool, _limit: usize) {}
 
 /// Resolve the merge-base SHA between `HEAD` and `base_ref` in `worktree_dir`.
 fn merge_base_within(
@@ -1348,18 +1485,29 @@ const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// last commit (staged + unstaged tracked changes) plus untracked files - the
 /// "what did the agent just touch" semantic used by the diff dock
 /// ([`crate::app::diff_dock`]). When `HEAD` is unborn, everything is diffed
-/// against the empty tree. Reuses [`compute_diff_against`], so the lockfile /
-/// size / count / binary guards are identical to [`load_column`].
+/// against the empty tree. Any other `rev-parse` failure, including a
+/// deadline, sets [`WorktreeDiff::error`] and does not diff. Reuses
+/// [`compute_diff_against`], so the lockfile / size / count / binary guards
+/// are identical to [`load_column`].
 ///
 /// Runs entirely via subprocess; safe to call off the main thread.
 pub fn compute_head_diff(worktree_dir: &Path) -> WorktreeDiff {
     let toplevel = worktree_toplevel(worktree_dir);
     let worktree_dir = toplevel.as_path();
     log::debug!("git: compute_head_diff dir={}", worktree_dir.display());
-    // HEAD's commit SHA, or the empty tree when HEAD is unborn (no commits yet).
     let base = match run_git(worktree_dir, &["rev-parse", "--verify", "HEAD"]) {
         Ok(out) => String::from_utf8_lossy(&out).trim().to_string(),
-        Err(_) => EMPTY_TREE_SHA.to_string(),
+        Err(error) => match empty_tree_if_unborn_head(worktree_dir, error) {
+            Ok(base) => base,
+            Err(error) => {
+                log::warn!("git: HEAD lookup failed: {error}");
+                return WorktreeDiff {
+                    error: Some(error),
+                    toplevel: Some(toplevel),
+                    ..Default::default()
+                };
+            }
+        },
     };
     let mut diff = compute_diff_against(worktree_dir, &base);
     diff.toplevel = Some(toplevel);
@@ -1367,6 +1515,41 @@ pub fn compute_head_diff(worktree_dir: &Path) -> WorktreeDiff {
         diff.head_sha = Some(base);
     }
     diff
+}
+
+/// `Ok(empty tree)` only when `HEAD` is a symbolic ref whose target does not
+/// exist yet. A deadline stops the probe immediately: a timed-out git must not
+/// be followed by another git command. Anything else keeps `rev_parse_error`.
+fn empty_tree_if_unborn_head(
+    worktree_dir: &Path,
+    rev_parse_error: String,
+) -> Result<String, String> {
+    if rev_parse_error.contains("exceeded its deadline") {
+        return Err(rev_parse_error);
+    }
+    let reference = match run_git(worktree_dir, &["symbolic-ref", "--quiet", "HEAD"]) {
+        Ok(out) => String::from_utf8_lossy(&out).trim().to_string(),
+        Err(error) if error.contains("exceeded its deadline") => return Err(error),
+        Err(_) => return Err(rev_parse_error),
+    };
+    if reference.is_empty() {
+        return Err(rev_parse_error);
+    }
+    match run_git(
+        worktree_dir,
+        &["for-each-ref", "--format=%(refname)", &reference],
+    ) {
+        Ok(out) => {
+            let listed = String::from_utf8_lossy(&out);
+            if listed.lines().any(|line| line == reference) {
+                Err(rev_parse_error)
+            } else {
+                Ok(EMPTY_TREE_SHA.to_string())
+            }
+        }
+        Err(error) if error.contains("exceeded its deadline") => Err(error),
+        Err(_) => Err(rev_parse_error),
+    }
 }
 
 /// Shared core of [`load_column`] and [`compute_head_diff`]: diff the
@@ -1588,8 +1771,9 @@ fn compute_diff_against_within(
 }
 
 /// Per-file diffstat of the working tree against `base`, charged against
-/// `budget`. A failed or timed-out numstat or untracked scan is an `Err`,
-/// never a partial or empty map that reads as "no changes".
+/// `budget`. A failed or timed-out numstat, untracked scan, stat, or
+/// working-tree read is an `Err`, never a partial or empty map that reads as
+/// "no changes".
 fn compute_file_stats_against_within(
     budget: &GitBudget,
     worktree_dir: &Path,
@@ -1613,7 +1797,7 @@ fn compute_file_stats_against_within(
         log::debug!("git: untracked file stats truncated at {remaining}");
     }
     for path in untracked {
-        if is_skipped_name(&path) || is_too_large(worktree_dir, &path) {
+        if is_skipped_name(&path) || is_too_large_within(budget, worktree_dir, &path)? {
             stats.insert(
                 path,
                 FileDiffStat {
@@ -1623,7 +1807,7 @@ fn compute_file_stats_against_within(
             );
             continue;
         }
-        let (text, is_binary) = load_working_text(worktree_dir, &path);
+        let (text, is_binary) = load_working_text_within(budget, worktree_dir, &path)?;
         let added = if is_binary {
             0
         } else {
@@ -1963,6 +2147,84 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn hash_untracked_inputs_fails_instead_of_hanging_on_a_fifo() {
+        // Git does not list FIFOs. The guard appends this path to the listing
+        // the fingerprint walks, which is the open a stalled mount would hit.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        assert!(test_git(&root, &["init"]), "git init is required");
+        make_blocking_fifo(&root.join("stuck"));
+        {
+            let _guard = ExtraUntrackedGuard::arm(vec!["stuck".to_string()]);
+            let (paths, _) =
+                list_untracked_limited_timed(&root, 8, GIT_DEADLINE).expect("untracked listing");
+            assert!(
+                paths.iter().any(|path| path == "stuck"),
+                "listing must return the fifo, got {paths:?}"
+            );
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _guard = ExtraUntrackedGuard::arm(vec!["stuck".to_string()]);
+            let _ = tx.send(hash_untracked_inputs(&root, Duration::from_millis(200)));
+        });
+        let result = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("hash_untracked_inputs hung on a blocking untracked path");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn compute_file_stats_against_within_fails_instead_of_hanging_on_a_fifo() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        assert!(test_git(&root, &["init"]), "git init is required");
+        assert!(test_git(
+            &root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ));
+        make_blocking_fifo(&root.join("stuck"));
+        {
+            let _guard = ExtraUntrackedGuard::arm(vec!["stuck".to_string()]);
+            let (paths, _) =
+                list_untracked_limited_timed(&root, 8, GIT_DEADLINE).expect("untracked listing");
+            assert!(
+                paths.iter().any(|path| path == "stuck"),
+                "listing must return the fifo, got {paths:?}"
+            );
+        }
+
+        let root_for_call = root.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _guard = ExtraUntrackedGuard::arm(vec!["stuck".to_string()]);
+            let budget = GitBudget {
+                deadline_at: Instant::now() + Duration::from_millis(200),
+            };
+            let _ = tx.send(compute_file_stats_against_within(
+                &budget,
+                &root_for_call,
+                "HEAD",
+            ));
+        });
+        let result = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("compute_file_stats_against_within hung on a blocking untracked path");
+        let err = result.expect_err("fifo read must surface the deadline");
+        assert!(err.contains("deadline"), "got {err}");
+    }
+
+    #[test]
     fn working_tree_reads_fail_closed_once_budget_is_exhausted() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -2280,6 +2542,52 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn head_rev_parse_timeout_is_not_an_empty_tree_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(test_git(root, &["init"]), "git init is required");
+        std::fs::write(root.join("tracked.txt"), "original\n").unwrap();
+        assert!(test_git(root, &["add", "tracked.txt"]));
+        assert!(test_git(
+            root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "-m",
+                "init",
+            ],
+        ));
+        std::fs::write(root.join("tracked.txt"), "modified\n").unwrap();
+
+        let _guard = HeadRevParseTimeoutGuard::arm();
+        let _ = take_git_commands();
+        let diff = compute_head_diff(root);
+        let cmds = take_git_commands();
+        let err = diff
+            .error
+            .expect("a HEAD lookup timeout is an error, not an empty tree");
+        assert!(err.contains("deadline"), "got {err}");
+        assert!(
+            diff.files.is_empty(),
+            "timeout must not produce an empty-tree diff, files={:?}",
+            diff.files.iter().map(|file| &file.path).collect::<Vec<_>>()
+        );
+        assert!(
+            cmds.iter().all(|cmd| {
+                let name = git_subcommand_name(cmd);
+                name != Some("diff")
+                    && name != Some("symbolic-ref")
+                    && name != Some("for-each-ref")
+                    && !cmd.contains(EMPTY_TREE_SHA)
+            }),
+            "timed-out HEAD lookup must not diff the empty tree, commands={cmds:?}"
+        );
+    }
+
+    #[test]
     fn column_fingerprint_changes_when_modified_file_content_changes() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -2440,6 +2748,14 @@ pub(crate) mod tests {
         assert!(err.contains("deadline"), "got {err}");
         assert!(load.file_stats.is_err());
         assert_eq!(load.fingerprint.untracked_hash, None);
+    }
+
+    fn make_blocking_fifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let fifo = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo` is a valid NUL-terminated path for the call's duration.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
     }
 
     fn test_git(cwd: &std::path::Path, args: &[&str]) -> bool {
