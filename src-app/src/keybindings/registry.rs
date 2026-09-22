@@ -9,15 +9,14 @@ use gpui::Action;
 use crate::{
     ClearScrollHistory, ClosePane, CloseTab, CloseWorkspace, CopyWorkspacePath, DismissSearch,
     FocusDown, FocusLeft, FocusRight, FocusUp, JumpNextPrompt, JumpNextWaiting, JumpPrevPrompt,
-    LayoutEvenHorizontal, LayoutEvenVertical, LayoutMainVertical, LayoutTiled, MarkdownCopy,
-    MarkdownFindDismiss, MarkdownFindNext, MarkdownFindOpen, MarkdownFindPrev,
-    MarkdownScrollPageDown, MarkdownScrollPageUp, NewTab, NewWorkspace, NextTab, NextWorkspace,
-    OpenWorkspaceInCursor, OpenWorkspaceInVsCode, OpenWorkspaceInWindsurf, OpenWorkspaceInZed,
-    PreviousTab, Quit, ResetTerminal, RevealWorkspaceInFileManager, ScrollPageDown, ScrollPageUp,
-    SearchNext, SearchPrev, SelectWorkspace1, SelectWorkspace2, SelectWorkspace3, SelectWorkspace4,
-    SelectWorkspace5, SelectWorkspace6, SelectWorkspace7, SelectWorkspace8, SelectWorkspace9,
-    SplitEqualize, SplitHorizontally, SplitVertically, SwapPane, TerminalCopy, TerminalPaste,
-    ToggleCopyMode, ToggleSearch, ToggleSearchRegex, ToggleZoom, UndoClosePane,
+    LayoutEvenHorizontal, LayoutEvenVertical, LayoutMainVertical, LayoutTiled, NewTab,
+    NewWorkspace, NextTab, NextWorkspace, OpenWorkspaceInCursor, OpenWorkspaceInVsCode,
+    OpenWorkspaceInWindsurf, OpenWorkspaceInZed, PreviousTab, Quit, ResetTerminal,
+    RevealWorkspaceInFileManager, ScrollPageDown, ScrollPageUp, SearchNext, SearchPrev,
+    SelectWorkspace1, SelectWorkspace2, SelectWorkspace3, SelectWorkspace4, SelectWorkspace5,
+    SelectWorkspace6, SelectWorkspace7, SelectWorkspace8, SelectWorkspace9, SplitEqualize,
+    SplitHorizontally, SplitVertically, SwapPane, TerminalCopy, TerminalPaste, ToggleCopyMode,
+    ToggleSearch, ToggleSearchRegex, ToggleZoom, UndoClosePane,
 };
 use crate::{FontSizeDecrease, FontSizeIncrease, FontSizeReset};
 
@@ -35,7 +34,6 @@ pub enum ShortcutGroup {
     Terminal,
     Search,
     Diff,
-    Markdown,
     Agents,
     Application,
     Contextual,
@@ -50,7 +48,6 @@ impl ShortcutGroup {
         ShortcutGroup::Terminal,
         ShortcutGroup::Search,
         ShortcutGroup::Diff,
-        ShortcutGroup::Markdown,
         ShortcutGroup::Agents,
         ShortcutGroup::Application,
         ShortcutGroup::Contextual,
@@ -64,7 +61,6 @@ impl ShortcutGroup {
             ShortcutGroup::Terminal => "Terminal",
             ShortcutGroup::Search => "Search",
             ShortcutGroup::Diff => "Git diff",
-            ShortcutGroup::Markdown => "Markdown",
             ShortcutGroup::Agents => "Agents & cockpit",
             ShortcutGroup::Application => "Application",
             ShortcutGroup::Contextual => "Fixed shortcuts · editors & navigation",
@@ -485,58 +481,6 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         description: "Quit",
         group: ShortcutGroup::Application,
     },
-    // US-022: Markdown pane navigation. Scroll + copy bind on the root
-    // `Markdown` context; find-overlay actions bind on `MarkdownSearch`
-    // (active only while the search bar is open).
-    ActionMeta {
-        name: "markdown_scroll_page_up",
-        factory: || Box::new(MarkdownScrollPageUp),
-        context: "Markdown",
-        description: "Markdown: scroll up one page",
-        group: ShortcutGroup::Markdown,
-    },
-    ActionMeta {
-        name: "markdown_scroll_page_down",
-        factory: || Box::new(MarkdownScrollPageDown),
-        context: "Markdown",
-        description: "Markdown: scroll down one page",
-        group: ShortcutGroup::Markdown,
-    },
-    ActionMeta {
-        name: "markdown_find_open",
-        factory: || Box::new(MarkdownFindOpen),
-        context: "Markdown",
-        description: "Markdown: open find bar",
-        group: ShortcutGroup::Markdown,
-    },
-    ActionMeta {
-        name: "markdown_copy",
-        factory: || Box::new(MarkdownCopy),
-        context: "Markdown",
-        description: "Markdown: copy selection / current match",
-        group: ShortcutGroup::Markdown,
-    },
-    ActionMeta {
-        name: "markdown_find_next",
-        factory: || Box::new(MarkdownFindNext),
-        context: "MarkdownSearch",
-        description: "Markdown: jump to next match",
-        group: ShortcutGroup::Markdown,
-    },
-    ActionMeta {
-        name: "markdown_find_prev",
-        factory: || Box::new(MarkdownFindPrev),
-        context: "MarkdownSearch",
-        description: "Markdown: jump to previous match",
-        group: ShortcutGroup::Markdown,
-    },
-    ActionMeta {
-        name: "markdown_find_dismiss",
-        factory: || Box::new(MarkdownFindDismiss),
-        context: "MarkdownSearch",
-        description: "Markdown: close find bar",
-        group: ShortcutGroup::Markdown,
-    },
     // US-003 (prd-git-diff-mode-2026-Q3.md): toggle the dedicated Git
     // Diff mode (AppMode::Diff).
     ActionMeta {
@@ -565,7 +509,7 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
     },
     // US-003 (prd-ai-in-diff-2026-Q3.md): copy the hunk under the cursor as a
     // unified diff. Scoped to the DiffView context so Ctrl+Shift+C there never
-    // collides with the global markdown / terminal copy bindings.
+    // collides with the global terminal copy binding.
     ActionMeta {
         name: "copy_diff_hunk",
         factory: || Box::new(crate::CopyDiffHunk),

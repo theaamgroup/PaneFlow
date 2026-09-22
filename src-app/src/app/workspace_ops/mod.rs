@@ -143,7 +143,6 @@ fn closed_record_uses_worktree(record: &ClosedRecord, worktree: &std::path::Path
             ClosedSurfaceRecord::Terminal { cwd, .. } => cwd
                 .as_deref()
                 .is_some_and(|cwd| path_is_within_worktree(cwd, worktree)),
-            ClosedSurfaceRecord::Markdown { .. } => false,
         },
         ClosedRecord::Tab(record) => layout_uses_worktree(&record.layout, None, worktree),
         ClosedRecord::Workspace(record) => {
@@ -243,16 +242,14 @@ pub(crate) fn push_closed_record(
 ) -> Vec<crate::workspace::worktree::ManagedWorktree> {
     match &mut record {
         ClosedRecord::Pane(pane) => {
-            if let ClosedSurfaceRecord::Terminal {
+            let ClosedSurfaceRecord::Terminal {
                 scrollback, replay, ..
-            } = &mut pane.surface
-            {
-                if let Some(scrollback) = scrollback {
-                    scrollback.shrink_to_fit();
-                }
-                if let Some(replay) = replay {
-                    replay.shrink_to_fit();
-                }
+            } = &mut pane.surface;
+            if let Some(scrollback) = scrollback {
+                scrollback.shrink_to_fit();
+            }
+            if let Some(replay) = replay {
+                replay.shrink_to_fit();
             }
         }
         // A tab record is where the multi-megabyte strings actually live - it
@@ -360,23 +357,21 @@ fn enforce_closed_pane_scrollback_budget(records: &mut [ClosedRecord], budget: u
 fn release_record_scrollback(record: &mut ClosedRecord, total: &mut usize, budget: usize) {
     match record {
         ClosedRecord::Pane(pane) => {
-            if let ClosedSurfaceRecord::Terminal {
+            let ClosedSurfaceRecord::Terminal {
                 scrollback, replay, ..
-            } = &mut pane.surface
+            } = &mut pane.surface;
+            // The styled capture (#195) goes first: released, the record
+            // still restores its plain text, so it degrades to what undo
+            // did before the capture existed instead of to nothing.
+            if *total > budget
+                && let Some(replay) = replay.take()
             {
-                // The styled capture (#195) goes first: released, the record
-                // still restores its plain text, so it degrades to what undo
-                // did before the capture existed instead of to nothing.
-                if *total > budget
-                    && let Some(replay) = replay.take()
-                {
-                    *total = total.saturating_sub(replay.len());
-                }
-                if *total > budget
-                    && let Some(scrollback) = scrollback.take()
-                {
-                    *total = total.saturating_sub(scrollback.len());
-                }
+                *total = total.saturating_sub(replay.len());
+            }
+            if *total > budget
+                && let Some(scrollback) = scrollback.take()
+            {
+                *total = total.saturating_sub(scrollback.len());
             }
         }
         ClosedRecord::Tab(tab) => release_layout_scrollback(&mut tab.layout, total, budget),
@@ -548,7 +543,6 @@ fn closed_pane_scrollback_bytes(records: &[ClosedRecord]) -> usize {
                 } => {
                     scrollback.as_ref().map_or(0, String::len) + replay.as_ref().map_or(0, Vec::len)
                 }
-                ClosedSurfaceRecord::Markdown { .. } => 0,
             },
             ClosedRecord::Tab(tab) => layout_node_scrollback_bytes(&tab.layout),
             ClosedRecord::Workspace(workspace) => workspace
@@ -589,9 +583,6 @@ pub(crate) fn capture_closed_pane_record(
                 agent_context: Some(Box::new(tv_ref.agent_context.clone())),
             }
         }
-        crate::pane::PaneSurface::Markdown(markdown) => ClosedSurfaceRecord::Markdown {
-            path: markdown.read(cx).path.clone(),
-        },
         crate::pane::PaneSurface::Diff(_) => return None,
     };
     Some(ClosedPaneRecord {
@@ -801,12 +792,6 @@ fn restore_closed_surface_record(
             cx.subscribe(&terminal, PaneFlowApp::handle_terminal_event)
                 .detach();
             crate::pane::PaneSurface::Terminal(terminal)
-        }
-        ClosedSurfaceRecord::Markdown { path } => {
-            let markdown = cx.new(|cx: &mut Context<crate::markdown::MarkdownView>| {
-                crate::markdown::MarkdownView::open(path.clone(), cx)
-            });
-            crate::pane::PaneSurface::Markdown(markdown)
         }
     }
 }
@@ -1651,7 +1636,7 @@ impl PaneFlowApp {
 
     /// Working directory for a terminal spawned into the active workspace.
     /// `source_cwd` is the focused/source pane's live cwd (`cwd_now()`), which
-    /// is `None` for a markdown pane (US-020) and on every platform that can't
+    /// is `None` for a non-terminal pane and on every platform that can't
     /// introspect a child's cwd - notably *always* on Windows, where
     /// `cwd_now()` is a stub. Left unhandled, that `None` lets the PTY spawn
     /// drop to the process `current_dir()` (`C:\Program Files\PaneFlow` for an
@@ -1758,7 +1743,7 @@ impl PaneFlowApp {
         let ws_id = ws.id;
 
         // Inherit CWD from the target pane's active terminal. `cwd_now()` is
-        // best-effort: `None` for a markdown pane (US-020) and on platforms
+        // best-effort: `None` for a non-terminal pane and on platforms
         // without child-cwd introspection (always on Windows). `new_terminal_cwd`
         // then falls back to the workspace root, so the new pane never drops to
         // the process `current_dir()` (`C:\Program Files\PaneFlow` when installed).
@@ -4623,33 +4608,32 @@ mod tests {
     /// Issue #454: the sweeps above reach a terminal through
     /// `PaneSurface::Terminal` on a tab's layout tree, plus the dock. The
     /// modules scanned here are the ones that build the surfaces that route
-    /// skips: `DiffView` and `MarkdownView` (`as_terminal()` hands back
-    /// `None` for both), the Review grid, whose panes live in
-    /// `ReviewState::layout` off `PaneFlowApp::review` rather than off any
-    /// tab, and Work Review, which is a pane factory for the same diffs. All
-    /// are terminal-free today, which is why #438 could delete the
-    /// Review-terminal sweeps, and the close confirmation and worktree
-    /// retirement now depend on them staying that way. A `TerminalView`
-    /// behind one of them is the #454 bug again: a live agent the close modal
-    /// never mentions, in a checkout retirement is free to delete underneath
-    /// it. So none of these modules may name that type at all - the same
-    /// shape as the engine-absence guard in `terminal/types.rs`, and for the
-    /// same reason: a rule about how the type is spelled
-    /// (`Entity<TerminalView>` and not `Entity<crate::terminal::TerminalView>`)
-    /// is a rule a later edit walks straight past. What this cannot see is a
-    /// handle whose type is never written - `app/review/agent.rs` holds the
-    /// terminals it prefills through a generic - so it is a guard on the
-    /// OWNING shapes (a field, an annotated collection) and on pane
-    /// placement, not a proof of absence. Other strong `Entity<Pane>` holders
-    /// exist elsewhere (`pane_menu_open`, `swap_armed_panes`); they are
-    /// transient UI state, not hosts, and out of this guard's scope. The
-    /// guard fails with the offending `file:line`.
+    /// skips: `DiffView` (`as_terminal()` hands back `None`), the Review
+    /// grid, whose panes live in `ReviewState::layout` off
+    /// `PaneFlowApp::review` rather than off any tab, and Work Review, which
+    /// is a pane factory for the same diffs. All are terminal-free today,
+    /// which is why #438 could delete the Review-terminal sweeps, and the
+    /// close confirmation and worktree retirement now depend on them staying
+    /// that way. A `TerminalView` behind one of them is the #454 bug again:
+    /// a live agent the close modal never mentions, in a checkout retirement
+    /// is free to delete underneath it. So none of these modules may name
+    /// that type at all - the same shape as the engine-absence guard in
+    /// `terminal/types.rs`, and for the same reason: a rule about how the
+    /// type is spelled (`Entity<TerminalView>` and not
+    /// `Entity<crate::terminal::TerminalView>`) is a rule a later edit walks
+    /// straight past. What this cannot see is a handle whose type is never
+    /// written - `app/review/agent.rs` holds the terminals it prefills through
+    /// a generic - so it is a guard on the OWNING shapes (a field, an
+    /// annotated collection) and on pane placement, not a proof of absence.
+    /// Other strong `Entity<Pane>` holders exist elsewhere (`pane_menu_open`,
+    /// `swap_armed_panes`); they are transient UI state, not hosts, and out
+    /// of this guard's scope. The guard fails with the offending `file:line`.
     #[test]
     fn no_terminal_may_hide_behind_a_pane_surface_the_sweeps_skip() {
         use std::path::{Path, PathBuf};
 
         let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let guarded = ["diff", "markdown", "app/review", "app/work_review"];
+        let guarded = ["diff", "app/review", "app/work_review"];
         // A scan whose roots have been renamed away covers nothing and says
         // nothing, which reads exactly like a scan that found nothing. Both
         // halves of the negative control are asserted: the roots exist, and
@@ -4722,7 +4706,7 @@ mod tests {
         );
         assert_eq!(
             as_terminal.matches("PaneSurface::").count(),
-            3,
+            2,
             "a PaneSurface variant came or went; add its module to the scan \
              above if it can host a terminal: {as_terminal}"
         );

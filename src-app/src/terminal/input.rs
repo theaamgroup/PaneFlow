@@ -923,10 +923,9 @@ impl TerminalView {
         }
     }
 
-    /// US-012: open a resolved hyperlink. `.md` routes to the in-pane markdown
-    /// viewer, code paths to the editor chain (both via app-level events so the
-    /// VISUAL/EDITOR resolution stays testable), and URLs / OSC 8 to the OS
-    /// handler. Shared routing for the mouse-up open.
+    /// US-012: open a resolved hyperlink. `.md` and code paths both emit
+    /// app-level events so the external editor stays off this view; URLs and
+    /// OSC 8 go to the OS handler. Shared routing for the mouse-up open.
     fn open_hyperlink(&self, link: &HyperlinkZone, cx: &mut Context<Self>) {
         match link.source {
             HyperlinkSource::FilePath => {

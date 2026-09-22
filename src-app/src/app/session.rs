@@ -715,11 +715,7 @@ impl PaneFlowApp {
         let mut workspace_terminals = 0usize;
         let mut warned_terminal_cap = false;
         for tab_session in ws_session.tabs.iter().take(MAX_TABS_PER_WORKSPACE) {
-            let restored_layout = tab_session
-                .layout
-                .clone()
-                .map(without_persisted_scrollback)
-                .and_then(validated_layout_within_cap);
+            let restored_layout = tab_session.layout.clone().and_then(restored_tab_layout);
             if let Some(ref layout) = restored_layout {
                 let n = layout_terminal_count(layout);
                 if skip_tab_over_workspace_terminal_cap(
@@ -830,8 +826,10 @@ impl PaneFlowApp {
     }
 
     /// Build the single [`crate::pane::PaneSurface`] described by one
-    /// serialized definition, or `None` when the definition cannot be
-    /// materialized (a markdown entry with no path).
+    /// serialized definition, or `None` when it cannot be materialized.
+    ///
+    /// A retired `markdown` surface is `None` so it does not become a terminal
+    /// at `fallback_cwd`. Callers drop that leaf before spawn.
     ///
     /// EP-002 US-005: a pane is mono-surface, so exactly one definition is ever
     /// built. Kept separate from [`Self::spawn_pane_from_surfaces`] so the
@@ -843,14 +841,8 @@ impl PaneFlowApp {
         fallback_cwd: &std::path::Path,
         cx: &mut Context<Self>,
     ) -> Option<crate::pane::PaneSurface> {
-        use std::path::PathBuf;
-
         if surface.surface_type.as_deref() == Some("markdown") {
-            let path = surface.path.as_ref().map(PathBuf::from)?;
-            let markdown = cx.new(|cx: &mut Context<crate::markdown::MarkdownView>| {
-                crate::markdown::MarkdownView::open(path, cx)
-            });
-            return Some(crate::pane::PaneSurface::Markdown(markdown));
+            return None;
         }
 
         let cwd = resolved_surface_cwd(surface.cwd.as_deref(), fallback_cwd);
@@ -922,6 +914,13 @@ impl PaneFlowApp {
         fallback_cwd: &std::path::Path,
         cx: &mut Context<Self>,
     ) -> Entity<Pane> {
+        debug_assert!(
+            surfaces.is_empty()
+                || surfaces
+                    .iter()
+                    .any(|surface| surface.surface_type.as_deref() != Some("markdown")),
+            "markdown-only leaves are dropped before spawn"
+        );
         let mut built: Option<crate::pane::PaneSurface> = None;
         for i in restore_candidate_order(surfaces) {
             built = Self::build_restored_surface(workspace_id, &surfaces[i], fallback_cwd, cx);
@@ -1227,6 +1226,69 @@ fn without_persisted_scrollback(mut layout: LayoutNode) -> LayoutNode {
     layout
 }
 
+/// Prepare one saved tab for restore: drop scrollback, enforce the leaf and
+/// PTY caps, then remove leaves that only hosted the retired markdown viewer.
+fn restored_tab_layout(layout: LayoutNode) -> Option<LayoutNode> {
+    let layout = without_persisted_scrollback(layout);
+    let layout = validated_layout_within_cap(layout)?;
+    drop_retired_markdown_leaves(layout)
+}
+
+/// Drop `surface_type: "markdown"` leaves. A pane that also holds a terminal
+/// keeps the terminal. One-child splits collapse. `None` means nothing left
+/// to spawn, which must not become a shell at the workspace cwd.
+fn drop_retired_markdown_leaves(node: LayoutNode) -> Option<LayoutNode> {
+    match node {
+        LayoutNode::Pane { mut surfaces } => {
+            surfaces.retain(|surface| surface.surface_type.as_deref() != Some("markdown"));
+            if surfaces.is_empty() {
+                None
+            } else {
+                Some(LayoutNode::Pane { surfaces })
+            }
+        }
+        LayoutNode::Split {
+            direction,
+            ratio,
+            ratios,
+            children,
+        } => {
+            let had_ratios = ratios.is_some();
+            let original_children = children.len();
+            let mut kept_children = Vec::with_capacity(children.len());
+            let mut kept_ratios = Vec::with_capacity(children.len());
+            for (i, child) in children.into_iter().enumerate() {
+                let child_ratio = ratios.as_ref().and_then(|ratios| ratios.get(i).copied());
+                if let Some(kept) = drop_retired_markdown_leaves(child) {
+                    kept_children.push(kept);
+                    if let Some(child_ratio) = child_ratio {
+                        kept_ratios.push(child_ratio);
+                    }
+                }
+            }
+            match kept_children.len() {
+                0 => None,
+                1 => kept_children.pop(),
+                _ => {
+                    let ratios = (had_ratios && kept_ratios.len() == kept_children.len())
+                        .then_some(kept_ratios);
+                    let ratio = if kept_children.len() == original_children {
+                        ratio
+                    } else {
+                        None
+                    };
+                    Some(LayoutNode::Split {
+                        direction,
+                        ratio,
+                        ratios,
+                        children: kept_children,
+                    })
+                }
+            }
+        }
+    }
+}
+
 /// Validate a persisted layout and enforce the hard leaf + terminal ceilings
 /// (US-009 AC2 / US-011 / issue #30). `validate_layout` best-effort-caps the
 /// leaf budget and truncates each pane to [`MAX_PANE_SURFACES`] (logged), but
@@ -1264,7 +1326,8 @@ fn validated_layout_within_caps(
     Some(layout)
 }
 
-/// Non-markdown surfaces spawn a `TerminalView` / PTY on restore.
+/// Retired markdown surfaces are not PTYs. They are dropped before spawn;
+/// every other surface still spawns a `TerminalView`.
 fn is_pty_surface(surface: &paneflow_config::schema::SurfaceDefinition) -> bool {
     surface.surface_type.as_deref() != Some("markdown")
 }
@@ -1848,6 +1911,115 @@ mod tests {
         };
         assert_eq!(layout.leaf_count(), 1);
         assert_eq!(layout_terminal_count(&layout), 2);
+    }
+
+    /// Issue #598: an old `session.json` leaf with `surface_type: "markdown"`
+    /// must disappear. The sibling terminal stays, with its own cwd, and a
+    /// markdown-only tab does not come back as a shell at the workspace cwd.
+    #[test]
+    fn restoring_a_session_drops_a_markdown_leaf_and_keeps_the_rest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_path = tmp.path().join("session.json");
+        let contents = r#"{
+            "version": 2,
+            "active_workspace": 0,
+            "workspaces": [{
+                "title": "demo",
+                "cwd": "/tmp/workspace-fallback",
+                "tabs": [
+                    {
+                        "title": "work",
+                        "layout": {
+                            "type": "split",
+                            "direction": "vertical",
+                            "ratios": [0.4, 0.6],
+                            "children": [
+                                {
+                                    "type": "pane",
+                                    "surfaces": [{
+                                        "surface_type": "terminal",
+                                        "cwd": "/tmp/real-terminal",
+                                        "name": "zsh"
+                                    }]
+                                },
+                                {
+                                    "type": "pane",
+                                    "surfaces": [{
+                                        "surface_type": "markdown",
+                                        "path": "/tmp/README.md"
+                                    }]
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "title": "notes",
+                        "layout": {
+                            "type": "pane",
+                            "surfaces": [{
+                                "surface_type": "markdown",
+                                "path": "/tmp/NOTES.md"
+                            }]
+                        }
+                    }
+                ]
+            }]
+        }"#;
+        std::fs::write(&session_path, contents).expect("seed session");
+
+        let (state, info) = PaneFlowApp::load_session_at(&session_path);
+        assert!(
+            info.is_none(),
+            "a v2 session with a markdown leaf is not corruption"
+        );
+        let state = state.expect("session loads");
+        assert_eq!(
+            state.version,
+            paneflow_config::schema::SESSION_SCHEMA_VERSION,
+            "removing the markdown viewer must not bump the session schema"
+        );
+
+        let mixed = state.workspaces[0].tabs[0]
+            .layout
+            .clone()
+            .expect("mixed tab has a layout");
+        let LayoutNode::Split { children, .. } = &mixed else {
+            panic!("the saved split must deserialize");
+        };
+        let LayoutNode::Pane { surfaces } = &children[1] else {
+            panic!("the markdown leaf must still deserialize");
+        };
+        assert_eq!(surfaces[0].surface_type.as_deref(), Some("markdown"));
+        assert_eq!(
+            surfaces[0].path.as_deref(),
+            Some("/tmp/README.md"),
+            "SurfaceDefinition.path still deserializes"
+        );
+
+        let restored = restored_tab_layout(mixed).expect("the terminal leaf stays");
+        let LayoutNode::Pane { surfaces } = &restored else {
+            panic!(
+                "a split whose other child was markdown collapses to the terminal, got {restored:?}"
+            );
+        };
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(surfaces[0].surface_type.as_deref(), Some("terminal"));
+        assert_eq!(surfaces[0].cwd.as_deref(), Some("/tmp/real-terminal"));
+        assert!(surfaces[0].path.is_none());
+        assert_ne!(
+            surfaces[0].cwd.as_deref(),
+            Some("/tmp/workspace-fallback"),
+            "the kept pane is the saved terminal, not a shell at the workspace cwd"
+        );
+
+        let notes = state.workspaces[0].tabs[1]
+            .layout
+            .clone()
+            .expect("notes tab has a layout");
+        assert!(
+            restored_tab_layout(notes).is_none(),
+            "a markdown-only leaf is dropped instead of becoming a terminal"
+        );
     }
 
     #[test]

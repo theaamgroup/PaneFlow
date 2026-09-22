@@ -1,5 +1,5 @@
-//! Pane - a mono-surface leaf holding exactly one view (a terminal, a markdown
-//! viewer, or a diff view).
+//! Pane - a mono-surface leaf holding exactly one view (a terminal or a diff
+//! view).
 //!
 //! Each leaf in the layout tree holds an `Entity<Pane>`, and each pane holds a
 //! single [`PaneSurface`]. Multiplicity lives one level up: a workspace owns a
@@ -35,7 +35,6 @@ use crate::ui_primitives::squircle::{squircle_border, squircle_fill};
 use crate::ui_primitives::{AnimatedHoverExt, lerp_color};
 
 use crate::diff::DiffView;
-use crate::markdown::MarkdownView;
 use crate::pane_drag::{
     DragPreview, DropEdge, PaneDrag, ReviewSubjectDrag, SPLIT_EDGE_BAND, SessionDrag,
     compute_drop_edge, split_rect,
@@ -46,14 +45,12 @@ use crate::terminal::{TerminalEvent, TerminalView};
 // PaneSurface - the single view a pane holds
 // ---------------------------------------------------------------------------
 
-/// The one surface a pane holds. Terminals, markdown viewers and diff views are
-/// interchangeable here: the pane renders whichever it owns. A second surface
-/// means a second pane (split) or a second workspace tab, never a second entry
-/// in a strip.
+/// The one surface a pane holds. Terminals and diff views are interchangeable
+/// here: the pane renders whichever it owns. A second surface means a second
+/// pane (split) or a second workspace tab, never a second entry in a strip.
 #[derive(Clone)]
 pub enum PaneSurface {
     Terminal(Entity<TerminalView>),
-    Markdown(Entity<MarkdownView>),
     Diff(Entity<DiffView>),
 }
 
@@ -61,7 +58,7 @@ impl PaneSurface {
     pub fn as_terminal(&self) -> Option<&Entity<TerminalView>> {
         match self {
             PaneSurface::Terminal(t) => Some(t),
-            PaneSurface::Markdown(_) | PaneSurface::Diff(_) => None,
+            PaneSurface::Diff(_) => None,
         }
     }
 
@@ -71,7 +68,6 @@ impl PaneSurface {
     pub(crate) fn kind_icon(&self) -> &'static str {
         match self {
             PaneSurface::Terminal(_) => "icons/terminal.svg",
-            PaneSurface::Markdown(_) => "icons/file-text.svg",
             PaneSurface::Diff(_) => "icons/git-branch.svg",
         }
     }
@@ -82,7 +78,6 @@ impl PaneSurface {
     pub(crate) fn kind_label(&self) -> &'static str {
         match self {
             PaneSurface::Terminal(_) => "Terminal",
-            PaneSurface::Markdown(_) => "Markdown",
             PaneSurface::Diff(_) => "Diff",
         }
     }
@@ -348,7 +343,7 @@ pub struct Pane {
     /// toggle) takes effect on the next click without a per-frame disk read.
     pub cached_config: paneflow_config::schema::PaneFlowConfig,
     /// Live drop-to-split target (EP-003 US-007): the edge the blue overlay
-    /// previews while a session or markdown file is dragged over this pane's
+    /// previews while a session is dragged over this pane's
     /// content. `None` = center band (new workspace tab) or no drag. Updated by
     /// the content `on_drag_move` handler; reset on drop. While no drag is
     /// active the overlay is `invisible()` regardless of this value, so a stale
@@ -766,7 +761,7 @@ impl Pane {
     }
 
     /// Iterate over this pane's terminal - zero items when its surface is a
-    /// markdown or diff view. Kept as an iterator so the many callers that scan
+    /// diff view. Kept as an iterator so the many callers that scan
     /// panes uniformly (sidebar counters, AI-tool PID owner lookups, layout
     /// serialization) keep working unchanged after EP-002 US-004.
     pub fn terminals(&self) -> impl Iterator<Item = &Entity<TerminalView>> {
@@ -834,9 +829,8 @@ impl Pane {
         .detach();
     }
 
-    /// Get a display title for a surface. Markdown surfaces use the file
-    /// basename; terminal surfaces detect well-known programs from the OSC
-    /// title.
+    /// Get a display title for a surface. Terminal surfaces detect well-known
+    /// programs from the OSC title.
     ///
     /// The full variant keeps meaningful title text for the flexible header
     /// and tooltip while the render chain applies ellipsis at the available
@@ -845,7 +839,6 @@ impl Pane {
     /// variant used by drag labels and other fixed-width surfaces.
     fn surface_full_title(surface: &PaneSurface, cx: &App) -> String {
         match surface {
-            PaneSurface::Markdown(md) => md.read(cx).title().to_string(),
             PaneSurface::Diff(d) => d.read(cx).title(),
             PaneSurface::Terminal(t) => Self::terminal_surface_full_title(t, cx),
         }
@@ -853,7 +846,6 @@ impl Pane {
 
     pub(crate) fn surface_title(surface: &PaneSurface, cx: &App) -> String {
         let raw = match surface {
-            PaneSurface::Markdown(md) => md.read(cx).title().to_string(),
             PaneSurface::Diff(d) => d.read(cx).title(),
             PaneSurface::Terminal(t) => Self::terminal_surface_title(t, cx),
         };
@@ -861,7 +853,7 @@ impl Pane {
     }
 
     /// Icon path for a surface (rendered as a small leading SVG in the header).
-    /// Differentiates terminal, markdown and diff surfaces at a glance.
+    /// Differentiates terminal and diff surfaces at a glance.
     fn surface_icon(surface: &PaneSurface) -> &'static str {
         surface.kind_icon()
     }
@@ -1428,8 +1420,8 @@ impl Pane {
         }
     }
 
-    /// This pane's terminal, when its surface is one. `None` for a markdown or
-    /// diff surface - every caller (event handlers, workspace ops, IPC, header
+    /// This pane's terminal, when its surface is one. `None` for a diff
+    /// surface - every caller (event handlers, workspace ops, IPC, header
     /// action buttons) must handle that absence. Unlike the pre-EP-002 API this
     /// can no longer miss because of a stale index: the `Option` now encodes
     /// the surface's kind and nothing else.
@@ -2043,7 +2035,6 @@ impl Focusable for Pane {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         match &self.surface {
             PaneSurface::Terminal(t) => t.read(cx).focus_handle(cx),
-            PaneSurface::Markdown(m) => m.read(cx).focus_handle(cx),
             PaneSurface::Diff(d) => d.read(cx).focus_handle(cx),
         }
     }
@@ -2071,7 +2062,6 @@ impl Render for Pane {
                     t.clone().cached(cached_surface_style()).into_any_element()
                 }
             }
-            PaneSurface::Markdown(m) => m.clone().into_any_element(),
             PaneSurface::Diff(d) => d.clone().into_any_element(),
         };
         let theme = crate::theme::active_theme();
@@ -2082,7 +2072,7 @@ impl Render for Pane {
         // this pane's content, never a renderer or GPU effect. It sits inside
         // `content`, so the pane header, the US-018 attention glow, the peek badge,
         // the broadcast stripe and the Composer all stay at full contrast - the
-        // dim only ever touches terminal/markdown/diff output. It carries no
+        // dim only ever touches terminal or diff output. It carries no
         // `id` and no handlers, so GPUI inserts no hitbox for it and it cannot
         // swallow a click (Ghostty needs three explicit opt-outs for this).
         //

@@ -615,7 +615,7 @@
         },
         "path": {
           "type": ["string", "null"],
-          "description": "File path for non-terminal surfaces such as markdown."
+          "description": "Optional path stored with a surface. Older sessions recorded a markdown file here; the field still deserializes."
         },
         "env": {
           "type": ["object", "null"],

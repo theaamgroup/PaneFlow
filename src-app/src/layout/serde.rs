@@ -141,24 +141,6 @@ impl LayoutTree {
                                 font_size: tv_ref.terminal.font_size_override,
                             }
                         }
-                        crate::pane::PaneSurface::Markdown(markdown) => {
-                            let path = markdown.read(cx).path.display().to_string();
-                            SurfaceDefinition {
-                                surface_type: Some("markdown".to_string()),
-                                agent_context: None,
-                                name: None,
-                                custom_name: None,
-                                command: None,
-                                prompt: None,
-                                cwd: None,
-                                path: Some(path),
-                                env: None,
-                                focus: Some(true),
-                                scrollback: None,
-                                agent: None,
-                                font_size: None,
-                            }
-                        }
                         crate::pane::PaneSurface::Diff(diff) => {
                             crate::app::review::surface_for_subject(&diff.read(cx).subject())
                         }

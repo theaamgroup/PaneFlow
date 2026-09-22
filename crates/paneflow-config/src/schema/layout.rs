@@ -434,7 +434,8 @@ pub struct SurfaceDefinition {
     pub prompt: Option<String>,
     /// Working directory override for this surface.
     pub cwd: Option<String>,
-    /// File path for non-terminal surfaces such as markdown.
+    /// Optional path stored with a surface. Older sessions recorded a
+    /// markdown file here; the field still deserializes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// Extra environment variables merged over `terminal.env`. The same

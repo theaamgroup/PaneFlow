@@ -5,11 +5,10 @@
 //! [`DiffView`] pointed at one [`ReviewSubject`]. The multi-column arranger,
 //! the multi-repo host and the scope model went with that change.
 //!
-//! `DiffView` is the structural analog of `markdown::MarkdownView`: an
-//! `Entity` implementing `Render + Focusable`, hosted in a pane through the
-//! `PaneSurface::Diff` variant. Unlike a markdown pane it IS persisted: a
-//! Review pane round-trips through `SessionState::review_layout` as its
-//! subject (`app/review/session.rs`), so the grid survives a relaunch.
+//! `DiffView` is an `Entity` implementing `Render + Focusable`, hosted in a
+//! pane through the `PaneSurface::Diff` variant. A Review pane round-trips
+//! through `SessionState::review_layout` as its subject
+//! (`app/review/session.rs`), so the grid survives a relaunch.
 
 mod align;
 mod element;

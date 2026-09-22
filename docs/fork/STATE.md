@@ -17,6 +17,7 @@ The Files rail, the dock code editor, `paneflow-textdiff`, and the editor
 benchmark suite are removed (#597). A clicked file path opens in the
 configured external editor. Git diff viewing and Review mode stay. The
 terminal bench and the startup bench are the performance suites that remain.
+The in-app Markdown viewer is removed (#598): a Cmd-clicked `.md` path opens in the external editor, and tree-sitter Markdown highlighting in Changes and Review stays.
 
 **2026-09-18: the 0.7.0 cut.** 36 non-merge commits since `v0.6.1`, a minor
 bump because the release adds surfaces rather than only fixing them: the

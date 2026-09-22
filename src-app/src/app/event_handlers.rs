@@ -444,6 +444,30 @@ fn open_pane_in_new_workspace_tab(
     })
 }
 
+/// Where a clicked path opens. Markdown and code paths both go to the
+/// external editor; markdown has no line or column.
+struct ExternalEditorOpen {
+    path: std::path::PathBuf,
+    line: Option<u32>,
+    col: Option<u32>,
+}
+
+fn external_editor_open(event: &terminal::TerminalEvent) -> Option<ExternalEditorOpen> {
+    match event {
+        terminal::TerminalEvent::OpenMarkdownPath(path) => Some(ExternalEditorOpen {
+            path: path.clone(),
+            line: None,
+            col: None,
+        }),
+        terminal::TerminalEvent::OpenCodePath { path, line, col } => Some(ExternalEditorOpen {
+            path: path.clone(),
+            line: *line,
+            col: *col,
+        }),
+        _ => None,
+    }
+}
+
 impl PaneFlowApp {
     /// EP-002 US-007: open `pane` as a brand-new workspace tab of `ws_idx` and
     /// make it active. Toasts and leaves the workspace untouched when the tab
@@ -972,29 +996,27 @@ impl PaneFlowApp {
             terminal::TerminalEvent::SelectionCopied => {
                 self.show_toast("Copied", cx);
             }
-            terminal::TerminalEvent::OpenMarkdownPath(path) => {
-                self.open_markdown_in_pane(&terminal, path.clone(), cx);
+            terminal::TerminalEvent::OpenMarkdownPath(_)
+            | terminal::TerminalEvent::OpenCodePath { .. } => {
+                let Some(open) = external_editor_open(event) else {
+                    return;
+                };
+                let editor = self.cached_config.external_editor.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        crate::editor::open_at_location(
+                            &open.path,
+                            open.line,
+                            open.col,
+                            editor.as_deref(),
+                        );
+                    })
+                    .detach();
             }
             terminal::TerminalEvent::FontZoomChanged => {
                 // EP-006 US-019: persist immediately so the zoom survives a
                 // crash, not just a clean quit (SurfaceRenamed parity).
                 self.save_session(cx);
-            }
-            terminal::TerminalEvent::OpenCodePath { path, line, col } => {
-                // Spawn the editor on the GPUI background executor so a
-                // slow editor launch (cold VS Code, remote SSH editor)
-                // never blocks the main thread. `open_at_location`
-                // already log-swallows failures, so we don't need to
-                // surface the result here.
-                let path = path.clone();
-                let line = *line;
-                let col = *col;
-                let editor = self.cached_config.external_editor.clone();
-                cx.background_executor()
-                    .spawn(async move {
-                        crate::editor::open_at_location(&path, line, col, editor.as_deref());
-                    })
-                    .detach();
             }
             terminal::TerminalEvent::ShellPromptReady => {
                 // The shell is back at its prompt: whatever agent this pane
@@ -1085,45 +1107,6 @@ impl PaneFlowApp {
             crate::ai_types::AgentStateSource::Terminal,
             cx,
         );
-    }
-
-    /// US-020 - append a markdown tab to the pane that owns `source_terminal`.
-    ///
-    /// The historical implementation split the layout vertically and created
-    /// a dedicated markdown pane; the user feedback was that opening a doc
-    /// shouldn't shrink the terminal real-estate. The current behaviour is to
-    /// make markdown a peer tab inside the same pane - the user keeps the
-    /// terminal+markdown pair via Ctrl+Tab / mouse-click, and the layout tree
-    /// is untouched.
-    /// Open a markdown file requested from a terminal surface (OSC path click).
-    ///
-    /// EP-002 US-007: a pane holds one surface, so the file opens in a new
-    /// workspace tab instead of being appended next to the terminal that asked
-    /// for it - the terminal keeps running.
-    fn open_markdown_in_pane(
-        &mut self,
-        source_terminal: &Entity<TerminalView>,
-        path: std::path::PathBuf,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(ws_idx) = self.workspace_idx_for_terminal(source_terminal, cx) else {
-            return;
-        };
-        let ws_id = self.workspaces[ws_idx].id;
-        let markdown = cx.new(|cx: &mut Context<crate::markdown::MarkdownView>| {
-            crate::markdown::MarkdownView::open(path, cx)
-        });
-        let new_pane = self.create_pane_with_existing_surface(
-            crate::pane::PaneSurface::Markdown(markdown),
-            ws_id,
-            cx,
-        );
-        if !self.open_pane_in_new_workspace_tab(ws_idx, new_pane.clone(), cx) {
-            return;
-        }
-        self.pending_pane_focus = Some(new_pane);
-        self.save_session(cx);
-        cx.notify();
     }
 
     /// Find which workspace contains the given terminal entity.
@@ -1748,8 +1731,8 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) {
         // Find the tab holding this terminal, in any workspace.
-        // US-020: skip markdown panes - they have no active terminal, so the
-        // identity check via `active_terminal_opt` returns None for them.
+        // A non-terminal pane has no active terminal, so `active_terminal_opt`
+        // returns None for it.
         let located = self.workspaces.iter().enumerate().find_map(|(ws_idx, ws)| {
             ws.tabs()
                 .iter()
@@ -2020,7 +2003,7 @@ mod tests {
     use super::{CwdBinding, tab_binding_for_cwd};
     use super::{
         announced_port_conflicts, child_identity_is_live, declaration_survives_scan,
-        keep_session_after_surface_focus, keep_session_after_surface_purge,
+        external_editor_open, keep_session_after_surface_focus, keep_session_after_surface_purge,
         keep_session_at_cached_shell, keep_session_at_shell_prompt, merge_scan_workspace_state,
         merge_service_label, port_ownership, same_process, stale_sweep_keeps_without_pid_probe,
         surface_awaits_scan,
@@ -2030,6 +2013,76 @@ mod tests {
     use crate::terminal::ServiceInfo;
     use crate::workspace::{PaneScan, PortEntry};
     use std::collections::{HashMap, HashSet};
+
+    /// Issue #598: a detected `.md` path is a file hyperlink, and that event
+    /// opens the external editor with no line or column. The handler spawns
+    /// `open_at_location` on the same background path as a code click.
+    #[test]
+    fn detected_markdown_path_opens_in_the_external_editor() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("README.md");
+        std::fs::write(&file, "# notes\n").expect("write markdown");
+        let line = format!("see {}", file.display());
+        let columns: Vec<usize> = (0..line.chars().count()).collect();
+        let zones = crate::terminal::element::detect_file_paths_on_line_mapped(
+            &line,
+            crate::terminal::types::Line(0),
+            &columns,
+            None,
+        );
+        assert_eq!(zones.len(), 1, "the markdown scanner must see README.md");
+        assert_eq!(
+            zones[0].source,
+            crate::terminal::types::HyperlinkSource::FilePath
+        );
+        assert!(zones[0].uri.ends_with("README.md"));
+        assert!(zones[0].line.is_none());
+        assert!(zones[0].col.is_none());
+
+        let event = crate::terminal::TerminalEvent::OpenMarkdownPath(std::path::PathBuf::from(
+            &zones[0].uri,
+        ));
+        let open = external_editor_open(&event).expect("a markdown click opens an editor");
+        assert_eq!(open.path, std::path::PathBuf::from(&zones[0].uri));
+        assert_eq!(open.line, None);
+        assert_eq!(open.col, None);
+
+        let code = crate::terminal::TerminalEvent::OpenCodePath {
+            path: std::path::PathBuf::from("src/lib.rs"),
+            line: Some(42),
+            col: Some(7),
+        };
+        let code_open = external_editor_open(&code).expect("a code click opens an editor");
+        assert_eq!(code_open.line, Some(42));
+        assert_eq!(code_open.col, Some(7));
+        assert!(external_editor_open(&crate::terminal::TerminalEvent::TitleChanged).is_none());
+
+        let src = include_str!("event_handlers.rs");
+        let arm = src
+            .split("terminal::TerminalEvent::OpenMarkdownPath(_)")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("terminal::TerminalEvent::FontZoomChanged")
+                    .next()
+            })
+            .expect("the markdown click arm");
+        assert!(
+            arm.contains("external_editor_open(event)"),
+            "the click arm must use the editor routing decision: {arm}"
+        );
+        assert!(
+            arm.contains("crate::editor::open_at_location("),
+            "the click arm must open the external editor: {arm}"
+        );
+        assert!(
+            arm.contains("cx.background_executor()"),
+            "editor launch stays off the render thread: {arm}"
+        );
+        assert!(
+            !arm.contains("open_markdown") && !arm.contains("::Markdown"),
+            "a markdown click must not open an in-app pane: {arm}"
+        );
+    }
 
     #[test]
     fn a_pane_walking_home_unbinds_its_tab_and_an_unrelated_cd_changes_nothing() {

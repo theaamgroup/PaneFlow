@@ -90,8 +90,7 @@ Themes affect more than terminal ANSI colours:
 
 * terminal background, foreground, cursor, selection, scrollbar, links, and ANSI palette;
 * the app chrome palette derived from the active theme;
-* markdown panes and tables;
-* Diff and Review syntax colours;
+* Diff and Review syntax colours, including Markdown in those diffs;
 * title-bar colours, and alignment with the native macOS Sidebar material when `macos_chrome_material` is on.
 
 Two related settings are separate from the theme name:

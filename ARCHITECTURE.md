@@ -25,7 +25,7 @@ without Electron.
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 93 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 86 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
@@ -123,8 +123,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │                                        rebuilt every frame made the whole settings surface lag
 ├── diff/                              ← git diff engine + single-ReviewSubject viewer (custom Element, own hscroll);
 │                                         per-pane base + unified/split display, no embedded terminals or scope/sync layer
-├── markdown/                          ← streaming Markdown view (parser, security, theme); panes come from
-│                                         OSC path click + session restore only (no Files-sidebar drag or click)
+├── text_sanitize.rs                   ← strip bidi and zero-width characters from untrusted labels
 ├── agents/                            ← agent process supervision, notifications
 ├── ai_hooks/                          ← ai.* hook payload extraction
 ├── {claude,codex,opencode,pi,command}_sessions.rs ← per-agent session-file readers
@@ -204,10 +203,11 @@ Blocking git, filesystem walks, recursive watcher registration, and fleet-wide s
 
 ## Opening a file
 
-There is no in-app file tree and no in-app editor. A clicked file path,
-including an Agent setup row, opens in the configured external editor
-(`editor::open_at_location`). The right rail is the Sessions sidebar only.
-Git diff viewing (the Changes dock) and Review mode stay.
+There is no in-app file tree, no in-app editor, and no in-app Markdown
+viewer. A clicked file path, including `.md` and an Agent setup row, opens
+in the configured external editor (`editor::open_at_location`). The right
+rail is the Sessions sidebar only. Git diff viewing (the Changes dock) and
+Review mode stay. Tree-sitter still highlights Markdown in those diffs.
 
 ## Diff syntax highlighting
 
@@ -461,7 +461,7 @@ env; use `open --env VAR=1`.
 
 ### Fork-pin maintenance (GPUI)
 
-The Zed git deps in `src-app/Cargo.toml` pin `zed-industries/zed@fecc3273ed32643c2ea1b04a74c8780e2c9ffaf8` (`gpui` and `gpui_platform` in `[dependencies]` at lines 39-40, plus a test-support `gpui` in `[dev-dependencies]` at line 253). `gpui_platform` must carry the `font-kit` feature on macOS. To bump: choose and freeze a tested upstream revision, update every exact `rev`, run `cargo update`, then run the workspace test, Clippy, and format gates. Do not reintroduce an `arthjean/zed` pin.
+The Zed git deps in `src-app/Cargo.toml` pin `zed-industries/zed@fecc3273ed32643c2ea1b04a74c8780e2c9ffaf8` (`gpui` and `gpui_platform` in `[dependencies]` at lines 33-34, plus a test-support `gpui` in `[dev-dependencies]` at line 215). `gpui_platform` must carry the `font-kit` feature on macOS. To bump: choose and freeze a tested upstream revision, update every exact `rev`, run `cargo update`, then run the workspace test, Clippy, and format gates. Do not reintroduce an `arthjean/zed` pin.
 
 ## Dependency sources
 

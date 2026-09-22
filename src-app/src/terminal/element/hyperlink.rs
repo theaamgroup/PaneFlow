@@ -3,7 +3,7 @@
 //! Two scanners share the same line-scoped, char-to-column mapped pattern:
 //! - `detect_urls_on_line_mapped`  - Zed-style URL regex (US-015).
 //! - `detect_file_paths_on_line_mapped` - `.md` / `.markdown` paths with
-//!   existence check + heuristics (US-019).
+//!   existence check + heuristics (US-019). Clicks open the external editor.
 //!
 //! Both return `HyperlinkZone`; the scheme allowlist (`is_url_scheme_openable`)
 //! guards what `TerminalView` will actually open.
@@ -558,8 +558,8 @@ pub fn detect_file_paths_on_line_mapped(
 // The code-path scanner detects a known source extension, expands possible
 // path starts to the left, then validates the resolved file before emitting a
 // link. Location suffixes accept `:line[:col]`, `(line,col)`, and `(line:col)`.
-// `.md` / `.markdown` are deliberately absent: the markdown scanner routes
-// those to the in-pane markdown viewer.
+// `.md` / `.markdown` are deliberately absent: the markdown scanner owns
+// them and the click opens the external editor with no line or column.
 
 /// US-013: Python traceback frame `File "path", line N`. The path is quoted and
 /// the line number lives in a separate clause, so the generic code-path regex
@@ -1696,7 +1696,7 @@ mod tests {
 
     #[test]
     fn code_path_scanner_skips_markdown() {
-        // .md files belong to the FilePath scanner (markdown viewer route).
+        // .md files belong to the FilePath scanner (external-editor route).
         // The code-path scanner must NOT emit a zone for them.
         let tmp = tempfile::tempdir().expect("tempdir");
         write_md(tmp.path(), "README.md");
