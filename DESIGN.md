@@ -196,7 +196,7 @@ is not rendered at all — one reachable mode is not a choice — and
 Every overlay is deferred at an explicit priority, and that ladder is itself
 part of the contract: **1** settings selects · **2** toasts · **3** menus
 (branch, new tab, dock options, Customize Sidebar, palette branch) · **4**
-Composer, dock options, the diff feedback flash
+Composer, the dock layout submenu, the diff feedback flash
 (`diff/view/interaction.rs`) · **6** full-surface overlays · **8**
 Custom Buttons and the Review-with-agent popover · **10** dialogs ·
 **11** close confirm. A new overlay picks the rung that matches its kind rather
