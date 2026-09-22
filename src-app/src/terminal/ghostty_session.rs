@@ -1781,9 +1781,13 @@ impl GhosttySession {
     pub(super) fn line_text_at(&self, point: Point) -> Option<GridLineText> {
         let state = self.inner.state.read();
         let content = &state.content;
-        // Cells are row-major in viewport order, so a row is one slice; the
-        // first cell's coordinate confirms the layout before it is trusted.
-        let row = usize::try_from(point.line.0).ok()?;
+        // Hover passes a grid line (`cell_at` subtracts `display_offset`).
+        // Published cells are the viewport, indexed from its top row, so add
+        // the offset back before slicing (issue #696). The returned line stays
+        // in grid coordinates.
+        let offset = i32::try_from(content.display_offset).ok()?;
+        let viewport_line = point.line.0.checked_add(offset)?;
+        let row = usize::try_from(viewport_line).ok()?;
         let start = row.checked_mul(content.cols)?;
         let cells = content
             .cells
@@ -1791,7 +1795,7 @@ impl GhosttySession {
             .filter(|cells| {
                 cells
                     .first()
-                    .is_some_and(|cell| cell.point.line == point.line)
+                    .is_some_and(|cell| cell.point.line.0 == viewport_line)
             })?;
         let mut text = String::with_capacity(cells.len());
         let mut char_to_column = Vec::with_capacity(cells.len());
@@ -5271,6 +5275,48 @@ mod tests {
         );
         assert!(session.line_text_at(Point::new(4, 0)).is_none());
         assert!(session.line_text_at(Point::new(-1, 0)).is_none());
+    }
+
+    /// Issue #696: hover passes the grid line from `cell_at` (viewport row
+    /// minus `display_offset`). The slice has to be the hovered viewport row.
+    #[test]
+    fn line_text_at_reads_the_hovered_row_while_scrolled_back() {
+        let size = ghostty::WindowSize::new(20, 4, 8, 16).expect("valid grid");
+        let mut terminal =
+            ghostty::DisplayTerminal::new(size, 100, ghostty::TerminalAppearance::default())
+                .expect("libghostty initializes");
+        for index in 0..12 {
+            terminal
+                .feed(format!("row{index:02} unique\r\n").as_bytes())
+                .expect("history line");
+        }
+        terminal
+            .scroll_to_viewport_row(0)
+            .expect("scroll to the top of history");
+        let content = content_from_ghostty(terminal.snapshot().expect("scrolled snapshot"));
+        let offset = i32::try_from(content.display_offset).expect("offset fits");
+        assert!(offset > 0, "scrollback must move the viewport");
+        let viewport_row = 1usize;
+        let expected: String = content
+            .cells
+            .iter()
+            .skip(viewport_row * content.cols)
+            .take(content.cols)
+            .map(|cell| cell.c)
+            .collect();
+        assert!(
+            expected.contains("row"),
+            "viewport row should hold history text, got {expected:?}"
+        );
+        let (session, _pending, _events_rx) =
+            GhosttySession::pending(TerminalWindowSize::new(20, 4, 8, 16));
+        session.inner.state.write().content = content;
+        let grid_line = viewport_row as i32 - offset;
+        let line = session
+            .line_text_at(Point::new(grid_line, 0))
+            .expect("hovered history row");
+        assert_eq!(line.line.0, grid_line);
+        assert_eq!(line.text, expected);
     }
 
     fn empty_ghostty_content(cols: usize, rows: usize) -> ghostty::Content {
