@@ -20,7 +20,8 @@ fn git(cwd: &Path, args: &[&str], deadline: Instant) -> Result<Vec<u8>, String> 
         .checked_duration_since(Instant::now())
         .ok_or("Git inspection timed out")?;
     let mut cmd = crate::workspace::worktree::git_command();
-    cmd.current_dir(cwd).args(args);
+    crate::workspace::worktree::git_subcommand(&mut cmd, args);
+    cmd.current_dir(cwd);
     let out = paneflow_process::run_with_timeout(cmd, remaining, 512 * 1024)
         .map_err(|e| e.to_string())?;
     if !out.status.success() {

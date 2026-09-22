@@ -702,24 +702,63 @@ pub(crate) fn git_command() -> Command {
     cmd
 }
 
+/// Index of the git subcommand inside `args`.
+///
+/// Global options may precede it (`--literal-pathspecs`, `-c key=value`).
+/// `-c` and `-C`, and the long options that take a separate value, consume
+/// the next element. `--` ends the option scan. The subcommand is the first
+/// later token, so a leading option is never treated as the command name.
+fn git_subcommand_index(args: &[&str]) -> Option<usize> {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index];
+        if arg == "--" {
+            let next = index + 1;
+            return (next < args.len()).then_some(next);
+        }
+        if !arg.starts_with('-') {
+            return Some(index);
+        }
+        let consumes_next = matches!(
+            arg,
+            "-c" | "-C"
+                | "--git-dir"
+                | "--work-tree"
+                | "--namespace"
+                | "--config-env"
+                | "--super-prefix"
+                | "--exec-path"
+                | "--list-cmds"
+        );
+        index = index.saturating_add(if consumes_next { 2 } else { 1 });
+    }
+    None
+}
+
 /// Append a git subcommand, forcing `--no-ext-diff` on `git diff`.
 ///
-/// A leading argument that does not start with `-` is the subcommand.
-/// `-c alias.<name>=` is inserted before that token so a repo or global
-/// alias cannot replace it. An `alias.status` that exits 0 with empty
-/// stdout would otherwise make [`is_clean`] report a dirty tree as clean.
+/// `-c alias.<name>=` is inserted immediately before the subcommand token,
+/// after any global options, so a repo or global alias cannot replace it.
+/// An `alias.status` that exits 0 with empty stdout would otherwise make
+/// [`is_clean`] report a dirty tree as clean. The same clearance covers
+/// `rev-parse`, `ls-tree`, `branch`, and `switch` (issue #681).
 pub(crate) fn git_subcommand(cmd: &mut Command, args: &[&str]) {
-    if let Some(name) = args.first().filter(|name| !name.starts_with('-')) {
-        let disable_alias = format!("alias.{name}=");
-        cmd.arg("-c").arg(disable_alias);
+    let Some(index) = git_subcommand_index(args) else {
+        cmd.args(args);
+        return;
+    };
+    let name = args[index];
+    if index > 0 {
+        cmd.args(&args[..index]);
     }
-    match args {
-        ["diff", rest @ ..] => {
-            cmd.arg("diff").arg("--no-ext-diff").args(rest);
+    cmd.arg("-c").arg(format!("alias.{name}="));
+    if name == "diff" {
+        cmd.arg("diff").arg("--no-ext-diff");
+        if index + 1 < args.len() {
+            cmd.args(&args[index + 1..]);
         }
-        _ => {
-            cmd.args(args);
-        }
+    } else {
+        cmd.args(&args[index..]);
     }
 }
 
@@ -1808,6 +1847,51 @@ mod tests {
             !dashed.contains("alias.-c"),
             "a leading option is not a subcommand name: {dashed}"
         );
+        let dashed_alias = dashed
+            .find("alias.status=")
+            .expect("a leading -c still disables alias.status");
+        let dashed_status = dashed
+            .rfind("\"status\"")
+            .expect("status command names the subcommand");
+        assert!(
+            dashed_alias < dashed_status,
+            "-c alias.status= must follow other global options and precede status: {dashed}"
+        );
+        let literal = rendered_git_subcommand(&["--literal-pathspecs", "ls-tree", "-z", "HEAD"]);
+        let literal_flag = literal
+            .find("--literal-pathspecs")
+            .expect("literal pathspecs stays a global option");
+        let literal_alias = literal
+            .find("alias.ls-tree=")
+            .expect("ls-tree behind a global option disables alias.ls-tree");
+        let literal_cmd = literal
+            .find("\"ls-tree\"")
+            .expect("ls-tree command names the subcommand");
+        assert!(
+            literal_flag < literal_alias && literal_alias < literal_cmd,
+            "alias.ls-tree= must sit between --literal-pathspecs and ls-tree: {literal}"
+        );
+        for (file, marker) in [
+            (
+                include_str!("../diff/git.rs"),
+                "fn repository_discovery_command(",
+            ),
+            (
+                include_str!("../app/diff_dock/branch.rs"),
+                "fn list_branches(",
+            ),
+            (
+                include_str!("../app/diff_dock/branch.rs"),
+                "fn switch_branch(",
+            ),
+            (include_str!("../app/work_review/model.rs"), "fn git("),
+        ] {
+            let body = git_fn_source(file, marker);
+            assert!(
+                body.contains("git_subcommand("),
+                "{marker} must clear alias.<subcommand> through git_subcommand"
+            );
+        }
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo_root = tmp.path().join("repo");
