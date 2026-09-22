@@ -793,10 +793,9 @@ impl PaneFlowApp {
 
     /// Launch `preset` where the picker stands. The row that was clicked or
     /// confirmed is passed by value, never re-resolved from its painted index:
-    /// the cold PATH walk (issue #518) inserts agent rows ahead of the custom
-    /// commands once it publishes, so an index captured from the pre-scan
-    /// frame would launch a newly inserted agent instead of the custom
-    /// command the user chose.
+    /// the cold PATH walk (issue #518) inserts agent rows once it publishes,
+    /// so an index captured from the pre-scan frame would launch a newly
+    /// inserted agent instead of the shell or agent row the user chose.
     pub(crate) fn pane_palette_launch(
         &mut self,
         preset: Preset,
@@ -1524,8 +1523,6 @@ mod tests {
         assert!(!palette_holds_last_surface(None, &[]));
     }
 
-    /// Source-text assertion: `close_pane_palette` needs a live `Window`, so
-    /// the guard's position is pinned here. It must run before
     /// Issue #518: the cold PATH walk inserts agent rows once it publishes,
     /// so a launch must carry the `Preset` the user saw rather than
     /// re-resolve a painted index, and the row painter must read the
