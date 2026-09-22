@@ -12,7 +12,6 @@ use gpui::{
     point, prelude::*, px,
 };
 
-use crate::editor::WorkspaceEditor;
 use crate::pane::PaneSurface;
 use crate::settings::components::{menu_divider_color, select_item, select_menu, with_alpha};
 use crate::ui_primitives::AnimatedHoverExt;
@@ -36,9 +35,9 @@ fn context_menu_divider(ui: crate::theme::UiColors) -> gpui::Div {
 }
 
 /// Fixed rows are pin/unpin, reveal, copy path, manage custom buttons, and
-/// close, plus mute/unmute and an optional Mark as read row. The divider
-/// before Reveal only exists when an editor section does; otherwise the
-/// earlier workflow/service divider already separates groups.
+/// close, plus mute/unmute and an optional Mark as read row. `visible_editor_rows`
+/// is the single Open in editor row (always 1). The divider before Reveal
+/// exists only when that row does.
 fn workspace_context_menu_counts(
     visible_editor_rows: usize,
     workflow_rows: usize,
@@ -253,12 +252,11 @@ impl PaneFlowApp {
         let muted = self.workspaces[idx].muted;
         let workflow_rows = usize::from(workflow_template.is_some());
         let service_rows = services.len();
-        let visible_editors: Vec<_> = WorkspaceEditor::ALL
-            .into_iter()
-            .filter(|editor| editor.is_visible(&self.cached_config))
-            .collect();
+        // One row. The editor is `external_editor`, so there is nothing to
+        // filter by which CLI happens to be installed.
+        let visible_editor_rows = 1;
         let (menu_rows, separator_rows) = workspace_context_menu_counts(
-            visible_editors.len(),
+            visible_editor_rows,
             workflow_rows,
             service_rows,
             has_unread,
@@ -347,27 +345,20 @@ impl PaneFlowApp {
             context_menu = context_menu.child(context_menu_divider(ui));
         }
 
-        for editor in &visible_editors {
-            let shortcut = self
-                .shortcut_for_action(editor.shortcut_action())
-                .map(|s| SharedString::from(s.to_string()));
-            let command = editor.command().to_string();
-            let label_owned = editor.menu_label().to_string();
-            context_menu = context_menu.child(self.render_select_menu_item(
-                SharedString::from(format!("workspace-context-{}", editor.id())),
-                editor.menu_label(),
-                shortcut,
-                ui,
-                cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                    this.open_workspace_in_editor(idx, &command, &label_owned, cx);
-                    cx.stop_propagation();
-                }),
-            ));
-        }
-
-        if !visible_editors.is_empty() {
-            context_menu = context_menu.child(context_menu_divider(ui));
-        }
+        let editor_shortcut = self
+            .shortcut_for_action("open_workspace_in_editor")
+            .map(|s| SharedString::from(s.to_string()));
+        context_menu = context_menu.child(self.render_select_menu_item(
+            "workspace-context-editor".into(),
+            "Open in editor",
+            editor_shortcut,
+            ui,
+            cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                this.open_workspace_in_editor(idx, cx);
+                cx.stop_propagation();
+            }),
+        ));
+        context_menu = context_menu.child(context_menu_divider(ui));
 
         // Reveal in file manager
         let reveal_shortcut = self

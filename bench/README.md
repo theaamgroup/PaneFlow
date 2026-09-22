@@ -135,8 +135,7 @@ otherwise resolves to `paneflow` next to the test binary's profile directory.
 
 The marks, in launch order: `login_shell_env_loaded` (the login shell's PATH
 adopted), `crash_reporting_ready` (the first config read and the Sentry
-guard), `editor_cache_ready` (the installed-editor snapshot),
-`bridge_extracted` and `ai_hook_extracted` (the two stable helper copies),
+guard), `bridge_extracted` and `ai_hook_extracted` (the two stable helper copies),
 `gpui_app_ready` (platform and text system initialization inside GPUI),
 `config_loaded`, `fonts_loaded` (the embedded fonts registered),
 `window_requested` and `window_created` (the GPU window), `session_loaded`

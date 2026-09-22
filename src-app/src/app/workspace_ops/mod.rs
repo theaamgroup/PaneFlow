@@ -29,10 +29,10 @@ use crate::{
     ClosePane, CloseWorkspace, ClosedPaneRecord, ClosedRecord, ClosedSurfaceRecord,
     ClosedWorkspaceRecord, ClosedWorkspaceTabRecord, CopyWorkspacePath,
     MAX_CLOSED_PANE_SCROLLBACK_BYTES, MAX_CLOSED_PANES, NewWorkspace, NextWorkspace,
-    OpenWorkspaceInCursor, OpenWorkspaceInVsCode, OpenWorkspaceInWindsurf, OpenWorkspaceInZed,
-    PaneFlowApp, RevealWorkspaceInFileManager, SelectWorkspace1, SelectWorkspace2,
-    SelectWorkspace3, SelectWorkspace4, SelectWorkspace5, SelectWorkspace6, SelectWorkspace7,
-    SelectWorkspace8, SelectWorkspace9, SplitHorizontally, SplitVertically, UndoClosePane,
+    OpenWorkspaceInEditor, PaneFlowApp, RevealWorkspaceInFileManager, SelectWorkspace1,
+    SelectWorkspace2, SelectWorkspace3, SelectWorkspace4, SelectWorkspace5, SelectWorkspace6,
+    SelectWorkspace7, SelectWorkspace8, SelectWorkspace9, SplitHorizontally, SplitVertically,
+    UndoClosePane,
 };
 
 #[derive(Clone)]
@@ -2260,40 +2260,13 @@ impl PaneFlowApp {
         self.reveal_workspace_in_file_manager(self.active_idx, cx);
     }
 
-    pub(crate) fn handle_open_workspace_in_zed(
+    pub(crate) fn handle_open_workspace_in_editor(
         &mut self,
-        _: &OpenWorkspaceInZed,
+        _: &OpenWorkspaceInEditor,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_workspace_in_editor(self.active_idx, "zed", "Zed", cx);
-    }
-
-    pub(crate) fn handle_open_workspace_in_cursor(
-        &mut self,
-        _: &OpenWorkspaceInCursor,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_workspace_in_editor(self.active_idx, "cursor", "Cursor", cx);
-    }
-
-    pub(crate) fn handle_open_workspace_in_vscode(
-        &mut self,
-        _: &OpenWorkspaceInVsCode,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_workspace_in_editor(self.active_idx, "code", "VS Code", cx);
-    }
-
-    pub(crate) fn handle_open_workspace_in_windsurf(
-        &mut self,
-        _: &OpenWorkspaceInWindsurf,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_workspace_in_editor(self.active_idx, "windsurf", "Windsurf", cx);
+        self.open_workspace_in_editor(self.active_idx, cx);
     }
 
     pub(crate) fn close_workspace_at_inner(
@@ -2473,35 +2446,45 @@ impl PaneFlowApp {
         cx.notify();
     }
 
-    pub(crate) fn open_workspace_in_editor(
-        &mut self,
-        idx: usize,
-        command: &str,
-        label: &str,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn open_workspace_in_editor(&mut self, idx: usize, cx: &mut Context<Self>) {
         let Some(ws) = self.workspaces.get(idx) else {
             return;
         };
         let cwd = ws.cwd.clone();
-
-        let command = command.to_owned();
-        let toast_label = editor_toast_label(label).to_owned();
-        // Finder launches frequently strip user bin directories from PATH,
-        // so editors installed under ~/.local/bin or ~/.cargo/bin can't be
-        // found by Command::new alone - even though they resolve fine from a
-        // terminal. That `which` walk, the spawn, and the wait for the
-        // launcher's exit all run on the background executor (issue #530);
-        // a spawn error or a non-zero exit comes back as a toast.
+        // The binary is `external_editor` (then `$VISUAL` / `$EDITOR` / the
+        // fallback probes), not a hardcoded editor. `which` stays off the
+        // render thread (issue #530). `system`, or nothing resolved, is the
+        // macOS handler: a directory has no line:col argv.
+        let configured = self.cached_config.external_editor.clone();
+        let toast_label = editor_toast_label("Open in editor").to_owned();
         let task = cx.background_executor().spawn(async move {
             let cmd = smol::unblock(move || {
-                let bin = resolve_editor_binary(&command);
-                log::info!(
-                    "workspace editor resolved: editor={command:?} binary={bin:?} cwd={cwd:?}"
-                );
-                let mut cmd = std::process::Command::new(bin);
-                cmd.current_dir(cwd).arg(".");
-                cmd
+                let visual = std::env::var("VISUAL").ok();
+                let editor_env = std::env::var("EDITOR").ok();
+                match crate::editor::workspace_editor_launch(
+                    configured.as_deref(),
+                    visual.as_deref(),
+                    editor_env.as_deref(),
+                    editor_binary_is_installed,
+                ) {
+                    crate::editor::WorkspaceEditorLaunch::System => {
+                        log::info!(
+                            "workspace editor resolved: external_editor={configured:?} system cwd={cwd:?}"
+                        );
+                        let mut cmd = std::process::Command::new("/usr/bin/open");
+                        cmd.arg(&cwd);
+                        cmd
+                    }
+                    crate::editor::WorkspaceEditorLaunch::Command { bin, args } => {
+                        let resolved = resolve_editor_binary(&bin);
+                        log::info!(
+                            "workspace editor resolved: external_editor={configured:?} editor={bin:?} binary={resolved:?} cwd={cwd:?}"
+                        );
+                        let mut cmd = std::process::Command::new(resolved);
+                        cmd.current_dir(&cwd).args(&args).arg(".");
+                        cmd
+                    }
+                }
             })
             .await;
             match crate::external_open::run_workspace_command(cmd).await {
@@ -3432,6 +3415,42 @@ mod tests {
             .find("run_workspace_command(")
             .expect("Finder reveal must observe open's exit status");
         assert!(validate_at < open_at, "{reveal_impl}");
+    }
+
+    /// The surviving action launches `external_editor`. A handler that ignores
+    /// the setting and names one of the old CLIs fails this without spawning.
+    #[test]
+    fn open_workspace_in_editor_reads_external_editor() {
+        let src = include_str!("mod.rs");
+        let handler = source_slice(
+            src,
+            "pub(crate) fn handle_open_workspace_in_editor(",
+            "pub(crate) fn close_workspace_at_inner(",
+        );
+        let launch = source_slice(
+            src,
+            "pub(crate) fn open_workspace_in_editor(",
+            "pub(crate) fn commit_rename(",
+        );
+        assert!(
+            handler.contains("self.active_idx"),
+            "the chord opens the active workspace: {handler}"
+        );
+        assert!(
+            launch.contains("cached_config.external_editor"),
+            "the launch must read external_editor: {launch}"
+        );
+        assert!(
+            launch.contains("workspace_editor_launch("),
+            "the launch must resolve the configured editor: {launch}"
+        );
+        let combined = format!("{handler}{launch}");
+        for hardcoded in ["\"zed\"", "\"cursor\"", "\"code\"", "\"windsurf\""] {
+            assert!(
+                !combined.contains(hardcoded),
+                "workspace open must not hardcode {hardcoded}"
+            );
+        }
     }
 
     #[test]

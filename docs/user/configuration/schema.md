@@ -69,10 +69,6 @@ That strictness is an editor-side aid only; it never affects loading.
 | `workspace_new_tab_branches` | object | `{}` | Branch overrides keyed by workspace cwd, e.g. `{"/projects/Aftermarket-Websites": "staging"}`. An absent entry inherits the default; an empty value uses that workspace's checkout. Set these using each workspace's branch picker in New tabs settings. |
 | `new_tabs_on_main` | boolean or null | `true` | Legacy compatibility: when `new_tab_branch` is absent, false uses the workspace checkout and true/absent uses main. |
 | `workspace_auto_sort` | boolean or null | `false` | Order the workspace sidebar automatically: pinned first, then workspaces with something running, then idle ones, alphabetically within each group. Sibling git worktrees stay contiguous. Drag-to-reorder is disabled while this is on. |
-| `workspace_zed_menu_visible` | boolean or null | installed detection | Show the **Open in Zed** workspace context-menu row. `true` always shows it, `false` hides it, and null/omitted shows it only when the Zed CLI is installed. |
-| `workspace_cursor_menu_visible` | boolean or null | installed detection | Show the **Open in Cursor** workspace context-menu row. `true` always shows it, `false` hides it, and null/omitted shows it only when the Cursor CLI is installed. |
-| `workspace_vscode_menu_visible` | boolean or null | installed detection | Show the **Open in VS Code** workspace context-menu row. `true` always shows it, `false` hides it, and null/omitted shows it only when the VS Code CLI is installed. |
-| `workspace_windsurf_menu_visible` | boolean or null | installed detection | Show the **Open in Windsurf** workspace context-menu row. `true` always shows it, `false` hides it, and null/omitted shows it only when the Windsurf CLI is installed. |
 | `window_backdrop` | string or null | `auto` | Accepted: `auto`, `blurred`, `transparent`, `opaque`, `off`. Read once at startup. See the resolution table below: the values do not map one-to-one on macOS. |
 | `macos_chrome_material` | boolean or null | `true` | Reveals AppKit's native Sidebar material across the whole window shell: the primary rail, panel inset, and pane gutters. Silently disabled when `window_backdrop` is `opaque`, `off`, or `transparent`. |
 | `option_as_meta` | boolean or null | `false` | Option produces Unicode input by default. Set to `true` to send Option/Alt as an ESC prefix. |
@@ -86,7 +82,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `mcp_bridge_prompt_dismissed` | array of strings | `[]` | MCP-install agent ids (`claude-code`, `codex`, `gemini`, `opencode`) whose sidebar "Install MCP bridge" callout was dismissed. When a pane runs one of those agents and its MCP config has no `paneflow` entry, the sidebar footer offers the bridge once; the callout's `×` writes the agent id here so it never asks again for that agent. Remove an id to see the offer again. A malformed value loads as the empty list. |
 | `review_prefill_delay_ms` | integer or null | `2000` | Delay before Review pre-fills a freshly launched CLI. Clamped to `250` to `10000`. |
 | `submit_paste_delay_ms` | integer or null | `70` | Minimum delay between bracketed paste and submit carriage return. Clamped to `10` to `5000`. |
-| `external_editor` | string or null | `auto` | Editor command (quoted paths and flags supported, without a shell), tried before `$VISUAL` and `$EDITOR`. `auto`/null starts with those variables, then probes `code`, `cursor`, `zed`, `subl`, `code-insiders`, `windsurf`, `hx`, `nvim`, `vim`, `emacs`, then the macOS handler. Failed commands fall through. `system` uses only the macOS handler, without line/column positioning. |
+| `external_editor` | string or null | `auto` | Editor command (quoted paths and flags supported, without a shell), tried before `$VISUAL` and `$EDITOR`. `auto`/null starts with those variables, then probes `code`, `cursor`, `zed`, `subl`, `code-insiders`, `windsurf`, `hx`, `nvim`, `vim`, `emacs`, then the macOS handler. Failed file-link commands fall through. `system` uses only the macOS handler, without line/column positioning. The workspace **Open in editor** action (`Ctrl+Alt+Z`) launches this same command in the workspace directory. |
 | `shortcuts` | object | `{}` | Custom keybindings: `{ "ctrl+shift+t": "new_tab" }`. |
 | `terminal` | object or null | defaults below | Terminal renderer and PTY settings. |
 | `commands` | array | `[]` | Command palette entries and workspace templates. |
@@ -115,12 +111,10 @@ the published schema.
 `macos_chrome_material`, whatever that key is set to. If the whole-shell
 material disappears after a backdrop change, this is why.
 
-## Workspace context-menu rows
+## Workspace context menu
 
-The four `workspace_*_menu_visible` controls live under **Settings >
-Workspaces**. They change only whether the matching editor row is rendered in
-a workspace context menu. Editor keybindings remain available and behave the
-same way regardless of these visibility settings.
+**Open in editor** launches `external_editor` in that workspace's directory.
+`Ctrl+Alt+Z` runs the same action. There is one row, not a row per editor.
 
 ## Agent buttons
 
@@ -287,10 +281,6 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
   "workspace_auto_sort": false,
   "new_tab_branch": "main",
   "workspace_new_tab_branches": {},
-  "workspace_zed_menu_visible": null,
-  "workspace_cursor_menu_visible": null,
-  "workspace_vscode_menu_visible": null,
-  "workspace_windsurf_menu_visible": null,
   "window_backdrop": "auto",
   "macos_chrome_material": true,
   "option_as_meta": false,
