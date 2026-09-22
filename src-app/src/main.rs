@@ -407,38 +407,106 @@ fn debug_durable_install_refusal(command: &str) -> Option<String> {
 }
 
 /// Issue #398: scrubs user-identifying filesystem paths (`/Users/<name>/...`)
-/// out of free-text crash strings before an event leaves the machine.
+/// out of crash strings before an event leaves the machine.
 /// `send_default_pii(false)` keeps Sentry's own PII defaults off, but a
-/// panic message or exception value can still embed a path like
-/// `/Users/alice/Projects/paneflow/src/foo.rs`, which is username-bearing
-/// even with PII off.
+/// panic message, exception value, stack frame, or debug image can still
+/// embed a path like `/Users/alice/Projects/paneflow/src/foo.rs`, which is
+/// username-bearing even with PII off.
+///
+/// Issue #656: the home-folder segment includes spaces and runs to the next
+/// `/` or the end of the string. `/Users/Ada Lovelace/Projects/foo` becomes
+/// `/Users/<redacted>/Projects/foo`.
 fn redact_home_dir_paths(text: &str) -> String {
     static USERS_PATH: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r"/Users/[^/\s]+").expect("static regex"));
+        std::sync::LazyLock::new(|| regex::Regex::new(r"/Users/[^/]+").expect("static regex"));
     USERS_PATH
         .replace_all(text, "/Users/<redacted>")
         .into_owned()
+}
+
+fn redact_owned_path(path: &mut String) {
+    let redacted = redact_home_dir_paths(path);
+    *path = redacted;
+}
+
+fn redact_optional_path(path: &mut Option<String>) {
+    if let Some(path) = path.as_mut() {
+        redact_owned_path(path);
+    }
+}
+
+fn redact_stack_frame(frame: &mut sentry::protocol::Frame) {
+    redact_optional_path(&mut frame.filename);
+    redact_optional_path(&mut frame.abs_path);
+}
+
+fn redact_stacktrace(stacktrace: &mut sentry::protocol::Stacktrace) {
+    for frame in &mut stacktrace.frames {
+        redact_stack_frame(frame);
+    }
+}
+
+fn redact_optional_stacktrace(stacktrace: &mut Option<sentry::protocol::Stacktrace>) {
+    if let Some(stacktrace) = stacktrace.as_mut() {
+        redact_stacktrace(stacktrace);
+    }
+}
+
+/// `name` is the image path (`code_file` on symbolic images). Proguard
+/// images have no path. Apple images have `name` only.
+fn redact_debug_image(image: &mut sentry::protocol::DebugImage) {
+    use sentry::protocol::DebugImage;
+
+    match image {
+        DebugImage::Apple(image) => redact_owned_path(&mut image.name),
+        DebugImage::Symbolic(image) => {
+            redact_owned_path(&mut image.name);
+            redact_optional_path(&mut image.debug_file);
+        }
+        DebugImage::Wasm(image) => {
+            redact_owned_path(&mut image.name);
+            redact_owned_path(&mut image.code_file);
+            redact_optional_path(&mut image.debug_file);
+        }
+        DebugImage::Proguard(_) => {}
+    }
+}
+
+/// Rewrites home-directory paths on the fields a crash event can carry out.
+/// Stack frames cover exception, thread, and top-level stacktraces,
+/// including each raw stacktrace. Unrelated fields are left alone.
+fn redact_crash_event(event: &mut sentry::protocol::Event<'_>) {
+    if let Some(message) = event.message.take() {
+        event.message = Some(redact_home_dir_paths(&message));
+    }
+    for exception in &mut event.exception.values {
+        redact_optional_path(&mut exception.value);
+        redact_optional_stacktrace(&mut exception.stacktrace);
+        redact_optional_stacktrace(&mut exception.raw_stacktrace);
+    }
+    redact_optional_stacktrace(&mut event.stacktrace);
+    for thread in &mut event.threads.values {
+        redact_optional_stacktrace(&mut thread.stacktrace);
+        redact_optional_stacktrace(&mut thread.raw_stacktrace);
+    }
+    for image in &mut event.debug_meta.to_mut().images {
+        redact_debug_image(image);
+    }
 }
 
 /// Issue #204: crash-report client options. One construction site so the
 /// PII policy cannot drift: `send_default_pii` stays OFF, so events never
 /// carry the IP address / request / user defaults Sentry would otherwise
 /// attach. Issue #398 adds `before_send` so free-text panic/exception
-/// messages get their home-directory paths redacted too.
+/// messages get their home-directory paths redacted too. Issue #656 extends
+/// that hook to stack-frame paths and debug-image names.
 fn crash_reporting_options() -> sentry::ClientOptions {
     sentry::ClientOptions::new()
         .maybe_release(sentry::release_name!())
         .send_default_pii(false)
         .server_name("paneflow")
         .before_send(|mut event| {
-            if let Some(message) = event.message.as_deref() {
-                event.message = Some(redact_home_dir_paths(message));
-            }
-            for exception in &mut event.exception.values {
-                if let Some(value) = exception.value.as_deref() {
-                    exception.value = Some(redact_home_dir_paths(value));
-                }
-            }
+            redact_crash_event(&mut event);
             Some(event)
         })
 }
@@ -842,16 +910,19 @@ mod crash_reporting_tests {
         // `/Users/<name>/...`). The `before_send` hook must scrub that
         // path out of both the top-level message and every exception value
         // before the event would leave the machine.
+        // Issue #656: a home folder with a space must be removed whole, and
+        // the same scrub must cover stack-frame paths and debug-image names.
         let options = crash_reporting_options();
         let before_send = options
             .before_send
             .clone()
             .expect("crash_reporting_options must install a before_send hook");
 
+        let spaced_home = "/Users/Ada Lovelace/Projects/foo";
         let mut event = sentry::protocol::Event {
             message: Some(
                 "panicked at src-app/src/foo.rs:42: /Users/alice/Projects/paneflow/paneflow.json \
-                 not found"
+                 not found; also /Users/Ada Lovelace/Projects/foo"
                     .to_string(),
             ),
             ..Default::default()
@@ -863,19 +934,86 @@ mod crash_reporting_tests {
                  file or directory"
                     .to_string(),
             ),
+            stacktrace: Some(sentry::protocol::Stacktrace {
+                frames: vec![sentry::protocol::Frame {
+                    filename: Some(spaced_home.to_string()),
+                    abs_path: Some(format!("{spaced_home}.rs")),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            raw_stacktrace: Some(sentry::protocol::Stacktrace {
+                frames: vec![sentry::protocol::Frame {
+                    abs_path: Some(spaced_home.to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
             ..Default::default()
         });
+        event.stacktrace = Some(sentry::protocol::Stacktrace {
+            frames: vec![sentry::protocol::Frame {
+                abs_path: Some(spaced_home.to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        event.threads.values.push(sentry::protocol::Thread {
+            stacktrace: Some(sentry::protocol::Stacktrace {
+                frames: vec![sentry::protocol::Frame {
+                    filename: Some("lib.rs".to_string()),
+                    abs_path: Some(format!("{spaced_home}.rs")),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            raw_stacktrace: Some(sentry::protocol::Stacktrace {
+                frames: vec![sentry::protocol::Frame {
+                    filename: Some(spaced_home.to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        event
+            .debug_meta
+            .to_mut()
+            .images
+            .push(sentry::protocol::DebugImage::Symbolic(
+                sentry::protocol::SymbolicDebugImage {
+                    name: spaced_home.to_string(),
+                    arch: None,
+                    image_addr: sentry::protocol::Addr(0),
+                    image_size: 1,
+                    image_vmaddr: sentry::protocol::Addr(0),
+                    id: sentry::protocol::debugid::DebugId::nil(),
+                    code_id: None,
+                    debug_file: Some(format!("{spaced_home}.dSYM")),
+                },
+            ));
 
         let redacted = before_send(event).expect("before_send must not drop the event");
 
-        let message = redacted.message.expect("message must survive redaction");
+        let message = redacted
+            .message
+            .as_deref()
+            .expect("message must survive redaction");
         assert!(
             !message.contains("alice"),
             "home directory must be redacted from the message: {message}"
         );
         assert!(
+            !message.contains("Ada Lovelace"),
+            "spaced home folder must be redacted from the message: {message}"
+        );
+        assert!(
             message.contains("/Users/<redacted>/"),
             "redacted message should keep the /Users/<redacted> marker: {message}"
+        );
+        assert!(
+            message.contains("/Users/<redacted>/Projects/foo"),
+            "spaced home folder must be replaced up to the next slash: {message}"
         );
 
         let exception_value = redacted.exception.values[0]
@@ -885,6 +1023,93 @@ mod crash_reporting_tests {
         assert!(
             !exception_value.contains("alice"),
             "home directory must be redacted from the exception value: {exception_value}"
+        );
+        assert!(
+            exception_value.contains("/Users/<redacted>/Library/Application Support/"),
+            "spaces after the home folder must stay: {exception_value}"
+        );
+
+        let exception_frame = &redacted.exception.values[0]
+            .stacktrace
+            .as_ref()
+            .expect("exception stacktrace must survive")
+            .frames[0];
+        assert_eq!(
+            exception_frame.filename.as_deref(),
+            Some("/Users/<redacted>/Projects/foo")
+        );
+        assert_eq!(
+            exception_frame.abs_path.as_deref(),
+            Some("/Users/<redacted>/Projects/foo.rs")
+        );
+        assert_eq!(
+            redacted.exception.values[0]
+                .raw_stacktrace
+                .as_ref()
+                .expect("raw exception stacktrace must survive")
+                .frames[0]
+                .abs_path
+                .as_deref(),
+            Some("/Users/<redacted>/Projects/foo")
+        );
+        assert_eq!(
+            redacted
+                .stacktrace
+                .as_ref()
+                .expect("top-level stacktrace must survive")
+                .frames[0]
+                .abs_path
+                .as_deref(),
+            Some("/Users/<redacted>/Projects/foo")
+        );
+        let thread = &redacted.threads.values[0];
+        let thread_frame = &thread
+            .stacktrace
+            .as_ref()
+            .expect("thread stacktrace must survive")
+            .frames[0];
+        assert_eq!(thread_frame.filename.as_deref(), Some("lib.rs"));
+        assert_eq!(
+            thread_frame.abs_path.as_deref(),
+            Some("/Users/<redacted>/Projects/foo.rs")
+        );
+        assert_eq!(
+            thread
+                .raw_stacktrace
+                .as_ref()
+                .expect("raw thread stacktrace must survive")
+                .frames[0]
+                .filename
+                .as_deref(),
+            Some("/Users/<redacted>/Projects/foo")
+        );
+
+        match &redacted.debug_meta.images[0] {
+            sentry::protocol::DebugImage::Symbolic(image) => {
+                assert_eq!(image.name, "/Users/<redacted>/Projects/foo");
+                assert_eq!(
+                    image.debug_file.as_deref(),
+                    Some("/Users/<redacted>/Projects/foo.dSYM")
+                );
+            }
+            other => assert!(
+                matches!(other, sentry::protocol::DebugImage::Symbolic(_)),
+                "debug image must stay a symbolic image, got {other:?}"
+            ),
+        }
+
+        let payload = serde_json::to_string(&redacted).expect("event serializes");
+        assert!(
+            !payload.contains("Ada Lovelace"),
+            "sent event must not contain the spaced home folder: {payload}"
+        );
+        assert!(
+            !payload.contains("/Users/alice"),
+            "sent event must not contain the alice home folder: {payload}"
+        );
+        assert!(
+            payload.contains("/Users/<redacted>/"),
+            "sent event must keep the redaction marker: {payload}"
         );
     }
 
