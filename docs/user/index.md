@@ -9,7 +9,7 @@ that speaks plain shell. Split panes, persistent sessions, dev-server
 port detection, and bundled themes.
 
 This fork targets macOS on Apple Silicon. Authorized repository users can
-download the signed, notarized 0.7.0 DMG from
+download the signed, notarized 0.7.1 DMG from
 [GitHub Releases](https://github.com/theaamgroup/PaneFlow/releases/latest).
 There is no Homebrew tap. For source builds, see [INSTALL.md](../../INSTALL.md).
 
