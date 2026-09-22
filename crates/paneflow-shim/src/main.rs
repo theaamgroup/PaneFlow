@@ -111,6 +111,11 @@ fn main() -> ExitCode {
         return ExitCode::from(127);
     };
 
+    // #662: a killed session can leave a version-pinned command in the
+    // project hook file. Grok runs that file even when this launch is not
+    // Claude, so reap before any agent reads it.
+    hooks::reap_dead_project_hooks_here();
+
     // Install hook config guards before spawning the child, remove on drop.
     // The binding is held to end of `main` so destructors fire after
     // `run_real` returns; `None` is the graceful-degradation path for a
