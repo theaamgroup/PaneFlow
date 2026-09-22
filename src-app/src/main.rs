@@ -3325,7 +3325,7 @@ fn main() {
 
             // Register every embedded `.ttf` under `assets/fonts/` BEFORE
             // any window opens, so GPUI's text system can resolve the
-            // `Geist Mono` family (mono) and `Geist`
+            // `JetBrainsMono Nerd Font` family (mono) and `Geist`
             // family (sans, 4 weights) Paneflow ships as the default
             // primaries - same strategy Zed uses with `.ZedMono` /
             // `.ZedSans` (`zed/assets/settings/default.json:29,57`).
@@ -3336,7 +3336,7 @@ fn main() {
             // and rasterize them as empty bitmaps; GPUI's per-Font
             // fallback chain only walks on missing-glyph not on
             // empty-raster, so the system primary "rendered" zero glyphs
-            // and nothing fell through. With Geist Mono as the registered
+            // and nothing fell through. With JetBrainsMono Nerd Font as the registered
             // primary, GPUI owns the font tables end-to-end. Iterates
             // the rust-embed registry (Zed pattern,
             // `zed/crates/assets/src/assets.rs:42`) so adding a new font
