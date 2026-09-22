@@ -1568,22 +1568,24 @@ fn write_session_json_inner(path: &Path, state: &paneflow_config::schema::Sessio
                     }
                 }
             }
-            if let Some(tmp_path) = tmp_path {
-                if let Err(err) = std::fs::rename(&tmp_path, path) {
-                    log::warn!("session save rename failed: {err}");
-                    let _ = std::fs::remove_file(&tmp_path);
+            match tmp_path {
+                Some(tmp_path) => match std::fs::rename(&tmp_path, path) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        log::warn!("session save rename failed: {err}");
+                        let _ = std::fs::remove_file(&tmp_path);
+                        false
+                    }
+                },
+                None => {
+                    log::warn!(
+                        "session save failed: {}",
+                        failure
+                            .map(|err| err.to_string())
+                            .unwrap_or_else(|| "temp path already existed".to_string())
+                    );
                     false
-                } else {
-                    true
                 }
-            } else {
-                log::warn!(
-                    "session save failed: {}",
-                    failure
-                        .map(|err| err.to_string())
-                        .unwrap_or_else(|| "temp path already existed".to_string())
-                );
-                false
             }
         }
         Err(e) => {
