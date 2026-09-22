@@ -318,7 +318,10 @@ fn repair_stale_owned_file(
         *lease = HookLease::acquire(path)?;
         return Ok(false);
     };
-    let owned = last.take_created()?;
+    // Peek only. `take_created` deletes the marker; doing that before the
+    // replacement is durable makes a failed persist look unowned, so the
+    // next repair refuses the stale file.
+    let owned = last.is_created();
     let repaired = if owned {
         use std::io::Write;
         let parent = path
@@ -328,6 +331,7 @@ fn repair_stale_owned_file(
         file.write_all(source.as_bytes())?;
         file.as_file().sync_all()?;
         file.persist(path).map_err(|error| error.error)?;
+        last.take_created()?;
         true
     } else {
         false
@@ -545,6 +549,50 @@ mod tests {
             .expect("an edited file must be refused even when PaneFlow created it");
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+    }
+
+    #[test]
+    fn repair_stale_owned_file_keeps_created_marker_when_replacement_write_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join("hooks");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("paneflow.json");
+        let source = grok_source().unwrap();
+        let stale = render_as_sibling_instance(&source, Path::new("/gone/paneflow-ai-hook"));
+        std::fs::write(&path, &stale).unwrap();
+        let mut crashed = HookLease::acquire(&path).unwrap();
+        crashed.mark_created().unwrap();
+        drop(crashed);
+
+        // `TempDir` cannot remove a non-writable directory. Restore the mode
+        // on every exit, including a failed assertion.
+        struct RestoreWritable(PathBuf);
+        impl Drop for RestoreWritable {
+            fn drop(&mut self) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        let _restore = RestoreWritable(directory.clone());
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let error = GrokHookFileGuard::install_at(&directory)
+            .err()
+            .expect("a failed replacement must surface the write error");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            HookLease::acquire(&path).unwrap().is_created(),
+            "a failed repair must leave the created marker in place"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), stale);
+
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let guard = GrokHookFileGuard::install_at(&directory)
+            .expect("a later repair must replace the stale file once the directory is writable");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        drop(guard);
     }
 
     #[test]
