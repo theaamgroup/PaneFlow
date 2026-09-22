@@ -67,7 +67,6 @@ use gpui::{App, Entity, Window};
 use paneflow_config::schema::{ButtonCommand, LayoutNode, TabSession};
 
 use crate::ai_types::AgentSession;
-use crate::launch_cwd;
 use crate::layout::LayoutTree;
 use crate::pane::Pane;
 
@@ -340,12 +339,6 @@ impl Workspace {
         }
     }
 
-    /// Create a workspace with a pre-allocated ID (use `next_workspace_id()` to obtain one).
-    pub fn with_id(id: u64, title: impl Into<String>, pane: Entity<Pane>) -> Self {
-        let cwd = launch_cwd::implicit_launch_cwd().display().to_string();
-        Self::build(id, title.into(), cwd, LayoutTree::Leaf(pane))
-    }
-
     /// Create a workspace with a pre-allocated ID and explicit CWD.
     pub fn with_cwd_and_id(
         id: u64,
@@ -378,6 +371,7 @@ impl Workspace {
     }
 
     /// Create a workspace with a pre-allocated ID and layout tree.
+    #[cfg(test)]
     pub fn with_layout_and_id(
         id: u64,
         title: impl Into<String>,

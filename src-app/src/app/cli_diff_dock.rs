@@ -540,7 +540,7 @@ impl PaneFlowApp {
     /// Called once per frame from [`Self::wrap_cli_diff_dock`] rather than from
     /// each of the places the visible tab moves (sidebar click, `Cmd+1..9`,
     /// tab switch / create / close / reorder, cross-workspace tab move,
-    /// workspace create / close / restore, IPC `workspace.select`, Settings):
+    /// workspace create / close / restore, Settings):
     /// the dock follows one fact - which session is visible - so it reconciles
     /// against that fact instead of asking every caller to remember it.
     pub(crate) fn sync_diff_dock_session(&mut self, cx: &mut Context<Self>) {

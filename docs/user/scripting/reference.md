@@ -18,10 +18,6 @@ launching the app.
 | `search <target> <pattern>`                | `surface.search`                   | No                         | Search pane scrollback                 |
 | `ps [--json]`                              | `fleet.list`                       | No                         | List detected agents across workspaces |
 | `status <target> [--json]`                 | `surface.status`                   | No                         | Read one surface's agent state         |
-| `new`                                      | `workspace.create`                 | No                         | Create a workspace                     |
-| `select <index>`                           | `workspace.select`                 | No                         | Select a workspace                     |
-| `split <h\|v>`                             | `surface.split`                    | No                         | Split a pane                           |
-| `focus <target>`                           | `surface.focus`                    | No                         | Focus a terminal surface               |
 | `send <target> <text>`                     | `surface.send_text`                | Gated                      | Stage or submit text                   |
 | `key <target> <keystroke>`                 | `surface.send_keystroke`           | Gated                      | Send one non-submitting keystroke      |
 
@@ -150,16 +146,12 @@ printf '%s\\n' '{"jsonrpc":"2.0","method":"system.capabilities","params":{},"id"
 | `system.ping`              | -                                                                                               | Liveness check                                           |
 | `system.capabilities`      | -                                                                                               | `{scripting, methods[]}`                                 |
 | `system.identify`          | -                                                                                               | `{name, version, protocol}`                              |
-| `workspace.create`         | `name?`, `cwd?`, `layout?`                                                                      | Create a workspace                                       |
-| `workspace.select`         | `index`                                                                                         | Switch workspace                                         |
 | `surface.list`             | `workspace_id?`                                                                                 | `{surfaces:[{surface_id,name,title,cwd,cmd,workspace,workspace_id,scope,tab_id,tab_title}]}`; agents-pane surfaces have no `workspace_id` and are omitted when the filter is set |
 | `surface.read`             | `surface_id`, `lines?`, `offset?`, `fenced?`, `workspace_id?`                                   | Scrollback, `output_generation`, `truncated`             |
 | `surface.search`           | `surface_id`, `pattern`, `max_matches?`, `workspace_id?`                                        | Case-insensitive substring matches                       |
-| `surface.focus`            | `surface_id`                                                                                    | Focus a workspace or Agents surface                      |
 | `surface.status`           | `surface_id`                                                                                    | Agent state for one surface                              |
 | `surface.send_text`        | `surface_id`, `text`, `submit?`, `paste?`                                                       | Gated PTY text write                                     |
 | `surface.send_keystroke`   | `surface_id`, `keystroke`                                                                       | Env-gated non-submitting keystroke                       |
-| `surface.split`            | `direction`, `surface_id?`, `cwd?`, `command?`, `prompt?`, `env?`, `name?`, `managed_worktree?` | Split a pane                                             |
 | `fleet.list`               | -                                                                                               | Read-only fleet snapshot                                 |
 | `ai.session_start`         | hook payload                                                                                    | Agent lifecycle event                                   |
 | `ai.prompt_submit`         | hook payload                                                                                    | Agent lifecycle event                                   |

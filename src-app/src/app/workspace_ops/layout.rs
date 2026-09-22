@@ -1,14 +1,10 @@
-//! Layout presets, JSON layout application, zoom, and split-equalize.
+//! Layout presets, zoom, and split-equalize.
 //!
 //! Part of the US-023 workspace_ops decomposition.
 
-use std::collections::VecDeque;
-use std::path::PathBuf;
-
 use gpui::{Context, Entity, Focusable, Window};
-use paneflow_config::schema::LayoutNode;
 
-use crate::layout::{LayoutTree, MAX_PANES, SplitDirection};
+use crate::layout::{LayoutTree, SplitDirection};
 use crate::pane::Pane;
 use crate::{
     LayoutEvenHorizontal, LayoutEvenVertical, LayoutMainVertical, LayoutTiled, PaneFlowApp,
@@ -16,30 +12,6 @@ use crate::{
 };
 
 impl PaneFlowApp {
-    fn layout_uses_pending_worktree(
-        &self,
-        layout: &LayoutNode,
-        fallback_cwd: &std::path::Path,
-    ) -> bool {
-        match layout {
-            LayoutNode::Pane { surfaces } => surfaces.iter().any(|surface| {
-                if matches!(surface.surface_type.as_deref(), Some("markdown" | "diff")) {
-                    return false;
-                }
-                let candidate = surface
-                    .cwd
-                    .as_deref()
-                    .map(PathBuf::from)
-                    .filter(|path| path.is_dir())
-                    .unwrap_or_else(|| fallback_cwd.to_path_buf());
-                self.pending_worktree_teardown_conflicts(&candidate)
-            }),
-            LayoutNode::Split { children, .. } => children
-                .iter()
-                .any(|child| self.layout_uses_pending_worktree(child, fallback_cwd)),
-        }
-    }
-
     pub(crate) fn handle_toggle_zoom(
         &mut self,
         _: &ToggleZoom,
@@ -112,74 +84,6 @@ impl PaneFlowApp {
         }
         self.save_session(cx);
         cx.notify();
-    }
-
-    /// Apply a layout from a `LayoutNode` (deserialized JSON) to the active workspace.
-    ///
-    /// Handles pane count mismatch: spawns new panes when the layout has more
-    /// leaves than available, drops extras when fewer. Exits zoom first.
-    pub(crate) fn apply_layout_from_json(
-        &mut self,
-        layout: &mut LayoutNode,
-        cx: &mut Context<Self>,
-    ) -> Result<(), String> {
-        let fallback_cwd = self
-            .active_workspace()
-            .map(|workspace| PathBuf::from(&workspace.cwd))
-            .ok_or_else(|| "No active workspace".to_string())?;
-        if self.layout_uses_pending_worktree(layout, &fallback_cwd) {
-            return Err("Layout cwd is inside a worktree being retired".into());
-        }
-        // Validate the layout (clamps ratios, pads children, etc.)
-        paneflow_config::loader::validate_layout(layout);
-
-        let needed = layout.leaf_count();
-        if needed == 0 {
-            return Err("Layout has no panes".into());
-        }
-        if needed > MAX_PANES {
-            return Err(format!("Layout exceeds maximum pane count ({MAX_PANES})"));
-        }
-
-        if let Some(ws) = self.active_workspace_mut() {
-            ws.exit_zoom(cx);
-        }
-
-        let Some(ws) = self.active_workspace_mut() else {
-            return Err("No active workspace".into());
-        };
-
-        // Collect existing panes and drop the old tree. A zero-leaf placeholder
-        // (`LayoutTree::empty`, used by `workspace.create` with a layout) yields
-        // an empty deque, so `spawn` runs for every layout pane including leaf 0.
-        let existing: Vec<Entity<Pane>> = ws
-            .active_tab_mut()
-            .root
-            .take()
-            .map(|r| r.collect_leaves())
-            .unwrap_or_default();
-
-        // Keep only the panes we need; extras are dropped with the old tree
-        let mut pane_deque: VecDeque<Entity<Pane>> = existing.into_iter().take(needed).collect();
-
-        let ws_id = ws.id;
-        let fallback_cwd = PathBuf::from(&ws.cwd);
-        let tree = LayoutTree::from_layout_node(layout, &mut pane_deque, &mut |node| {
-            let surfaces = match node {
-                LayoutNode::Pane { surfaces } => surfaces.as_slice(),
-                _ => &[],
-            };
-            PaneFlowApp::spawn_pane_from_surfaces(ws_id, surfaces, &fallback_cwd, cx)
-        });
-
-        let Some(ws) = self.active_workspace_mut() else {
-            return Err("No active workspace".into());
-        };
-        ws.active_tab_mut().root = Some(tree);
-        self.save_session(cx);
-        cx.notify();
-
-        Ok(())
     }
 
     pub(crate) fn handle_layout_even_h(

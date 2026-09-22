@@ -9,12 +9,11 @@
 //! => launch the GUI" default, and never eats the manually-parsed top-level
 //! flags handled above it.
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use paneflow_ipc_client::IpcClient;
 use serde_json::Value;
 
 mod context_cmds;
-mod control_cmds;
 mod read_cmds;
 mod selector;
 mod send_cmd;
@@ -42,11 +41,7 @@ pub(crate) const VERBS: &[&str] = &[
     "search",
     "ps",
     "status",
-    "new",
-    "select",
-    "split",
     "send",
-    "focus",
     "key",
     "list_panes",
     "read_pane",
@@ -63,11 +58,7 @@ pub(crate) const HELP_VERBS: &[(&str, &str)] = &[
     ("search", "Search a pane's scrollback"),
     ("ps", "List running agents"),
     ("status", "Read one surface's agent state"),
-    ("new", "Create a new workspace"),
-    ("select", "Select a workspace by index"),
-    ("split", "Split the active pane"),
     ("send", "Inject text into a pane"),
-    ("focus", "Give a surface keyboard focus"),
     ("key", "Send a named keystroke to a pane"),
 ];
 
@@ -196,29 +187,6 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Create a new workspace.
-    New {
-        /// Workspace title.
-        #[arg(long)]
-        name: Option<String>,
-        /// Working directory for the first pane (must exist).
-        #[arg(long)]
-        cwd: Option<String>,
-    },
-    /// Select a workspace by index.
-    Select {
-        /// Zero-based workspace index.
-        index: u64,
-    },
-    /// Split the active pane horizontally or vertically.
-    Split {
-        /// `h`/`horizontal` (panes stacked) or `v`/`vertical` (side by side).
-        direction: SplitDir,
-        /// Split the pane hosting this target instead of the first leaf.
-        /// Target: surface id, name, `cmdline:<substr>`, or `cwd:<path>`.
-        #[arg(long)]
-        target: Option<String>,
-    },
     /// Inject text into a pane WITHOUT submitting it (human-in-loop).
     ///
     /// Requires `PANEFLOW_IPC_SCRIPTING=1` on the running instance; the text is
@@ -252,11 +220,6 @@ enum Commands {
         #[arg(long, value_name = "PATH")]
         report_file: Option<String>,
     },
-    /// Give a targeted surface the keyboard focus.
-    Focus {
-        /// Target: surface id, name, `cmdline:<substr>`, or `cwd:<path>`.
-        target: String,
-    },
     /// Send a named keystroke (e.g. `escape`, `ctrl-c`, `tab`) to a pane.
     ///
     /// Requires `PANEFLOW_IPC_SCRIPTING=1` on the running instance. Keystrokes
@@ -268,24 +231,6 @@ enum Commands {
         /// Dash-separated keystroke description ("escape", "ctrl-c", "alt-f").
         keystroke: String,
     },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
-enum SplitDir {
-    #[value(name = "horizontal", alias = "h")]
-    Horizontal,
-    #[value(name = "vertical", alias = "v")]
-    Vertical,
-}
-
-impl SplitDir {
-    /// The `direction` string the `surface.split` IPC method expects.
-    fn as_ipc(self) -> &'static str {
-        match self {
-            SplitDir::Horizontal => "horizontal",
-            SplitDir::Vertical => "vertical",
-        }
-    }
 }
 
 /// A CLI failure carrying the process exit code to surface for it.
@@ -362,11 +307,7 @@ fn connect() -> Result<IpcClient, String> {
     Ok(IpcClient::new(socket))
 }
 
-/// Route a parsed subcommand to its handler. Handlers land per story:
-/// `read`/`search` + the target selector (US-003/US-004), `new`/`select`/`split`
-/// (US-005), `send` (US-006). The scaffold (US-002) wires the surface and the
-/// transport; each arm returns an explicit "not yet implemented" runtime error
-/// until its story fills it in.
+/// Route a parsed subcommand to its handler.
 fn dispatch(command: Commands, client: &IpcClient) -> Result<i32, CliError> {
     match command {
         Commands::Ls { human } => read_cmds::ls(client, human),
@@ -387,13 +328,6 @@ fn dispatch(command: Commands, client: &IpcClient) -> Result<i32, CliError> {
         Commands::Task { command } => context_cmds::run(client, command),
         Commands::Ps { json } => read_cmds::ps(client, json),
         Commands::Status { target, json } => read_cmds::status(client, &target, json),
-        Commands::New { name, cwd } => {
-            control_cmds::new_workspace(client, name.as_deref(), cwd.as_deref())
-        }
-        Commands::Select { index } => control_cmds::select(client, index),
-        Commands::Split { direction, target } => {
-            control_cmds::split(client, direction.as_ipc(), target.as_deref())
-        }
         Commands::Send {
             target,
             text,
@@ -410,13 +344,12 @@ fn dispatch(command: Commands, client: &IpcClient) -> Result<i32, CliError> {
             paste,
             report_file.as_deref(),
         ),
-        Commands::Focus { target } => control_cmds::focus(client, &target),
         Commands::Key { target, keystroke } => send_cmd::key(client, &target, &keystroke),
     }
 }
 
 /// Render a JSON-RPC `result` value as pretty JSON to stdout. Shared by the
-/// read and control command modules so every machine-readable output uses one
+/// read and context command modules so every machine-readable output uses one
 /// renderer.
 pub(super) fn print_json(value: &Value) -> Result<(), CliError> {
     let rendered = serde_json::to_string_pretty(value)
@@ -428,7 +361,7 @@ pub(super) fn print_json(value: &Value) -> Result<(), CliError> {
 /// Reject a server reply that carries a *legacy* application error.
 ///
 /// A handful of server handlers signal cap/validation failures (split at
-/// `MAX_PANES`, `select` out-of-range, `send_text` over the 64 KiB limit) with
+/// `send_text` over the 64 KiB limit) with
 /// an ad-hoc `{"error": "<message>"}` payload that does NOT use the
 /// `_jsonrpc_error` sentinel. The dispatcher therefore promotes them under
 /// `result`, so the transport's `parse_response` returns `Ok` and the command
@@ -449,6 +382,27 @@ pub(super) fn reject_legacy_error(result: Value) -> Result<Value, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removed_control_verbs_are_unknown_and_absent_from_help() {
+        for args in [
+            vec!["paneflow", "new"],
+            vec!["paneflow", "select", "0"],
+            vec!["paneflow", "split", "v"],
+            vec!["paneflow", "focus", "pane"],
+        ] {
+            let verb = args[1];
+            assert!(!is_cli_verb(Some(verb)));
+            assert!(looks_like_unknown_verb(Some(verb)));
+            assert_eq!(
+                Cli::try_parse_from(&args)
+                    .expect_err("removed verb")
+                    .exit_code(),
+                2
+            );
+            assert!(!HELP_VERBS.iter().any(|(name, _)| *name == verb));
+        }
+    }
 
     #[test]
     fn removed_flow_is_unknown_and_absent_from_help() {
@@ -509,7 +463,7 @@ mod tests {
     fn is_cli_verb_matches_known_verbs() {
         assert!(is_cli_verb(Some("ls")));
         assert!(is_cli_verb(Some("send")));
-        assert!(is_cli_verb(Some("focus")));
+        assert!(is_cli_verb(Some("status")));
         assert!(is_cli_verb(Some("key")));
         assert!(!is_cli_verb(Some("mcp")));
         assert!(!is_cli_verb(Some("hooks")));
@@ -660,20 +614,6 @@ mod tests {
     }
 
     #[test]
-    fn split_target_is_optional() {
-        let cli = Cli::try_parse_from(["paneflow", "split", "v"]).expect("parse");
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Split { target: None, .. })
-        ));
-        let cli =
-            Cli::try_parse_from(["paneflow", "split", "v", "--target", "backend"]).expect("parse");
-        assert!(
-            matches!(cli.command, Some(Commands::Split { target: Some(t), .. }) if t == "backend")
-        );
-    }
-
-    #[test]
     fn key_requires_target_and_keystroke() {
         let err = Cli::try_parse_from(["paneflow", "key", "backend"]).expect_err("usage");
         assert_eq!(err.exit_code(), 2);
@@ -685,18 +625,6 @@ mod tests {
     fn cli_parses_a_verb_with_flags() {
         let cli = Cli::try_parse_from(["paneflow", "ls", "--human"]).expect("parse");
         assert!(matches!(cli.command, Some(Commands::Ls { human: true })));
-    }
-
-    #[test]
-    fn split_accepts_short_aliases() {
-        let cli = Cli::try_parse_from(["paneflow", "split", "h"]).expect("parse");
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Split {
-                direction: SplitDir::Horizontal,
-                ..
-            })
-        ));
     }
 
     #[test]
