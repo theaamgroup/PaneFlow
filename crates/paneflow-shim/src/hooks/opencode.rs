@@ -88,6 +88,8 @@ impl OpenCodePluginGuard {
         })?;
         let mut plugin_lease = HookLease::acquire(&plugin_path)?;
         with_config_lock(&plugin_path, || {
+            // `exists` and `write_text_atomic` both follow a file symlink.
+            refuse_symlink(&plugin_path, "OpenCode plugin file")?;
             let created_plugin = !plugin_path.exists();
             write_text_atomic(&plugin_path, OPENCODE_PLUGIN_SOURCE)?;
             if created_plugin {
@@ -354,6 +356,38 @@ mod tests {
             std::fs::read_to_string(&plugin).unwrap(),
             OPENCODE_PLUGIN_SOURCE
         );
+    }
+
+    #[test]
+    fn opencode_plugin_refuses_symlinked_file() {
+        use std::os::unix::fs::symlink;
+
+        // The plugins directory is real, but the plugin file is a symlink.
+        // `write_text_atomic` would follow it and replace the target.
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join("opencode");
+        let plugins = directory.join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let target = temp.path().join("user-plugin.ts");
+        let original = "// distinctive user bytes\n";
+        std::fs::write(&target, original).unwrap();
+        let plugin_path = plugins.join(PANEFLOW_TS_BASENAME);
+        symlink(&target, &plugin_path).unwrap();
+
+        let error = match OpenCodePluginGuard::install_at(&directory) {
+            Ok(_) => panic!("a symlinked OpenCode plugin file must be refused"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            std::fs::symlink_metadata(&plugin_path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link itself must be left in place"
+        );
+        assert_eq!(std::fs::read_link(&plugin_path).unwrap(), target);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
     }
 
     #[test]
