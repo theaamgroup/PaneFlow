@@ -24,7 +24,11 @@ pub struct PaneFlowConfig {
     /// stores the currently resolved concrete bundled theme for compatibility.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub theme_mode: Option<String>,
-    /// Workspace command definitions (cmux-compatible format).
+    /// Legacy command palette entries and workspace templates (issue #607).
+    /// Accepted and ignored: an older `paneflow.json` still loads, and the
+    /// app does not launch or edit this array. Session restore owns
+    /// repeatable layouts. The key stays on the struct because the published
+    /// schema sets `additionalProperties` to false.
     #[serde(default, deserialize_with = "lenient_commands")]
     pub commands: Vec<CommandDefinition>,
     /// Native window backdrop: `"auto"` (default), `"blurred"`,
@@ -747,7 +751,8 @@ where
 }
 
 /// Commands are lenient per entry rather than per vector: one malformed
-/// command must not discard its valid siblings.
+/// command must not discard its valid siblings or the rest of the file.
+/// The loaded array is accepted and ignored by the app (issue #607).
 fn lenient_commands<'de, D>(d: D) -> Result<Vec<CommandDefinition>, D::Error>
 where
     D: serde::Deserializer<'de>,

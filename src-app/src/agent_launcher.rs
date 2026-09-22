@@ -812,8 +812,7 @@ fn installed_binaries_contains(binary: &'static str) -> bool {
 }
 
 /// Shown in place of a "not installed" verdict while the first PATH walk
-/// for agent CLIs is still running (issue #518). The new-pane picker and
-/// the workspace template editor share it.
+/// for agent CLIs is still running (issue #518). The new-pane picker shows it.
 pub(crate) const AGENT_SCAN_PENDING_COPY: &str = "Looking for agent CLIs on this machine.";
 
 /// `true` while no PATH walk has published yet, so the UI can say it is

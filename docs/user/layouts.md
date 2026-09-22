@@ -29,9 +29,7 @@ Presets operate on every pane in the active workspace. They replace
 the current split tree and ratios with the preset tree. They do not
 change the workspace count.
 
-The preset names above are keybinding action names. Workspace templates
-use preset values instead: `even_h`, `even_v`,
-`main_vertical`, and `tiled`.
+The preset names above are keybinding action names.
 
 ## What stays intact?
 

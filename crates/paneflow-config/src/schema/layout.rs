@@ -73,11 +73,11 @@ pub struct WorkspaceDefinition {
     pub name: Option<String>,
     /// Default working directory for the workspace.
     pub cwd: Option<String>,
-    /// Layout preset used by the visual workspace builder.
+    /// Historical layout preset on a leftover `commands` entry.
     ///
-    /// Accepted values mirror workspace templates: `"even_h"`, `"even_v"`,
-    /// `"main_vertical"`, and `"tiled"`. Older configs may omit this and rely
-    /// on `layout` alone.
+    /// Accepted values are `"even_h"`, `"even_v"`, `"main_vertical"`, and
+    /// `"tiled"`. The `commands` array is accepted and ignored (issue #607).
+    /// Older configs may omit this and rely on `layout` alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout_preset: Option<String>,
     /// Color as a 6-digit hex string (e.g. "ff6600").

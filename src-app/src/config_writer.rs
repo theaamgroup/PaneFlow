@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// US-016: serialize every read-modify-write of `paneflow.json`.
@@ -616,18 +615,6 @@ fn with_agent_panel_field_in<T: serde::Serialize + serde::de::DeserializeOwned>(
     serde_json::from_value(json)
 }
 
-/// In-memory companion for [`save_commands_checked_if_current`]. Replaces the
-/// full user-defined command/template list while preserving every other config
-/// field.
-pub fn with_commands(
-    config: &paneflow_config::schema::PaneFlowConfig,
-    commands: Vec<paneflow_config::schema::CommandDefinition>,
-) -> paneflow_config::schema::PaneFlowConfig {
-    let mut next = config.clone();
-    next.commands = commands;
-    next
-}
-
 /// Which `paneflow.json` block a single-field settings write targets. Field
 /// names are only unique within a block, so [`FieldPersistSeq`] scopes its
 /// generations by it.
@@ -708,7 +695,7 @@ pub fn save_agent_panel_field_checked(
 /// Read-modify-write one field of `path` only when `seq` is still the newest
 /// generation for `(scope, key)`. The generation check happens while holding
 /// the shared config-write lock so an older task cannot overwrite a newer task
-/// that acquired the lock first (mirrors [`save_commands_at_if_current`]).
+/// that acquired the lock first.
 fn save_field_at_if_current(
     path: &Path,
     scope: FieldScope,
@@ -732,74 +719,20 @@ fn save_field_at_if_current(
     write_config_checked(path, &json)
 }
 
-/// Save the full `commands` array only when this is still the newest workspace
-/// template snapshot. The generation check happens while holding the shared
-/// config-write lock so an older task cannot overwrite a newer task that
-/// acquired the lock first.
-pub fn save_commands_checked_if_current(
-    commands: Vec<paneflow_config::schema::CommandDefinition>,
-    save_seq: &AtomicU64,
-    seq: u64,
-) -> bool {
-    let Some(path) = paneflow_config::loader::config_path() else {
-        log::warn!("config: cannot determine config path, not saving");
-        return false;
-    };
-    save_commands_at_if_current(&path, commands, save_seq, seq)
-}
-
-fn save_commands_at_if_current(
-    path: &Path,
-    commands: Vec<paneflow_config::schema::CommandDefinition>,
-    save_seq: &AtomicU64,
-    seq: u64,
-) -> bool {
-    let value = match serde_json::to_value(commands) {
-        Ok(value) => value,
-        Err(e) => {
-            log::warn!("config: failed to serialize commands: {e}");
-            return false;
-        }
-    };
-    let _guard = config_write_guard();
-    if save_seq.load(Ordering::SeqCst) != seq {
-        return true;
-    }
-    let Ok(mut json) = load_raw_config(path) else {
-        return false;
-    };
-    if let Some(root) = json.as_object_mut() {
-        root.insert("commands".to_string(), value);
-    }
-    write_config_checked(path, &json)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         AGENT_BUTTON_VISIBILITY_MIGRATION_KEY, ConfigWritePrecondition, FieldPersistSeq,
         FieldScope, apply_agent_panel_field, apply_reset_shortcuts, apply_terminal_field,
         load_raw_config, merge_shortcut, migrate_agent_button_visibility_at, reset_shortcuts_at,
-        save_commands_at_if_current, save_field_at_if_current, with_agent_panel_field,
-        with_agent_panel_field_in, with_commands, with_field, with_field_in, write_config_checked,
-        write_config_checked_with_precondition,
+        save_field_at_if_current, with_agent_panel_field, with_agent_panel_field_in, with_field,
+        with_field_in, write_config_checked, write_config_checked_with_precondition,
     };
     use crate::agent_launcher::TerminalAgent;
-    use paneflow_config::schema::{CommandDefinition, PaneFlowConfig};
+    use paneflow_config::schema::PaneFlowConfig;
     use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    fn shell_command(name: &str, command: &str) -> CommandDefinition {
-        CommandDefinition {
-            name: name.to_string(),
-            description: None,
-            keywords: Vec::new(),
-            workspace: None,
-            command: Some(command.to_string()),
-        }
-    }
 
     /// Issue #300: a value that does not survive the in-memory round-trip
     /// must surface as an error, not silently become the previous config, so
@@ -897,35 +830,6 @@ mod tests {
             nested.terminal.as_ref().and_then(|t| t.scroll_multiplier),
             Some(1.5)
         );
-    }
-
-    #[test]
-    fn persist_workspace_commands_keeps_newer_snapshot() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("paneflow.json");
-        let save_seq = AtomicU64::new(2);
-        let older = vec![shell_command("Dev", "old")];
-        let newer = vec![shell_command("Dev", "new")];
-        let cached = with_commands(
-            &with_commands(
-                &paneflow_config::schema::PaneFlowConfig::default(),
-                older.clone(),
-            ),
-            newer.clone(),
-        );
-
-        assert!(save_commands_at_if_current(
-            &path,
-            newer.clone(),
-            &save_seq,
-            2
-        ));
-        assert!(save_commands_at_if_current(&path, older, &save_seq, 1));
-
-        let got: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(got["commands"], serde_json::to_value(&newer).unwrap());
-        assert_eq!(cached.commands, newer);
-        assert_eq!(save_seq.load(Ordering::SeqCst), 2);
     }
 
     /// Issue #242: persist A then persist B of one field, with A's task

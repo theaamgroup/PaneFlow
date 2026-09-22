@@ -3,7 +3,7 @@
 PaneFlow's Settings panel is the human UI for common preferences. It is
 not the full configuration reference. Use it for the settings you adjust
 often: editor, shell, theme, shortcuts, notifications, terminal display,
-workspace templates, agent launchers, AI access, and MCP setup.
+sidebar order, new-tab branches, agent launchers, AI access, and MCP setup.
 
 **TL;DR.** Most Settings rows write to `paneflow.json` and hot-reload
   after the file is saved. MCP Servers is different: it installs or
@@ -19,7 +19,7 @@ workspace templates, agent launchers, AI access, and MCP setup.
 | Keyboard Shortcuts | Every action's binding, grouped by area (panes, workspaces, tabs, terminal, search, git diff, agents, application). Search by action name or by chord (`cmd+shift+j`), or press **Find by key** and type the chord to see what owns it. Click a row to record a new binding. **Reset to defaults** asks once before it rewrites every binding. | `shortcuts`                                                                                                                                                                                                 | Reloaded after the config save.                                             |
 | Notifications      | Native OS notifications for waiting agents.                                                                                                          | `agent_panel.notify_when_agent_waiting`                                                                                                                                                                     | Hot-reloads.                                                                |
 | Terminal           | Cursor shape and color, font family, font size, font weight, line height, cell width, integrated glyphs, and color emoji.                            | `terminal.cursor_shape`, `terminal.cursor_color`, `font_family`, `font_size`, `font_weight`, `line_height`, `cell_width`, `terminal.integrated_glyphs`, `terminal.color_emoji`                              | Display controls hot-reload. Cursor shape applies to the next new terminal. |
-| Workspaces         | Reusable workspace templates with panes, agents, shell commands, cwd, env, and prompt prefill.                                                       | `commands[].workspace`                                                                                                                                                                                      | Templates validate every pane before launching.      |
+| Workspaces         | Sidebar auto-sort, and the default branch for new tabs, including a per-workspace override.                                                          | `workspace_auto_sort`, `new_tab_branch`, `workspace_new_tab_branches`                                                                                                                                       | Hot-reloads. Open terminals keep their checkout.    |
 | AI Agent           | Launcher button visibility, Claude Code bypass mode, AI free access, and the injection fence.                                                        | `*_button_visible`, `claude_code_bypass_permissions`, `ai_unrestricted`, `ai_injection_fence`                                                                                                               | Launcher and access changes hot-reload.                                     |
 | MCP Servers        | Installs or repairs the bundled `paneflow-mcp` bridge for Claude Code, Codex, Gemini, and opencode.                                                  | Agent config files, not `paneflow.json`                                                                                                                                                                     | Re-run after a PaneFlow update or when an agent config changes.             |
 
@@ -54,7 +54,7 @@ Common examples:
   shows the theme's literal colours. Hot-reloads.
 * `terminal.osc52_clipboard` to stop programs from writing the system
   clipboard through OSC 52 (`"disabled"`; the default is `"copy_only"`).
-* `commands[]` entries that are not workspace templates.
+* `commands`, a leftover array that is accepted and ignored.
 * Profiles, window-decoration, and agent-panel options.
 * `option_as_meta`, which defaults to off on macOS. Set it to `true` if you want Option to send an ESC prefix instead of producing Unicode input.
 

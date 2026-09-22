@@ -84,7 +84,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `external_editor` | string or null | `auto` | Editor command (quoted paths and flags supported, without a shell), tried before `$VISUAL` and `$EDITOR`. `auto`/null starts with those variables, then probes `code`, `cursor`, `zed`, `subl`, `code-insiders`, `windsurf`, `hx`, `nvim`, `vim`, `emacs`, then the macOS handler. Failed file-link commands fall through. `system` uses only the macOS handler, without line/column positioning. The workspace **Open in editor** action (`Ctrl+Alt+Z`) launches this same command in the workspace directory. |
 | `shortcuts` | object | `{}` | Custom keybindings: `{ "ctrl+shift+t": "new_tab" }`. |
 | `terminal` | object or null | defaults below | Terminal renderer and PTY settings. |
-| `commands` | array | `[]` | Command palette entries and workspace templates. |
+| `commands` | array | `[]` | Legacy command palette entries and workspace templates. Accepted and ignored. Older files still load; PaneFlow does not launch or edit this array. Repeatable layouts come from session restore. |
 | `claude_code_bypass_permissions` | boolean or null | `false` | Adds Claude Code `--permission-mode bypassPermissions` when launching from PaneFlow. |
 | `ai_unrestricted` | boolean or null | `false` | Allows trusted automation to submit via IPC without `PANEFLOW_IPC_SCRIPTING=1`. |
 | `ai_injection_fence` | boolean or null | `true` | Wraps pane reads in an untrusted-output fence. Keep enabled for AI clients. |
@@ -189,11 +189,17 @@ Legacy `agent_panel.max_content_width`, `thinking_display`, `profiles`,
 They configure the removed Agents view and have no effect on terminal agents.
 `notify_when_agent_waiting` remains active.
 
-## Commands and workspace templates
+## Commands
 
-`commands` is an array of definitions. Every entry requires `name` and
-may set `description`, `keywords`, exactly one of `command` or
-`workspace`.
+`commands` is accepted and ignored (issue #607). An older file may still
+carry the array; the loader keeps it and the rest of the file loads.
+PaneFlow does not edit the key and does not launch workspace templates
+from it. Repeatable layouts come from session restore. The published
+schema still describes the historical entry shape so an editor does not
+reject the key (`additionalProperties` is false).
+
+Every entry has `name` and may set `description`, `keywords`, and exactly
+one of `command` or `workspace`.
 
 Workspace definitions can set `name`, `cwd`, `layout_preset`, `color`,
 and `layout`. `layout_preset` accepts `even_h`, `even_v`,
@@ -334,7 +340,7 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
 ```
 
 `agent_context` on a surface stores the session-owned pane UUID and current agent task.
-Omit it from reusable templates. Assign tasks through `paneflow task assign`;
+Assign tasks through `paneflow task assign`;
 see [Agent context](../../agent-context.md) for the API and persistence contract.
 
 Legacy `window_decorations` values are accepted and ignored by the loader.

@@ -838,7 +838,9 @@ lag. The Appearance page leads with three theme tiles (System, Light, Dark;
 134 tall, radius 10, 2 px border) holding a mockup painted from the preset and
 a live split-diff sample; the preset itself is a select, not a tile grid.
 
-Workspaces includes a **New tabs** card with a **Default branch** select
+Workspaces leads with the sidebar auto-sort toggle. There is no template
+builder; repeatable layouts come from session restore. It includes a
+**New tabs** card with a **Default branch** select
 (default `main`) and a select for each open Git workspace. Workspace rows show
 the folder name and path; they offer **Use default**, **Workspace checkout**,
 and the repository's local branches. The default select lists branches from

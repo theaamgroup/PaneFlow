@@ -85,8 +85,7 @@ impl PaneFlowApp {
         self.reset_settings_scroll();
         self.terminal_dropdown = None;
         self.general_dropdown = None;
-        self.workspace_template_dropdown = None;
-        self.workspace_template_detail_open = false;
+        self.new_tab_branch_dropdown = None;
         self.font_dropdown_open = false;
         self.font_search.clear();
         self.theme_dropdown_open = false;
@@ -168,8 +167,7 @@ impl PaneFlowApp {
         self.theme_dropdown_open = false;
         self.terminal_dropdown = None;
         self.general_dropdown = None;
-        self.workspace_template_dropdown = None;
-        self.workspace_template_detail_open = false;
+        self.new_tab_branch_dropdown = None;
         self.clear_settings_search(cx);
         if self.recording_shortcut_idx.is_some() {
             self.recording_shortcut_idx = None;
@@ -401,8 +399,8 @@ impl PaneFlowApp {
                 self.terminal_dropdown = None;
             } else if self.general_dropdown.is_some() {
                 self.general_dropdown = None;
-            } else if self.workspace_template_dropdown.is_some() {
-                self.workspace_template_dropdown = None;
+            } else if self.new_tab_branch_dropdown.is_some() {
+                self.new_tab_branch_dropdown = None;
             } else {
                 self.close_settings(cx);
             }

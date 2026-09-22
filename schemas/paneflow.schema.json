@@ -302,7 +302,8 @@
     },
     "commands": {
       "type": "array",
-      "description": "cmux-compatible command and workspace definitions, rendered in the workspace command palette.",
+      "deprecated": true,
+      "description": "Legacy command palette entries and workspace templates. Accepted and ignored. Older files still validate; PaneFlow does not launch or edit this array. Repeatable layouts come from session restore.",
       "items": { "$ref": "#/definitions/commandDefinition" },
       "default": []
     },
@@ -494,7 +495,7 @@
         "layout_preset": {
           "type": ["string", "null"],
           "enum": ["even_h", "even_v", "main_vertical", "tiled", null],
-          "description": "Visual workspace-builder preset. Uses the built-in layout presets."
+          "description": "Historical layout preset name on a leftover commands entry: even_h, even_v, main_vertical, or tiled. The commands array is accepted and ignored."
         },
         "color": {
           "type": ["string", "null"],
@@ -561,7 +562,7 @@
       "properties": {
         "agent_context": {
           "type": ["object", "null"],
-          "description": "Session-owned pane identity and current task. Omit from reusable templates; manage assignments through paneflow task assign."
+          "description": "Session-owned pane identity and current task. Manage assignments through paneflow task assign."
         },
         "surface_type": {
           "type": ["string", "null"],

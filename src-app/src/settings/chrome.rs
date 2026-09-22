@@ -118,14 +118,10 @@ const NAV_GROUPS: &[NavGroup] = &[
                 keywords: &[
                     "workspace",
                     "workspaces",
-                    "project",
-                    "layout",
-                    "pane",
-                    "panes",
-                    "flow",
-                    "toml",
-                    "agent",
-                    "command",
+                    "sidebar",
+                    "sort",
+                    "branch",
+                    "new tab",
                 ],
             },
         ],
@@ -560,8 +556,7 @@ impl PaneFlowApp {
         self.theme_dropdown_open = false;
         self.terminal_dropdown = None;
         self.general_dropdown = None;
-        self.workspace_template_dropdown = None;
-        self.workspace_template_detail_open = false;
+        self.new_tab_branch_dropdown = None;
         if self.recording_shortcut_idx.is_some() {
             self.recording_shortcut_idx = None;
             let config = paneflow_config::loader::load_config();
@@ -582,9 +577,6 @@ impl PaneFlowApp {
         }
         if section == SettingsSection::McpServers {
             self.refresh_mcp_status(cx);
-        }
-        if section == SettingsSection::Workspaces {
-            self.sync_workspace_template_inputs(cx);
         }
         self.settings_focus.focus(window, cx);
         cx.notify();
