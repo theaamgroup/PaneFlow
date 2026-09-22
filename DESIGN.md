@@ -1099,8 +1099,8 @@ split, or an unmounted dock in an unmuted workspace notifies even while the wind
 ## 7. Accessibility
 
 This section has no upstream counterpart. It records what issues #275, #316,
-#317, #321, #340, and #361 landed, and it is **normative**: a new surface that
-does not meet it is not finished.
+#317, #321, #340, #361, and #676 landed, and it is **normative**: a new
+surface that does not meet it is not finished.
 
 ### 7.1 Every icon-only control is named
 
@@ -1126,6 +1126,7 @@ visible text already names it — which still carries `Role::Button`.
 | Icon buttons, sidebar actions, menu triggers, nav rows | `Role::Button` | `aria_label`; `a11y_disabled` where a control can be disabled |
 | Settings toggles (`toggle_switch`) | `Role::Switch` | `aria_toggled`, `tab_index(0)` |
 | Select triggers | `Role::ComboBox` | `aria_label` (visible value; setting title too when the row has one), `aria_expanded`, `tab_index(0)` |
+| Diff branch chip | `Role::ComboBox` | accessible name includes the current branch, `aria_expanded`, `tab_index(0)`; the click arm accepts only `ClickEvent::Keyboard` |
 | Select lists and rows | `Role::ListBox` / `ListBoxOption` | `aria_selected` |
 | Terminal search status | `Role::Status` | the status string as `aria_label` |
 
@@ -1202,9 +1203,10 @@ focus, and restore through it.
 These are real and MUST NOT be described as solved:
 
 1. **There is no Tab ring and no visible focus ring anywhere.**
-   `window.focus_next` is not bound and GPUI does not auto-bind Tab, so only
-   eight `tab_index(0)` call sites exist and focus is conveyed solely by the
-   absence of dim.
+   `window.focus_next` is not bound and GPUI does not auto-bind Tab. The diff
+   branch chip is a tab stop, as are the Settings switches, select triggers,
+   and the shortcut capture toggle. Focus is conveyed solely by the absence
+   of dim.
 2. **The workspace and tab rail is not keyboard-navigable.** It handles keys
    only for the inline rename editor.
 3. **Settings nav rows carry a role and a name but no `tab_index`**, so they

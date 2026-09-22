@@ -483,11 +483,7 @@ fn render_diffstat_counts(
         .gap(px(4.))
         .text_size(px(10.))
         .font_weight(FontWeight::MEDIUM)
-        .child(
-            div()
-                .text_color(ui.vc_added)
-                .child(format!("+{}", stats.insertions)),
-        )
+        .child(div().text_color(ui.vc_added).child(stats.insertion_label()))
         .child(
             div()
                 .text_color(ui.vc_deleted)
@@ -3100,6 +3096,7 @@ mod tests {
             files_changed: 3,
             insertions: 142,
             deletions: 38,
+            ..crate::workspace::GitDiffStats::default()
         }
     }
 
@@ -3128,6 +3125,7 @@ mod tests {
             files_changed: 1,
             insertions: 0,
             deletions: 4,
+            ..crate::workspace::GitDiffStats::default()
         };
         assert!(diffstat_visible(show(true), &deletions_only));
     }

@@ -1648,6 +1648,9 @@ struct PaneFlowApp {
     toast_queue: std::collections::VecDeque<Toast>,
     /// Dismiss timer for the active toast - dropped on new toast to cancel the old timer.
     _toast_task: Option<gpui::Task<()>>,
+    /// Last serial stamped onto a shown toast. Starts at 0 and increments,
+    /// skipping 0, in `show_next_toast` (issue #697).
+    toast_serial: u64,
     /// US-019 (orchestration-v2): the surface last visited by
     /// `JumpNextWaiting`, so repeated presses cycle through the waiting
     /// agents instead of bouncing on the first one.
