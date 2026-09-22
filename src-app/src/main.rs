@@ -221,10 +221,10 @@ pub(crate) enum GeneralDropdown {
     Shell,
 }
 
-/// Which Workspaces-page dropdown is currently open.
+/// Which Workspaces-page select is open. New-tab branch menus share it so
+/// only one popover is open at a time.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum WorkspaceTemplateDropdown {
-    Layout,
     NewTabBranch(Option<u64>),
 }
 
@@ -1246,10 +1246,6 @@ struct PaneFlowApp {
     /// Monotonic settings-persist generation. `persist_setting` `fetch_add`s
     /// before spawning the off-thread write, matching [`Self::save_seq`].
     config_persist_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    /// Coalescing token for full-array workspace-template writes. This is
-    /// separate from `config_persist_seq` because a later single-field write
-    /// does not carry the commands snapshot and therefore cannot supersede it.
-    workspace_commands_persist_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Per-field generations for single-field settings writes (issue #242).
     /// `persist_setting` bumps the field before spawning and the off-thread
     /// writer skips its write under the config lock once superseded, so a
@@ -1305,24 +1301,8 @@ struct PaneFlowApp {
     terminal_dropdown: Option<TerminalDropdown>,
     /// Codex settings: which General-page select is open (`None` = closed).
     general_dropdown: Option<GeneralDropdown>,
-    /// Codex settings: which Workspaces-page select is open (`None` = closed).
-    workspace_template_dropdown: Option<WorkspaceTemplateDropdown>,
-    /// Selected `cached_config.commands` index for the Workspaces page.
-    workspace_template_selected: Option<usize>,
-    /// Whether the Workspaces page is showing the selected template detail.
-    workspace_template_detail_open: bool,
-    /// Selected flattened pane index inside the selected workspace template.
-    workspace_template_selected_pane: usize,
-    /// Last Workspaces-page action result or validation message.
-    workspace_template_status: Option<String>,
-    /// Workspaces-page text fields. They are synced from the selected template
-    /// and explicitly saved by the page actions.
-    workspace_template_name_input: gpui::Entity<crate::widgets::text_input::TextInput>,
-    workspace_template_project_input: gpui::Entity<crate::widgets::text_input::TextInput>,
-    workspace_pane_name_input: gpui::Entity<crate::widgets::text_input::TextInput>,
-    workspace_pane_cwd_input: gpui::Entity<crate::widgets::text_input::TextInput>,
-    workspace_pane_command_input: gpui::Entity<crate::widgets::text_input::TextInput>,
-    workspace_pane_prompt_input: gpui::Entity<crate::widgets::text_input::TextInput>,
+    /// Which new-tab branch select is open (`None` = closed).
+    new_tab_branch_dropdown: Option<WorkspaceTemplateDropdown>,
     /// Codex settings: cached MCP-bridge status snapshot, refreshed off-thread
     /// so the MCP page never does config I/O during a frame.
     mcp_status: Option<Vec<paneflow_mcp_install::StatusReport>>,

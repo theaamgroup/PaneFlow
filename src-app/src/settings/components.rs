@@ -8,8 +8,6 @@
 //! - **setting_card** - borderless theme-aware panel (white in light, `#232323`
 //!   in dark) with the CLI pane card's squircle corner. Wraps row groups so
 //!   each section reads as a card the way the pane grid does.
-//! - **card_tint** - a selection/emphasis fill painted over a card, in the same
-//!   squircle, because a plain `.bg()` would square its corners.
 //! - **hairline** - 1px row separator (border at ~50% alpha), used inside
 //!   cards to split rows.
 //! - **toggle_pill** - Codex/iOS switch: a 36x22 pill, solid `#339cff` track
@@ -112,16 +110,6 @@ pub fn setting_card(_ui: crate::theme::UiColors) -> Div {
             crate::app::constants::PANE_CARD_RADIUS,
             bg,
         ))
-}
-
-/// A tint painted over a [`setting_card`]'s fill (selection, emphasis).
-/// Chain it right after the card, before its content: the card's own fill is
-/// already its first child, and GPUI paints children in order.
-///
-/// A plain `.bg()` on the card would paint a square quad over the superellipse
-/// and hand back the corners the squircle just traced.
-pub fn card_tint(color: Hsla) -> impl IntoElement {
-    squircle::squircle_fill(crate::app::constants::PANE_CARD_RADIUS, color)
 }
 
 /// 1px hairline divider used between rows inside a `setting_card`.

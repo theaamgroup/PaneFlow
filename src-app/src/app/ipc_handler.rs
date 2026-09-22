@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, BackgroundExecutor, Context, Entity};
-use paneflow_config::schema::{PaneFlowConfig, TerminalSurfaceProfile};
+use paneflow_config::schema::PaneFlowConfig;
 use paneflow_ipc_client::ai_hook::{
     AiToolName, LifecycleEventSource, METHOD_EXIT, METHOD_NOTIFICATION, METHOD_PROMPT_SUBMIT,
     METHOD_SESSION_END, METHOD_SESSION_START, METHOD_STOP, METHOD_TOOL_USE, SessionPid, SurfaceId,
@@ -28,7 +28,6 @@ use crate::agent_launcher::TerminalAgent;
 use crate::agents::notifications::{self as desktop_notifications, DesktopNotification};
 use crate::ai_types::AgentSession;
 use crate::layout::LayoutTree;
-use crate::layout::SplitDirection;
 use crate::pane::Pane;
 use crate::terminal::TerminalView;
 use crate::workspace::Workspace;
@@ -53,14 +52,6 @@ const UP_PREFILL_FLOOR: Duration = Duration::from_millis(1800);
 const UP_PREFILL_MAX: Duration = Duration::from_millis(8000);
 const UP_PREFILL_POLL: Duration = Duration::from_millis(200);
 
-/// workspace templates launch-command readiness window. A newly-created PTY can be
-/// alive before its shell prompt is ready to consume typed input, especially on
-/// Windows. Launch commands are therefore delayed until the initial shell output
-/// settles, then prompts are scheduled after the command has been injected.
-const UP_LAUNCH_FLOOR: Duration = Duration::from_millis(700);
-const UP_LAUNCH_MAX: Duration = Duration::from_millis(4000);
-const UP_LAUNCH_POLL: Duration = Duration::from_millis(100);
-
 struct TranscriptTurnEndNotification {
     agent: TerminalAgent,
     title: String,
@@ -81,146 +72,6 @@ const SUBMIT_ECHO_POLL: Duration = Duration::from_millis(15);
 /// a non-echoing TUI) the `\r` is sent anyway once `floor + SUBMIT_ECHO_EXTRA`
 /// elapses, so a dispatch can never hang. Bounds the long tail without a loop.
 const SUBMIT_ECHO_EXTRA: Duration = Duration::from_millis(500);
-
-/// A validated pane plan for workspace templates: the cwd is already canonicalized,
-/// so the spawn phase is infallible with respect to directories (US-012).
-pub(crate) struct PlannedPane {
-    pub(crate) cwd: Option<PathBuf>,
-    pub(crate) command: Option<String>,
-    pub(crate) prompt: Option<String>,
-    pub(crate) env: Option<HashMap<String, String>>,
-    pub(crate) profile: TerminalSurfaceProfile,
-    pub(crate) focus: bool,
-    /// EP-004 US-012: stable label posed atomically as `custom_name` at spawn
-    /// (sanitized; de-duplicated within the batch). `None` keeps the
-    /// auto-derived name.
-    pub(crate) label: Option<String>,
-    /// EP-004 US-015: optional context blob staged to a temp file and passed to
-    /// the spawned agent via `PANEFLOW_CONTEXT_FILE` (no inline 64 KiB cap).
-    pub(crate) context: Option<String>,
-}
-
-/// Parse a JSON `{ "K": "V", … }` object into an env map. Every value must be
-/// a string (a shell env value can only be a string); anything else is a
-/// `-32602` rather than a silently dropped entry, so a client never gets a
-/// pane missing the env it asked for. Returns `Ok(None)` for absent/`null`/
-/// empty so the global `terminal.env` default still applies underneath
-/// (parity with `SurfaceDefinition::env`).
-fn parse_env_object(
-    value: Option<&serde_json::Value>,
-) -> Result<Option<HashMap<String, String>>, JsonRpcError> {
-    let Some(value) = value.filter(|v| !v.is_null()) else {
-        return Ok(None);
-    };
-    let Some(obj) = value.as_object() else {
-        return Err(JsonRpcError::invalid_params(
-            "env must be an object of string values",
-        ));
-    };
-    let mut map = HashMap::with_capacity(obj.len());
-    for (k, v) in obj {
-        let Some(s) = v.as_str() else {
-            return Err(JsonRpcError::invalid_params(format!(
-                "env value for {k:?} must be a string"
-            )));
-        };
-        map.insert(k.clone(), s.to_string());
-    }
-    Ok((!map.is_empty()).then_some(map))
-}
-
-/// Parse an optional `profile` string. Absent/`null` is `Normal`; an unknown
-/// name or a non-string is a `-32602` instead of silently falling back.
-fn parse_terminal_profile(
-    value: Option<&serde_json::Value>,
-) -> Result<TerminalSurfaceProfile, JsonRpcError> {
-    match value {
-        None | Some(serde_json::Value::Null) => Ok(TerminalSurfaceProfile::Normal),
-        Some(serde_json::Value::String(name)) => match name.as_str() {
-            "normal" => Ok(TerminalSurfaceProfile::Normal),
-            "agent" => Ok(TerminalSurfaceProfile::Agent),
-            "review" => Ok(TerminalSurfaceProfile::Review),
-            "cached" => Ok(TerminalSurfaceProfile::Cached),
-            other => Err(JsonRpcError::invalid_params(format!(
-                "unknown profile {other:?}; expected one of normal, agent, review, cached"
-            ))),
-        },
-        Some(_) => Err(JsonRpcError::invalid_params("profile must be a string")),
-    }
-}
-
-pub(crate) fn parse_workspace_pane_plan(
-    spec: &serde_json::Value,
-) -> Result<PlannedPane, JsonRpcError> {
-    let cwd = match spec.get("cwd").and_then(|c| c.as_str()) {
-        Some(raw) => Some(canonicalize_workspace_cwd(raw)?),
-        None => None,
-    };
-    let prompt = spec.get("prompt").and_then(|c| c.as_str());
-    if let Some(prompt) = prompt {
-        validate_prefill_prompt(prompt)?;
-    }
-    Ok(PlannedPane {
-        cwd,
-        command: spec
-            .get("command")
-            .and_then(|c| c.as_str())
-            .map(str::to_string),
-        prompt: prompt.map(str::to_string),
-        env: parse_env_object(spec.get("env"))?,
-        profile: parse_terminal_profile(spec.get("profile"))?,
-        focus: spec.get("focus").and_then(|f| f.as_bool()).unwrap_or(false),
-        label: spec
-            .get("label")
-            .or_else(|| spec.get("name"))
-            .and_then(|v| v.as_str())
-            .and_then(sanitize_pane_name),
-        context: spec
-            .get("context")
-            .and_then(|c| c.as_str())
-            .map(str::to_string),
-    })
-}
-
-pub(crate) fn dedupe_planned_pane_labels(planned: &mut [PlannedPane]) {
-    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for pp in planned {
-        if let Some(label) = pp.label.take() {
-            let unique = crate::workspace::surface_naming::claim_unique(&mut taken, &label);
-            if unique != label {
-                log::warn!(
-                    "workspace templates: duplicate label '{label}' in batch, using '{unique}'"
-                );
-            }
-            pp.label = Some(unique);
-        }
-    }
-}
-
-/// Build the layout tree for workspace templates from a preset name. Mirrors the
-/// keyboard layout presets (`handle_layout_*`): `even_h` = side by side
-/// (Vertical divider), `even_v` = stacked (Horizontal divider), `main_vertical`
-/// = the focused pane on the left with the rest stacked, `tiled` = tmux grid.
-/// Unknown names fall back to `even_h`.
-///
-/// `focus_idx` picks the left/main slot for `main_vertical` only. Other presets
-/// keep pane order. Keyboard focus is the caller's job after the tree is built.
-pub(crate) fn build_up_layout(
-    preset: &str,
-    panes: Vec<Entity<Pane>>,
-    focus_idx: usize,
-) -> Option<LayoutTree> {
-    match preset {
-        "even_v" => LayoutTree::from_panes_equal(SplitDirection::Horizontal, panes),
-        "main_vertical" => {
-            let main = panes.get(focus_idx).or_else(|| panes.first())?.clone();
-            let others: Vec<_> = panes.into_iter().filter(|p| *p != main).collect();
-            LayoutTree::main_vertical(main, others)
-        }
-        "tiled" => LayoutTree::tiled(panes),
-        _ => LayoutTree::from_panes_equal(SplitDirection::Vertical, panes),
-    }
-}
 
 fn fire_turn_end_notification(
     agent: TerminalAgent,
@@ -402,179 +253,6 @@ fn extract_last_result_capped(path: &std::path::Path, cap: u64) -> Option<String
     None
 }
 
-// ---------------------------------------------------------------------------
-// EP-004 US-015 (agent-control-plane): structured context channel.
-//
-// A orchestrator passes a (possibly large) context blob to a spawned agent via the
-// `context` param of workspace templates. Inlining it would hit the
-// 64 KiB `send_text` cap and silently truncate; instead it is staged to a temp
-// file and the path is handed to the agent through `PANEFLOW_CONTEXT_FILE`. The
-// write finishes before that env var is inserted and before the IPC method
-// returns success; a failed write is an error, not a spawn whose env points at
-// a missing file. Files are age-swept on the next launch, so a crash never
-// leaks disk unboundedly.
-// ---------------------------------------------------------------------------
-
-/// Per-process monotonic counter for unique context-file names.
-static CONTEXT_FILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Directory holding spawn-time context files, under the per-user OS temp dir.
-fn context_dir() -> std::path::PathBuf {
-    std::env::temp_dir().join("paneflow-context")
-}
-
-/// Allocate a unique (not-yet-created) path for a new context file. Namespaced
-/// by PID so two concurrent Paneflow instances never collide.
-fn next_context_file_path() -> std::path::PathBuf {
-    let seq = CONTEXT_FILE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    context_dir().join(format!("ctx-{}-{seq}.txt", std::process::id()))
-}
-
-/// Write `content` to `path` atomically (temp + rename) so a fast-booting agent
-/// reading `PANEFLOW_CONTEXT_FILE` sees the whole file or nothing. Blocking; the
-/// blob is small enough to run on the automation tick. Callers must not insert
-/// the env var or return IPC success until this returns `Ok`.
-///
-/// The blob is an orchestrator's inter-agent payload (task text, code, possibly
-/// secrets). `std::env::temp_dir()` can resolve to a world-traversable root
-/// (e.g. `/tmp`), so the dir is locked owner-only (0700) and the file is created
-/// 0600 - parity with the IPC socket dir hardening in `ipc.rs`. `create_new`
-/// also means the staging write never follows a pre-planted symlink (CWE-59).
-fn write_context_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    let Some(dir) = path.parent() else {
-        log::warn!(
-            "context file: failed to stage {}: path has no parent directory",
-            path.display()
-        );
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "context file path has no parent directory",
-        ));
-    };
-    if let Err(e) = create_private_dir(dir) {
-        log::warn!("context file: cannot create {}: {e}", dir.display());
-        return Err(e);
-    }
-    let tmp = path.with_extension("tmp");
-    // Clear any stale tmp from a same-PID crash so `create_new` below can own the
-    // path (and so it can't fail on, or follow, a leftover/planted entry).
-    let _ = std::fs::remove_file(&tmp);
-    match write_private_file(&tmp, content).and_then(|()| std::fs::rename(&tmp, path)) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            log::warn!("context file: failed to stage {}: {e}", path.display());
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
-
-/// Create `dir` (recursively) owner-only - 0700 on Unix - so a context blob in a
-/// world-traversable temp root is unreachable by other local users. Idempotent;
-/// re-pins the mode if the dir already existed at looser perms.
-fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)?;
-        // `recursive` does not re-chmod a pre-existing dir; pin it 0700 regardless.
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-        Ok(())
-    }
-}
-
-/// Write `content` to a freshly created (never pre-existing) `path`, 0600 on Unix
-/// so the inter-agent blob is owner-only even within the temp dir. `create_new`
-/// refuses to open an existing path, so the write cannot follow a symlink an
-/// attacker planted at the predictable temp name (CWE-59).
-fn write_private_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        opts.mode(0o600);
-    }
-    opts.open(path)?.write_all(content.as_bytes())
-}
-
-/// EP-004 US-015 AC4: drop stale spawn-time context files left by a prior run
-/// (an agent reads its file at startup; the file is ephemeral). Age-bounded at
-/// 6 h so a concurrently-running instance's fresh files are spared. Blocking, so
-/// it is run via `smol::unblock` the first time the context channel is used.
-fn sweep_orphaned_context_files() {
-    let Ok(entries) = std::fs::read_dir(context_dir()) else {
-        return;
-    };
-    let now = std::time::SystemTime::now();
-    for entry in entries.flatten() {
-        let stale = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|m| now.duration_since(m).ok())
-            .is_some_and(|age| age > std::time::Duration::from_secs(6 * 3600));
-        if stale {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
-/// Write `context` (when non-empty) to `path`, then insert `PANEFLOW_CONTEXT_FILE`.
-/// A write error returns `Err` without inserting the env var so callers cannot
-/// spawn a pane that believes the file exists.
-fn stage_context_file_at(
-    context: Option<&str>,
-    mut env: Option<HashMap<String, String>>,
-    path: std::path::PathBuf,
-) -> std::io::Result<Option<HashMap<String, String>>> {
-    if let Some(content) = context.filter(|c| !c.is_empty()) {
-        write_context_file(&path, content)?;
-        env.get_or_insert_with(HashMap::new).insert(
-            "PANEFLOW_CONTEXT_FILE".to_string(),
-            path.to_string_lossy().into_owned(),
-        );
-    }
-    Ok(env)
-}
-
-/// Stage a `context` blob (when present) to a temp file and return `env` with
-/// `PANEFLOW_CONTEXT_FILE` set to its path. The write is synchronous and must
-/// succeed before the env var is inserted. Absent/empty context returns `env`
-/// unchanged. Orphan sweep stays detached/once and is not on the success path.
-fn stage_context_file(
-    context: Option<&str>,
-    env: Option<HashMap<String, String>>,
-    cx: &mut gpui::Context<crate::PaneFlowApp>,
-) -> std::io::Result<Option<HashMap<String, String>>> {
-    let Some(content) = context.filter(|c| !c.is_empty()) else {
-        return Ok(env);
-    };
-    // AC4: lazily sweep stale files from a prior run, once per process, the
-    // first time the context channel is actually used (off the render
-    // thread). Lazy rather than at boot so an unused feature costs nothing
-    // and so this stays self-contained in the handler module.
-    static CONTEXT_SWEEP_ONCE: std::sync::Once = std::sync::Once::new();
-    CONTEXT_SWEEP_ONCE.call_once(|| {
-        cx.background_spawn(async {
-            smol::unblock(sweep_orphaned_context_files).await;
-        })
-        .detach();
-    });
-    stage_context_file_at(Some(content), env, next_context_file_path())
-}
-
-pub(crate) fn stage_planned_pane_env(
-    pane: &PlannedPane,
-    cx: &mut gpui::Context<crate::PaneFlowApp>,
-) -> std::io::Result<Option<HashMap<String, String>>> {
-    stage_context_file(pane.context.as_deref(), pane.env.clone(), cx)
-}
-
 fn fire_agent_exit_notification(
     agent: TerminalAgent,
     workspace_title: &str,
@@ -674,16 +352,6 @@ fn resolve_paste_mode(
 
 fn text_contains_submit_byte(text: &str) -> bool {
     text.contains('\r') || text.contains('\n')
-}
-
-/// Reject submit bytes before prefilling a workspace template prompt.
-fn validate_prefill_prompt(prompt: &str) -> Result<(), JsonRpcError> {
-    if text_contains_submit_byte(prompt) {
-        return Err(JsonRpcError::invalid_params(
-            "prompt contains CR or LF; a prefilled prompt is never submitted, use surface.send_text",
-        ));
-    }
-    Ok(())
 }
 
 fn resolve_send_text_body_mode(
@@ -1319,8 +987,7 @@ pub(crate) fn wrap_untrusted(header_attrs: &str, body: &str) -> String {
 /// EP-004 US-012 (agent-control-plane): sanitize a user-supplied pane
 /// name/label: trim, strip control characters, cap at 64 chars. Returns `None`
 /// for an empty/blank result (clears the custom name / no label). Shared by
-/// UI pane names and the atomic spawn label on
-/// workspace templates/workspace templates.
+/// UI pane names and spawn labels.
 pub(crate) fn sanitize_pane_name(raw: &str) -> Option<String> {
     const MAX_NAME_LEN: usize = 64;
     let cleaned: String = raw
@@ -1869,8 +1536,8 @@ impl PaneFlowApp {
     /// Prefill a prompt into a pane once its output settles (US-010,
     /// cli-agent-orchestration): FLOOR delay, then poll `output_generation`
     /// until idle (two equal reads) or MAX elapses; then write the prompt
-    /// WITHOUT a carriage return - human-in-loop, the user submits. Shared by
-    /// workspace templates and the spawn-capable workspace templates (EP-003).
+    /// WITHOUT a carriage return - human-in-loop, the user submits. Used by
+    /// session "Continue in" handoffs.
     /// The text a prompt prefill writes, given whether the surface has
     /// enabled bracketed paste (`ESC[?2004h`).
     ///
@@ -1935,72 +1602,6 @@ impl PaneFlowApp {
                     let view = t.read(cx);
                     let text = Self::prefill_text_for(&prompt, view.bracketed_paste_enabled());
                     view.inject_text(&text);
-                }
-            });
-        })
-        .detach();
-    }
-
-    pub(crate) fn schedule_launch_command(
-        terminal: &Entity<TerminalView>,
-        command: String,
-        prompt: Option<String>,
-        pane_label: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let prompt = prompt.filter(|p| !p.is_empty());
-        // Declare the identity NOW, not after the settle wait below: the whole
-        // point is that the pane shows its agent from frame zero, and this path
-        // deliberately holds the command back for up to `UP_LAUNCH_MAX`.
-        terminal.update(cx, |view, _cx| view.declare_agent_from_command(&command));
-        let weak = terminal.downgrade();
-        cx.spawn(async move |_, cx: &mut gpui::AsyncApp| {
-            let Some(settled) = Self::wait_for_terminal_settle(
-                &weak,
-                UP_LAUNCH_FLOOR,
-                UP_LAUNCH_MAX,
-                UP_LAUNCH_POLL,
-                cx,
-            )
-            .await
-            else {
-                return;
-            };
-            cx.update(|cx| {
-                if let Some(t) = weak.upgrade() {
-                    if !settled {
-                        log::warn!(
-                            "workspace launch: pane {pane_label} shell still producing output after \
-                             {UP_LAUNCH_MAX:?}; launch command sent best-effort"
-                        );
-                    }
-                    t.read(cx).send_command(&command);
-                }
-            });
-
-            let Some(prompt) = prompt else {
-                return;
-            };
-            let Some(settled) = Self::wait_for_terminal_settle(
-                &weak,
-                UP_PREFILL_FLOOR,
-                UP_PREFILL_MAX,
-                UP_PREFILL_POLL,
-                cx,
-            )
-            .await
-            else {
-                return;
-            };
-            cx.update(|cx| {
-                if let Some(t) = weak.upgrade() {
-                    if !settled {
-                        log::warn!(
-                            "prompt prefill: pane {pane_label} still producing output after \
-                             {UP_PREFILL_MAX:?}; prompt prefilled best-effort"
-                        );
-                    }
-                    t.read(cx).send_text(&prompt);
                 }
             });
         })
@@ -3872,120 +3473,10 @@ pub(crate) fn promote_response(
     })
 }
 
-/// Test-only stand-in for a dead network mount: resolving any path listed
-/// here stalls for [`STALLED_CWD_DELAY`] before the filesystem answers.
-#[cfg(test)]
-static STALLED_CWD_PATHS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
-
-#[cfg(test)]
-const STALLED_CWD_DELAY: Duration = Duration::from_secs(2);
-
-/// US-014 (cli-hardening-followup-2026-Q3): validate and canonicalize the
-/// `cwd` field of a workspace template.
-///
-/// US-026: this is **not** a confinement jail. A same-UID client may
-/// legitimately open a workspace at any directory it can already reach, and
-/// `canonicalize` resolves `../` and symlinks to wherever they actually point
-/// (`"../../etc"` → `/etc`) without restricting the result to any root - so it
-/// does not, and cannot, prevent "walking outside the workspace". Its job is
-/// narrower: turn a relative or symlinked path into a concrete absolute one and
-/// reject upfront the inputs that would otherwise fail confusingly at PTY
-/// spawn - a path that does not exist or is unreadable, a path containing NUL
-/// bytes (rejected by `canonicalize` itself; most OSes would silently truncate
-/// it), or a path to a regular file (the first chdir would fail) - each with a
-/// structured `-32602` so the client knows the request was refused.
-///
-/// Successful canonicalization is logged at `info!` for audit trail
-/// (relative-path resolution and symlink traversal visibility).
-///
-/// Issue #358: every caller runs on the GPUI automation tick, and `stat`
-/// on a dead NFS/SMB/iCloud mount can block for the kernel mount timeout,
-/// which would freeze painting and the 50 ms IPC drain. The filesystem
-/// work therefore runs on a helper thread with the same bounded probe as
-/// session restore: a late answer is refused with `-32602` and the stalled
-/// thread is left to unwind once the filesystem finally answers.
-pub(crate) fn canonicalize_workspace_cwd(raw: &str) -> Result<std::path::PathBuf, JsonRpcError> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let owned = raw.to_string();
-    let spawned = std::thread::Builder::new()
-        .name("ipc-cwd-probe".to_string())
-        .spawn(move || {
-            let _ = tx.send(canonicalize_workspace_cwd_blocking(&owned));
-        });
-    if let Err(err) = spawned {
-        return Err(JsonRpcError::invalid_params(format!(
-            "cwd could not be probed: {raw} ({err})"
-        )));
-    }
-    match rx.recv_timeout(WORKSPACE_CWD_PROBE_TIMEOUT) {
-        Ok(result) => result,
-        Err(_) => {
-            log::warn!(
-                "ipc: cwd {raw:?} did not answer stat within {WORKSPACE_CWD_PROBE_TIMEOUT:?}; refusing it"
-            );
-            Err(JsonRpcError::invalid_params(format!(
-                "cwd did not answer within {WORKSPACE_CWD_PROBE_TIMEOUT:?} (unresponsive volume?): {raw}"
-            )))
-        }
-    }
-}
-
-/// Longest an IPC cwd probe may hold the automation tick. A local directory
-/// answers in microseconds; only a dead network or cloud mount runs this
-/// out, and such a cwd is refused rather than letting `stat` pin the render
-/// thread for the mount's own timeout (matches session restore's bound).
-const WORKSPACE_CWD_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
-
-/// The blocking half of [`canonicalize_workspace_cwd`]: runs on the probe
-/// thread, never on the GPUI thread.
-fn canonicalize_workspace_cwd_blocking(raw: &str) -> Result<std::path::PathBuf, JsonRpcError> {
-    let expanded = expand_tilde(raw);
-    #[cfg(test)]
-    {
-        let stalled = STALLED_CWD_PATHS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&expanded);
-        if stalled {
-            std::thread::sleep(STALLED_CWD_DELAY);
-        }
-    }
-    let canonical = std::fs::canonicalize(&expanded).map_err(|e| {
-        JsonRpcError::invalid_params(format!("cwd does not exist or is unreadable: {raw} ({e})"))
-    })?;
-    let meta = std::fs::metadata(&canonical).map_err(|e| {
-        JsonRpcError::invalid_params(format!("cwd metadata read failed for {raw}: {e}"))
-    })?;
-    if !meta.is_dir() {
-        return Err(JsonRpcError::invalid_params(format!(
-            "cwd is not a directory: {raw}"
-        )));
-    }
-    let spawn_cwd = canonical;
-    log::info!("workspace template: canonical cwd resolved {raw:?} -> {spawn_cwd:?}");
-    Ok(spawn_cwd)
-}
-
-fn expand_tilde(raw: &str) -> PathBuf {
-    expand_tilde_with_home(raw, dirs::home_dir().as_deref())
-}
-
-fn expand_tilde_with_home(raw: &str, home: Option<&std::path::Path>) -> PathBuf {
-    match raw {
-        "~" => home
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from(raw)),
-        _ => raw
-            .strip_prefix("~/")
-            .and_then(|rest| home.map(|home| home.join(rest)))
-            .unwrap_or_else(|| PathBuf::from(raw)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::MAX_PANES;
+    use crate::layout::{MAX_PANES, SplitDirection};
     use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, mpsc};
 
@@ -4244,130 +3735,6 @@ mod tests {
         );
     }
 
-    // US-008: workspace templates env parsing. A shell env value can only be a
-    // string, so a non-string value is a `-32602` (never silently dropped),
-    // and an absent/empty object yields `None` so the global `terminal.env`
-    // default still applies underneath.
-    #[test]
-    fn parse_env_object_keeps_strings_and_rejects_the_rest() {
-        let env = parse_env_object(Some(&serde_json::json!({
-            "RUST_LOG": "info",
-            "PORT": "8080"
-        })))
-        .expect("all-string values parse")
-        .expect("non-empty string map");
-        assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("info"));
-        assert_eq!(env.get("PORT").map(String::as_str), Some("8080"));
-        assert_eq!(env.len(), 2);
-
-        for spec in [
-            serde_json::json!({ "RUST_LOG": "info", "PORT": 8080 }),
-            serde_json::json!({ "FLAG": true }),
-            serde_json::json!({ "NESTED": { "A": "b" } }),
-            serde_json::json!({ "NULL": null }),
-            serde_json::json!("PORT=8080"),
-            serde_json::json!(["PORT=8080"]),
-        ] {
-            let err = parse_env_object(Some(&spec))
-                .err()
-                .unwrap_or_else(|| panic!("must be rejected: {spec}"));
-            assert_eq!(err.code, JsonRpcError::INVALID_PARAMS, "{spec}");
-        }
-    }
-
-    #[test]
-    fn parse_env_object_absent_or_empty_is_none() {
-        assert!(parse_env_object(None).expect("absent is fine").is_none());
-        assert!(
-            parse_env_object(Some(&serde_json::Value::Null))
-                .expect("null is absent")
-                .is_none()
-        );
-        assert!(
-            parse_env_object(Some(&serde_json::json!({})))
-                .expect("empty object is fine")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn parse_terminal_profile_accepts_known_names_and_rejects_the_rest() {
-        assert_eq!(
-            parse_terminal_profile(None).expect("absent"),
-            TerminalSurfaceProfile::Normal
-        );
-        assert_eq!(
-            parse_terminal_profile(Some(&serde_json::Value::Null)).expect("null"),
-            TerminalSurfaceProfile::Normal
-        );
-        for (name, expected) in [
-            ("normal", TerminalSurfaceProfile::Normal),
-            ("agent", TerminalSurfaceProfile::Agent),
-            ("review", TerminalSurfaceProfile::Review),
-            ("cached", TerminalSurfaceProfile::Cached),
-        ] {
-            assert_eq!(
-                parse_terminal_profile(Some(&serde_json::json!(name))).expect(name),
-                expected
-            );
-        }
-        for spec in [
-            serde_json::json!("bogus"),
-            serde_json::json!("Agent"),
-            serde_json::json!(""),
-            serde_json::json!(1),
-            serde_json::json!(true),
-            serde_json::json!({ "name": "agent" }),
-        ] {
-            let err = parse_terminal_profile(Some(&spec))
-                .err()
-                .unwrap_or_else(|| panic!("must be rejected: {spec}"));
-            assert_eq!(err.code, JsonRpcError::INVALID_PARAMS, "{spec}");
-        }
-    }
-
-    // A pane spec with a non-string env value or an unknown profile is a
-    // `-32602`, never a pane that silently lacks what the client asked for.
-    #[test]
-    fn parse_workspace_pane_plan_rejects_non_string_env_and_unknown_profile() {
-        let reject = |spec: serde_json::Value, what: &str| -> JsonRpcError {
-            match parse_workspace_pane_plan(&spec) {
-                Ok(_) => panic!("{what} must be rejected: {spec}"),
-                Err(err) => err,
-            }
-        };
-
-        let err = reject(
-            serde_json::json!({ "env": { "PORT": 3000 } }),
-            "non-string env value",
-        );
-        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
-        assert!(err.message.contains("PORT"), "{}", err.message);
-
-        let err = reject(serde_json::json!({ "env": "PORT=3000" }), "non-object env");
-        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
-
-        let err = reject(serde_json::json!({ "profile": "bogus" }), "unknown profile");
-        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
-        assert!(err.message.contains("bogus"), "{}", err.message);
-
-        let plan = parse_workspace_pane_plan(&serde_json::json!({
-            "env": { "PORT": "3000" },
-            "profile": "normal"
-        }))
-        .unwrap_or_else(|err| {
-            panic!(
-                "all-string env and a known profile are accepted: {}",
-                err.message
-            )
-        });
-        assert_eq!(
-            plan.env.and_then(|e| e.get("PORT").cloned()).as_deref(),
-            Some("3000")
-        );
-        assert_eq!(plan.profile, TerminalSurfaceProfile::Normal);
-    }
-
     // -----------------------------------------------------------------
     // JSON-RPC error
     // envelope promotion
@@ -4592,27 +3959,6 @@ mod tests {
     }
 
     #[test]
-    fn prefill_prompt_with_cr_or_lf_is_rejected_as_invalid_params() {
-        // Workspace template prompts must not contain submit bytes.
-        // Refuse them with -32602 before anything is spawned.
-        for prompt in ["fix the bug\nplease", "fix the bug\r", "fix\r\nthe bug"] {
-            let spec = serde_json::json!({ "prompt": prompt });
-            match parse_workspace_pane_plan(&spec) {
-                Err(err) => assert_eq!(err.code, JsonRpcError::INVALID_PARAMS),
-                Ok(_) => panic!("prompt {prompt:?} carries a submit byte and must be refused"),
-            }
-        }
-        let spec = serde_json::json!({ "prompt": "fix the bug" });
-        assert_eq!(
-            parse_workspace_pane_plan(&spec)
-                .expect("single-line prompt")
-                .prompt
-                .as_deref(),
-            Some("fix the bug")
-        );
-    }
-
-    #[test]
     fn send_text_pty_payload_wraps_only_when_paste_and_bracketed() {
         use super::send_text_pty_payload;
         assert_eq!(
@@ -4688,112 +4034,6 @@ mod tests {
                 .as_str()
                 .unwrap_or("")
                 .contains("CR or LF"),
-        );
-    }
-
-    // -----------------------------------------------------------------
-    // US-014 (cli-hardening-followup-2026-Q3) - workspace template cwd
-    // canonicalization
-    // -----------------------------------------------------------------
-
-    /// AC #6: a non-existent `cwd` must surface as JSON-RPC `-32602
-    /// Invalid params` without attempting to spawn a PTY. Exercises
-    /// the free helper `canonicalize_workspace_cwd` directly so the
-    /// contract is verified in isolation from `PaneFlowApp`.
-    #[test]
-    fn workspace_template_rejects_nonexistent_cwd() {
-        let bogus = "/nonexistent/path/paneflow-us-014-fixture-xyz";
-        assert!(
-            !std::path::Path::new(bogus).exists(),
-            "fixture precondition: path must not exist"
-        );
-        let err = super::canonicalize_workspace_cwd(bogus).expect_err("must reject missing cwd");
-        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
-        assert!(
-            err.message.contains("does not exist"),
-            "error must mention non-existence, got: {}",
-            err.message
-        );
-    }
-
-    /// AC #3: a `cwd` that resolves to a regular file (not a
-    /// directory) must surface as `-32602 cwd is not a directory`.
-    #[test]
-    fn workspace_template_rejects_file_cwd() {
-        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-        let path = tmp.path().to_string_lossy().into_owned();
-        let err =
-            super::canonicalize_workspace_cwd(&path).expect_err("must reject regular-file cwd");
-        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
-        assert!(
-            err.message.contains("not a directory"),
-            "error must mention not-a-directory, got: {}",
-            err.message
-        );
-    }
-
-    /// Issue #358: workspace templates
-    /// resolve `cwd` on the GPUI automation tick. A cwd on a dead NFS/SMB
-    /// mount can pin `stat` for the kernel mount timeout, so the probe must
-    /// answer within a bounded window (`-32602` on timeout) like session
-    /// restore does, instead of freezing paint and the 50 ms IPC drain.
-    #[test]
-    fn workspace_cwd_probe_returns_invalid_params_when_stat_stalls() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let stalled = tmp.path().to_path_buf();
-        let stalled_str = stalled.to_string_lossy().into_owned();
-        super::STALLED_CWD_PATHS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(stalled.clone());
-        let bound = super::STALLED_CWD_DELAY / 2;
-
-        let started = std::time::Instant::now();
-        let result = super::canonicalize_workspace_cwd(&stalled_str);
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < bound,
-            "cwd probe blocked the caller for {elapsed:?} (bound {bound:?})"
-        );
-        let err = result.expect_err("a stalled cwd must be refused, not trusted");
-        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
-        assert!(
-            err.message.contains("did not answer"),
-            "error must mention the timeout, got: {}",
-            err.message
-        );
-    }
-
-    /// Sanity: a real, existing directory must canonicalize successfully.
-    #[test]
-    fn workspace_template_accepts_existing_directory() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let resolved = super::canonicalize_workspace_cwd(tmp.path().to_str().expect("utf-8 path"))
-            .expect("real dir must canonicalize");
-        // canonicalize resolves to an absolute path.
-        assert!(resolved.is_absolute());
-        assert!(resolved.is_dir());
-    }
-
-    #[test]
-    fn workspace_cwd_expands_home_prefix_before_canonicalize() {
-        let home = PathBuf::from("/home/arthur");
-
-        assert_eq!(
-            super::expand_tilde_with_home("~", Some(&home)),
-            home.clone()
-        );
-        assert_eq!(
-            super::expand_tilde_with_home("~/dev/backend", Some(&home)),
-            home.join("dev/backend")
-        );
-        assert_eq!(
-            super::expand_tilde_with_home("~\\dev\\backend", Some(&home)),
-            PathBuf::from(r"~\dev\backend")
-        );
-        assert_eq!(
-            super::expand_tilde_with_home("rel/~not-home", Some(&home)),
-            PathBuf::from("rel/~not-home")
         );
     }
 
@@ -5932,107 +5172,6 @@ mod tests {
         assert_eq!(v["last_result"], "compiled clean");
     }
 
-    #[test]
-    fn context_file_round_trips_without_truncation_and_paths_unique() {
-        // AC2: a context blob larger than the 64 KiB inline cap is written
-        // verbatim (no silent truncation), and each spawn gets a unique path.
-        let p1 = super::next_context_file_path();
-        let p2 = super::next_context_file_path();
-        assert_ne!(p1, p2, "each context file gets a distinct path");
-        let big = "x".repeat(128 * 1024);
-        super::write_context_file(&p1, &big).expect("context file staged");
-        let read = std::fs::read_to_string(&p1).expect("context file staged");
-        assert_eq!(
-            read.len(),
-            big.len(),
-            "no truncation past the 64 KiB inline cap"
-        );
-        let _ = std::fs::remove_file(&p1);
-    }
-
-    /// US-015 hardening: the inter-agent context blob must be owner-only on disk
-    /// (the staging dir can resolve to a shared `/tmp`), parity with the IPC
-    /// socket. The file is 0600 and the containing dir 0700 - no group/other bits.
-    #[cfg(unix)]
-    #[test]
-    fn context_file_and_dir_are_owner_only() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let path = super::next_context_file_path();
-        super::write_context_file(&path, "secret inter-agent context")
-            .expect("context file staged");
-        let file_mode = std::fs::metadata(&path)
-            .expect("file staged")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(
-            file_mode, 0o600,
-            "context file must be 0600, got {file_mode:o}"
-        );
-        let dir_mode = std::fs::metadata(super::context_dir())
-            .expect("dir exists")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(
-            dir_mode, 0o700,
-            "context dir must be 0700, got {dir_mode:o}"
-        );
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn write_context_file_error_is_observable_when_parent_is_a_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let parent_as_file = dir.path().join("blocked");
-        std::fs::write(&parent_as_file, b"not a dir").expect("write blocker");
-        let path = parent_as_file.join("ctx-test.txt");
-        super::write_context_file(&path, "blob")
-            .expect_err("parent path is a file so the write must fail");
-        assert!(
-            !path.exists(),
-            "failed write must not leave a destination file"
-        );
-    }
-
-    #[test]
-    fn context_file_failed_write_does_not_insert_env() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let parent_as_file = dir.path().join("blocked");
-        std::fs::write(&parent_as_file, b"not a dir").expect("write blocker");
-        let path = parent_as_file.join("ctx-test.txt");
-        let mut env = HashMap::new();
-        env.insert("KEEP".into(), "yes".into());
-        super::stage_context_file_at(Some("secret inter-agent context"), Some(env), path.clone())
-            .expect_err("write must fail before env insert");
-        assert!(
-            !path.exists(),
-            "failed stage must not leave a destination file"
-        );
-    }
-
-    #[test]
-    fn stage_context_file_at_inserts_env_only_after_successful_write() {
-        let path = super::next_context_file_path();
-        let env = super::stage_context_file_at(Some("hello"), None, path.clone())
-            .expect("write must succeed");
-        let env = env.expect("env populated after successful write");
-        assert_eq!(
-            env.get("PANEFLOW_CONTEXT_FILE").map(String::as_str),
-            Some(path.to_string_lossy().as_ref())
-        );
-        assert_eq!(std::fs::read_to_string(&path).expect("read"), "hello");
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn context_file_empty_does_not_write_or_insert_env() {
-        let path = super::next_context_file_path();
-        let env = super::stage_context_file_at(Some(""), None, path.clone()).expect("no write");
-        assert!(env.is_none());
-        assert!(!path.exists());
-    }
-
     // -----------------------------------------------------------------
     // US-013 (prd-pane-context-bridge) - surface.rename name parsing
     // -----------------------------------------------------------------
@@ -6043,8 +5182,8 @@ mod tests {
 
     #[test]
     fn prompt_prefill_writes_through_inject_text_and_never_submits() {
-        // Issue #334: the shared prefill (Launch
-        // Pad, and "Continue in") writes through `inject_text`, which wraps
+        // Issue #334: the shared prefill ("Continue in") writes through
+        // `inject_text`, which wraps
         // the block in bracketed-paste markers when the surface has enabled
         // `ESC[?2004h` and otherwise writes it verbatim, never rewriting a
         // newline to a carriage return. Nothing follows the block.
@@ -6052,7 +5191,7 @@ mod tests {
         let body = src
             .split("pub(crate) fn schedule_prompt_prefill(")
             .nth(1)
-            .and_then(|rest| rest.split("pub(crate) fn schedule_launch_command(").next())
+            .and_then(|rest| rest.split("async fn wait_for_terminal_settle(").next())
             .expect("schedule_prompt_prefill body");
         assert!(
             body.contains("prefill_text_for(&prompt, view.bracketed_paste_enabled())")
@@ -6089,7 +5228,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_template_dedups_duplicate_labels_in_batch() {
+    fn spawn_labels_dedup_and_blank_names_clear() {
         // EP-004 US-012 AC3: two identical labels in one workspace templates batch
         // resolve to distinct stable names (the second gets a `-2` suffix),
         // reusing the shared suffix algorithm the handler calls.

@@ -281,6 +281,27 @@ fn leftover_agent_summary_enabled_still_loads() {
 }
 
 #[test]
+fn leftover_commands_array_still_loads() {
+    // Issue #607: the workspace-template builder is gone, but an older
+    // paneflow.json may still carry a non-empty `commands` array. The key is
+    // accepted and ignored, not a hard parse failure, and siblings still load.
+    let config = parse_and_validate(
+        r#"{
+            "theme": "Cursor Dark",
+            "commands": [
+                {
+                    "name": "dev",
+                    "command": "echo hi"
+                }
+            ]
+        }"#,
+    );
+    assert_eq!(config.theme.as_deref(), Some("Cursor Dark"));
+    assert_eq!(config.commands.len(), 1);
+    assert_eq!(config.commands[0].name, "dev");
+}
+
+#[test]
 fn test_leftover_telemetry_key_is_ignored_and_rest_of_config_is_used() {
     // Existing paneflow.json files may still contain a telemetry block
     // after the subsystem was removed. Unknown keys are ignored; the

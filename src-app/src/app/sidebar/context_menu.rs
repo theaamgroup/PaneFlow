@@ -40,12 +40,10 @@ fn context_menu_divider(ui: crate::theme::UiColors) -> gpui::Div {
 /// exists only when that row does.
 fn workspace_context_menu_counts(
     visible_editor_rows: usize,
-    workflow_rows: usize,
     service_rows: usize,
     has_unread: bool,
 ) -> (usize, usize) {
-    let menu_rows =
-        visible_editor_rows + 6 + workflow_rows + service_rows + usize::from(has_unread);
+    let menu_rows = visible_editor_rows + 6 + service_rows + usize::from(has_unread);
     let separator_rows = 3 + usize::from(service_rows > 0) + usize::from(visible_editor_rows > 0);
     (menu_rows, separator_rows)
 }
@@ -185,7 +183,6 @@ impl PaneFlowApp {
     ) -> AnyElement {
         let idx = menu.idx;
         let can_close = !self.workspaces.is_empty();
-        let workflow_template = self.workspace_template_for_workspace(idx);
         let services: Vec<_> = self
             .workspaces
             .get(idx)
@@ -209,17 +206,12 @@ impl PaneFlowApp {
             .agent_completion_notification
             .is_unread();
         let muted = self.workspaces[idx].muted;
-        let workflow_rows = usize::from(workflow_template.is_some());
         let service_rows = services.len();
         // One row. The editor is `external_editor`, so there is nothing to
         // filter by which CLI happens to be installed.
         let visible_editor_rows = 1;
-        let (menu_rows, separator_rows) = workspace_context_menu_counts(
-            visible_editor_rows,
-            workflow_rows,
-            service_rows,
-            has_unread,
-        );
+        let (menu_rows, separator_rows) =
+            workspace_context_menu_counts(visible_editor_rows, service_rows, has_unread);
         let menu_height = px(8. + menu_rows as f32 * 28. + separator_rows as f32 * 9.);
         let menu_pos = clamped_context_menu_position(menu.position, px(248.), menu_height, window);
 
@@ -250,23 +242,8 @@ impl PaneFlowApp {
             }),
         ));
 
-        if let Some(template_idx) = workflow_template {
-            context_menu = context_menu.child(self.render_select_menu_item(
-                "workspace-context-run-workflow".into(),
-                "Run Workflow",
-                None,
-                ui,
-                cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                    this.workspace_menu_open = None;
-                    this.run_saved_workspace_template_for_workspace(idx, template_idx, cx);
-                    cx.stop_propagation();
-                }),
-            ));
-        }
-
-        // Unconditional since issue #107: the pin row always sits above this
-        // rule, so it can no longer open the menu on a leading divider - which
-        // is the only reason it used to be gated on "Run Workflow" existing.
+        // The pin row always sits above this rule, so the menu never opens
+        // on a leading divider.
         context_menu = context_menu.child(context_menu_divider(ui));
 
         for (port, info) in services {
@@ -1077,15 +1054,15 @@ mod tests {
 
     #[test]
     fn workspace_menu_geometry_uses_filtered_editor_rows() {
-        assert_eq!(workspace_context_menu_counts(4, 0, 0, false), (10, 4));
-        assert_eq!(workspace_context_menu_counts(2, 1, 0, false), (9, 4));
-        assert_eq!(workspace_context_menu_counts(0, 0, 0, false), (6, 3));
+        assert_eq!(workspace_context_menu_counts(4, 0, false), (10, 4));
+        assert_eq!(workspace_context_menu_counts(2, 0, false), (8, 4));
+        assert_eq!(workspace_context_menu_counts(0, 0, false), (6, 3));
     }
 
     #[test]
     fn workspace_menu_geometry_counts_service_and_editor_dividers_independently() {
-        assert_eq!(workspace_context_menu_counts(4, 0, 2, false), (12, 5));
-        assert_eq!(workspace_context_menu_counts(0, 0, 2, false), (8, 4));
+        assert_eq!(workspace_context_menu_counts(4, 2, false), (12, 5));
+        assert_eq!(workspace_context_menu_counts(0, 2, false), (8, 4));
     }
     #[test]
     fn workspace_notification_menu_routes_are_separate_from_tab_badges() {
@@ -1107,9 +1084,9 @@ mod tests {
 
     #[test]
     fn workspace_menu_geometry_adds_only_one_row_for_unread_completions() {
-        for (editors, workflows, services) in [(0, 0, 0), (2, 1, 0), (4, 0, 2)] {
-            let read = workspace_context_menu_counts(editors, workflows, services, false);
-            let unread = workspace_context_menu_counts(editors, workflows, services, true);
+        for (editors, services) in [(0, 0), (2, 0), (4, 2)] {
+            let read = workspace_context_menu_counts(editors, services, false);
+            let unread = workspace_context_menu_counts(editors, services, true);
             assert_eq!(unread, (read.0 + 1, read.1));
         }
     }

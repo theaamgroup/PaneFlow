@@ -48,7 +48,7 @@ impl PaneFlowApp {
         let workspace = ws_idx.and_then(|index| self.workspaces.get(index));
         let ws_id = workspace.map(|ws| ws.id);
         let which = WorkspaceTemplateDropdown::NewTabBranch(ws_id);
-        let is_open = self.workspace_template_dropdown == Some(which);
+        let is_open = self.new_tab_branch_dropdown == Some(which);
         let default = self.cached_config.default_new_tab_branch();
         let current = workspace.map_or_else(
             || Some(default.to_string()),
@@ -127,8 +127,8 @@ impl PaneFlowApp {
             let mut menu =
                 select_listbox(SharedString::from(format!("new-tab-branch-menu-{id}")), ui)
                     .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
-                        if this.workspace_template_dropdown == Some(which) {
-                            this.workspace_template_dropdown = None;
+                        if this.new_tab_branch_dropdown == Some(which) {
+                            this.new_tab_branch_dropdown = None;
                             cx.notify();
                         }
                     }));
@@ -144,7 +144,7 @@ impl PaneFlowApp {
                     )
                     .cursor(CursorStyle::Arrow)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.workspace_template_dropdown = None;
+                        this.new_tab_branch_dropdown = None;
                         if let Some(ws_id) = ws_id {
                             let Some(ws) = this.workspaces.iter().find(|ws| ws.id == ws_id) else {
                                 return;
@@ -224,7 +224,7 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.workspace_template_dropdown = if was_open {
+        self.new_tab_branch_dropdown = if was_open {
             None
         } else {
             Some(WorkspaceTemplateDropdown::NewTabBranch(ws_id))

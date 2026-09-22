@@ -97,7 +97,7 @@ Two related settings are separate from the theme name:
 
 * `terminal.cursor_color` overrides only the terminal cursor. `null`
   uses the cursor colour from the active theme.
-* `commands[].workspace.color` is a workspace-template colour, not a
+* `commands` is a leftover config key, accepted and ignored. It is not a
   theme accent.
 
 ## How does theme hot-reload work?
