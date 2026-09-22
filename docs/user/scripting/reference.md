@@ -128,9 +128,9 @@ tracked agent returns idle state, not an error.
 | Path limit       | The composed path is rejected if it would exceed the `sockaddr_un.sun_path` ceiling of 104 bytes, and IPC is disabled with a warning |
 | Permissions      | Mode `0600` after bind, plus a per-connection peer-UID check |
 | Framing          | Newline-delimited JSON-RPC 2.0                                                       |
-| Request model    | One request per connection                                |
+| Request model    | Multiple sequential requests per connection                                |
 | Local trust      | Same user only; no network listener, no token, no TLS                                |
-| Backpressure     | Connection cap, GPUI queue timeout, and bounded event queues return structured errors or `dropped` frames |
+| Backpressure     | Connection cap and bounded GPUI request queue; queue-full and request-timeout errors |
 
 Probe capabilities at runtime:
 
