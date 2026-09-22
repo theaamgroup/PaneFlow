@@ -127,6 +127,14 @@ impl ConfigLease {
 }
 
 impl LastConfigLease {
+    /// Whether the durable ownership bit is set for the leased resource.
+    ///
+    /// A non-consuming peek, same as [`ConfigLease::is_created`]: the marker
+    /// stays until [`Self::take_created`].
+    pub fn is_created(&self) -> bool {
+        self.marker.exists()
+    }
+
     /// Consume and clear the durable resource-ownership bit.
     ///
     /// Clearing before cleanup makes a crash conservative: it may leave a
