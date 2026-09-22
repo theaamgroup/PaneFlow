@@ -703,7 +703,16 @@ pub(crate) fn git_command() -> Command {
 }
 
 /// Append a git subcommand, forcing `--no-ext-diff` on `git diff`.
+///
+/// A leading argument that does not start with `-` is the subcommand.
+/// `-c alias.<name>=` is inserted before that token so a repo or global
+/// alias cannot replace it. An `alias.status` that exits 0 with empty
+/// stdout would otherwise make [`is_clean`] report a dirty tree as clean.
 pub(crate) fn git_subcommand(cmd: &mut Command, args: &[&str]) {
+    if let Some(name) = args.first().filter(|name| !name.starts_with('-')) {
+        let disable_alias = format!("alias.{name}=");
+        cmd.arg("-c").arg(disable_alias);
+    }
     match args {
         ["diff", rest @ ..] => {
             cmd.arg("diff").arg("--no-ext-diff").args(rest);
@@ -1726,6 +1735,12 @@ mod tests {
         );
     }
 
+    fn rendered_git_subcommand(args: &[&str]) -> String {
+        let mut cmd = git_command();
+        git_subcommand(&mut cmd, args);
+        format!("{cmd:?}")
+    }
+
     #[test]
     fn git_run_disables_repo_hooks() {
         assert_production_git_command_isolated(include_str!("worktree.rs"), "fn run_git(");
@@ -1742,6 +1757,56 @@ mod tests {
         assert_production_git_command_isolated(
             include_str!("../app/diff_dock/branch.rs"),
             "fn switch_branch(",
+        );
+
+        // `git_subcommand` puts `-c alias.<name>=` on the Command before the
+        // subcommand token. Git applies `-c` after the repo config and after
+        // `GIT_CONFIG_GLOBAL`, so the same flag blocks an inherited global
+        // alias. Do not set `GIT_CONFIG_GLOBAL` on this process: other tests
+        // share it. The live case below is the repo alias.
+        let subcommand_body = source_slice(
+            include_str!("worktree.rs"),
+            "fn git_subcommand(",
+            "fn run_git(",
+        );
+        assert!(
+            subcommand_body.contains("alias."),
+            "git_subcommand must clear alias.<name> before the subcommand"
+        );
+        let status_cmd = rendered_git_subcommand(&[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ]);
+        let alias_status_at = status_cmd
+            .find("alias.status=")
+            .expect("status command disables alias.status");
+        let status_token = status_cmd
+            .find("\"status\"")
+            .expect("status command names the subcommand");
+        assert!(
+            alias_status_at < status_token,
+            "-c alias.status= must precede the status token: {status_cmd}"
+        );
+        let diff_cmd = rendered_git_subcommand(&["diff", "--stat"]);
+        let alias_diff_at = diff_cmd
+            .find("alias.diff=")
+            .expect("diff command disables alias.diff");
+        let diff_token = diff_cmd
+            .find("\"diff\"")
+            .expect("diff command names the subcommand");
+        let no_ext = diff_cmd
+            .find("--no-ext-diff")
+            .expect("diff keeps --no-ext-diff");
+        assert!(
+            alias_diff_at < diff_token && diff_token < no_ext,
+            "-c alias.diff= must precede diff --no-ext-diff: {diff_cmd}"
+        );
+        let dashed = rendered_git_subcommand(&["-c", "color.ui=never", "status"]);
+        assert!(
+            !dashed.contains("alias.-c"),
+            "a leading option is not a subcommand name: {dashed}"
         );
 
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1810,12 +1875,29 @@ mod tests {
             GIT_DEADLINE,
         )
         .expect("config diff.external");
+        // `run_git` itself must not recurse through alias.status: this config
+        // subcommand is also dispatched by `git_subcommand`.
+        let alias_status = format!("!{}", marker_script.display());
+        run_git(
+            &repo_root,
+            &["config", "alias.status", &alias_status],
+            GIT_DEADLINE,
+        )
+        .expect("config alias.status");
 
         std::fs::write(repo_root.join("README.md"), "changed\n").expect("dirty worktree");
 
         let listed = list_worktrees(&repo_root).expect("list worktrees");
         assert!(!listed.is_empty(), "hostile repo must still list");
-        is_clean(&repo_root).expect("git status against hostile hooksPath/fsmonitor");
+        assert!(
+            !is_clean(&repo_root).expect("git status against hostile hooksPath/fsmonitor"),
+            "a dirty tree must not look clean when alias.status exits 0 with empty stdout"
+        );
+        assert!(
+            !marker.exists(),
+            "alias.status must not run: {}",
+            std::fs::read_to_string(&marker).unwrap_or_default()
+        );
         let diff = crate::diff::compute_head_diff(&repo_root);
         assert!(
             diff.error.is_none(),
