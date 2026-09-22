@@ -281,18 +281,29 @@ impl TerminalView {
     pub(super) fn exit_copy_mode(&mut self, copy_to_clipboard: bool, cx: &mut Context<Self>) {
         let backend = self.terminal.session_backend();
 
+        // A copy the engine refuses is over the text cap, not an empty
+        // selection. Leave the highlight so the refused text is still selected.
+        let mut clear_selection = true;
         if copy_to_clipboard {
-            if let Some(text) = backend.selection_text() {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            match backend.selection_text() {
+                Ok(Some(text)) => {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+                Ok(None) => {}
+                Err(_) => clear_selection = false,
             }
-            // After copying, scroll to bottom
-            backend.scroll_to_bottom();
+            if clear_selection {
+                // After copying, scroll to bottom
+                backend.scroll_to_bottom();
+            }
         } else {
             // On cancel, restore the scroll position from before copy mode entry
             backend.restore_display_offset(self.copy_mode_frozen_offset);
         }
 
-        backend.clear_selection();
+        if clear_selection {
+            backend.clear_selection();
+        }
 
         self.copy_mode_active = false;
         cx.notify();
