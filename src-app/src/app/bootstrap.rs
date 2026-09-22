@@ -752,6 +752,7 @@ impl PaneFlowApp {
             toast: None,
             toast_queue: std::collections::VecDeque::new(),
             _toast_task: None,
+            toast_serial: 0,
             jump_cursor: None,
             swap_source: None,
             swap_armed_panes: Vec::new(),
