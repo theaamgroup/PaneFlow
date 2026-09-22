@@ -308,12 +308,19 @@ fn captured_path_has_system_bin(path: &str) -> bool {
 /// Extract the `PATH=` value from newline-delimited `env` output that follows
 /// `marker`. PATH never contains a newline, so line-splitting is safe even when
 /// some other variable's value spans multiple lines.
+///
+/// A record counts only when it ends in `\n`. The read cap can slice through
+/// `PATH=...`; adopting that fragment would replace the inherited PATH with a
+/// prefix (issue #683).
 #[cfg(unix)]
 fn extract_path(buf: &[u8], marker: &[u8]) -> Option<String> {
     let start = find_subslice(buf, marker)? + marker.len();
-    for line in buf[start..].split(|&b| b == b'\n') {
-        if let Some(rest) = line.strip_prefix(b"PATH=") {
-            return std::str::from_utf8(rest).ok().map(str::to_string);
+    let mut rest = &buf[start..];
+    while let Some(end) = rest.iter().position(|byte| *byte == b'\n') {
+        let line = &rest[..end];
+        rest = &rest[end + 1..];
+        if let Some(path) = line.strip_prefix(b"PATH=") {
+            return std::str::from_utf8(path).ok().map(str::to_string);
         }
     }
     None
@@ -436,6 +443,19 @@ mod tests {
         // A variable whose value contains a newline must not corrupt parsing.
         let out = b"__M__\nSCRIPT=line1\nline2\nPATH=/usr/bin\n";
         assert_eq!(extract_path(out, b"__M__").as_deref(), Some("/usr/bin"));
+    }
+
+    #[test]
+    fn extract_path_rejects_an_unterminated_fragment() {
+        assert_eq!(
+            extract_path(b"__M__\nPATH=/usr/bin:/opt/homebrew/bin", b"__M__"),
+            None,
+            "a cap that slices through PATH= must not be adopted"
+        );
+        assert_eq!(
+            extract_path(b"__M__\nPATH=/usr/bin:/opt/homebrew/bin\n", b"__M__").as_deref(),
+            Some("/usr/bin:/opt/homebrew/bin")
+        );
     }
 
     #[test]
