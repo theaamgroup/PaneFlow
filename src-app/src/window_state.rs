@@ -78,9 +78,27 @@ pub(crate) fn save() {
     let Some(state) = *last_windowed_size_guard() else {
         return;
     };
-
     let Some(path) = state_path() else {
         return;
+    };
+    save_to(&path, state);
+}
+
+fn save_to(path: &Path, state: PersistedWindowSize) {
+    // A dotfiles-managed window-state.json is a symlink into another store.
+    // Publish onto the link's target so the atomic rename updates that store
+    // and leaves the link standing, and refuse a dangling link rather than
+    // replacing it with a regular file. The temp file is created in the
+    // target's parent: renaming onto the symlink path would replace the link.
+    let path = match window_state_write_target(path) {
+        Ok(target) => target,
+        Err(error) => {
+            log::warn!(
+                "window state: cannot resolve write target {}: {error}",
+                path.display()
+            );
+            return;
+        }
     };
     let Some(parent) = path.parent() else {
         return;
@@ -109,6 +127,19 @@ pub(crate) fn save() {
     }
     if let Err(error) = temporary.persist(&path) {
         log::warn!("window state: failed to persist: {error}");
+    }
+}
+
+/// Resolve an existing symlink to its managed target so an atomic replacement
+/// updates the target without silently breaking a dotfile-manager link. A
+/// dangling link is refused: replacing it would change the user's path policy.
+/// Same match as `config_writer::config_write_target`; that helper is private.
+fn window_state_write_target(path: &Path) -> Result<PathBuf, std::io::Error> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path),
+        Ok(_) => Ok(path.to_path_buf()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(error) => Err(error),
     }
 }
 
@@ -342,5 +373,81 @@ mod tests {
         let file = std::fs::File::open(&path).expect("open");
         let contents = read_capped(file, &path).expect("a file exactly at the cap must load");
         assert_eq!(contents.len(), at_cap);
+    }
+
+    /// A dotfiles-managed window-state.json is a symlink into another store.
+    /// The atomic publish must land on the link's target and leave the link
+    /// standing. A dangling link is refused rather than replaced by a regular
+    /// file (the session.json / paneflow.json contract).
+    #[test]
+    fn window_state_persist_updates_symlink_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = dir.path().join("store");
+        std::fs::create_dir_all(&store).expect("store dir");
+        let target = store.join("window-state.json");
+        std::fs::write(&target, "stale").expect("seed target");
+        let live = dir.path().join("live");
+        std::fs::create_dir_all(&live).expect("live dir");
+        let link = live.join("window-state.json");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let state = PersistedWindowSize {
+            width: MIN_WINDOW_WIDTH,
+            height: MIN_WINDOW_HEIGHT,
+        };
+        save_to(&link, state);
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link still present")
+                .file_type()
+                .is_symlink(),
+            "window-state.json must stay a symlink after a save"
+        );
+        assert_eq!(
+            std::fs::read_link(&link).expect("readlink"),
+            target,
+            "the link must still point at the managed target"
+        );
+        let loaded = load_from_path(&target).expect("the link target must hold the new size");
+        assert_eq!(loaded.width, MIN_WINDOW_WIDTH);
+        assert_eq!(loaded.height, MIN_WINDOW_HEIGHT);
+        assert!(
+            std::fs::symlink_metadata(&target)
+                .expect("target metadata")
+                .file_type()
+                .is_file(),
+            "the new size must be a regular file at the link target"
+        );
+
+        let before = std::fs::read(&target).expect("read target");
+        let missing = dir.path().join("missing").join("window-state.json");
+        let dangling = live.join("dangling.json");
+        std::os::unix::fs::symlink(&missing, &dangling).expect("dangling symlink");
+        save_to(&dangling, state);
+
+        let dangling_meta =
+            std::fs::symlink_metadata(&dangling).expect("dangling link still present");
+        assert!(
+            dangling_meta.file_type().is_symlink(),
+            "a dangling link must stay a symlink"
+        );
+        assert!(
+            !dangling_meta.file_type().is_file(),
+            "a dangling link must not be replaced by a regular file"
+        );
+        assert!(
+            !missing.exists(),
+            "refusing a dangling link must not create a regular file at its target"
+        );
+        assert!(
+            !dir.path().join("missing").exists(),
+            "refusing a dangling link must not create the missing parent"
+        );
+        assert_eq!(
+            std::fs::read(&target).expect("read target"),
+            before,
+            "refusing a dangling link must not rewrite the live target"
+        );
     }
 }
