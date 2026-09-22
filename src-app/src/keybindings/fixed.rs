@@ -129,12 +129,6 @@ pub(super) const FIXED: &[(&str, &str)] = &[
     ("escape", "Copy mode · exit"),
     ("q", "Copy mode · exit"),
     ("enter", "Diff branch menu · switch to typed branch"),
-    ("up", "Custom Buttons · previous button"),
-    ("down", "Custom Buttons · next button"),
-    ("enter", "Custom Buttons · edit, create, or save button"),
-    ("delete", "Custom Buttons · delete selected button"),
-    ("backspace", "Custom Buttons · delete selected button"),
-    ("tab", "Custom Buttons editor · next field"),
     ("escape", "Settings · dismiss dropdown or close"),
     ("escape", "Shortcut recording and capture · cancel"),
     (

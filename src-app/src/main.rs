@@ -322,7 +322,6 @@ pub(crate) struct ClosedWorkspaceRecord {
     pub(crate) index: usize,
     pub(crate) active_tab: usize,
     pub(crate) tabs: Vec<ClosedWorkspaceTabRecord>,
-    pub(crate) custom_buttons: Vec<paneflow_config::schema::ButtonCommand>,
     pub(crate) sidebar_expanded: bool,
     pub(crate) pinned: bool,
     /// Lifecycle ownership held while the workspace is undoable. Destructive
@@ -1525,11 +1524,6 @@ struct PaneFlowApp {
     /// focus for it. Applied after render mounts the pane, like
     /// the guard is reached from a `Window`-less subscriber.
     pending_close_focus_claim: bool,
-    /// State of the "Custom Buttons" management modal opened from the
-    /// workspace context menu. `None` = closed.
-    custom_buttons_modal: Option<app::custom_buttons_modal::CustomButtonsModal>,
-    /// Focus handle routing key events to the custom-buttons modal while open.
-    custom_buttons_modal_focus: FocusHandle,
     /// US-006: shared "theme file changed" signal flipped by the theme
     /// watcher's debounce thread (event-driven invalidation). The 50 ms
     /// IPC poll loop in `process_config_changes` drains this flag and
@@ -2469,10 +2463,6 @@ impl Render for PaneFlowApp {
         // Issue #339: Pane Overview (same mode gate).
         if self.pane_overview.is_some() && in_cli_mode {
             app_content = app_content.child(self.render_pane_overview(window, cx));
-        }
-
-        if self.custom_buttons_modal.is_some() {
-            app_content = app_content.child(self.render_custom_buttons_modal(cx));
         }
 
         if self.show_about_dialog {

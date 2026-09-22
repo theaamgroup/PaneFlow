@@ -1862,10 +1862,9 @@ impl Pane {
     /// Trailing action-button cluster of the pane header (US-051: code-motion
     /// out of the former tab bar). Zoom badge + the five header actions: the
     /// two splits, the files tree, the agent-sessions sidebar and the diff
-    /// dock. Deliberately fixed - the agent launchers and the per-workspace
-    /// custom buttons moved out of the header (they stay reachable from the
-    /// pane palette), so the cluster needs neither a fold toggle nor a
-    /// computed width.
+    /// dock. Deliberately fixed - the agent launchers live in the pane
+    /// palette, not this header, so the cluster needs neither a fold toggle
+    /// nor a computed width.
     /// Self-contained - recomputes the palette it needs.
     fn render_end_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = pane_colors();

@@ -1899,7 +1899,7 @@ impl PaneFlowApp {
         // covers the agent badge.
         //
         // The `+` opens the « New pane » preset palette, which covers the
-        // shell, the agents, and the workspace's custom commands.
+        // shell and the visible agents.
         //
         // The `x` closes the whole folder. Issue #111 routes it through the
         // workspace-wide guard because dropping the `Workspace` also drops

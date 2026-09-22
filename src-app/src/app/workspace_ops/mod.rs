@@ -688,7 +688,6 @@ fn capture_closed_workspace_record(
                 worktree: tab.worktree.clone(),
             })
             .collect(),
-        custom_buttons: workspace.custom_buttons.clone(),
         sidebar_expanded: workspace.sidebar_expanded,
         pinned: workspace.pinned,
         managed_worktrees: workspace.managed_worktrees.clone(),
@@ -1716,7 +1715,7 @@ impl PaneFlowApp {
     /// EP-005: the preset palette owns the focus while it is open, so it cannot
     /// resolve a target from the focus chain and must surface a refusal (the
     /// `MAX_PANES` cap in particular) inside the palette rather than behind it.
-    /// `profile` and `command` let it drop an agent or a custom command
+    /// `profile` and `command` let it drop a shell or an agent
     /// straight into the new pane.
     pub(crate) fn split_with_target(
         &mut self,
@@ -2168,7 +2167,6 @@ impl PaneFlowApp {
             index,
             active_tab,
             tabs,
-            custom_buttons,
             sidebar_expanded,
             pinned,
             managed_worktrees,
@@ -2207,7 +2205,6 @@ impl PaneFlowApp {
             .collect();
         let mut workspace =
             Workspace::restored_with_id(workspace_id, title, fallback_cwd, tabs, active_tab);
-        workspace.custom_buttons = custom_buttons;
         workspace.sidebar_expanded = sidebar_expanded;
         workspace.pinned = pinned;
         workspace.managed_worktrees = managed_worktrees;
@@ -3599,7 +3596,6 @@ mod tests {
             index: 0,
             active_tab: 0,
             tabs: Vec::new(),
-            custom_buttons: Vec::new(),
             sidebar_expanded: true,
             pinned: false,
             managed_worktrees,

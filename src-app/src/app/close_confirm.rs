@@ -782,10 +782,10 @@ impl PaneFlowApp {
         }
     }
 
-    /// Centred confirm card over a dimmed backdrop. Styling follows
-    /// `custom_buttons_modal.rs` (`deferred()` backdrop + centered card +
-    /// focus-handled key input); every colour comes from `UiColors`, and the
-    /// danger accent is `ui.vc_deleted` - there is no `ui.danger`.
+    /// Centred confirm card over a dimmed backdrop. Styling follows the
+    /// broadcast picker (`app/broadcast.rs`: `deferred()` backdrop + centered
+    /// card + focus-handled key input); every colour comes from `UiColors`,
+    /// and the danger accent is `ui.vc_deleted` - there is no `ui.danger`.
     pub(crate) fn render_close_confirm_dialog(
         &self,
         pending: &PendingClose,
