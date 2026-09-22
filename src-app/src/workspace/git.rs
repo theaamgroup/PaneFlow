@@ -217,7 +217,7 @@ fn untracked_insertions(cwd: &str, rel_path: &str) -> usize {
         Ok(meta) if meta.file_type().is_symlink() => std::fs::read_link(&path)
             .map(|target| text_line_count(&target.to_string_lossy()))
             .unwrap_or(0),
-        Ok(_) => {
+        Ok(meta) if meta.file_type().is_file() => {
             let file = match std::fs::File::open(&path) {
                 Ok(file) => file,
                 Err(_) => return 0,
@@ -236,6 +236,9 @@ fn untracked_insertions(cwd: &str, rel_path: &str) -> usize {
                 .map(|text| text_line_count(&text))
                 .unwrap_or(0)
         }
+        // FIFOs, sockets, and devices block in `File::open` with no writer
+        // (issue #692). They contribute no lines.
+        Ok(_) => 0,
         Err(_) => 0,
     }
 }
@@ -1326,11 +1329,10 @@ mod tests {
         );
     }
 
+    /// Issue #692: a reader-less FIFO must count as zero lines and must not
+    /// pin the stats helper. Later files in the same sweep still count.
     #[test]
-    fn untracked_insertions_within_stops_at_deadline_on_stalled_file() {
-        // #269: git never lists a FIFO, but a regular file on a stalled volume
-        // blocks `File::open` the same way. Opening a reader-less FIFO is the
-        // portable stand-in: it blocks until a writer appears.
+    fn untracked_insertions_skip_a_fifo_without_blocking() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("first.txt"), "alpha\nbeta\n").unwrap();
         std::fs::write(dir.path().join("last.txt"), "gamma\n").unwrap();
@@ -1339,7 +1341,6 @@ mod tests {
         // SAFETY: `c_path` is a valid NUL-terminated path that lives for the call.
         assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
 
-        let budget = std::time::Duration::from_secs(1);
         let started = std::time::Instant::now();
         let insertions = untracked_insertions_within(
             dir.path().to_str().unwrap(),
@@ -1348,21 +1349,14 @@ mod tests {
                 "stalled".to_string(),
                 "last.txt".to_string(),
             ],
-            started + budget,
+            started + std::time::Duration::from_secs(5),
         );
-        let elapsed = started.elapsed();
-        // Release the abandoned helper: pairing a writer completes its open,
-        // it reads EOF, and its send fails because the receiver is gone.
-        let _writer = std::fs::OpenOptions::new().write(true).open(&fifo);
-
         assert!(
-            elapsed < budget + std::time::Duration::from_secs(3),
-            "stalled untracked read overran the budget: {elapsed:?}"
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "fifo line count blocked the sweep: {:?}",
+            started.elapsed()
         );
-        assert_eq!(
-            insertions, 2,
-            "files read before the stall must still be counted"
-        );
+        assert_eq!(insertions, 3, "both regular files must be counted");
     }
 
     #[test]
