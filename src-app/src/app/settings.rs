@@ -60,8 +60,8 @@ pub(crate) fn is_font_block_key(nested: bool, key: &str) -> bool {
 }
 
 impl PaneFlowApp {
-    /// Open the embedded settings (Codex-style). The Settings button and the
-    /// title-bar / macOS menu route here; it sets `settings_section`, and
+    /// Open the embedded settings (Codex-style). The macOS menu bar
+    /// (PaneFlow ▸ Settings…) routes here; it sets `settings_section`, and
     /// `main.rs` then swaps the left rail for the settings nav and the content
     /// area for the section panel. The name is kept for call-site compatibility
     /// there is no separate settings *window* anymore.
@@ -81,7 +81,6 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) {
         self.workspace_menu_open = None;
-        self.profile_menu_open = None;
         self.settings_section = Some(section);
         self.reset_settings_scroll();
         self.terminal_dropdown = None;
@@ -153,7 +152,6 @@ impl PaneFlowApp {
 
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_section = None;
-        self.profile_menu_open = None;
         // Shortcuts-page ephemeral state. The armed "Reset" confirmation is the
         // one that matters: left standing across a close, it would turn a
         // stray click on reopen into "every binding erased, no undo".

@@ -194,7 +194,8 @@ Everything below points at upstream and must be cut or repointed.
    `HOMEBREW_TAP_DEPLOY_KEY`, `GPG_*`, `POSTHOG_API_KEY`, `AZURE_*`.
 5. Author identity to scrub: `src-app/src/app/about_dialog.rs:117` reads
    "(c) Arthur Jean"; `src-app/Cargo.toml:490` maintainer email; five
-   `paneflow.dev` menu links at `src-app/src/app/profile_menu.rs:23` to `:27`.
+   `paneflow.dev` menu links that lived on the title-bar profile menu; that menu
+   is deleted (issue #604).
    `.github/SECURITY.md`, `.github/CONTRIBUTING.md`, and
    `.github/CODE_OF_CONDUCT.md` carried upstream URLs; all three are deleted.
    The repository becoming public for Sparkle does not restore upstream's

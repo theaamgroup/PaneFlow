@@ -3,7 +3,7 @@
 //! command buttons that appear in the workspace's New pane palette, next
 //! to the built-in defaults (Claude / Codex).
 //!
-//! Modal overlay pattern follows the theme picker (`app/theme_picker.rs`):
+//! Modal overlay pattern follows the broadcast picker (`app/broadcast.rs`):
 //! `deferred()` backdrop + centered card + focus-handled key input.
 //!
 //! Form text inputs are full cursor-aware `widgets::text_input::TextInput`

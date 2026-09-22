@@ -27,6 +27,11 @@ reference tables. Read [DESIGN.md](DESIGN.md) before UI changes and update it in
 The registry currently declares **82 GPUI action types**, **82 actions total**.
 Update both counts when changing `app/actions.rs`; its drift test reads this file.
 
+Settings and About are reached only from the macOS menu bar (**PaneFlow ▸
+Settings…** and **About PaneFlow**). The title bar has no avatar and no
+profile menu. Themes are chosen in Settings → Appearance; there is no modal
+theme picker.
+
 ## Verify before claiming
 
 Run all six, before and after any pass, and quote the actual output:

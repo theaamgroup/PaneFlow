@@ -362,14 +362,19 @@ mod tests {
             );
         }
 
+        for removed in ["profile-menu", "\"Guest\""] {
+            assert!(
+                !title_bar.contains(removed),
+                "title bar still contains the removed avatar menu `{removed}`"
+            );
+        }
+
         let event_handlers = include_str!("../app/event_handlers.rs");
-        let profile_menu = include_str!("../app/profile_menu.rs");
         let bootstrap = include_str!("../app/bootstrap.rs");
         let workspace_ops = include_str!("../app/workspace_ops/mod.rs");
         let main = include_str!("../main.rs");
         for (path, source) in [
             ("event_handlers.rs", event_handlers),
-            ("profile_menu.rs", profile_menu),
             ("bootstrap.rs", bootstrap),
             ("workspace_ops/mod.rs", workspace_ops),
             ("main.rs", main),
@@ -398,5 +403,9 @@ mod tests {
                 "removing custom popovers must preserve native macOS item `{native_item}`"
             );
         }
+        assert!(
+            !main.contains("profile-menu"),
+            "the title-bar avatar menu must not be mounted from main.rs"
+        );
     }
 }

@@ -779,7 +779,6 @@ impl PaneFlowApp {
             pane_menu_open: None,
             pending_pane_focus: None,
             recent_probes: crate::app::workspace_ops::RecentProbes::default(),
-            profile_menu_open: None,
             agent_sessions: crate::AgentSessionsState {
                 sessions_sidebar_open: false,
                 sessions_sidebar_animation: None,
@@ -810,12 +809,6 @@ impl PaneFlowApp {
             about_dialog_focus: cx.focus_handle(),
             system_info_dialog: None,
             system_info_dialog_focus: cx.focus_handle(),
-            show_theme_picker: false,
-            theme_picker_query: String::new(),
-            theme_picker_selected_idx: 0,
-            theme_picker_focus: cx.focus_handle(),
-            theme_picker_scroll: gpui::ScrollHandle::new(),
-            theme_picker_drag: None,
             // Issue #524: Clone repository modal closed.
             // Issue #523: command palette closed.
             command_palette_open: false,

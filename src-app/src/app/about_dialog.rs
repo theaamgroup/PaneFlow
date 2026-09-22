@@ -525,7 +525,6 @@ mod tests {
         for (name, file) in [
             ("main.rs", include_str!("../main.rs")),
             ("bootstrap.rs", include_str!("bootstrap.rs")),
-            ("profile_menu.rs", include_str!("profile_menu.rs")),
         ] {
             let production = file.split("#[cfg(test)]").next().expect("production half");
             assert!(
