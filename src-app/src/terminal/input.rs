@@ -1048,7 +1048,9 @@ impl TerminalView {
         if !self.focus_handle(cx).is_focused(window) {
             return;
         }
-        if let Some(text) = self.terminal.session_backend().selection_text() {
+        // `Err` is an engine refusal (the selection is over the copy cap), not
+        // an empty selection. Leave the highlight alone; this path never clears.
+        if let Ok(Some(text)) = self.terminal.session_backend().selection_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
