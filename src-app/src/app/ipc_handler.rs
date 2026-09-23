@@ -1228,6 +1228,24 @@ pub(crate) fn take_watcher_config_for_apply(
     None
 }
 
+/// Replace the Settings shortcut list from a reloaded user map and disarm
+/// recording.
+///
+/// `recording_shortcut_idx` is a position into `effective_shortcuts`. Unbinding
+/// a default skips that row and a user-only chord is appended, so the same
+/// index can name a different action after a watcher reload (issue #729).
+/// Clearing it here, before the caller rebuilds shortcut rows, keeps a shifted
+/// index from staying highlighted or saving the next chord onto the wrong
+/// action. The index is not re-resolved by action name.
+pub(crate) fn replace_shortcuts_disarming_recording(
+    effective_shortcuts: &mut Vec<keybindings::ShortcutEntry>,
+    recording_shortcut_idx: &mut Option<usize>,
+    user_shortcuts: &HashMap<String, String>,
+) {
+    *effective_shortcuts = keybindings::settings_shortcuts(user_shortcuts);
+    *recording_shortcut_idx = None;
+}
+
 impl PaneFlowApp {
     /// One automation poll tick for IPC and config reloads.
     /// Keeping this order in one method prevents the bootstrap closure from
@@ -1285,7 +1303,11 @@ impl PaneFlowApp {
                 config.theme.as_deref(),
             );
             keybindings::apply_keybindings(cx, &config.shortcuts);
-            self.effective_shortcuts = keybindings::settings_shortcuts(&config.shortcuts);
+            replace_shortcuts_disarming_recording(
+                &mut self.effective_shortcuts,
+                &mut self.recording_shortcut_idx,
+                &config.shortcuts,
+            );
             if self.settings_section == Some(crate::SettingsSection::Shortcuts) {
                 // The Shortcuts page is virtualized off a cached row list that
                 // indexes `effective_shortcuts`, so a hand edit to `shortcuts`
@@ -5374,6 +5396,52 @@ mod tests {
         assert!(super::should_apply_watcher_config(0, 4, 4));
         assert!(super::should_apply_watcher_config(0, 5, 4));
         assert!(super::should_apply_watcher_config(0, 0, 0));
+    }
+
+    #[test]
+    fn config_reload_disarms_shortcut_recording() {
+        use std::collections::HashMap;
+
+        let before_map = HashMap::new();
+        let mut after_map = HashMap::new();
+        // Unbind the first default (`split_horizontally` on secondary-shift-d).
+        // The row leaves index 0 and returns later as Unassigned, so the armed
+        // index names the next action. Same shift as
+        // `effective_shortcuts_action_name_survives_unbind_shift`, through the
+        // settings list `process_config_changes` actually installs.
+        after_map.insert("secondary-shift-d".to_string(), "none".to_string());
+
+        let before = crate::keybindings::settings_shortcuts(&before_map);
+        let after = crate::keybindings::settings_shortcuts(&after_map);
+        let armed = 0;
+        assert!(
+            armed < before.len() && armed < after.len(),
+            "armed index must exist in both settings lists"
+        );
+        let before_action = before[armed].action_name;
+        let after_action = after[armed].action_name;
+        assert_ne!(
+            before_action, after_action,
+            "unbinding the first default must put a different action at the armed index \
+             (before={before_action}, after={after_action})"
+        );
+        println!("armed index {armed}: before={before_action} after={after_action}");
+
+        let mut effective_shortcuts = before;
+        let mut recording_shortcut_idx = Some(armed);
+        super::replace_shortcuts_disarming_recording(
+            &mut effective_shortcuts,
+            &mut recording_shortcut_idx,
+            &after_map,
+        );
+        assert!(
+            recording_shortcut_idx.is_none(),
+            "a config reload must disarm shortcut recording before rows rebuild"
+        );
+        assert_eq!(
+            effective_shortcuts[armed].action_name, after_action,
+            "the reload must install the shifted settings list, not keep the armed row"
+        );
     }
 
     fn watcher_config_with_shell(shell: &str) -> PaneFlowConfig {
