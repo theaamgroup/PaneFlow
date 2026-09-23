@@ -25,24 +25,36 @@ pub(crate) struct MouseEncoderSize {
 }
 
 /// The terminal modes a mouse encoder derives its behavior from.
+///
+/// `ghostty_mouse_encoder_setopt_from_terminal` copies tracking (modes 9,
+/// 1000, 1002, 1003) and format (1005, 1006, 1015, 1016). Mode 9 is not
+/// mode 1000, and 1015/1016 are not 1006: each is its own field so a change
+/// reconfigures the encoder instead of keeping the previous format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct MouseModes {
+    x10: bool,
     report_click: bool,
     drag: bool,
     motion: bool,
     sgr: bool,
     utf8: bool,
+    urxvt: bool,
+    sgr_pixels: bool,
 }
 
-impl From<Modes> for MouseModes {
-    fn from(modes: Modes) -> Self {
-        Self {
-            report_click: modes.mouse_report_click,
-            drag: modes.mouse_drag,
-            motion: modes.mouse_motion,
-            sgr: modes.sgr_mouse,
-            utf8: modes.utf8_mouse,
-        }
+impl MouseModes {
+    /// Read the modes the encoder copies out of `terminal`.
+    pub(crate) fn from_terminal(terminal: &DisplayTerminal) -> Result<Self> {
+        Ok(Self {
+            x10: terminal.mode(9)?,
+            report_click: terminal.mode(1000)?,
+            drag: terminal.mode(1002)?,
+            motion: terminal.mode(1003)?,
+            utf8: terminal.mode(1005)?,
+            sgr: terminal.mode(1006)?,
+            urxvt: terminal.mode(1015)?,
+            sgr_pixels: terminal.mode(1016)?,
+        })
     }
 }
 
