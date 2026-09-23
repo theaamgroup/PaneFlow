@@ -229,7 +229,10 @@ fn engine_mouse_geometry(
     fn axis(position: f32, measured: f32, cells: usize) -> (f32, u32) {
         let rounded = terminal_metric_to_u16(measured).max(1);
         let scaled = if measured.is_finite() && measured > 0.0 {
-            position.max(0.0) * f32::from(rounded) / measured
+            // Divide first. `position * rounded / measured` can stop just
+            // short of the next rounded cell (172 * 9 / 8.6 is 179.99998),
+            // and the engine then reports the previous column.
+            (position.max(0.0) / measured) * f32::from(rounded)
         } else {
             0.0
         };
@@ -1518,6 +1521,52 @@ mod tests {
                 "cell ({column}, {row})"
             );
         }
+    }
+
+    /// An integer-pixel click on a cell boundary must report that cell.
+    /// 8.6px rounds to 9. At x=172 the measured grid is column 20, but
+    /// multiplying by 9 before dividing by 8.6 stops at 179.99998 and the
+    /// engine reports column 19.
+    #[test]
+    fn a_click_on_an_integer_pixel_cell_boundary_reports_that_column() {
+        use super::engine_mouse_geometry;
+        use paneflow_terminal_ghostty as ghostty;
+
+        let (columns, rows, cell_width, line_height) = (40usize, 10usize, 8.6f32, 16.0f32);
+        let (column, row) = (20usize, 4usize);
+        let position = (172.0f32, (row as f32 + 0.5) * line_height);
+        assert_eq!((position.0 / cell_width) as usize, column);
+
+        let size = ghostty::WindowSize::new(columns, rows, 9, 16).expect("valid size");
+        let mut terminal =
+            ghostty::DisplayTerminal::new(size, 100, ghostty::TerminalAppearance::default())
+                .expect("terminal must initialize");
+        terminal
+            .feed(b"\x1b[?1000h\x1b[?1006h")
+            .expect("sgr mouse on");
+
+        let geometry = engine_mouse_geometry(position, cell_width, line_height, columns, rows);
+        assert_eq!(geometry.screen_width, 360);
+        let bytes = terminal
+            .encode_mouse(ghostty::MouseInput {
+                action: ghostty::MouseAction::Press,
+                button: Some(ghostty::MouseButton::Left),
+                modifiers: ghostty::Modifiers::empty(),
+                x: geometry.x,
+                y: geometry.y,
+                screen_width: geometry.screen_width,
+                screen_height: geometry.screen_height,
+                padding_top: 0,
+                padding_bottom: 0,
+                padding_left: 0,
+                padding_right: 0,
+                any_button_pressed: true,
+            })
+            .expect("encode");
+        assert_eq!(
+            String::from_utf8(bytes).expect("ascii"),
+            format!("\x1b[<0;{};{}M", column + 1, row + 1),
+        );
     }
 
     #[test]
