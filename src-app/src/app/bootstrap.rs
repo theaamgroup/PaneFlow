@@ -362,12 +362,19 @@ impl PaneFlowApp {
                             continue;
                         }
 
-                        // Run git probes off main thread
+                        // Run git probes off main thread. Issue #709: the
+                        // whole burst draws on ONE deadline, so N checkouts
+                        // cannot stack N per-checkout timeouts here.
                         let results = smol::unblock(move || {
+                            let sweep_until = std::time::Instant::now()
+                                + crate::workspace::GIT_STATS_SWEEP_DEADLINE;
                             cwds.into_iter()
                                 .map(|cwd| {
                                     let (branch, is_repo) = crate::workspace::detect_branch(&cwd);
-                                    let stats = crate::workspace::GitDiffStats::from_cwd(&cwd);
+                                    let stats = crate::workspace::GitDiffStats::from_cwd_within(
+                                        &cwd,
+                                        sweep_until,
+                                    );
                                     (cwd, branch, is_repo, stats)
                                 })
                                 .collect::<Vec<_>>()
@@ -1797,6 +1804,44 @@ mod tests {
         assert!(
             !defaults.contains("report_issue") && !defaults.contains("ReportIssue"),
             "ReportIssue must have no default chord"
+        );
+    }
+
+    /// Issue #709. Source probe: the deadline is an `Instant` captured inside
+    /// an async watcher task; a live git hang is not what this test is for.
+    /// The region is the event-path closure only. The 30s fallback sweep
+    /// already shares one deadline and must not satisfy this by itself.
+    #[test]
+    fn git_event_probe_draws_on_one_sweep_deadline() {
+        let production = include_str!("bootstrap.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the module");
+        // 24-space indent is the HEAD/index watcher. The fallback sweep's
+        // closure sits four spaces shallower and does not match these markers.
+        let start = "                        let results = smol::unblock(move || {";
+        let end = "                        })\n                        .await;";
+        assert!(
+            production.contains(start),
+            "missing event-path start marker {start:?}"
+        );
+        let start_at = production.find(start).expect("event-path start marker");
+        assert!(
+            production[start_at + start.len()..].contains(end),
+            "missing event-path end marker after the start {end:?}"
+        );
+        let event = source_slice(production, start, end);
+        assert!(
+            event.contains("GIT_STATS_SWEEP_DEADLINE"),
+            "the event path must share one GIT_STATS_SWEEP_DEADLINE: {event}"
+        );
+        assert!(
+            event.contains("from_cwd_within"),
+            "the event path must call from_cwd_within: {event}"
+        );
+        assert!(
+            !event.contains("from_cwd("),
+            "the event path must not call from_cwd per cwd: {event}"
         );
     }
 

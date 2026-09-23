@@ -4117,17 +4117,27 @@ mod tests {
         );
     }
 
+    /// Text of one production `match` arm, from `method` up to but not
+    /// including the next arm `next`. The bound is checked before slicing:
+    /// a missing delimiter fails the test instead of returning the rest of
+    /// the file, which would include these tests' own needle literals
+    /// (issue #725).
+    fn production_match_arm<'a>(src: &'a str, method: &str, next: &str) -> &'a str {
+        let rest = src.split(method).nth(1).expect("production match arm");
+        assert!(
+            rest.contains(next),
+            "{method} must be bounded by the next production arm {next}"
+        );
+        rest.split_once(next).expect("bounded production arm").0
+    }
+
     /// Issue #362: `surface.search` must not answer a wedged runtime with
     /// `matches=[] truncated=true`, which reads as "pattern absent" or
     /// "raise max_matches". It maps the failure the way `surface.read` does.
     #[test]
     fn surface_search_maps_a_runtime_failure_to_an_error() {
         let src = include_str!("ipc_handler.rs");
-        let arm = src
-            .split("\"surface.search\"")
-            .nth(1)
-            .and_then(|rest| rest.split("\"surface.rename\"").next())
-            .expect("surface.search arm");
+        let arm = production_match_arm(src, "\"surface.search\"", "\"surface.send_text\"");
         assert!(
             arm.contains("Err(reason) =>") && arm.contains("internal_error"),
             "an unanswered or failed scan is a JSON-RPC error, not an empty capped result"
@@ -4145,13 +4155,9 @@ mod tests {
         let src = include_str!("ipc_handler.rs");
         for (method, next) in [
             ("\"surface.read\"", "\"surface.status\""),
-            ("\"surface.search\"", "\"surface.rename\""),
+            ("\"surface.search\"", "\"surface.send_text\""),
         ] {
-            let arm = src
-                .split(method)
-                .nth(1)
-                .and_then(|rest| rest.split(next).next())
-                .expect("surface arm");
+            let arm = production_match_arm(src, method, next);
             assert!(
                 arm.contains("smol::unblock("),
                 "{method} must run the blocking runtime wait off the GPUI thread"
