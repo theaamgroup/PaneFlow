@@ -86,21 +86,60 @@ echo "    xcrun notarytool info $SUBMISSION_ID --apple-id <APPLE_ID> --team-id $
 # meaningfully expensive (Apple does not document a per-account rate
 # limit on notarytool, but ~10 polls in the typical 5 min case and ~180
 # polls at the 90 min ceiling are well below any plausible threshold).
+#
+# `set -e` aborts on a failing command substitution, so a non-zero
+# `notarytool info` (network blip, transient 5xx) never reaches the case
+# arm below. An unparseable body fails the same way inside python.
+# Neither is terminal: log it, sleep POLL_INTERVAL, and poll again until
+# a real status or MAX_WAIT_SECONDS.
 POLL_INTERVAL=30
 MAX_WAIT_SECONDS=$((90 * 60))
 START_TIME=$(date +%s)
 
-while true; do
-    INFO_JSON="$(xcrun notarytool info "$SUBMISSION_ID" \
-        --apple-id "$APPLE_ID" \
-        --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-        --team-id "$APPLE_TEAM_ID" \
-        --output-format json)"
-    STATUS="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("status", "Unknown"))' <<< "$INFO_JSON")"
-
+note_poll_elapsed() {
     NOW=$(date +%s)
     ELAPSED=$((NOW - START_TIME))
     ELAPSED_FMT="$(printf '%02d:%02d' $((ELAPSED / 60)) $((ELAPSED % 60)))"
+}
+
+fail_notarization_timeout() {
+    echo "::error title=Notarization timeout::Submission $SUBMISSION_ID still pending after $((MAX_WAIT_SECONDS / 60)) minutes."
+    echo "::error::Apple's notary backend is in deep queue. Recover later with:"
+    echo "::error::  xcrun notarytool info $SUBMISSION_ID --apple-id <APPLE_ID> --team-id $APPLE_TEAM_ID --password <APP_SPECIFIC_PASSWORD>"
+    echo "::error::If the submission later reaches Accepted, staple manually with:"
+    echo "::error::  xcrun stapler staple $APP"
+    exit 1
+}
+
+# Log a poll retry and sleep, unless the wait budget is already spent.
+# Callers must not busy-spin: the only wait is POLL_INTERVAL.
+retry_poll() {
+    local reason="$1"
+    note_poll_elapsed
+    if [ "$ELAPSED" -ge "$MAX_WAIT_SECONDS" ]; then
+        echo "[+${ELAPSED_FMT}] ${reason}"
+        fail_notarization_timeout
+    fi
+    echo "[+${ELAPSED_FMT}] ${reason} - retrying"
+    sleep "$POLL_INTERVAL"
+}
+
+while true; do
+    if ! INFO_JSON="$(xcrun notarytool info "$SUBMISSION_ID" \
+        --apple-id "$APPLE_ID" \
+        --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+        --team-id "$APPLE_TEAM_ID" \
+        --output-format json)"; then
+        retry_poll "notarytool info failed"
+        continue
+    fi
+
+    if ! STATUS="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("status", "Unknown"))' <<< "$INFO_JSON")"; then
+        retry_poll "notarytool info status could not be parsed"
+        continue
+    fi
+
+    note_poll_elapsed
 
     case "$STATUS" in
         Accepted)
@@ -125,20 +164,15 @@ while true; do
             echo "[+${ELAPSED_FMT}] In Progress... (next poll in ${POLL_INTERVAL}s)"
             ;;
         *)
-            # Any unexpected status (network blip mid-poll, unknown
-            # transient Apple state) - keep polling until terminal or
-            # timeout, but flag the anomaly in the log.
+            # Parsed, but not a status we know. Keep polling until a
+            # terminal state or the timeout. Transport failures never
+            # reach here: notarytool exited 0 and the body parsed.
             echo "[+${ELAPSED_FMT}] Unexpected status: $STATUS - continuing to poll"
             ;;
     esac
 
     if [ "$ELAPSED" -ge "$MAX_WAIT_SECONDS" ]; then
-        echo "::error title=Notarization timeout::Submission $SUBMISSION_ID still pending after $((MAX_WAIT_SECONDS / 60)) minutes."
-        echo "::error::Apple's notary backend is in deep queue. Recover later with:"
-        echo "::error::  xcrun notarytool info $SUBMISSION_ID --apple-id <APPLE_ID> --team-id $APPLE_TEAM_ID --password <APP_SPECIFIC_PASSWORD>"
-        echo "::error::If the submission later reaches Accepted, staple manually with:"
-        echo "::error::  xcrun stapler staple $APP"
-        exit 1
+        fail_notarization_timeout
     fi
 
     sleep "$POLL_INTERVAL"
