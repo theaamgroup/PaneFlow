@@ -499,7 +499,7 @@ mod discriminant_tests {
     #[test]
     fn clamp_reported_grapheme_keeps_the_base_and_drops_the_tail() {
         let mut codepoints = vec![u32::from('a')];
-        codepoints.extend(std::iter::repeat(0x0301).take(2000));
+        codepoints.extend(std::iter::repeat_n(0x0301, 2000));
         let (character, zerowidth) = clamp_reported_grapheme(&codepoints);
         assert_eq!(character, 'a');
         let extra = zerowidth.expect("combiners");
