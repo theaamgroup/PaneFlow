@@ -20,7 +20,7 @@
 use crate::agent_sessions::AssistantUsage;
 
 /// Version stamp surfaced in the cost tooltip so a stale estimate is auditable.
-pub const PRICING_TABLE_VERSION: &str = "2026-06-17";
+pub const PRICING_TABLE_VERSION: &str = "2026-09-22";
 
 /// Dollars per million tokens for one model family. `cache_read` is the
 /// (cheaper) rate for cached-input tokens; `cache_write` is the (pricier) rate
@@ -38,6 +38,64 @@ pub struct ModelPricing {
 /// figures as of [`PRICING_TABLE_VERSION`]; all estimates.
 pub const PRICING_TABLE: &[(&str, ModelPricing)] = &[
     // ── Anthropic (Claude Code) ──────────────────────────────────────────
+    // Current Opus rates. More specific keys first: "claude-opus-5-5"
+    // contains "opus-5", and "opus-4-1" is a substring of "opus-4-10".
+    // Opus 5.5 is $4/$20 (cache read is 0.05x, not the usual 0.1x).
+    (
+        "opus-5-5",
+        ModelPricing {
+            input: 4.0,
+            output: 20.0,
+            cache_read: 0.20,
+            cache_write: 5.0,
+        },
+    ),
+    // Opus 5 and Opus 4.5-4.8 ($5/$25). Must precede generic "opus" (4 / 4.1).
+    (
+        "opus-5",
+        ModelPricing {
+            input: 5.0,
+            output: 25.0,
+            cache_read: 0.50,
+            cache_write: 6.25,
+        },
+    ),
+    (
+        "opus-4-5",
+        ModelPricing {
+            input: 5.0,
+            output: 25.0,
+            cache_read: 0.50,
+            cache_write: 6.25,
+        },
+    ),
+    (
+        "opus-4-6",
+        ModelPricing {
+            input: 5.0,
+            output: 25.0,
+            cache_read: 0.50,
+            cache_write: 6.25,
+        },
+    ),
+    (
+        "opus-4-7",
+        ModelPricing {
+            input: 5.0,
+            output: 25.0,
+            cache_read: 0.50,
+            cache_write: 6.25,
+        },
+    ),
+    (
+        "opus-4-8",
+        ModelPricing {
+            input: 5.0,
+            output: 25.0,
+            cache_read: 0.50,
+            cache_write: 6.25,
+        },
+    ),
     (
         "opus",
         ModelPricing {
@@ -54,6 +112,16 @@ pub const PRICING_TABLE: &[(&str, ModelPricing)] = &[
             output: 15.0,
             cache_read: 0.30,
             cache_write: 3.75,
+        },
+    ),
+    // Haiku 4.x ($1/$5). Must precede generic "haiku" (3.5 at $0.80/$4).
+    (
+        "haiku-4",
+        ModelPricing {
+            input: 1.0,
+            output: 5.0,
+            cache_read: 0.10,
+            cache_write: 1.25,
         },
     ),
     (
@@ -128,14 +196,34 @@ mod tests {
 
     #[test]
     fn lookup_matches_specific_before_general() {
-        // A Claude Opus id must hit the opus row, not a broader key.
+        // Opus 4.8 hits the specific row, not the generic Opus 4 / 4.1 rate.
         let opus = lookup("claude-opus-4-8-20260101").expect("opus priced");
-        assert_eq!(opus.input, 15.0);
+        assert_eq!(opus.input, 5.0);
         let sonnet = lookup("claude-sonnet-4-6").expect("sonnet priced");
         assert_eq!(sonnet.input, 3.0);
         // gpt-5 hits the gpt-5 row (which precedes the general gpt fallback).
         let gpt5 = lookup("gpt-5").expect("gpt-5 priced");
         assert_eq!(gpt5.output, 10.0);
+    }
+
+    #[test]
+    fn current_opus_models_use_current_rates() {
+        assert_eq!(lookup("claude-opus-4-6").unwrap().input, 5.0);
+        let opus5 = lookup("claude-opus-5").unwrap();
+        assert_eq!(opus5.input, 5.0);
+        assert_eq!(opus5.output, 25.0);
+        // `claude-opus-5-5` contains "opus-5", so the 5.5 row must win.
+        let opus55 = lookup("claude-opus-5-5").unwrap();
+        assert_eq!(opus55.input, 4.0);
+        assert_eq!(opus55.output, 20.0);
+        assert_eq!(opus55.cache_read, 0.20);
+        // `claude-opus-4-1` contains none of the current keys, so it stays
+        // on the Opus 4 / 4.1 row. "opus-4-1" is not a key (substring of
+        // "opus-4-10").
+        assert_eq!(lookup("claude-opus-4-1").unwrap().input, 15.0);
+        assert_eq!(lookup("claude-haiku-4-5").unwrap().input, 1.0);
+        // Haiku 3.5 ids do not contain "haiku-4".
+        assert_eq!(lookup("claude-3-5-haiku-20241022").unwrap().input, 0.80);
     }
 
     #[test]
