@@ -425,6 +425,10 @@ jobs:
       - name: create-dmg retry/verify tests
         run: bash scripts/create-dmg.test.sh
 
+      # GPU-free; stubbed notarytool/stapler, no Apple network (issue #715).
+      - name: notarize poll retry tests
+        run: bash scripts/notarize-macos.test.sh
+
       # Fail fast if the runner image drifts away from the pinned Xcode
       # or the Metal compiler. GPUI compiles .metal shaders at build
       # time; `xcrun metal --version` is the proof (path lookup succeeds
