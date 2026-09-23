@@ -283,6 +283,10 @@ pub struct TerminalView {
     pub(super) cursor_visible: bool,
     /// Track mouse button state for drag selection
     pub(super) selecting: bool,
+    /// Bumped on each selection press. A mouse-up read finishes later, and a
+    /// completion may clear or open a link only while this value still matches
+    /// the press that started it (issue #704).
+    pub(super) selection_press_generation: u64,
     /// Last known cell dimensions (from element::resolve_frame_metrics)
     pub(super) cell_width: gpui::Pixels,
     pub(super) line_height: gpui::Pixels,
@@ -985,6 +989,7 @@ impl TerminalView {
             focus_handle,
             cursor_visible: true,
             selecting: false,
+            selection_press_generation: 0,
             cell_width: gpui::px(8.0),
             line_height: gpui::px(16.0),
             element_origin: Arc::new(Mutex::new(gpui::Point::default())),
