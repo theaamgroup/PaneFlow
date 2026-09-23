@@ -1447,10 +1447,6 @@ impl PaneFlowApp {
         let mut recent_paths: Vec<std::path::PathBuf> = Vec::with_capacity(paths.len());
         let mut refused_at_cap = false;
         for path in paths {
-            if self.workspaces.len() >= MAX_WORKSPACES {
-                refused_at_cap = true;
-                break;
-            }
             // A drop carries whatever the file manager had selected, so the
             // directory check is what keeps a stray file out of the rail. The
             // picker is already restricted to directories and passes through.
@@ -1463,11 +1459,19 @@ impl PaneFlowApp {
             }
             let cwd = path.display().to_string();
             // Re-opening a folder that is already filed selects its row
-            // instead of stacking a second one on the same root.
+            // instead of stacking a second one on the same root. This is
+            // before the cap (#717): selecting creates nothing, so a full
+            // rail must still switch to that folder.
             if let Some(at) = self.workspaces.iter().position(|ws| ws.cwd == cwd) {
                 self.active_idx = at;
                 opened = true;
                 recent_paths.push(path.clone());
+                continue;
+            }
+            // Only a new workspace is refused here. Later paths in this batch
+            // may still be folders that are already open.
+            if self.workspaces.len() >= MAX_WORKSPACES {
+                refused_at_cap = true;
                 continue;
             }
             let n = self.workspaces.len() + 1;
@@ -5092,6 +5096,53 @@ mod tests {
             folders.matches("workspace_limit_reached()").count(),
             1,
             "the drop path must toast once, not once per refused path: {folders}"
+        );
+    }
+
+    /// Issue #717: at the workspace cap, opening a folder that is already
+    /// filed selects its row. The cap used to break before that branch, so
+    /// the gesture toasted and left the current workspace selected. The cap
+    /// stays, but only on the path that would push a new workspace.
+    #[test]
+    fn open_workspace_folders_reselects_existing_folder_at_cap() {
+        let src = include_str!("mod.rs");
+        let folders = source_slice(
+            src,
+            "pub(crate) fn open_workspace_folders(",
+            "pub(crate) fn open_recent_workspace(",
+        );
+        let reselect = folders
+            .find("position(|ws| ws.cwd == cwd)")
+            .expect("re-select branch");
+        let cap = folders
+            .find("workspaces.len() >= MAX_WORKSPACES")
+            .expect("cap check");
+        let push = folders
+            .find("self.workspaces.push(ws)")
+            .expect("new workspace push");
+        assert!(
+            reselect < cap,
+            "re-selecting an open folder must run before the cap check: {folders}"
+        );
+        assert!(
+            cap < push,
+            "the cap must refuse before a new workspace is pushed: {folders}"
+        );
+        let arm_end = folders[reselect..]
+            .find("continue;")
+            .expect("re-select arm continues")
+            + reselect;
+        assert!(
+            arm_end < cap,
+            "the re-select arm must leave the loop body before the cap check: {folders}"
+        );
+        assert!(
+            !folders[reselect..arm_end].contains("refused_at_cap"),
+            "re-selecting must not raise the cap toast: {folders}"
+        );
+        assert!(
+            folders[cap..push].contains("refused_at_cap = true"),
+            "a new folder at the cap must still be refused: {folders}"
         );
     }
 }
