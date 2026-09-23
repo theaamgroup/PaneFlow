@@ -1753,11 +1753,24 @@ impl PaneFlowApp {
             // its tab was bound to, and the tab follows it out the way it
             // followed it in (issue #347). Without this the tab stayed bound
             // and the next split landed in the checkout the pane had left.
-            // An unbound tab returns exactly as before: nothing to probe.
             if self.workspaces[ws_idx].tabs()[tab_idx].worktree.is_some() {
                 self.set_tab_worktree(ws_idx, tab_idx, None, cx);
             }
-            return;
+            // Issue #724: `cd` into a foreign repository points `git_dir` and
+            // its watch at that repo. Returning here left the foreign branch
+            // up until the 30s poll and left this workspace's own `.git`
+            // unwatched for the session. Fall through into the same probe
+            // when the tracked dir is not the root's. A match still returns:
+            // unwatch+rewatch of the same dir drops events. Both `None`
+            // match, compared as paths. `find_git_dir` already bounded the
+            // walk, so this does not canonicalize.
+            let root_git_dir = crate::workspace::find_git_dir(&self.workspaces[ws_idx].cwd);
+            if tracked_git_dir_is_root(
+                self.workspaces[ws_idx].git_dir.as_deref(),
+                root_git_dir.as_deref(),
+            ) {
+                return;
+            }
         }
 
         // US-019: capture the stable workspace id, NOT the positional index.
@@ -1862,41 +1875,37 @@ impl PaneFlowApp {
                             }
                             CwdBinding::Keep => {}
                         }
-                        // Unwatch old git dir
-                        let old_git_dir = app.workspaces[ws_idx].git_dir.clone();
-                        if let Some(ref dir) = old_git_dir {
-                            app.unwatch_git_dir(dir);
-                        }
-                        // Update workspace git tracking (cwd stays fixed at creation -
-                        // it represents the workspace's root folder and must not drift
-                        // when the user `cd`s inside the shell).
-                        let tracked_cwd = {
-                            let ws = &mut app.workspaces[ws_idx];
-                            ws.git_dir = git_dir.clone();
-                            ws.cwd.clone()
-                        };
-                        // Watch new git dir
-                        if let Some(ref dir) = git_dir {
-                            let count = app.git_watch_counts.entry(dir.clone()).or_insert(0);
-                            *count += 1;
-                            if *count == 1
-                                && let Some(ref mut watcher) = app.git_watcher
-                                && let Err(e) =
-                                    watcher.watch(dir, notify::RecursiveMode::NonRecursive)
-                            {
-                                log::warn!("git watcher: failed to watch {}: {e}", dir.display());
-                            }
-                        }
                         // Keyed by the workspace root, probed at the pane's
                         // cwd: the workspace fields follow the shell, the
                         // per-checkout cache does not take a foreign probe.
-                        let changed = app.apply_git_state_probed_at(
+                        // `git_dir` and the watch move with that probe (issue
+                        // #724), including a pane that came back to the root
+                        // while the workspace still tracked a foreign repo.
+                        // cwd stays fixed at creation: it is the workspace's
+                        // root folder and must not drift when the shell `cd`s.
+                        let (tracked_cwd, fields_changed) = retarget_workspace_git_dir(
+                            &mut app.workspaces[ws_idx],
+                            &mut app.git_watch_counts,
+                            app.git_watcher.as_mut(),
+                            git_dir,
+                            &branch,
+                            is_repo,
+                            &stats,
+                        );
+                        // Retarget already wrote this workspace. Apply still
+                        // runs so every other workspace on this cwd, and the
+                        // per-checkout cache, see the probe. `fields_changed`
+                        // keeps the repaint when this workspace was the only
+                        // one and the probe was taken somewhere else (the
+                        // cache ignores that).
+                        let mut changed = app.apply_git_state_probed_at(
                             &tracked_cwd,
                             &new_cwd,
                             branch,
                             is_repo,
                             stats,
                         );
+                        changed |= fields_changed;
                         let refreshed_diff =
                             changed && app.refresh_diff_dock_if_open_for_cwd(&tracked_cwd, cx);
                         log::debug!("workspace CWD changed to: {new_cwd}");
@@ -1992,9 +2001,91 @@ pub(crate) fn tab_binding_for_cwd(
     }
 }
 
+/// Whether `tracked` is already the git dir of the workspace root.
+///
+/// Both `None` (not a repository) match. Paths are compared as
+/// [`find_git_dir`](crate::workspace::find_git_dir) returned them: a second
+/// canonicalize would `stat` a stalled mount that walk already bounded.
+pub(crate) fn tracked_git_dir_is_root(
+    tracked: Option<&std::path::Path>,
+    root: Option<&std::path::Path>,
+) -> bool {
+    tracked == root
+}
+
+/// Drop one watch refcount on `git_dir`. The last user unwatches.
+///
+/// A missing entry is left alone. Same rules as `unwatch_git_dir`: shared
+/// so the cwd-change retarget cannot drift from it.
+pub(crate) fn release_git_watch(
+    watch_counts: &mut std::collections::HashMap<std::path::PathBuf, usize>,
+    watcher: Option<&mut notify::RecommendedWatcher>,
+    git_dir: &std::path::Path,
+) {
+    if let Some(count) = watch_counts.get_mut(git_dir) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            watch_counts.remove(git_dir);
+            if let Some(watcher) = watcher {
+                let _ = watcher.unwatch(git_dir);
+            }
+        }
+    }
+}
+
+/// Point `workspace` at `git_dir`, move its watch refcount with it, and
+/// write the probe onto that workspace.
+///
+/// The new directory is refcounted even when `watcher` is missing or
+/// `watch` fails. That is the cwd-change landing's rule. `watch_git_dir`
+/// records a count only after the first registration succeeds; do not
+/// unify the two increments. Returns the workspace cwd (the apply key)
+/// and whether this workspace's branch, repo-ness, or stats changed.
+pub(crate) fn retarget_workspace_git_dir(
+    workspace: &mut crate::workspace::Workspace,
+    watch_counts: &mut std::collections::HashMap<std::path::PathBuf, usize>,
+    mut watcher: Option<&mut notify::RecommendedWatcher>,
+    git_dir: Option<std::path::PathBuf>,
+    branch: &str,
+    is_repo: bool,
+    stats: &crate::workspace::GitDiffStats,
+) -> (String, bool) {
+    if let Some(old) = workspace.git_dir.take() {
+        release_git_watch(watch_counts, watcher.as_deref_mut(), &old);
+    }
+    workspace.git_dir = git_dir;
+    if let Some(dir) = workspace.git_dir.clone() {
+        let count = watch_counts.entry(dir.clone()).or_insert(0);
+        *count += 1;
+        // Increment stands even if `watch` fails: see the doc comment.
+        if *count == 1
+            && let Some(watcher) = watcher.as_deref_mut()
+            && let Err(e) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive)
+        {
+            log::warn!("git watcher: failed to watch {}: {e}", dir.display());
+        }
+    }
+    let mut changed = false;
+    if workspace.git_branch != branch {
+        workspace.git_branch = branch.to_string();
+        changed = true;
+    }
+    if workspace.is_git_repo != is_repo {
+        workspace.is_git_repo = is_repo;
+        changed = true;
+    }
+    if workspace.git_stats != *stats {
+        workspace.git_stats = stats.clone();
+        changed = true;
+    }
+    (workspace.cwd.clone(), changed)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CwdBinding, tab_binding_for_cwd};
+    use super::{
+        CwdBinding, retarget_workspace_git_dir, tab_binding_for_cwd, tracked_git_dir_is_root,
+    };
     use super::{
         announced_port_conflicts, child_identity_is_live, declaration_survives_scan,
         external_editor_open, keep_session_after_surface_focus, keep_session_after_surface_purge,
@@ -2189,6 +2280,190 @@ mod tests {
         assert!(
             !handler.contains("apply_git_state_for_cwd("),
             "the keyed-only apply would file a foreign probe under the root: {handler}"
+        );
+    }
+
+    #[test]
+    fn cwd_change_back_to_root_restores_workspace_git_dir() {
+        // Issue #724: a workspace rooted at repo A whose `git_dir` still
+        // points at repo B (the shell came home; the early return used to
+        // keep the foreign watch) is restored by `retarget_workspace_git_dir`,
+        // the landing both the foreign-`cd` path and the early-return miss
+        // call. No `PaneFlowApp`: constructing one boots the real session.
+        fn git(cwd: &std::path::Path, args: &[&str]) {
+            let mut cmd = crate::workspace::worktree::git_command();
+            cmd.arg("-C").arg(cwd).args(args);
+            let out = cmd.output().expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        fn init_committed_repo(path: &std::path::Path, branch: &str) {
+            std::fs::create_dir_all(path).expect("repo dir");
+            git(path, &["init", "-q", "-b", branch]);
+            git(
+                path,
+                &["config", "user.email", "paneflow-tests@example.invalid"],
+            );
+            git(path, &["config", "user.name", "PaneFlow Tests"]);
+            std::fs::write(path.join("README.md"), format!("{branch}\n")).expect("tracked file");
+            git(path, &["add", "README.md"]);
+            git(path, &["commit", "-q", "-m", "fixture"]);
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_a = tmp.path().join("repo-a");
+        let repo_b = tmp.path().join("repo-b");
+        init_committed_repo(&repo_a, "branch-a");
+        init_committed_repo(&repo_b, "branch-b");
+
+        let mut workspace = crate::workspace::Workspace::empty_with_cwd_and_id(1, "A", repo_a);
+        let root_git = workspace
+            .git_dir
+            .clone()
+            .expect("repo A resolves a git dir at construction");
+        let repo_b_cwd = repo_b.to_str().expect("utf8 temp path");
+        let foreign_git =
+            crate::workspace::find_git_dir(repo_b_cwd).expect("repo B resolves a git dir");
+        assert_ne!(
+            root_git, foreign_git,
+            "the two repos must not share a git dir"
+        );
+        let (foreign_branch, foreign_is_repo) = crate::workspace::detect_branch(repo_b_cwd);
+        assert!(foreign_is_repo);
+        assert_eq!(foreign_branch, "branch-b");
+
+        // The foreign `cd` has already landed: B is what the workspace
+        // tracks, and it is the sole watcher.
+        workspace.git_dir = Some(foreign_git.clone());
+        workspace.git_branch = foreign_branch;
+        workspace.is_git_repo = true;
+        workspace.git_stats = crate::workspace::GitDiffStats {
+            files_changed: 4,
+            insertions: 10,
+            deletions: 2,
+            insertions_truncated: false,
+        };
+        let mut counts = HashMap::new();
+        counts.insert(foreign_git.clone(), 1);
+
+        let root_probe = crate::workspace::find_git_dir(&workspace.cwd);
+        assert!(
+            !tracked_git_dir_is_root(workspace.git_dir.as_deref(), root_probe.as_deref()),
+            "a foreign git dir must not take the early return"
+        );
+        assert!(tracked_git_dir_is_root(
+            Some(root_git.as_path()),
+            root_probe.as_deref()
+        ));
+        assert!(
+            tracked_git_dir_is_root(None, None),
+            "a workspace outside any repo matches a missing root git dir"
+        );
+
+        let (branch, is_repo) = crate::workspace::detect_branch(&workspace.cwd);
+        let stats = crate::workspace::GitDiffStats::from_cwd(&workspace.cwd);
+        assert_eq!(branch, "branch-a");
+        assert!(is_repo);
+        assert_ne!(workspace.git_branch, branch);
+        assert_ne!(workspace.git_stats, stats);
+
+        let (tracked_cwd, changed) = retarget_workspace_git_dir(
+            &mut workspace,
+            &mut counts,
+            None,
+            root_probe.clone(),
+            &branch,
+            is_repo,
+            &stats,
+        );
+        assert!(changed);
+        assert_eq!(tracked_cwd, workspace.cwd);
+        assert_eq!(workspace.git_dir, root_probe);
+        assert_eq!(workspace.git_dir.as_ref(), Some(&root_git));
+        assert_eq!(workspace.git_branch, "branch-a");
+        assert!(workspace.is_git_repo);
+        assert_eq!(workspace.git_stats, stats);
+        assert!(
+            !counts.contains_key(&foreign_git),
+            "the foreign watch refcount is released: {counts:?}"
+        );
+        assert_eq!(
+            counts.get(&root_git).copied(),
+            Some(1),
+            "repo A's git dir is what would be watched: {counts:?}"
+        );
+        assert!(tracked_git_dir_is_root(
+            workspace.git_dir.as_deref(),
+            crate::workspace::find_git_dir(&workspace.cwd).as_deref(),
+        ));
+
+        // A second workspace still watching B keeps its refcount. Releasing
+        // must decrement, not drop the entry, matching `unwatch_git_dir`.
+        workspace.git_dir = Some(foreign_git.clone());
+        let mut shared = HashMap::from([(foreign_git.clone(), 2usize)]);
+        retarget_workspace_git_dir(
+            &mut workspace,
+            &mut shared,
+            None,
+            Some(root_git.clone()),
+            &branch,
+            is_repo,
+            &stats,
+        );
+        assert_eq!(shared.get(&foreign_git).copied(), Some(1));
+        assert_eq!(shared.get(&root_git).copied(), Some(1));
+        assert_eq!(workspace.git_dir.as_ref(), Some(&root_git));
+
+        let src = include_str!("event_handlers.rs");
+        let handler = crate::source_probe::source_slice(
+            src,
+            "fn handle_cwd_change(",
+            "pub(crate) fn spawn_initial_git_stats(",
+        );
+        let early = crate::source_probe::source_slice(
+            handler,
+            "if self.workspaces[ws_idx].cwd == new_cwd {",
+            "let ws_id = self.workspaces[ws_idx].id;",
+        );
+        assert!(
+            early.contains("self.set_tab_worktree(ws_idx, tab_idx, None, cx);"),
+            "coming home still unbinds the tab: {early}"
+        );
+        assert!(
+            early.contains("crate::workspace::find_git_dir("),
+            "the early return decides from the root's git dir: {early}"
+        );
+        let decide = early
+            .find("tracked_git_dir_is_root(")
+            .expect("coming home compares the tracked git dir with the root's");
+        let bail = early
+            .find("return;")
+            .expect("a matching git dir still returns");
+        assert!(
+            decide < bail,
+            "return only after the git dir comparison: {early}"
+        );
+        assert_eq!(
+            early.matches("return;").count(),
+            1,
+            "a foreign git dir must fall through to the probe: {early}"
+        );
+        let retarget_at = handler
+            .find("retarget_workspace_git_dir(")
+            .expect("the probe landing retargets through the tested function");
+        let apply_at = handler
+            .find("app.apply_git_state_probed_at(")
+            .expect("the landing still applies the probe");
+        assert!(
+            retarget_at < apply_at,
+            "retarget runs before apply_git_state_probed_at"
+        );
+        assert!(
+            !handler.contains("apply_git_state_for_cwd("),
+            "the landing must not file the probe with the keyed-only apply"
         );
     }
 
