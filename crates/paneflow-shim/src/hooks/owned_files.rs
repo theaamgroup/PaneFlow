@@ -21,7 +21,10 @@ impl PiExtensionGuard {
         let directory = home.join(".pi").join("agent").join("extensions");
         let path = directory.join(PANEFLOW_TS_BASENAME);
         if !paneflow_ipc_reachable() {
-            sweep_matching_owned_file(&path, PI_EXTENSION_SOURCE);
+            // The extension is TypeScript, so byte equality cannot recognise
+            // an older rendering. Ownership is the `.created` marker, the
+            // same rule repair uses.
+            sweep_created_owned_file(&path);
             return Ok(HookInstall::Skipped(HookInstallSkip::IpcUnavailable));
         }
         Self::install_at(&directory).map(HookInstall::Installed)
@@ -33,7 +36,17 @@ impl PiExtensionGuard {
         let path = directory.join(PANEFLOW_TS_BASENAME);
         let mut lease = HookLease::acquire(&path)?;
         with_config_lock(&path, || {
-            install_owned_file(&path, PI_EXTENSION_SOURCE, &mut lease)?;
+            // Not `install_owned_file`: that entry point repairs only a JSON
+            // rendering. A `.created` last-holder file is replaced even when
+            // the bytes are an older TypeScript extension. A file without
+            // the marker is still refused.
+            install_owned_file_repairing(
+                &path,
+                PI_EXTENSION_SOURCE,
+                &mut lease,
+                &|existing| existing == PI_EXTENSION_SOURCE,
+                &pi_extension_owned_by_marker,
+            )?;
             Ok(())
         })?;
         Ok(Self { path, lease })
@@ -256,19 +269,34 @@ pub(super) fn install_owned_file(
 /// Publish `source` at `path` unless a file is already there. An existing
 /// file that `accepts` (this instance's own bytes, or a sibling instance's
 /// rendering of the same content) is left exactly as it is and never marked
-/// created, so cleanup can only ever delete what PaneFlow itself wrote; any
-/// other existing file is refused with `AlreadyExists`.
+/// created, so cleanup can only ever delete what PaneFlow itself wrote. A
+/// stale file is repaired only when [`is_paneflow_rendering_shape`] says it
+/// is still a PaneFlow rendering; any other existing file is refused with
+/// `AlreadyExists`. That shape proof is what keeps a user-edited JSON hook
+/// from being overwritten.
 pub(super) fn install_accepted_owned_file(
     path: &Path,
     source: &str,
     lease: &mut HookLease,
     accepts: &dyn Fn(&str) -> bool,
 ) -> std::io::Result<()> {
+    install_owned_file_repairing(path, source, lease, accepts, &|existing| {
+        is_paneflow_rendering_shape(existing, source, &|_| true)
+    })
+}
+
+fn install_owned_file_repairing(
+    path: &Path,
+    source: &str,
+    lease: &mut HookLease,
+    accepts: &dyn Fn(&str) -> bool,
+    proves_owned: &dyn Fn(&str) -> bool,
+) -> std::io::Result<()> {
     refuse_symlink(path, "managed hook")?;
     match read_optional_text(path)? {
         Some(existing) if accepts(&existing) => Ok(()),
         Some(existing) => {
-            if repair_stale_owned_file(path, &existing, source, lease)? {
+            if repair_stale_owned_file(path, &existing, source, lease, proves_owned)? {
                 return Ok(());
             }
             Err(std::io::Error::new(
@@ -297,19 +325,24 @@ pub(super) fn install_accepted_owned_file(
 
 /// Replace a stale file PaneFlow itself wrote with this instance's
 /// rendering. Three proofs are required, and a miss on any of them leaves
-/// the file alone: the content is still a PaneFlow rendering of `source`
-/// (only the hook program differs, so nobody edited it), no other session
-/// holds the lease (a live sibling is using that program), and the durable
-/// `.created` marker says PaneFlow created it. A crashed session that named
-/// a since-pruned version-pinned hook binary otherwise left hooks disabled
-/// until the user deleted the file by hand. Returns whether it repaired.
+/// the file alone: `proves_owned` says the bytes are still PaneFlow's, no
+/// other session holds the lease (a live sibling is using the file), and the
+/// durable `.created` marker says PaneFlow created it.
+///
+/// JSON hooks pass [`is_paneflow_rendering_shape`], so only the hook program
+/// may differ and a user edit is refused. That repairs a crashed session
+/// whose version-pinned hook binary was later pruned. The Pi extension is
+/// TypeScript, so that parse cannot succeed; its caller accepts any bytes
+/// and the marker plus last-holder are the proof. A file without the marker
+/// is not repaired. Returns whether it repaired.
 fn repair_stale_owned_file(
     path: &Path,
     existing: &str,
     source: &str,
     lease: &mut HookLease,
+    proves_owned: &dyn Fn(&str) -> bool,
 ) -> std::io::Result<bool> {
-    if !is_paneflow_rendering_shape(existing, source, &|_| true) {
+    if !proves_owned(existing) {
         return Ok(false);
     }
     let Some(mut last) = lease.try_take_last()? else {
@@ -357,6 +390,21 @@ fn remove_unchanged_file(
         remove_created_file(path, true)?;
     }
     Ok(())
+}
+
+/// Content gate for the Pi extension. It is TypeScript, so
+/// [`is_paneflow_rendering_shape`] cannot match an older copy. Repair and
+/// the orphan sweep still require the durable `.created` marker, and repair
+/// also requires this session to be the last holder.
+fn pi_extension_owned_by_marker(_existing: &str) -> bool {
+    true
+}
+
+/// Remove a PaneFlow-created Pi extension even when its bytes are not the
+/// current source. An upgrade changes [`PI_EXTENSION_SOURCE`]; comparing
+/// bytes would leave the stale file loaded.
+fn sweep_created_owned_file(path: &Path) {
+    sweep_accepted_owned_file(path, &pi_extension_owned_by_marker);
 }
 
 pub(super) fn sweep_matching_owned_file(path: &Path, source: &str) {
@@ -593,6 +641,76 @@ mod tests {
             .expect("a later repair must replace the stale file once the directory is writable");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
         drop(guard);
+    }
+
+    #[test]
+    fn a_stale_paneflow_owned_pi_extension_is_repaired() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join("extensions");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(PANEFLOW_TS_BASENAME);
+        // Older extension: TypeScript, not the current source, and not JSON,
+        // so the rendering-shape proof cannot be what lets repair through.
+        let stale = "export default function (pi) { /* old protocol, id: 1 */ }\n";
+        assert_ne!(stale, PI_EXTENSION_SOURCE);
+        assert!(serde_json::from_str::<serde_json::Value>(stale).is_err());
+
+        std::fs::write(&path, stale).unwrap();
+        let mut crashed = HookLease::acquire(&path).unwrap();
+        crashed.mark_created().unwrap();
+        drop(crashed);
+
+        let guard = PiExtensionGuard::install_at(&directory)
+            .expect("a stale PaneFlow-owned Pi extension must be repaired");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), PI_EXTENSION_SOURCE);
+        drop(guard);
+        assert!(
+            !path.exists(),
+            "the repaired file is owned and removed by the last session"
+        );
+
+        // Without the marker the same stale bytes are a user's file.
+        std::fs::write(&path, stale).unwrap();
+        let error = PiExtensionGuard::install_at(&directory)
+            .err()
+            .expect("an unowned stale file must be refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(
+            error.to_string().contains("contains user changes"),
+            "refusing a user file must say so: {error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), stale);
+
+        // A live sibling holds the lease, so repair must not replace the file.
+        let mut crashed = HookLease::acquire(&path).unwrap();
+        crashed.mark_created().unwrap();
+        drop(crashed);
+        let sibling = HookLease::acquire(&path).unwrap();
+        let error = PiExtensionGuard::install_at(&directory)
+            .err()
+            .expect("a live sibling must block repair");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), stale);
+        drop(sibling);
+        assert!(
+            HookLease::acquire(&path).unwrap().is_created(),
+            "a blocked repair must leave the created marker in place"
+        );
+
+        // The orphan sweep uses that marker, not byte equality with the
+        // current source.
+        sweep_created_owned_file(&path);
+        assert!(
+            !path.exists(),
+            "the orphan sweep must remove a stale created Pi extension"
+        );
+        std::fs::write(&path, stale).unwrap();
+        sweep_created_owned_file(&path);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            stale,
+            "a file PaneFlow did not create must survive the orphan sweep"
+        );
     }
 
     #[test]

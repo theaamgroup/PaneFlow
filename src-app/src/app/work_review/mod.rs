@@ -205,10 +205,13 @@ impl PaneFlowApp {
                 && let Ok(checkout) = checkout
             {
                 let ws_id = self.workspaces[w].id;
-                let repo_root = self.workspaces[w]
-                    .repo_root
-                    .clone()
-                    .unwrap_or_else(|| checkout.root.clone());
+                // Same-repo linked worktrees share the workspace common dir.
+                // A checkout of another repository does not (#730).
+                let repo_root = crate::diff::ReviewSubject::repo_root_for_checkout(
+                    self.workspaces[w].repo_root.as_deref(),
+                    &checkout.root,
+                    &checkout.common,
+                );
                 let worktree = crate::diff::DiffWorktree {
                     path: checkout.root.clone(),
                     branch: checkout.branch,

@@ -167,6 +167,53 @@ mod tests {
     }
 
     #[test]
+    fn review_subject_uses_the_checkouts_own_repository() {
+        use std::path::{Path, PathBuf};
+
+        let workspace = Path::new("/repo-a");
+        let foreign = ReviewSubject {
+            repo_root: ReviewSubject::repo_root_for_checkout(
+                Some(workspace),
+                Path::new("/repo-b"),
+                Path::new("/repo-b/.git"),
+            ),
+            worktree: crate::diff::DiffWorktree {
+                path: PathBuf::from("/repo-b"),
+                branch: "feature".into(),
+                workspace_id: Some(11),
+            },
+        };
+        assert_eq!(foreign.repo_root, PathBuf::from("/repo-b"));
+        assert_eq!(foreign.repo_name(), "repo-b");
+        assert_ne!(foreign.repo_root.as_path(), workspace);
+
+        // A linked worktree of B: the common dir is B's `.git`, the checkout
+        // root is not. The subject still names B, so refs are watched there.
+        assert_eq!(
+            ReviewSubject::repo_root_for_checkout(
+                Some(workspace),
+                Path::new("/repo-b-worktree"),
+                Path::new("/repo-b/.git"),
+            ),
+            PathBuf::from("/repo-b")
+        );
+
+        // A linked worktree of A shares A's common dir and keeps A's root.
+        assert_eq!(
+            ReviewSubject::repo_root_for_checkout(
+                Some(workspace),
+                Path::new("/linked-checkout"),
+                Path::new("/repo-a/.git"),
+            ),
+            PathBuf::from("/repo-a")
+        );
+
+        let producer = include_str!("../work_review/mod.rs");
+        assert!(producer.contains("repo_root_for_checkout("));
+        assert!(producer.contains("&checkout.common"));
+    }
+
+    #[test]
     fn review_dispatch_preserves_choice_order_and_second_opinion_prompts() {
         let prompts =
             review_prompts("feature", "HEAD~1", &[ReviewCli::Codex, ReviewCli::Pi]).unwrap();
