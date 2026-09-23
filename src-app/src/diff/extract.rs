@@ -62,6 +62,10 @@ pub(crate) fn file_to_unified(file: &FileDiff) -> String {
 /// Serialize a single [`DiffHunk`] into a fenced ```` ```diff ```` block,
 /// prefixed by a `path:Lstart-Lend` tag so an agent knows exactly which lines
 /// the change touches. Suitable for "copy hunk" and `@diff`-style handoff.
+///
+/// Context stops at neighbouring hunks ([`isolated_hunk_group`]). Widening this
+/// hunk alone would run into a close change, and the `@@` new-count would no
+/// longer match the body (#731).
 pub(crate) fn hunk_to_unified(file: &FileDiff, hunk: &DiffHunk) -> String {
     let tag = hunk_tag(file, hunk);
     if file.is_binary {
@@ -73,13 +77,13 @@ pub(crate) fn hunk_to_unified(file: &FileDiff, hunk: &DiffHunk) -> String {
     let base_lines = lines_inclusive(&file.base_text);
     let new_lines = lines_inclusive(&file.new_text);
     let mut body = String::new();
-    for group in group_hunks(
-        std::slice::from_ref(hunk),
+    let group = isolated_hunk_group(
+        &file.hunks,
+        hunk,
         base_lines.len() as u32,
         new_lines.len() as u32,
-    ) {
-        emit_group(&mut body, &group, &base_lines, &new_lines);
-    }
+    );
+    emit_group(&mut body, &group, &base_lines, &new_lines);
     format!("{tag}\n```diff\n{body}```\n")
 }
 
@@ -120,6 +124,9 @@ struct HunkGroup {
 /// Expand each hunk by [`CONTEXT`] lines (clamped to file bounds) and merge hunks
 /// whose windows touch, so every emitted `@@` block is a valid, non-overlapping
 /// unified-diff hunk. Hunks arrive in row order from `compute_hunks`.
+///
+/// Whole-file output ([`file_to_unified`]) uses this merge. A one-hunk copy does
+/// not: see [`isolated_hunk_group`].
 fn group_hunks(hunks: &[DiffHunk], base_lines: u32, new_lines: u32) -> Vec<HunkGroup> {
     let mut groups: Vec<HunkGroup> = Vec::new();
     for h in hunks {
@@ -143,6 +150,57 @@ fn group_hunks(hunks: &[DiffHunk], base_lines: u32, new_lines: u32) -> Vec<HunkG
         });
     }
     groups
+}
+
+/// Context window for copying `hunk` by itself.
+///
+/// [`group_hunks`] widens each side by [`CONTEXT`] on its own, but [`emit_group`]
+/// prints every context line from the base side. That stays aligned when every
+/// nearby change is in the group. For one hunk it does not: a neighbour inside
+/// the window changes that side's length, so the `@@` new-count disagrees with
+/// the body and the neighbour's lines are emitted as context (#731).
+///
+/// Clip at the previous and next hunk (or the file bounds) and keep the same
+/// lead and trail on both sides, so the new window is the base window shifted
+/// onto the new rows.
+fn isolated_hunk_group(
+    hunks: &[DiffHunk],
+    hunk: &DiffHunk,
+    base_len: u32,
+    new_len: u32,
+) -> HunkGroup {
+    let idx = hunks
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, hunk))
+        .or_else(|| hunks.iter().position(|candidate| candidate == hunk));
+
+    let (base_lo, new_lo) = match idx {
+        Some(i) if i > 0 => {
+            let prev = &hunks[i - 1];
+            (prev.base_row_range.end, prev.new_row_range.end)
+        }
+        _ => (0, 0),
+    };
+    let (base_hi, new_hi) = match idx {
+        Some(i) if i + 1 < hunks.len() => {
+            let next = &hunks[i + 1];
+            (next.base_row_range.start, next.new_row_range.start)
+        }
+        _ => (base_len, new_len),
+    };
+
+    let lead = CONTEXT
+        .min(hunk.base_row_range.start.saturating_sub(base_lo))
+        .min(hunk.new_row_range.start.saturating_sub(new_lo));
+    let trail = CONTEXT
+        .min(base_hi.saturating_sub(hunk.base_row_range.end))
+        .min(new_hi.saturating_sub(hunk.new_row_range.end));
+
+    HunkGroup {
+        base: (hunk.base_row_range.start - lead)..(hunk.base_row_range.end + trail),
+        new: (hunk.new_row_range.start - lead)..(hunk.new_row_range.end + trail),
+        hunks: vec![hunk.clone()],
+    }
 }
 
 /// Emit one `@@` header + interleaved context/removed/added body for a group.
@@ -355,5 +413,195 @@ mod tests {
         assert!(out.trim_end().ends_with("```"));
         assert!(out.contains("-b\n"));
         assert!(out.contains("+B\n"));
+    }
+
+    #[test]
+    fn hunk_to_unified_counts_match_body_near_eof_neighbor() {
+        // Lines 1..=9, with 6 replaced by X and 8..=9 deleted. One unchanged
+        // line ("7") sits between the hunks, inside the ±3 context window.
+        let base = "1\n2\n3\n4\n5\n6\n7\n8\n9\n";
+        let new = "1\n2\n3\n4\n5\nX\n7\n";
+        let near_eof = modified("x.rs", base, new);
+        assert_eq!(
+            near_eof.hunks.len(),
+            2,
+            "neighbour must stay its own hunk: {:?}",
+            near_eof.hunks
+        );
+        let copied = hunk_to_unified(&near_eof, &near_eof.hunks[0]);
+        assert!(
+            copied.contains("-6\n") && copied.contains("+X\n"),
+            "got:\n{copied}"
+        );
+        assert_header_counts_match_body(&copied);
+        let leaked = unified_hunks(&copied).iter().flatten().any(|line| {
+            let text = line
+                .strip_prefix(' ')
+                .or_else(|| line.strip_prefix('-'))
+                .or_else(|| line.strip_prefix('+'))
+                .unwrap_or(line);
+            text == "8" || text == "9"
+        });
+        assert!(
+            !leaked,
+            "deleted neighbour lines leaked into the copied hunk:\n{copied}"
+        );
+        assert_git_apply_accepts("x.rs", base, &copied);
+
+        // The whole-file diff merges both hunks and must still be applicable.
+        let whole = file_to_unified(&near_eof);
+        assert_header_counts_match_body(&whole);
+        assert!(
+            whole.contains("-8\n") && whole.contains("-9\n"),
+            "file diff dropped the deletion:\n{whole}"
+        );
+
+        // Insertion two lines above the copied edit. Not an end-of-file clip:
+        // the new side is longer, and the windows meet at the start of the file.
+        let above_base = "a\nb\nc\nd\ne\nf\n";
+        let above_new = "X\na\nb\nC\nd\ne\nf\n";
+        let inserted_above = modified("y.rs", above_base, above_new);
+        assert_eq!(inserted_above.hunks.len(), 2, "{:?}", inserted_above.hunks);
+        assert!(
+            inserted_above.hunks[0].base_row_range.is_empty(),
+            "first hunk should be the insertion: {:?}",
+            inserted_above.hunks
+        );
+        let above_gap = inserted_above.hunks[1]
+            .base_row_range
+            .start
+            .saturating_sub(inserted_above.hunks[0].base_row_range.end);
+        assert!(
+            above_gap < 3,
+            "insertion must sit within 3 lines, gap {above_gap}: {:?}",
+            inserted_above.hunks
+        );
+        let above = hunk_to_unified(&inserted_above, &inserted_above.hunks[1]);
+        assert_header_counts_match_body(&above);
+        assert_git_apply_accepts("y.rs", above_base, &above);
+
+        // Insertion one line below the copied edit, so the clip is not only at
+        // the start of the file either.
+        let below_base = "a\nb\nc\nd\n";
+        let below_new = "a\nB\nc\nX\nd\n";
+        let inserted_below = modified("z.rs", below_base, below_new);
+        assert_eq!(inserted_below.hunks.len(), 2, "{:?}", inserted_below.hunks);
+        assert!(
+            inserted_below.hunks[1].base_row_range.is_empty(),
+            "second hunk should be the insertion: {:?}",
+            inserted_below.hunks
+        );
+        let below_gap = inserted_below.hunks[1]
+            .base_row_range
+            .start
+            .saturating_sub(inserted_below.hunks[0].base_row_range.end);
+        assert!(
+            below_gap < 3,
+            "insertion must sit within 3 lines, gap {below_gap}: {:?}",
+            inserted_below.hunks
+        );
+        let below = hunk_to_unified(&inserted_below, &inserted_below.hunks[0]);
+        assert_header_counts_match_body(&below);
+        assert_git_apply_accepts("z.rs", below_base, &below);
+    }
+
+    /// Old-side lines are ` ` and `-`; new-side lines are ` ` and `+`. Counts
+    /// come from the `@@` header, not from a fixture that restates the body.
+    fn assert_header_counts_match_body(text: &str) {
+        let hunks = unified_hunks(text);
+        assert!(!hunks.is_empty(), "no @@ header in:\n{text}");
+        for hunk in hunks {
+            let (old_count, new_count) = header_counts(hunk[0]);
+            let mut old_lines = 0usize;
+            let mut new_lines = 0usize;
+            for line in &hunk[1..] {
+                if line.starts_with('\\') {
+                    continue;
+                }
+                match line.as_bytes().first().copied() {
+                    Some(b' ') => {
+                        old_lines += 1;
+                        new_lines += 1;
+                    }
+                    Some(b'-') => old_lines += 1,
+                    Some(b'+') => new_lines += 1,
+                    _ => {}
+                }
+            }
+            assert_eq!(old_count, old_lines, "old @@ count != body:\n{text}");
+            assert_eq!(new_count, new_lines, "new @@ count != body:\n{text}");
+        }
+    }
+
+    fn header_counts(header: &str) -> (usize, usize) {
+        let mut parts = header.split_whitespace();
+        assert_eq!(parts.next(), Some("@@"), "{header}");
+        let old = parts.next().expect("old range");
+        let new = parts.next().expect("new range");
+        assert_eq!(parts.next(), Some("@@"), "{header}");
+        (range_count(old), range_count(new))
+    }
+
+    fn range_count(field: &str) -> usize {
+        let digits = field
+            .strip_prefix('-')
+            .or_else(|| field.strip_prefix('+'))
+            .expect("range sign");
+        let (_, count) = digits.split_once(',').expect("explicit range count");
+        count.parse().expect("range count")
+    }
+
+    fn unified_hunks(text: &str) -> Vec<Vec<&str>> {
+        let mut hunks: Vec<Vec<&str>> = Vec::new();
+        let mut current: Option<Vec<&str>> = None;
+        for line in text.lines() {
+            if line.starts_with("@@ ") {
+                if let Some(done) = current.take() {
+                    hunks.push(done);
+                }
+                current = Some(vec![line]);
+            } else if let Some(body) = current.as_mut()
+                && matches!(line.as_bytes().first(), Some(b' ' | b'+' | b'-' | b'\\'))
+            {
+                body.push(line);
+            }
+        }
+        if let Some(done) = current {
+            hunks.push(done);
+        }
+        hunks
+    }
+
+    fn assert_git_apply_accepts(file_name: &str, base: &str, copied: &str) {
+        let hunks = unified_hunks(copied);
+        assert_eq!(hunks.len(), 1, "expected one hunk:\n{copied}");
+        let mut patch = format!("--- a/{file_name}\n+++ b/{file_name}\n");
+        for line in &hunks[0] {
+            patch.push_str(line);
+            patch.push('\n');
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "paneflow-731-{}-{}",
+            std::process::id(),
+            file_name.replace(['/', '.'], "_")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join(file_name), base).expect("base file");
+        let patch_path = dir.join("hunk.diff");
+        std::fs::write(&patch_path, &patch).expect("patch");
+        let output = std::process::Command::new("git")
+            .args(["apply", "--check", "--whitespace=nowarn"])
+            .arg(&patch_path)
+            .current_dir(&dir)
+            .output()
+            .expect("git apply");
+        assert!(
+            output.status.success(),
+            "git apply rejected the hunk ({}):\n{patch}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

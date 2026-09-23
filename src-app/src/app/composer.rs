@@ -24,6 +24,7 @@ use crate::app::broadcast::state_blocks_delivery;
 use crate::app::ipc_handler::find_terminal_by_surface_id;
 use crate::pane::Pane;
 use crate::widgets::text_area::TextArea;
+use crate::workspace::Workspace;
 
 /// US-003 AC6: the broadcast recap (and the queued confirmation) hold for
 /// 4 s before auto-dismiss - longer than the default `TOAST_HOLD_MS`
@@ -404,17 +405,16 @@ impl PaneFlowApp {
 
     /// Push the queued-prompt indicator down into the panes (tab chip,
     /// US-003 AC4). Mirrors `sync_attention`: recomputed idempotently from
-    /// the pending-buffer truth.
+    /// the pending-buffer truth. Every tab is visited, not only the visible
+    /// one (issue #722): a background member can hold a queued prompt, and
+    /// a flush clears it without a tab switch.
     pub(crate) fn sync_pending_chips(&self, cx: &mut Context<Self>) {
-        for ws in &self.workspaces {
-            if let Some(root) = &ws.active_tab().root {
-                for pane in root.collect_leaves() {
-                    let pending = pane.read(cx).active_terminal_opt().is_some_and(|t| {
-                        self.broadcast.pending.contains_key(&t.entity_id().as_u64())
-                    });
-                    pane.update(cx, |p, cx| p.set_pending_prefill(pending, cx));
-                }
-            }
+        for pane in pending_chip_panes(&self.workspaces) {
+            let pending = pane
+                .read(cx)
+                .active_terminal_opt()
+                .is_some_and(|t| self.broadcast.pending.contains_key(&t.entity_id().as_u64()));
+            pane.update(cx, |p, cx| p.set_pending_prefill(pending, cx));
         }
     }
 
@@ -425,6 +425,24 @@ impl PaneFlowApp {
         self.flush_pending_prefill(cx);
         self.refresh_composer_slot(cx);
     }
+}
+
+/// Panes whose queued-prompt chip is recomputed from `broadcast.pending`.
+///
+/// Background tabs are included: a broadcast queue addresses members on
+/// every tab, and a flush can clear a buffer while its tab is still hidden
+/// (issue #722). `Tab::collect_panes` also keeps a zoom-saved pane, which
+/// walking `root` alone would drop.
+fn pending_chip_panes(workspaces: &[Workspace]) -> Vec<Entity<Pane>> {
+    let mut panes = Vec::new();
+    for ws in workspaces {
+        for tab in ws.tabs() {
+            for pane in tab.collect_panes() {
+                panes.push(pane);
+            }
+        }
+    }
+    panes
 }
 
 #[cfg(test)]
@@ -458,5 +476,80 @@ mod tests {
         let (ok, truncated) = normalize_composer_text("short prompt");
         assert_eq!(ok, "short prompt");
         assert!(!truncated);
+    }
+
+    fn test_pane(cx: &mut impl gpui::AppContext) -> gpui::Entity<crate::pane::Pane> {
+        let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+        cx.new(|cx| crate::pane::Pane::new(terminal, 1, cx))
+    }
+
+    fn pane_ids(panes: &[gpui::Entity<crate::pane::Pane>]) -> Vec<u64> {
+        panes.iter().map(|pane| pane.entity_id().as_u64()).collect()
+    }
+
+    /// Issue #722: chip sync used to visit only `active_tab()`. A queued
+    /// prompt can sit on a background tab, including a pane parked in that
+    /// tab's zoom-saved tree, so the helper must include every pane
+    /// `ws.tabs()` yields.
+    #[gpui::test]
+    fn pending_chip_sync_covers_background_tabs(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let active = test_pane(cx);
+        let background = test_pane(cx);
+        let parked = test_pane(cx);
+        let mut ws = crate::workspace::Workspace::with_cwd_and_id(
+            1,
+            "ws",
+            std::path::PathBuf::new(),
+            active.clone(),
+        );
+        let mut background_tab = crate::workspace::Tab::new(
+            "background",
+            Some(crate::layout::LayoutTree::Leaf(background.clone())),
+        );
+        background_tab.saved_layout = Some(crate::layout::LayoutTree::Leaf(parked.clone()));
+        assert!(
+            ws.open_tab(background_tab),
+            "the fixture needs a second tab"
+        );
+        // `open_tab` activates the tab it just appended. Park it so a walk
+        // of only the active tab misses both of its panes.
+        ws.set_active_tab(0);
+        assert_eq!(ws.active_tab_idx(), 0);
+        let active_ids = pane_ids(&ws.active_tab().collect_panes());
+        assert!(
+            !active_ids.contains(&background.entity_id().as_u64()),
+            "the background pane must not sit on the active tab"
+        );
+        assert!(
+            !active_ids.contains(&parked.entity_id().as_u64()),
+            "the zoom-saved pane must not sit on the active tab"
+        );
+
+        let synced = super::pending_chip_panes(std::slice::from_ref(&ws));
+        let yielded: Vec<_> = ws
+            .tabs()
+            .iter()
+            .flat_map(|tab| tab.collect_panes())
+            .collect();
+        let synced_ids = pane_ids(&synced);
+        let yielded_ids = pane_ids(&yielded);
+
+        assert!(
+            yielded_ids.contains(&background.entity_id().as_u64()),
+            "the fixture must yield the background tab's pane"
+        );
+        assert!(
+            yielded_ids.contains(&parked.entity_id().as_u64()),
+            "the fixture must yield the zoom-saved pane"
+        );
+        assert!(
+            synced_ids.contains(&background.entity_id().as_u64()),
+            "a background-tab pane must receive the queued-prompt chip"
+        );
+        assert_eq!(
+            synced_ids, yielded_ids,
+            "chip sync must visit every pane ws.tabs() yields and nothing else"
+        );
     }
 }
