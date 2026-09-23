@@ -416,4 +416,41 @@ mod tests {
         };
         assert!(!terminal.encode_mouse(resized).expect("encode").is_empty());
     }
+
+    #[test]
+    fn switching_mouse_format_between_events_reconfigures_the_encoder() {
+        let mut terminal = terminal();
+        terminal
+            .feed(b"\x1b[?1000h\x1b[?1006h")
+            .expect("sgr mouse on");
+        // Cell size is 8×16. SGR (1006) is `CSI < btn ; col ; row M` in
+        // 1-based cells. SGR-pixels (1016) keeps that shape and reports
+        // terminal-space pixels, so (32, 48) stays (32, 48) rather than
+        // becoming cell (5, 4). Mode 1006 stays set; only 1016 changes.
+        let press = MouseInput {
+            action: MouseAction::Press,
+            button: Some(MouseButton::Left),
+            modifiers: Modifiers::empty(),
+            x: 32.0,
+            y: 48.0,
+            screen_width: 160,
+            screen_height: 64,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_left: 0,
+            padding_right: 0,
+            any_button_pressed: true,
+        };
+
+        assert_eq!(
+            terminal.encode_mouse(press).expect("encode sgr"),
+            b"\x1b[<0;5;4M"
+        );
+
+        terminal.feed(b"\x1b[?1016h").expect("sgr pixels on");
+        assert_eq!(
+            terminal.encode_mouse(press).expect("encode sgr pixels"),
+            b"\x1b[<0;32;48M"
+        );
+    }
 }
