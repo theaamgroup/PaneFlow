@@ -509,4 +509,26 @@ mod tests {
             }
         }
     }
+
+    /// `a` followed by 2000 combining acutes is one cluster of 2001
+    /// codepoints. Snapshot must stay `Ok` and keep `'a'`. The engine may
+    /// store the combiners or drop them; either way the base cell survives.
+    #[test]
+    fn snapshot_survives_an_oversized_grapheme_cluster() {
+        let mut terminal = terminal(20, 3, 100);
+        let mut bytes = Vec::with_capacity(1 + 2000 * 2);
+        bytes.push(b'a');
+        for _ in 0..2000 {
+            bytes.extend_from_slice(&[0xCC, 0x81]);
+        }
+        terminal.feed(&bytes).expect("output must parse");
+        let content = terminal.snapshot().expect("snapshot");
+        let cell = content
+            .cells
+            .iter()
+            .find(|cell| cell.point.line == 0 && cell.point.column == 0 && cell.character == 'a')
+            .or_else(|| content.cells.iter().find(|cell| cell.character == 'a'))
+            .expect("the cell that holds 'a'");
+        assert_eq!(cell.character, 'a');
+    }
 }
