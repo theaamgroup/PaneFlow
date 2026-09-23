@@ -64,13 +64,31 @@ These rules apply to Grok, Cursor, Claude, Codex, and all scheduled automations.
 4. One issue, one PR. Combine only inseparable fixes and explain the exception.
 5. Incomplete PRs stay draft. Drafts get CI but no automated review.
 6. Run applicable checks on the current commit; missing verification is not a pass.
-7. Codex is the only automatic PR reviewer of record. Other agents discover,
-   implement, and answer findings; additional code reviews require a human request.
-8. The author replies to each thread with `Fixed in <sha>: <verification>` or
-   `Declined: <reason and evidence>`, then resolves it. Reviewers never resolve
-   their own findings. A human resolves threads on flagged agent-authored PRs.
-9. A human signs off and executes every merge. Agents never self-approve, merge,
-   enable auto-merge, bypass protection, or directly push main.
+7. CodeRabbit comments are the reviewer notes in rule 8. When
+   `chatgpt-codex-connector` posts a P0 or P1, that comment is a defect.
+   Other agents discover, implement, and answer findings. An additional
+   code review takes a human request.
+8. The author replies to each defect thread with `Fixed in <sha>: <verification>`
+   or `Declined: <reason and evidence>`. A CodeRabbit note that is declined or
+   will not be taken is listed in the pull request Notes field and marked with
+   a comment whose first line is `Note declined: <reason>`. Reply on the thread
+   when one exists; when the note has no thread, post that line as a pull
+   request comment. The author resolves the thread after the reply. CodeRabbit
+   may resolve that same thread once the reply is present.
+9. A project admin merges a fully green pull request with `gh pr merge`.
+   A project admin is a user with the admin role on this repository. Fully
+   green means all of the following:
+   - GitHub reports the pull request mergeable.
+   - `tests_pass` succeeded on a head that already contains current main.
+   - The pull request is not a draft, and its base is main.
+   - Every review thread is resolved.
+   - The CodeRabbit status check has completed. The admin waits while it is
+     pending. Notes it posted are already fixed or marked `Note declined:`.
+     When it posted nothing, the Notes field says None. A pull request with
+     no CodeRabbit check meets this bullet.
+   - A failed `tests_pass` is not a reviewer note. A comment cannot waive it.
+   Anyone who is not a project admin prepares the handoff and stops. A direct
+   push to main is outside this grant, and so is a merge that skips protection.
 
 ### Metadata and safety
 
@@ -111,8 +129,9 @@ claiming a human-review blocker. Tests and agent confidence never clear an
 explicit hold; a human removes it after resolving the documented blocker.
 Carry issue safety categories to its PR. Existing holds from the former broad
 policy require a one-time human reassessment; automation cannot distinguish
-them from deliberately placed holds. Human sign-off and merge remain required
-for every PR, independently of this exceptional label.
+them from deliberately placed holds. A `needs-human-review` hold blocks an
+admin merge. Every other fully green pull request merges without a separate
+sign-off.
 
 To promote a fully classified item from `needs-info`, add `ready-for-agent`
 or `ready-for-human`; routing removes the previous state. Missing metadata
@@ -143,21 +162,24 @@ blocked-human-review → needs-human-review. Do not recreate them.
   complete metadata, a human owner, `ready-for-agent`, and no human-review
   hold. Safety categories alone do not block implementation. Stop and document
   a newly discovered hard blocker unless a human authorizes the flagged work.
-- Review: Codex reviews non-draft PRs and refreshes coverage after changes.
-  Grok's review automation checks handoff readiness and responds as author
-  where appropriate; it does not post a competing code review.
-- Merge: prepare the handoff below, then stop for a human. Never invoke
-  `gh pr merge`, merge APIs, auto-merge, or direct pushes to main.
+- Review: CodeRabbit posts the notes in rule 8. Codex posts P0 and P1
+  defects when it reviews. Grok's review automation checks handoff readiness
+  and answers those notes as the author. Grok does not post a second review.
+- Merge: a project admin merges a fully green pull request with `gh pr merge`.
+  Anyone else prepares the handoff and stops. A direct push to main is outside
+  this grant.
 
 ### Pull requests and handoff
 
-Start with two plain paragraphs under 150 words combined, nothing above them:
+Start with three plain paragraphs under 150 words combined, nothing above them:
 
 What changed: Explain the final change and why. Link the issue with `Closes #N`.
 
-Needs your attention: State verification performed and gaps, the human decision
-or inspection needed, and deployment/rollback requirements. Say “None” when no
-special decision remains; human sign-off is still required.
+Needs your attention: State verification performed, gaps, any hold, and
+deployment or rollback requirements. Say “None” when an admin may merge it.
+
+Notes: List reviewer notes declined or not taken. Each one has a pull request
+comment that starts with `Note declined:`. Say “None” when there are no such notes.
 
 Link detailed evidence below if necessary. No file inventories, repeated fix
 histories, copied logs, generic checklists, or progress-comment streams.
@@ -165,17 +187,17 @@ histories, copied logs, generic checklists, or progress-comment streams.
 The handoff automation edits at most one top-level summary. Retain the existing
 `[grok-review-handoff]` marker for compatibility (reporter, not second reviewer):
 
-> Reviewed <sha> · N fixed · N declined · N open · CI <status>
-> Human action: <decision or sign-off>
+> Reviewed <sha> · N fixed · N declined · N notes declined · N open · CI <status>
+> Notes declined: <count> · <comment links, or None>
+> Human action: <merge, hold, or sign-off>
 > Details: <review/evidence links>
 
-Count fixed findings only with a commit SHA. Keep declines and blockers visible,
-including blockers tracked in issues. No empty reviews or “no findings” comments.
-Ready for handoff requires current-head Codex review, current required checks,
-zero unresolved threads, and no outstanding blockers. Pending, cancelled,
-failed, or stale review is not clean. New commits need refreshed verification.
-A human inspects declines/gaps and directly verifies work with a documented
-hard blocker.
+Count fixed findings only with a commit SHA. Keep declines, declined notes, and
+blockers visible, including blockers tracked in issues. No empty reviews or
+“no findings” comments. An admin merges a pull request that meets rule 9.
+Record a missing Codex review in the handoff. A failed or stale `tests_pass`
+is not a note and is not green. An admin stops on a `needs-human-review` hold
+or a documented hard blocker.
 
 ### Verification and enforcement
 
@@ -187,9 +209,11 @@ For policy-only changes run `node --test scripts/agent-policy.test.cjs` and
 applicable when Rust behavior changes.
 
 The required aggregate CI check is `tests_pass`; its path-selected lanes live
-in `.github/workflows/run_tests.yml`. GitHub protection enforces approvals,
-current checks, and resolved conversations. Reviewer identity and human-only
-merging also require these agent instructions; labels alone do not enforce them.
+in `.github/workflows/run_tests.yml`. Branch protection on main requires
+`tests_pass` on a head that already contains main, and resolved conversations.
+The rule applies to admins. An approving review is not required. Reviewer
+identity and the admin merge rule also require these agent instructions;
+labels alone do not enforce them.
 The safety workflow activates when merged to main.
 
 ## Code Review Rules
@@ -199,9 +223,10 @@ and file/line supported by a test or clear code path. State uncertainty honestly
 Check existing threads before posting. Use canonical severity words; prioritize
 critical/high inline, summarize meaningful medium findings with links, and omit
 low-priority nits. Never inflate severity to fit a tool's priority filter.
-The GitHub reviewer of record (`chatgpt-codex-connector`) posts P0 and P1
-inline only: critical maps to P0 and high maps to P1, while medium findings go
-in the maintained summary.
+CodeRabbit comments are notes under rule 8. `chatgpt-codex-connector` posts
+P0 and P1 inline only: critical maps to P0 and high maps to P1, while medium
+findings go in the maintained summary. A P0 or P1 reply is `Fixed in <sha>:
+<verification>` or `Declined: <reason and evidence>`.
 
 One concise thread per defect; target at most ten by grouping related occurrences
 and linking overflow blockers in the maintained summary. Never hide a blocker to

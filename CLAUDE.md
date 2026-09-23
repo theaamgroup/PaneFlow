@@ -1,7 +1,7 @@
 # CLAUDE.md - PaneFlow
 
 Read `AGENTS.md` first. Its shared agent workflow governs issue metadata,
-safety routing, PR reviews, and human-only merge handoff for every agent.
+safety routing, PR reviews, and admin merge of a fully green pull request.
 
 Native Rust terminal workspace for running coding agents in parallel. Built with Zed's GPUI framework; VT emulation is Ghostty's `libghostty-vt`, statically linked from a vendored archive (`native/libghostty/`), with PaneFlow owning the PTY through `portable-pty`. **This fork is macOS only.**
 
@@ -226,7 +226,7 @@ CLI early-exit boundary. The setting is read at startup; document restart behavi
 
 Use `type(scope): description`, one atomic logical change per commit. Use `(fork)`
 for divergence from upstream and cite the GitHub issue. Do not add historical story
-IDs. Use a feature branch; follow the shared PR and human-only merge workflow in
+IDs. Use a feature branch; follow the shared PR and merge workflow in
 `AGENTS.md`. This is a private fork with no public advisory or contribution process.
 
 ## Platform (macOS only)
