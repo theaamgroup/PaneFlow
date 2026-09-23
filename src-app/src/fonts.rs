@@ -41,10 +41,11 @@ pub fn load_mono_fonts() -> Vec<String> {
     // NOTE: core-text 21's `get_descriptors()` has a documented one-shot leak -
     // it wraps the `CTFontCollectionCreateMatchingFontDescriptors` result under
     // the Get rule when Apple returns it under the Create rule, so the CFArray
-    // is never released. Accepted here: this runs at most once per process
-    // (memoized by the `INSTALLED_MONO_FONTS` `LazyLock`) and leaks only a few
-    // KB. If it ever moves off the one-shot path, mirror Zed's direct FFI
-    // (`extern "C"` + `wrap_under_create_rule`, gpui_macos/src/text_system.rs).
+    // is never released. Accepted here: each call leaks only a few KB.
+    // `INSTALLED_MONO_FONTS` memoizes one call; the settings font dropdown
+    // enumerates again on first open. If enumeration becomes hot, mirror Zed's
+    // direct FFI (`extern "C"` + `wrap_under_create_rule`,
+    // gpui_macos/src/text_system.rs).
     let Some(descriptors) = collection.get_descriptors() else {
         log::warn!("Core Text font enumeration failed: no descriptors returned");
         return Vec::new();
