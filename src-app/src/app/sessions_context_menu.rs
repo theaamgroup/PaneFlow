@@ -20,6 +20,7 @@ use crate::PaneFlowApp;
 use crate::agent_launcher::TerminalAgent;
 use crate::agent_sessions::{SessionAgent, SessionMeta};
 use crate::app::ipc_handler::find_pane_by_surface_id;
+use crate::app::session::probe_persisted_dir_within;
 use crate::app::sessions_handoff::{copy_text, handoff_prompt, handoff_targets};
 use crate::app::sidebar::context_menu::clamped_context_menu_position;
 use crate::settings::components::{menu_divider_color, select_item, select_menu};
@@ -37,6 +38,10 @@ pub(crate) struct SessionContextMenu {
 
 /// Caption under "Continue in" when no other launcher is enabled.
 const NO_TARGETS_CAPTION: &str = "Enable another agent in Settings ▸ AI Agent";
+
+/// Same bound as session restore's cwd probe. A transcript directory on a
+/// disconnected volume must not hold the GPUI thread for the mount timeout.
+const TRANSCRIPT_CWD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 /// Caption when the session's directory is gone; Copy summary still works.
 const CWD_MISSING_CAPTION: &str = "Directory no longer exists";
 /// Suffix on a target without a session reader of its own.
@@ -70,7 +75,12 @@ impl PaneFlowApp {
             agent,
             session_id: session_id.to_string(),
             position,
-            cwd_missing: cwd.is_empty() || !Path::new(cwd).is_dir(),
+            // A transcript cwd can sit on a disconnected volume. A stat that
+            // does not answer within the restore bound counts as missing
+            // rather than pinning the GPUI thread (issue #706).
+            cwd_missing: cwd.is_empty()
+                || probe_persisted_dir_within(Path::new(cwd), TRANSCRIPT_CWD_PROBE_TIMEOUT)
+                    != Some(true),
         });
         cx.notify();
     }
@@ -130,7 +140,10 @@ impl PaneFlowApp {
             return;
         };
         let cwd = PathBuf::from(&meta.cwd);
-        if meta.cwd.is_empty() || !cwd.is_dir() {
+        // Same bound as the menu open: a timeout is a missing directory.
+        if meta.cwd.is_empty()
+            || probe_persisted_dir_within(&cwd, TRANSCRIPT_CWD_PROBE_TIMEOUT) != Some(true)
+        {
             self.show_toast(CWD_MISSING_CAPTION, cx);
             return;
         }
@@ -321,6 +334,7 @@ fn disabled_row(
 #[cfg(test)]
 mod tests {
     use super::sessions_context_menu_height;
+    use crate::source_probe::source_slice;
     use gpui::px;
 
     #[test]
@@ -349,5 +363,44 @@ mod tests {
         assert!(!src.contains("schedule_deferred_submit"));
         assert!(!src.contains("send_command(&prompt"));
         assert!(!src.contains("\\r"));
+    }
+
+    /// Issue #706: both the row menu and Continue in stat a transcript cwd
+    /// on the GPUI thread. Each must use the bounded restore probe, treat a
+    /// timeout as missing, and must not call `is_dir` directly.
+    #[test]
+    fn row_menu_open_and_continue_use_the_bounded_cwd_probe() {
+        let src = include_str!("sessions_context_menu.rs");
+        let open = source_slice(
+            src,
+            "pub(crate) fn open_sessions_context_menu(",
+            "fn session_meta(",
+        );
+        let continue_in = source_slice(
+            src,
+            "pub(crate) fn continue_session_in(",
+            "pub(crate) fn render_sessions_context_menu(",
+        );
+        for (name, body) in [
+            ("open_sessions_context_menu", open),
+            ("continue_session_in", continue_in),
+        ] {
+            assert!(
+                body.contains("probe_persisted_dir_within("),
+                "{name} must stat through the bounded probe: {body}"
+            );
+            assert!(
+                body.contains("TRANSCRIPT_CWD_PROBE_TIMEOUT"),
+                "{name} must use the bounded probe timeout: {body}"
+            );
+            assert!(
+                body.contains("!= Some(true)"),
+                "{name} must treat a probe that did not answer as missing: {body}"
+            );
+            assert!(
+                !body.contains(".is_dir()"),
+                "{name} must not call is_dir directly: {body}"
+            );
+        }
     }
 }
