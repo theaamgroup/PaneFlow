@@ -1174,8 +1174,21 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
         cx: &mut gpui::App,
         f: impl FnOnce(&mut PaneFlowApp, &mut gpui::Window, &mut Context<PaneFlowApp>),
     ) {
-        let Some(window) = cx.active_window() else {
-            return;
+        // Issue #708: `active_window()` is `NSApp.mainWindow`, which is nil
+        // while the only window is minimized. A missing active window falls
+        // back to the first open `PaneFlowApp`. A present active window stays
+        // on the current path, including when it is not a `PaneFlowApp`.
+        let window = if let Some(active) = cx.active_window() {
+            active
+        } else {
+            let open_windows = cx.windows();
+            let Some(window) = open_windows
+                .into_iter()
+                .find(|window| window.downcast::<PaneFlowApp>().is_some())
+            else {
+                return;
+            };
+            window
         };
         let Some(window) = window.downcast::<PaneFlowApp>() else {
             return;
@@ -1192,12 +1205,20 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     });
 
     cx.on_action(|_: &crate::CheckForUpdates, cx| {
+        // Sparkle presents its own check UI and does not need a PaneFlow
+        // window. Still toast and repaint when one is open.
+        let result = crate::sparkle::check_for_updates();
+        let mut delivered = false;
         with_active_paneflow_window(cx, |app, _window, cx| {
-            if let Err(message) = crate::sparkle::check_for_updates() {
-                app.show_toast(message, cx);
+            if let Err(message) = &result {
+                app.show_toast(message.clone(), cx);
             }
             cx.notify();
+            delivered = true;
         });
+        if !delivered && let Err(message) = result {
+            log::warn!("PaneFlow > Check for Updates: {message}");
+        }
     });
 
     cx.on_action(|_: &crate::OpenWorkReview, cx| {
@@ -1653,6 +1674,76 @@ mod tests {
         assert!(
             !fallback.contains("active_idx + 1") && !fallback.contains("select_workspace("),
             "storage-order arithmetic diverges from the rendered sidebar: {fallback}"
+        );
+    }
+
+    /// Issue #708: `active_window()` is `NSApp.mainWindow`, nil while the only
+    /// window is minimized. The helper must fall back to `cx.windows()` instead
+    /// of returning, and Check for Updates must run with no window at all.
+    #[test]
+    fn menu_fallbacks_do_not_require_a_main_window() {
+        let production = include_str!("bootstrap.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the module");
+        let helper = source_slice(
+            production,
+            "fn with_active_paneflow_window(",
+            "cx.on_action(|_: &Quit, cx|",
+        );
+        assert!(
+            helper.contains("cx.active_window()"),
+            "an active window must stay on the current path: {helper}"
+        );
+        assert!(
+            helper.contains("cx.windows()"),
+            "a nil main window must fall back to cx.windows(): {helper}"
+        );
+        let active_at = helper
+            .find("cx.active_window()")
+            .expect("active_window call");
+        let windows_at = helper.find("cx.windows()").expect("windows fallback");
+        assert!(
+            active_at < windows_at,
+            "cx.windows() is the fallback, not a replacement for the active window"
+        );
+        let before_fallback = &helper[active_at..windows_at];
+        assert!(
+            before_fallback.contains("else"),
+            "cx.windows() must be the branch taken when active_window() is None: {helper}"
+        );
+        assert!(
+            !before_fallback.contains("return"),
+            "do not return before the cx.windows() fallback: {before_fallback}"
+        );
+        let fallback = source_slice(helper, "cx.windows()", "let Some(window) = window.downcast");
+        assert!(
+            fallback.contains("downcast::<PaneFlowApp>()"),
+            "cx.windows() must yield the first PaneFlowApp, not an arbitrary window: {fallback}"
+        );
+
+        let quit = source_slice(production, "cx.on_action(|_: &Quit, cx|", "cx.on_action(");
+        assert!(
+            quit.contains("with_active_paneflow_window")
+                && quit.contains("quit_after_session_save"),
+            "Quit must use the window fallback: {quit}"
+        );
+
+        let updates = source_slice(
+            production,
+            "cx.on_action(|_: &crate::CheckForUpdates, cx|",
+            "cx.on_action(",
+        );
+        let check_at = updates
+            .find("crate::sparkle::check_for_updates()")
+            .expect("Check for Updates must call check_for_updates");
+        assert!(
+            !updates[..check_at].contains("with_active_paneflow_window"),
+            "check_for_updates must run without a window: {updates}"
+        );
+        assert!(
+            updates.contains("show_toast"),
+            "a failed check still toasts when a window exists: {updates}"
         );
     }
 
