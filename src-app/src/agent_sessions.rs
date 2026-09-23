@@ -252,11 +252,15 @@ pub mod cache {
         }
     }
 
-    /// Store the result of a fresh scan. The mtime is captured AFTER
-    /// the scan to avoid the race where a write lands between the
-    /// pre-scan mtime read and the post-scan write -- using the
-    /// post-scan mtime means a follow-up write also invalidates the
-    /// entry.
+    /// Store the result of a fresh scan, keyed by the directory mtime
+    /// sampled at this call.
+    ///
+    /// A write that lands during the scan is not in `sessions`, but it
+    /// does advance this mtime. Keying the entry on that post-scan
+    /// sample folds the missed write into the fingerprint, so the next
+    /// lookup (within the 1 ms fuzz) returns the stale list. Callers
+    /// that sample a fingerprint themselves must pass the *pre-scan*
+    /// value to [`store_result_with_mtime`].
     #[allow(dead_code)]
     pub fn store_result(
         agent: SessionAgent,
@@ -271,10 +275,13 @@ pub mod cache {
         store_result_with_mtime(agent, cwd, mtime, sessions, omitted);
     }
 
-    /// Store a fresh scan using a reader-computed filesystem
-    /// fingerprint. The caller should capture this after the scan so
-    /// a concurrent write that lands during parsing invalidates the
-    /// next lookup.
+    /// Store a fresh scan under a reader-computed filesystem fingerprint.
+    ///
+    /// `mtime` must be the fingerprint captured *before* the scan. A
+    /// write during the scan is missing from `sessions`; storing under
+    /// the post-scan fingerprint folds that write into the key, and the
+    /// next lookup (within the 1 ms fuzz) serves the stale list. The
+    /// pre-scan key makes the same write miss.
     pub fn store_result_with_mtime(
         agent: SessionAgent,
         cwd: &str,
@@ -340,6 +347,40 @@ pub mod cache {
         cache.clear_poison();
     }
 
+    /// Serializes tests that clear or replace the process-global session
+    /// cache. Distinct from the cache mutex itself.
+    #[cfg(test)]
+    pub(crate) fn cache_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    // Issue #718 test seam. Readers call `run_after_scan_hook` after the
+    // scan has enumerated transcripts and before they store the cache
+    // entry, so a test can land a write the scan missed. The stored key
+    // must still be the pre-scan fingerprint. Thread-local: parallel
+    // tests do not see each other's hook.
+    #[cfg(test)]
+    thread_local! {
+        static AFTER_SCAN_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_after_scan_hook(hook: Option<Box<dyn Fn()>>) {
+        AFTER_SCAN_HOOK.with(|slot| *slot.borrow_mut() = hook);
+    }
+
+    /// Runs the issue #718 test hook, if this thread installed one.
+    #[cfg(test)]
+    pub(crate) fn run_after_scan_hook() {
+        AFTER_SCAN_HOOK.with(|slot| {
+            if let Some(hook) = slot.borrow().as_ref() {
+                hook();
+            }
+        });
+    }
+
     #[cfg(test)]
     mod tests {
         use super::{MTIME_FUZZ, within_fuzz};
@@ -356,8 +397,7 @@ pub mod cache {
         /// two so each owns the shared cache exclusively. The guard is
         /// itself poison-tolerant for the same reason.
         fn serial() -> std::sync::MutexGuard<'static, ()> {
-            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-            LOCK.lock().unwrap_or_else(|e| e.into_inner())
+            super::cache_test_lock()
         }
 
         /// EP-004 review follow-up: a strict `==` mtime check would
