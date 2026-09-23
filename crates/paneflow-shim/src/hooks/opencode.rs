@@ -11,13 +11,34 @@ use std::path::{Path, PathBuf};
 
 const OPENCODE_PLUGIN_SOURCE: &str = include_str!("../../assets/opencode-paneflow-status.ts");
 
-fn opencode_config_dir() -> Option<PathBuf> {
-    opencode_config_dir_from(
+fn opencode_config_file() -> Option<PathBuf> {
+    opencode_config_file_from(
         home_dir(),
         std::env::var_os("XDG_CONFIG_HOME"),
         std::env::var_os("OPENCODE_CONFIG"),
         std::env::var_os("OPENCODE_CONFIG_DIR"),
     )
+}
+
+/// File OpenCode loads.
+///
+/// `OPENCODE_CONFIG`, when set, is that file whatever its name. Otherwise the
+/// file is `opencode.json` under `OPENCODE_CONFIG_DIR`, else
+/// `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`.
+fn opencode_config_file_from(
+    home: Option<PathBuf>,
+    xdg_config_home: Option<OsString>,
+    opencode_config: Option<OsString>,
+    opencode_config_dir: Option<OsString>,
+) -> Option<PathBuf> {
+    if let Some(config) = opencode_config
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return Some(config);
+    }
+    opencode_config_dir_from(home, xdg_config_home, None, opencode_config_dir)
+        .map(|directory| directory.join("opencode.json"))
 }
 
 fn opencode_config_dir_from(
@@ -26,6 +47,8 @@ fn opencode_config_dir_from(
     opencode_config: Option<OsString>,
     opencode_config_dir: Option<OsString>,
 ) -> Option<PathBuf> {
+    // `OPENCODE_CONFIG` is a file. This is only its parent — the directory
+    // that holds `plugins/` — not a path that should gain `opencode.json`.
     if let Some(config) = opencode_config
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
@@ -45,6 +68,29 @@ fn opencode_config_dir_from(
         .map(|directory| directory.join("opencode"))
 }
 
+/// Directory that holds `plugins/` for this config file. A bare filename has
+/// an empty parent; treat that as the current directory.
+fn config_directory(config_path: &Path) -> &Path {
+    match config_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+/// `serde_json` cannot round-trip comments. Refuse when the resolved file is
+/// `opencode.jsonc`, or when a sibling `opencode.jsonc` sits beside the
+/// default `opencode.json` (OpenCode loads the jsonc first). A custom
+/// `OPENCODE_CONFIG` name is not that default.
+fn opencode_jsonc_blocks_write(config_path: &Path) -> bool {
+    if config_path.file_name() == Some(OsStr::new("opencode.jsonc")) {
+        return true;
+    }
+    config_path.file_name() == Some(OsStr::new("opencode.json"))
+        && config_directory(config_path)
+            .join("opencode.jsonc")
+            .exists()
+}
+
 pub(crate) struct OpenCodePluginGuard {
     plugin_path: PathBuf,
     config_path: PathBuf,
@@ -55,28 +101,28 @@ pub(crate) struct OpenCodePluginGuard {
 
 impl OpenCodePluginGuard {
     pub(crate) fn install() -> HookInstallResult<Self> {
-        let directory = opencode_config_dir().ok_or_else(home_unavailable)?;
+        let config_path = opencode_config_file().ok_or_else(home_unavailable)?;
         if !paneflow_ipc_reachable() {
-            Self::sweep_orphan(&directory);
+            Self::sweep_orphan(&config_path);
             return Ok(HookInstall::Skipped(HookInstallSkip::IpcUnavailable));
         }
-        Self::install_at(&directory).map(HookInstall::Installed)
+        Self::install_config(&config_path).map(HookInstall::Installed)
     }
 
     pub(crate) fn install_at(directory: &Path) -> std::io::Result<Self> {
-        let config_path = directory.join("opencode.json");
-        // serde_json cannot round-trip comments. If a jsonc file is present
-        // (alone or beside json), OpenCode loads jsonc first — writing json
-        // would either clobber comments or register the plugin in a file
-        // OpenCode does not read.
-        if directory.join("opencode.jsonc").exists() {
+        Self::install_config(&directory.join("opencode.json"))
+    }
+
+    fn install_config(config_path: &Path) -> std::io::Result<Self> {
+        if opencode_jsonc_blocks_write(config_path) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "OpenCode uses opencode.jsonc; refusing a competing JSON config",
             ));
         }
 
-        let plugins_dir = directory.join("plugins");
+        let plugins_dir = config_directory(config_path).join("plugins");
+        let config_path = config_path.to_path_buf();
         refuse_symlink(&plugins_dir, "OpenCode plugin")?;
         std::fs::create_dir_all(&plugins_dir)?;
         let plugin_path = plugins_dir.join(PANEFLOW_TS_BASENAME);
@@ -137,10 +183,15 @@ impl OpenCodePluginGuard {
         })
     }
 
-    fn sweep_orphan(directory: &Path) {
-        let plugin_path = directory.join("plugins").join(PANEFLOW_TS_BASENAME);
-        let config_path = directory.join("opencode.json");
-        let config_ok = with_orphan_lease(&config_path, &config_path, |created_config| {
+    fn sweep_orphan(config_path: &Path) {
+        // Rewriting `opencode.jsonc` would drop comments. Leave it alone.
+        if config_path.file_name() == Some(OsStr::new("opencode.jsonc")) {
+            return;
+        }
+        let plugin_path = config_directory(config_path)
+            .join("plugins")
+            .join(PANEFLOW_TS_BASENAME);
+        let config_ok = with_orphan_lease(config_path, config_path, |created_config| {
             let Some(content) = read_optional_text(&config_path)? else {
                 return Ok(());
             };
@@ -320,9 +371,73 @@ mod tests {
             Some(PathBuf::from("/tmp/opencode")),
         );
         assert_eq!(
-            opencode_config_dir_from(home, None, None, None),
+            opencode_config_dir_from(home.clone(), None, None, None),
             Some(PathBuf::from("/Users/alice/.config/opencode")),
         );
+        assert_eq!(
+            opencode_config_file_from(
+                home.clone(),
+                Some(OsString::from("/Users/alice/.config")),
+                None,
+                None,
+            ),
+            Some(PathBuf::from("/Users/alice/.config/opencode/opencode.json")),
+        );
+        assert_eq!(
+            opencode_config_file_from(
+                home.clone(),
+                None,
+                Some(OsString::from("/cfg/oc.json")),
+                Some(OsString::from("/tmp/ignored")),
+            ),
+            Some(PathBuf::from("/cfg/oc.json")),
+        );
+        assert_eq!(
+            opencode_config_file_from(
+                home.clone(),
+                None,
+                None,
+                Some(OsString::from("/tmp/opencode"))
+            ),
+            Some(PathBuf::from("/tmp/opencode/opencode.json")),
+        );
+        assert_eq!(
+            opencode_config_file_from(home, None, None, None),
+            Some(PathBuf::from("/Users/alice/.config/opencode/opencode.json")),
+        );
+    }
+
+    #[test]
+    fn opencode_guard_honors_custom_config_filename() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let config = temp.path().join("oc.json");
+        let resolved = opencode_config_file_from(
+            Some(temp.path().to_path_buf()),
+            None,
+            Some(config.as_os_str().to_os_string()),
+            Some(OsString::from(temp.path().join("ignored-dir"))),
+        )
+        .unwrap();
+        assert_eq!(resolved, config);
+
+        let guard = OpenCodePluginGuard::install_config(&resolved).unwrap();
+        let plugin = temp.path().join("plugins").join(PANEFLOW_TS_BASENAME);
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            root["plugin"],
+            serde_json::json!([plugin.to_str().unwrap()]),
+            "custom config must contain the plugin entry"
+        );
+        assert!(
+            !temp.path().join("opencode.json").exists(),
+            "a custom OPENCODE_CONFIG file must not also create opencode.json"
+        );
+        assert!(
+            plugin.is_file(),
+            "plugin ts must live under the config file's plugins directory"
+        );
+        drop(guard);
     }
 
     #[test]
