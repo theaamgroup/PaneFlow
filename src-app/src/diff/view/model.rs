@@ -1,6 +1,6 @@
 //! Public, GPUI-light data model exposed by the diff view.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 /// One worktree column seed: its working-tree root and current branch name.
@@ -26,6 +26,35 @@ pub struct ReviewSubject {
 }
 
 impl ReviewSubject {
+    /// Repository root for a review of this checkout (#730).
+    ///
+    /// `checkout_common` is `git rev-parse --git-common-dir`: the shared `.git`
+    /// directory, not the work tree. A linked worktree of the workspace's
+    /// repository has that directory at `workspace_repo_root/.git`, so the
+    /// workspace root stays. Any other common dir is a different repository;
+    /// its parent is the root, and `checkout_root` is the fallback when the
+    /// common path is not a `.git` directory.
+    pub fn repo_root_for_checkout(
+        workspace_repo_root: Option<&Path>,
+        checkout_root: &Path,
+        checkout_common: &Path,
+    ) -> PathBuf {
+        if let Some(repo_root) = workspace_repo_root
+            && repo_root.join(".git") == checkout_common
+        {
+            return repo_root.to_path_buf();
+        }
+        if checkout_common
+            .file_name()
+            .is_some_and(|name| name == ".git")
+            && let Some(parent) = checkout_common.parent()
+            && parent.is_absolute()
+        {
+            return parent.to_path_buf();
+        }
+        checkout_root.to_path_buf()
+    }
+
     /// Last path component of the repository root, falling back to the whole
     /// path when there is none (a filesystem root).
     pub fn repo_name(&self) -> String {
