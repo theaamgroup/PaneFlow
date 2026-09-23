@@ -24,8 +24,8 @@ use super::pty_session::{
 };
 use super::service_detector::ServiceInfo;
 use super::types::{
-    CopyModeCursorState, CursorShape, HyperlinkZone, Line, Modes, Point, SearchHighlight,
-    TerminalWindowSize,
+    CopyModeCursorState, CursorShape, HyperlinkSource, HyperlinkZone, Line, Modes, Point,
+    SearchHighlight, TerminalWindowSize,
 };
 use crate::theme::UiColors;
 use crate::ui_primitives::{
@@ -229,7 +229,49 @@ pub(super) struct HoverLinkCache {
     line: Line,
     cwd: Option<String>,
     line_text: String,
+    /// Regex zones first, then file and code zones once `paths_ready`.
     zones: Vec<HyperlinkZone>,
+    /// False while file and code zones are still being resolved off the UI thread.
+    paths_ready: bool,
+}
+
+/// Inputs for one off-thread file/code scan. Owned so the background task
+/// never borrows the view.
+pub(super) struct HoverPathScan {
+    generation: u64,
+    line: Line,
+    cwd: Option<String>,
+    line_text: String,
+    char_to_col: Vec<usize>,
+}
+
+pub(super) fn point_in_hover_zone(zone: &HyperlinkZone, point: Point) -> bool {
+    point.line == zone.start.line
+        && point.column >= zone.start.column
+        && point.column <= zone.end.column
+}
+
+fn link_outranks_path(link: &HyperlinkZone) -> bool {
+    matches!(link.source, HyperlinkSource::Osc8 | HyperlinkSource::Regex)
+}
+
+/// File and code scanners. Blocking `canonicalize` / `is_file` stay in this
+/// function so the UI thread never calls them.
+fn scan_hover_path_zones(scan: HoverPathScan) -> Vec<HyperlinkZone> {
+    let cwd = scan.cwd.as_deref().map(std::path::Path::new);
+    let mut zones = crate::terminal::element::detect_file_paths_on_line_mapped(
+        &scan.line_text,
+        scan.line,
+        &scan.char_to_col,
+        cwd,
+    );
+    zones.extend(crate::terminal::element::detect_code_paths_on_line_mapped(
+        &scan.line_text,
+        scan.line,
+        &scan.char_to_col,
+        cwd,
+    ));
+    zones
 }
 
 pub struct TerminalView {
@@ -347,7 +389,12 @@ pub struct TerminalView {
     pub(super) link_modifier_held: bool,
     /// Last full-line link detection result. Avoids repeating canonicalize on
     /// every mouse move while the pointer stays on the same terminal line.
+    /// Regex zones are stored immediately; file and code zones land when the
+    /// background scan sets `paths_ready`.
     pub(super) hover_link_cache: Option<HoverLinkCache>,
+    /// Bumped for each new file/code scan. A scan that finishes late must not
+    /// underline a hover that has already moved on.
+    hover_path_generation: u64,
     /// US-012: the link under the cursor at modifier+mouse-down. The open is
     /// deferred to mouse-up and fires only if no drag occurred (empty
     /// selection), so a Ctrl+drag starting on a link selects text instead of
@@ -978,6 +1025,7 @@ impl TerminalView {
             ctrl_hovered_link: None,
             link_modifier_held: false,
             hover_link_cache: None,
+            hover_path_generation: 0,
             mouse_down_link: None,
             ime_marked_text: String::new(),
             needs_initial_clear: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -1193,38 +1241,125 @@ impl TerminalView {
         Some((line.line, line.text, line.char_to_column))
     }
 
-    pub(super) fn detect_links_at_hover(&mut self) -> Vec<HyperlinkZone> {
+    /// Regex URL zones for the hovered line, plus file/code zones when a scan
+    /// for this line has already finished. `Some` means the caller must run
+    /// the file and code scanners off the UI thread; this function does not.
+    pub(super) fn collect_sync_hover_zones(
+        &mut self,
+    ) -> (Vec<HyperlinkZone>, Option<HoverPathScan>) {
         let Some((line, line_text, char_to_col)) = self.hovered_line_text() else {
             self.hover_link_cache = None;
-            return Vec::new();
+            self.hover_path_generation = self.hover_path_generation.wrapping_add(1);
+            return (Vec::new(), None);
         };
         let trimmed = line_text.trim_end();
         let trimmed_chars = trimmed.chars().count();
         let map = &char_to_col[..trimmed_chars];
-        let cwd_key = self.terminal.current_cwd.clone();
+        let cwd = self.terminal.current_cwd.clone();
         if let Some(cache) = &self.hover_link_cache
             && cache.line == line
-            && cache.cwd == cwd_key
+            && cache.cwd == cwd
             && cache.line_text == trimmed
         {
-            return cache.zones.clone();
+            return (cache.zones.clone(), None);
         }
-        let cwd = cwd_key.as_deref().map(std::path::Path::new);
 
-        let mut zones = crate::terminal::element::detect_urls_on_line_mapped(trimmed, line, map);
-        zones.extend(crate::terminal::element::detect_file_paths_on_line_mapped(
-            trimmed, line, map, cwd,
-        ));
-        zones.extend(crate::terminal::element::detect_code_paths_on_line_mapped(
-            trimmed, line, map, cwd,
-        ));
+        let url_zones = crate::terminal::element::detect_urls_on_line_mapped(trimmed, line, map);
+        self.hover_path_generation = self.hover_path_generation.wrapping_add(1);
+        let scan = HoverPathScan {
+            generation: self.hover_path_generation,
+            line,
+            cwd: cwd.clone(),
+            line_text: trimmed.to_string(),
+            char_to_col: map.to_vec(),
+        };
         self.hover_link_cache = Some(HoverLinkCache {
             line,
-            cwd: cwd_key,
+            cwd,
             line_text: trimmed.to_string(),
-            zones: zones.clone(),
+            zones: url_zones.clone(),
+            paths_ready: false,
         });
-        zones
+        (url_zones, Some(scan))
+    }
+
+    /// Resolve file and code zones off the UI thread. `canonicalize` on a dead
+    /// mount would otherwise freeze the window for the whole syscall.
+    pub(super) fn spawn_hover_path_scan(&self, scan: HoverPathScan, cx: &mut Context<Self>) {
+        let generation = scan.generation;
+        let line = scan.line;
+        let cwd = scan.cwd.clone();
+        let line_text = scan.line_text.clone();
+        cx.spawn(
+            async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let path_zones = cx
+                    .background_spawn(async move { scan_hover_path_zones(scan) })
+                    .await;
+                let _ = this.update(cx, |view, cx| {
+                    view.apply_hover_path_zones(generation, line, cwd, line_text, path_zones, cx);
+                });
+            },
+        )
+        .detach();
+    }
+
+    fn apply_hover_path_zones(
+        &mut self,
+        generation: u64,
+        line: Line,
+        cwd: Option<String>,
+        line_text: String,
+        path_zones: Vec<HyperlinkZone>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.hover_path_generation != generation {
+            return;
+        }
+        {
+            let Some(cache) = &mut self.hover_link_cache else {
+                return;
+            };
+            if cache.paths_ready
+                || cache.line != line
+                || cache.cwd != cwd
+                || cache.line_text != line_text
+            {
+                return;
+            }
+            cache.zones.extend(path_zones.iter().cloned());
+            cache.paths_ready = true;
+        }
+        // Same gate as `apply_resolved_hover_link`: a result that lands after
+        // the modifier is released, or after the pointer leaves the scanned
+        // line, must not underline whatever cell is current now.
+        if !self.link_modifier_held {
+            return;
+        }
+        let Some(point) = self.hovered_cell else {
+            return;
+        };
+        let same_line = self
+            .hovered_line_text()
+            .is_some_and(|(live_line, live_text, _)| {
+                live_line == line && live_text.trim_end() == line_text
+            });
+        if !same_line || self.terminal.current_cwd != cwd {
+            return;
+        }
+        if self
+            .ctrl_hovered_link
+            .as_ref()
+            .is_some_and(|link| link_outranks_path(link) && point_in_hover_zone(link, point))
+        {
+            return;
+        }
+        if let Some(zone) = path_zones
+            .into_iter()
+            .find(|zone| point_in_hover_zone(zone, point))
+        {
+            self.ctrl_hovered_link = Some(zone);
+            cx.notify();
+        }
     }
 
     /// Detect regex URLs on the line at the given grid point.
