@@ -1384,8 +1384,12 @@ pub fn is_skipped_name(path: &str) -> bool {
 /// guard for the common added/modified case; a metadata miss (deleted file)
 /// reads as not-too-large. The base side - and the metadata-miss case - is
 /// caught by the post-load length check in [`load_column`].
+///
+/// `symlink_metadata` does not follow the link. A symlink's length is its
+/// target-path length, so [`load_working_text`] can still diff that path
+/// instead of stubbing the pointee.
 fn is_too_large(worktree_dir: &Path, rel_path: &str) -> bool {
-    std::fs::metadata(worktree_dir.join(rel_path))
+    std::fs::symlink_metadata(worktree_dir.join(rel_path))
         .map(|m| m.len() > MAX_FILE_BYTES)
         .unwrap_or(false)
 }
@@ -2161,6 +2165,39 @@ pub(crate) mod tests {
         assert!(
             text.is_empty() && is_binary,
             "oversized working-tree content should stub as binary without keeping the buffer"
+        );
+    }
+
+    #[test]
+    fn symlink_to_large_file_is_diffed_as_target_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let oversized_len = MAX_FILE_BYTES as usize + 2;
+        let pointee = vec![b'a'; oversized_len];
+        std::fs::write(root.join("huge.bin"), &pointee).unwrap();
+        // Relative target: `read_link` returns this string, not the pointee.
+        let target = "huge.bin";
+        std::os::unix::fs::symlink(target, root.join("link.bin")).unwrap();
+
+        assert!(
+            is_too_large(root, "huge.bin"),
+            "the regular file is over MAX_FILE_BYTES"
+        );
+        assert!(
+            !is_too_large(root, "link.bin"),
+            "a symlink is sized by its target path, not the pointee"
+        );
+        assert!(
+            !is_too_large(root, "missing.bin"),
+            "a missing path stays not-too-large"
+        );
+
+        let (text, is_binary) = load_working_text(root, "link.bin");
+        assert_eq!((text.as_str(), is_binary), (target, false));
+        assert_ne!(
+            text.as_bytes(),
+            pointee.as_slice(),
+            "load_working_text must not return the pointee bytes"
         );
     }
 
