@@ -137,6 +137,26 @@ pub(crate) fn validate_group_name<Id>(
     Ok(())
 }
 
+/// Entity ids of panes that still exist, across every tab of every workspace.
+///
+/// The broadcast picker intersects group membership with this set. Walking
+/// only the active tab dropped background-tab members, so the picker could
+/// show "0 panes" while `live_active_group_members` still delivered those
+/// panes (issue #723). Closed panes are absent (US-002 AC4). Same walk as
+/// `sync_broadcast_stripes`: every tab, `collect_panes` (zoom-saved trees
+/// included), not `active_tab` + `collect_leaves`.
+pub(crate) fn live_pane_ids(workspaces: &[crate::workspace::Workspace]) -> HashSet<gpui::EntityId> {
+    let mut live = HashSet::new();
+    for ws in workspaces {
+        for tab in ws.tabs() {
+            for pane in tab.collect_panes() {
+                live.insert(pane.entity_id());
+            }
+        }
+    }
+    live
+}
+
 impl PaneFlowApp {
     /// The pane a cockpit gesture targets: the focused leaf, or the first
     /// leaf of the active workspace as a fallback so the shortcut still
@@ -416,14 +436,8 @@ impl PaneFlowApp {
         let renaming = self.broadcast_picker_renaming;
 
         // Live member counts so a closed pane never inflates a row (AC4).
-        let mut live: HashSet<gpui::EntityId> = HashSet::new();
-        for ws in &self.workspaces {
-            if let Some(root) = &ws.active_tab().root {
-                for pane in root.collect_leaves() {
-                    live.insert(pane.entity_id());
-                }
-            }
-        }
+        // Background tabs count: they are broadcast targets too (issue #723).
+        let live = live_pane_ids(&self.workspaces);
 
         let placeholder = if renaming.is_some() {
             "Rename group…"
@@ -758,5 +772,68 @@ mod tests {
         assert!(!state_blocks_delivery(&AgentState::Finished));
         // An Errored agent's process is gone - the pane is a bare shell.
         assert!(!state_blocks_delivery(&AgentState::Errored));
+    }
+
+    /// Issue #723: a member that lives only on a background tab is still a
+    /// broadcast target (`live_active_group_members` walks every tab). The
+    /// picker's live set is `live_pane_ids`; counting only `active_tab()`
+    /// would report 0 here.
+    #[gpui::test]
+    fn picker_member_count_matches_broadcast_targets(cx: &mut gpui::TestAppContext) {
+        use crate::layout::LayoutTree;
+        use crate::workspace::{Tab, Workspace};
+        use gpui::AppContext as _;
+
+        let new_pane = |cx: &mut gpui::VisualTestContext| {
+            let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+            cx.new(|cx| crate::pane::Pane::new(terminal, 1, cx))
+        };
+        let cx = cx.add_empty_window();
+
+        // Born on tab 0. Opening another tab activates that tab, leaving
+        // the member on the background tab only.
+        let background = new_pane(cx);
+        let background_id = background.entity_id();
+        let mut ws = Workspace::with_cwd_and_id(1, "ws", std::path::PathBuf::new(), background);
+        assert!(ws.open_tab(Tab::new(
+            String::new(),
+            Some(LayoutTree::Leaf(new_pane(cx)))
+        )));
+        // A closed pane's id can linger in the group between syncs (AC4).
+        let detached_id = new_pane(cx).entity_id();
+
+        assert_eq!(ws.active_tab_idx(), 1);
+        assert!(
+            !ws.active_tab()
+                .collect_panes()
+                .iter()
+                .any(|pane| pane.entity_id() == background_id),
+            "fixture: an active-tab walk must not see the member"
+        );
+
+        let members = [background_id, detached_id];
+        let mut broadcast_targets = Vec::new();
+        for tab in ws.tabs() {
+            for pane in tab.collect_panes() {
+                let id = pane.entity_id();
+                if members.contains(&id) {
+                    broadcast_targets.push(id);
+                }
+            }
+        }
+        let live = live_pane_ids(std::slice::from_ref(&ws));
+        let picker_count = members.iter().filter(|id| live.contains(id)).count();
+
+        assert_eq!(broadcast_targets, vec![background_id]);
+        assert_eq!(
+            picker_count,
+            broadcast_targets.len(),
+            "picker count must match panes the broadcast would reach"
+        );
+        assert!(live.contains(&background_id));
+        assert!(
+            !live.contains(&detached_id),
+            "a pane that is not on any tab must not inflate the count"
+        );
     }
 }

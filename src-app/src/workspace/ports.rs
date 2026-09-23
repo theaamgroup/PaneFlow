@@ -47,10 +47,10 @@ pub struct PaneScan {
     /// identity-pill agent (US-013); the union across panes feeds the
     /// workspace-level `detected_agents` aggregate.
     pub agents: Vec<String>,
-    /// Best-effort representative command for surface naming, resolved by the
-    /// same off-thread process scan so IPC/UI callers never do process-table
-    /// I/O. This is a child-selection heuristic, not a PTY foreground process
-    /// group query.
+    /// Representative command for surface naming, resolved by the same
+    /// off-thread process scan so IPC/UI callers never do process-table I/O.
+    /// This is the PTY foreground process group: the shell at a prompt, or
+    /// the job it is running, not an arbitrary descendant.
     pub foreground_command: Option<String>,
 }
 
@@ -138,12 +138,60 @@ fn classify_frontend_argv<'a>(args: impl Iterator<Item = &'a str>) -> Option<&'s
     None
 }
 
+/// One process in a PTY subtree walk. `pgid` is the kernel process group
+/// (`pbi_pgid`); `0` means the group could not be read and must not match a
+/// real foreground group.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug)]
+struct ProcessGroupPid {
+    pid: u32,
+    pgid: u32,
+}
+
+/// Representative pid of a PTY subtree.
+///
+/// `processes` is breadth-first order from the shell. When `foreground_pgid`
+/// is known, the representative is the first process in that order whose
+/// process group is the foreground group: the job closest to the shell.
+/// When the group is unknown, or no walked process is a member, the
+/// representative is `root_pid`. The last pid in the walk is not special: a
+/// long-lived background helper is often the deepest descendant.
+#[cfg(any(target_os = "macos", test))]
+fn representative_pid(
+    root_pid: u32,
+    processes: &[ProcessGroupPid],
+    foreground_pgid: Option<u32>,
+) -> u32 {
+    // pgid 0 is "not read", not a process group, so it is never foreground.
+    foreground_pgid
+        .filter(|foreground| *foreground != 0)
+        .and_then(|foreground| {
+            processes
+                .iter()
+                .find_map(|process| (process.pgid == foreground).then_some(process.pid))
+        })
+        .unwrap_or(root_pid)
+}
+
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // macOS
 // ---------------------------------------------------------------------------
+
+/// One `proc_bsdinfo` snapshot for a scan: the ppid→children map plus each
+/// process's group and the foreground group of its controlling terminal.
+#[cfg(target_os = "macos")]
+struct MacosProcTable {
+    children_of: std::collections::HashMap<u32, Vec<u32>>,
+    pgid_of: std::collections::HashMap<u32, u32>,
+    /// `e_tpgid` for processes that have a controlling tty. This is the
+    /// kernel's tty foreground group (the value `tcgetpgrp` reads), sampled
+    /// in the same `proc_pidinfo` as `pbi_pgid`. The scan thread does not
+    /// hold the PTY master, so it cannot call `tcgetpgrp` itself.
+    tty_foreground_pgid: std::collections::HashMap<u32, u32>,
+}
 
 /// macOS ppid→children map over every visible process, built once per scan.
 ///
@@ -153,17 +201,25 @@ fn classify_frontend_argv<'a>(args: impl Iterator<Item = &'a str>) -> Option<&'s
 /// we enumerate all pids (`listpids(ProcAllPIDS)`) and read each one's parent
 /// from `proc_bsdinfo.pbi_ppid` - the very same `proc_pidinfo(PROC_PIDTBSDINFO)`
 /// query that `name()` already succeeds with for same-user processes. Mirrors
-/// the parent-map walk. Processes we can't
-/// inspect (EPERM on SIP-protected / other-user pids, dead-pid races) are
-/// skipped - our agents are same-user PTY children, always readable.
+/// the parent-map walk. That read also records `pbi_pgid` and `e_tpgid`, so
+/// choosing the foreground command does not walk the table again. Processes
+/// we can't inspect (EPERM on SIP-protected / other-user pids, dead-pid
+/// races) are skipped - our agents are same-user PTY children, always readable.
 #[cfg(target_os = "macos")]
-fn macos_children_map() -> std::collections::HashMap<u32, Vec<u32>> {
+fn macos_children_map() -> MacosProcTable {
     use libproc::libproc::bsd_info::BSDInfo;
     use libproc::libproc::proc_pid::pidinfo;
     use libproc::processes::{ProcFilter, pids_by_type};
 
-    let mut children_of: std::collections::HashMap<u32, Vec<u32>> =
-        std::collections::HashMap::new();
+    // `NODEV` is `(dev_t)-1`. `e_tdev` stays that, and `e_tpgid` stays 0,
+    // when the process has no controlling terminal.
+    const NO_CONTROLLING_TTY: u32 = u32::MAX;
+
+    let mut table = MacosProcTable {
+        children_of: std::collections::HashMap::new(),
+        pgid_of: std::collections::HashMap::new(),
+        tty_foreground_pgid: std::collections::HashMap::new(),
+    };
     let pids = match pids_by_type(ProcFilter::All) {
         Ok(pids) => pids,
         Err(e) => {
@@ -181,7 +237,7 @@ fn macos_children_map() -> std::collections::HashMap<u32, Vec<u32>> {
                      badges and agent detection will be unavailable"
                 );
             }
-            return children_of;
+            return table;
         }
     };
     for pid in pids {
@@ -189,10 +245,23 @@ fn macos_children_map() -> std::collections::HashMap<u32, Vec<u32>> {
             continue;
         }
         if let Ok(info) = pidinfo::<BSDInfo>(pid as i32, 0) {
-            children_of.entry(info.pbi_ppid).or_default().push(pid);
+            table
+                .children_of
+                .entry(info.pbi_ppid)
+                .or_default()
+                .push(pid);
+            table.pgid_of.insert(pid, info.pbi_pgid);
+            // `s_ttypgrpid` is a `pid_t`. No foreground group is `NO_PID`
+            // (-1), which this u32 field stores as `u32::MAX`.
+            if info.e_tdev != NO_CONTROLLING_TTY
+                && info.e_tpgid > 1
+                && info.e_tpgid <= i32::MAX as u32
+            {
+                table.tty_foreground_pgid.insert(pid, info.e_tpgid);
+            }
         }
     }
-    children_of
+    table
 }
 
 /// macOS descendant walker - BFS over the prebuilt `children_of` ppid map
@@ -366,15 +435,27 @@ fn parse_procargs2(buf: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// Command name of the subtree's representative pid.
+///
+/// `foreground_pgid` is the shell's controlling-terminal foreground group
+/// (`e_tpgid`, the same group `tcgetpgrp` reports). `None` (no controlling
+/// tty) falls back to the root pid inside [`representative_pid`]. The name
+/// is `libproc::name`, trimmed, with an empty result dropped: the same
+/// resolution as before, applied to the foreground pid rather than
+/// `pids.last()`.
 #[cfg(target_os = "macos")]
-fn macos_representative_command(pids: &[u32]) -> Option<String> {
+fn macos_representative_command(
+    root_pid: u32,
+    processes: &[ProcessGroupPid],
+    foreground_pgid: Option<u32>,
+) -> Option<String> {
     use libproc::libproc::proc_pid::name;
 
-    let pid = pids.last().copied()?;
+    let pid = representative_pid(root_pid, processes, foreground_pgid);
     name(pid as i32)
         .ok()
-        .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty())
+        .map(|command| command.trim().to_string())
+        .filter(|command| !command.is_empty())
 }
 
 /// Scan every terminal's PTY subtree in one pass (macOS). libproc's socket
@@ -396,13 +477,13 @@ pub fn scan_panes(
     // One ppid→children snapshot for the whole scan - every root's subtree is
     // carved out of it, so the full `listpids` enumeration happens once, not
     // per pane.
-    let children_of = macos_children_map();
+    let table = macos_children_map();
     let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
     for &(key, root_pid) in roots {
         if root_pid == 0 {
             continue;
         }
-        let pids = bfs_descendants_macos(root_pid, &children_of, &mut visited);
+        let pids = bfs_descendants_macos(root_pid, &table.children_of, &mut visited);
 
         // `libproc::name` returns the kernel's `p_comm` - same semantics
         // and 16-char limit as a process `comm` field. EPERM (sandbox /
@@ -437,12 +518,26 @@ pub fn scan_panes(
         ports.sort_by_key(|e| (e.port, e.frontend.is_none()));
         ports.dedup_by_key(|e| e.port);
 
+        let processes: Vec<ProcessGroupPid> = pids
+            .iter()
+            .map(|&pid| ProcessGroupPid {
+                pid,
+                pgid: table.pgid_of.get(&pid).copied().unwrap_or(0),
+            })
+            .collect();
+        // The shell's tty foreground group. Absent when the root has no
+        // controlling terminal; the selector then names the root pid.
+        let foreground_pgid = table.tty_foreground_pgid.get(&root_pid).copied();
         results.insert(
             key,
             PaneScan {
                 ports,
                 agents,
-                foreground_command: macos_representative_command(&pids),
+                foreground_command: macos_representative_command(
+                    root_pid,
+                    &processes,
+                    foreground_pgid,
+                ),
             },
         );
     }
@@ -592,5 +687,50 @@ mod tests {
             agents.iter().any(|a| a == "sleep"),
             "macOS subtree scan must detect the live `sleep` child; got {agents:?}"
         );
+    }
+
+    /// Idle shell pgid 10, background `gitstatusd` pgid 20, and a foreground
+    /// `cargo` pgid 30. The representative is the foreground group, never
+    /// `pids.last()` and never "always the root".
+    #[test]
+    fn representative_command_ignores_background_child() {
+        let names = [
+            (10u32, "zsh"),
+            (20, "gitstatusd"),
+            (30, "cargo"),
+            (31, "rustc"),
+        ];
+        let command = |pid: u32| {
+            names
+                .iter()
+                .find(|(id, _)| *id == pid)
+                .map(|(_, name)| *name)
+        };
+
+        // BFS order: the idle shell, then the long-lived background helper.
+        // The helper is what `pids.last()` would report.
+        let idle = [
+            ProcessGroupPid { pid: 10, pgid: 10 },
+            ProcessGroupPid { pid: 20, pgid: 20 },
+        ];
+        let idle_pid = representative_pid(10, &idle, Some(10));
+        assert_eq!(command(idle_pid), Some("zsh"));
+        assert_ne!(idle_pid, 20);
+
+        // Foreground group is `cargo`, with the same background helper still
+        // in the walk (and last, so a last-pid cheat cannot land on cargo).
+        let busy = [
+            ProcessGroupPid { pid: 10, pgid: 10 },
+            ProcessGroupPid { pid: 30, pgid: 30 },
+            ProcessGroupPid { pid: 31, pgid: 30 },
+            ProcessGroupPid { pid: 20, pgid: 20 },
+        ];
+        let busy_pid = representative_pid(10, &busy, Some(30));
+        assert_eq!(command(busy_pid), Some("cargo"));
+        assert_ne!(command(busy_pid), Some("zsh"));
+        assert_ne!(command(busy_pid), Some("gitstatusd"));
+
+        // No foreground group (master fd unavailable): the shell, not the helper.
+        assert_eq!(command(representative_pid(10, &busy, None)), Some("zsh"));
     }
 }
