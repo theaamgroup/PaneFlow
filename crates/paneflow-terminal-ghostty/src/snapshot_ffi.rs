@@ -6,6 +6,8 @@ use crate::{GhosttyError, Result, Rgb, UnderlineStyle, WideCell};
 
 const MAX_GRAPHEME_CODEPOINTS: usize = 1024;
 const INLINE_GRAPHEME_CODEPOINTS: usize = 16;
+// The C API writes every codepoint and a multi-megabyte cluster must not OOM the process.
+const MAX_GRAPHEME_READ_CODEPOINTS: usize = 1_048_576;
 
 mod sealed {
     pub trait Sealed {}
@@ -143,14 +145,13 @@ pub(crate) fn cell_grapheme(
 ) -> Result<(char, Option<Box<[char]>>)> {
     let len = usize::try_from(len)
         .map_err(|_| GhosttyError::AbiMismatch("grapheme length overflow".into()))?;
-    if len > MAX_GRAPHEME_CODEPOINTS {
-        return Err(GhosttyError::LimitExceeded {
-            resource: "cell grapheme",
-            limit: MAX_GRAPHEME_CODEPOINTS,
-        });
-    }
     if len == 0 {
         return Ok((' ', None));
+    }
+    // `ghostty_render_state_row_cells_get` for `GRAPHEMES_BUF` writes every
+    // reported codepoint and takes no capacity. A shorter buffer overflows.
+    if len > MAX_GRAPHEME_READ_CODEPOINTS {
+        return Ok(('\u{FFFD}', None));
     }
     let mut inline = [0u32; INLINE_GRAPHEME_CODEPOINTS];
     let mut heap = Vec::new();
@@ -168,13 +169,20 @@ pub(crate) fn cell_grapheme(
         )
     };
     check("render_state_row_cells_get_graphemes", result)?;
-    let mut characters = codepoints
+    Ok(clamp_reported_grapheme(codepoints))
+}
+
+/// Keep the first [`MAX_GRAPHEME_CODEPOINTS`] of a reported cluster. The base
+/// codepoint stays the cell character; the rest, capped, are combining marks.
+fn clamp_reported_grapheme(codepoints: &[u32]) -> (char, Option<Box<[char]>>) {
+    let kept = &codepoints[..codepoints.len().min(MAX_GRAPHEME_CODEPOINTS)];
+    let mut characters = kept
         .iter()
         .copied()
         .map(|value| char::from_u32(value).unwrap_or(char::REPLACEMENT_CHARACTER));
     let character = characters.next().unwrap_or(' ');
-    let zerowidth = (len > 1).then(|| characters.collect::<Vec<_>>().into_boxed_slice());
-    Ok((character, zerowidth))
+    let zerowidth = (kept.len() > 1).then(|| characters.collect::<Vec<_>>().into_boxed_slice());
+    (character, zerowidth)
 }
 
 pub(crate) fn terminal_get<F: TerminalField>(terminal: sys::GhosttyTerminal) -> Result<F::Value> {
@@ -483,5 +491,19 @@ mod discriminant_tests {
         assert!(wide_cell(i32::MAX).is_err());
         assert!(underline(i32::MAX).is_err());
         assert!(cursor_shape(i32::MAX).is_err());
+    }
+
+    /// Vendored libghostty stops storing combiners at 64, so a live snapshot
+    /// never reports a cluster past [`MAX_GRAPHEME_CODEPOINTS`]. This drives
+    /// the clamp with the length the snapshot path would keep.
+    #[test]
+    fn clamp_reported_grapheme_keeps_the_base_and_drops_the_tail() {
+        let mut codepoints = vec![u32::from('a')];
+        codepoints.extend(std::iter::repeat(0x0301).take(2000));
+        let (character, zerowidth) = clamp_reported_grapheme(&codepoints);
+        assert_eq!(character, 'a');
+        let extra = zerowidth.expect("combiners");
+        assert_eq!(extra.len(), MAX_GRAPHEME_CODEPOINTS - 1);
+        assert!(extra.iter().all(|mark| *mark == '\u{0301}'));
     }
 }
