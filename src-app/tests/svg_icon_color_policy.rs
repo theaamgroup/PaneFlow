@@ -39,13 +39,35 @@ fn rust_sources(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The builder chain that starts at `start` in `src`, ending at the statement
-/// or argument terminator. Good enough to tell "this `svg()` sets a colour"
-/// from "this one does not": both `.path(..)` and `.text_color(..)` sit on the
-/// same chain, and a chain never spans a `;`.
+/// The builder chain that starts at `svg()` at `start`.
+///
+/// A GPUI render tree ends that chain at the next sibling, not at the
+/// statement's `;`. Stop at the first `,` or `;`, or the first unmatched
+/// `)` / `]` / `}`, once parentheses, brackets, and braces opened after
+/// `svg()` are balanced. Otherwise a sibling's `.text_color(` satisfies the
+/// check for an icon that sets none of its own.
 fn builder_chain(src: &str, start: usize) -> &str {
     let rest = &src[start..];
-    let end = rest.find(';').unwrap_or(rest.len());
+    let mut depth = 0usize;
+    let mut end = rest.len();
+    // `svg()`'s own `()` is the call, not an argument nested on the chain.
+    let scan = rest.strip_prefix("svg()").unwrap_or(rest);
+    let base = rest.len() - scan.len();
+    for (index, ch) in scan.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => {
+                end = base + index;
+                break;
+            }
+            ')' | ']' | '}' => depth -= 1,
+            ',' | ';' if depth == 0 => {
+                end = base + index;
+                break;
+            }
+            _ => {}
+        }
+    }
     &rest[..end]
 }
 
