@@ -38,8 +38,28 @@ pub struct ModelPricing {
 /// figures as of [`PRICING_TABLE_VERSION`]; all estimates.
 pub const PRICING_TABLE: &[(&str, ModelPricing)] = &[
     // ── Anthropic (Claude Code) ──────────────────────────────────────────
-    // Opus 4.5 and later ($5/$25). Must precede generic "opus" (4 / 4.1).
-    // "opus-4-1" is not a key: it is a substring of "opus-4-10".
+    // Current Opus rates. More specific keys first: "claude-opus-5-5"
+    // contains "opus-5", and "opus-4-1" is a substring of "opus-4-10".
+    // Opus 5.5 is $4/$20 (cache read is 0.05x, not the usual 0.1x).
+    (
+        "opus-5-5",
+        ModelPricing {
+            input: 4.0,
+            output: 20.0,
+            cache_read: 0.20,
+            cache_write: 5.0,
+        },
+    ),
+    // Opus 5 and Opus 4.5-4.8 ($5/$25). Must precede generic "opus" (4 / 4.1).
+    (
+        "opus-5",
+        ModelPricing {
+            input: 5.0,
+            output: 25.0,
+            cache_read: 0.50,
+            cache_write: 6.25,
+        },
+    ),
     (
         "opus-4-5",
         ModelPricing {
@@ -189,7 +209,15 @@ mod tests {
     #[test]
     fn current_opus_models_use_current_rates() {
         assert_eq!(lookup("claude-opus-4-6").unwrap().input, 5.0);
-        // `claude-opus-4-1` contains none of opus-4-5..opus-4-8, so it stays
+        let opus5 = lookup("claude-opus-5").unwrap();
+        assert_eq!(opus5.input, 5.0);
+        assert_eq!(opus5.output, 25.0);
+        // `claude-opus-5-5` contains "opus-5", so the 5.5 row must win.
+        let opus55 = lookup("claude-opus-5-5").unwrap();
+        assert_eq!(opus55.input, 4.0);
+        assert_eq!(opus55.output, 20.0);
+        assert_eq!(opus55.cache_read, 0.20);
+        // `claude-opus-4-1` contains none of the current keys, so it stays
         // on the Opus 4 / 4.1 row. "opus-4-1" is not a key (substring of
         // "opus-4-10").
         assert_eq!(lookup("claude-opus-4-1").unwrap().input, 15.0);
