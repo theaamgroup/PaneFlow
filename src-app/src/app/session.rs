@@ -1078,7 +1078,8 @@ fn persisted_dir_is_live(path: &Path) -> bool {
 /// directory answers in microseconds; only a dead network or cloud mount
 /// runs this out, and such a cwd is treated as unavailable rather than
 /// letting `stat` pin the render thread for the mount's own timeout.
-const RESTORED_CWD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+pub(crate) const RESTORED_CWD_PROBE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(250);
 
 /// Probe a persisted cwd off the render thread with a deadline. `stat` on
 /// an unmounted SMB/NFS/iCloud volume can block for tens of seconds, and
@@ -1086,7 +1087,7 @@ const RESTORED_CWD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// helper thread and a late answer counts as "not a directory". As with
 /// the git untracked-stats helper, a stalled thread is left to unwind on
 /// its own once the filesystem finally answers.
-fn persisted_dir_is_live_within(path: &Path, timeout: std::time::Duration) -> bool {
+pub(crate) fn persisted_dir_is_live_within(path: &Path, timeout: std::time::Duration) -> bool {
     probe_persisted_dir_within(path, timeout).unwrap_or(false)
 }
 
@@ -1343,12 +1344,13 @@ fn is_numbered_terminal_title(title: &str) -> bool {
 /// which is the state it can always fall back to. Logged, so a binding that
 /// silently vanished can be traced.
 ///
-/// Deliberately a plain `is_dir` and no canonicalization: this runs on the
-/// bootstrap path, and a stat is bounded where resolving symlinks across a
-/// dead network mount is not.
+/// The directory check is [`persisted_dir_is_live_within`] (issue #705), not
+/// a plain `is_dir`. This runs on the GPUI frame step, and `stat` on a dead
+/// network mount is not bounded. Still no canonicalization: resolving
+/// symlinks across that mount is a second unbounded `stat`.
 fn restored_tab_worktree(workspace_title: &str, path: Option<&str>) -> Option<PathBuf> {
     let path = PathBuf::from(path.filter(|p| !p.is_empty())?);
-    if path.is_dir() {
+    if persisted_dir_is_live_within(&path, RESTORED_CWD_PROBE_TIMEOUT) {
         return Some(path);
     }
     log::warn!(
@@ -2413,6 +2415,35 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|path| path != &stalled);
+    }
+
+    /// Issue #705: a tab bound to a worktree on a dead mount must not stall
+    /// the GPUI frame step. The binding is dropped inside the probe bound.
+    #[test]
+    fn restored_tab_worktree_falls_back_when_stat_stalls() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let stalled = tmp.path().join("unmounted-volume");
+        let stalled_str = stalled.to_string_lossy().into_owned();
+        STALLED_STAT_PATHS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(stalled.clone());
+        let bound = STALLED_STAT_DELAY / 2;
+
+        let started = std::time::Instant::now();
+        let restored = restored_tab_worktree("ws", Some(&stalled_str));
+        let elapsed = started.elapsed();
+
+        STALLED_STAT_PATHS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|path| path != &stalled);
+
+        assert!(
+            elapsed < bound,
+            "tab worktree probe blocked the caller for {elapsed:?} (bound {bound:?})"
+        );
+        assert_eq!(restored, None, "a stalled worktree stat drops the binding");
     }
 
     /// Issue #521: the click-time probe on a recent row tells a definite
