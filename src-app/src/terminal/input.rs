@@ -19,6 +19,7 @@ use paneflow_terminal_ghostty as ghostty;
 use crate::keys::TerminalKeySequence;
 use crate::terminal::types::{
     HyperlinkSource, HyperlinkZone, Modes, Point, SelectionGeometry, SelectionKind, ShellQuoting,
+    terminal_metric_to_u16,
 };
 
 #[cfg(debug_assertions)]
@@ -196,6 +197,56 @@ struct ReportedMouseInput {
     modifiers: gpui::Modifiers,
     any_button_pressed: bool,
     repeat: usize,
+}
+
+/// A pointer position and screen size in the engine's pixel space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct EngineMouseGeometry {
+    x: f32,
+    y: f32,
+    screen_width: u32,
+    screen_height: u32,
+}
+
+/// Map a grid-relative pointer position into the pixel space the engine's
+/// mouse encoder divides by.
+///
+/// The encoder turns pixels into cells with the integer cell size the grid
+/// was last resized with ([`terminal_metric_to_u16`]), but the grid is painted
+/// with the fractional measured size. Handing it real pixels makes the
+/// reported column drift by `x * (rounded - measured) / measured` cells: a
+/// 7.8px cell rounded to 8 reports a click at the right edge of a 100-column
+/// pane several cells to the left of where it landed, so a one-cell TUI
+/// button there never receives its click. Scaling by `rounded / measured`
+/// keeps `floor(x / cell)` identical on both sides.
+fn engine_mouse_geometry(
+    position: (f32, f32),
+    cell_width: f32,
+    line_height: f32,
+    columns: usize,
+    screen_lines: usize,
+) -> EngineMouseGeometry {
+    fn axis(position: f32, measured: f32, cells: usize) -> (f32, u32) {
+        let rounded = terminal_metric_to_u16(measured).max(1);
+        let scaled = if measured.is_finite() && measured > 0.0 {
+            // Divide first. `position * rounded / measured` can stop just
+            // short of the next rounded cell (172 * 9 / 8.6 is 179.99998),
+            // and the engine then reports the previous column.
+            (position.max(0.0) / measured) * f32::from(rounded)
+        } else {
+            0.0
+        };
+        let extent = (cells as u64 * u64::from(rounded)).clamp(1, u64::from(u32::MAX)) as u32;
+        (scaled, extent)
+    }
+    let (x, screen_width) = axis(position.0, cell_width, columns);
+    let (y, screen_height) = axis(position.1, line_height, screen_lines);
+    EngineMouseGeometry {
+        x,
+        y,
+        screen_width,
+        screen_height,
+    }
 }
 
 impl ReportedMouseButton {
@@ -559,12 +610,16 @@ impl TerminalView {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let metrics = self.terminal.session_backend().grid_metrics();
-            let screen_width = (metrics.columns as f32 * self.cell_width.as_f32())
-                .max(1.0)
-                .min(u32::MAX as f32) as u32;
-            let screen_height = (metrics.screen_lines as f32 * self.line_height.as_f32())
-                .max(1.0)
-                .min(u32::MAX as f32) as u32;
+            let geometry = engine_mouse_geometry(
+                (
+                    (position.x - origin.x).as_f32(),
+                    (position.y - origin.y).as_f32(),
+                ),
+                self.cell_width.as_f32(),
+                self.line_height.as_f32(),
+                metrics.columns,
+                metrics.screen_lines,
+            );
             let input = ghostty::MouseInput {
                 action: match action {
                     ReportedMouseAction::Press => ghostty::MouseAction::Press,
@@ -579,10 +634,10 @@ impl TerminalView {
                     ReportedMouseButton::WheelDown => ghostty::MouseButton::Five,
                 }),
                 modifiers: ghostty_modifiers(modifiers),
-                x: (position.x - origin.x).max(gpui::px(0.0)).as_f32(),
-                y: (position.y - origin.y).max(gpui::px(0.0)).as_f32(),
-                screen_width,
-                screen_height,
+                x: geometry.x,
+                y: geometry.y,
+                screen_width: geometry.screen_width,
+                screen_height: geometry.screen_height,
                 padding_top: 0,
                 padding_bottom: 0,
                 padding_left: 0,
@@ -1417,6 +1472,109 @@ mod tests {
     use crate::terminal::types::{Modes, ShellQuoting};
     use gpui::AppContext;
     use std::path::PathBuf;
+
+    /// A click on the last column of a fractional-cell grid must reach the
+    /// TUI as that column. Unscaled, the engine divided real pixels by the
+    /// rounded 8px cell and reported column 98 for a click on column 100, so
+    /// Claude Code's one-cell diff panel close button never saw its click.
+    #[test]
+    fn a_click_on_the_last_column_of_a_fractional_grid_reports_that_column() {
+        use super::engine_mouse_geometry;
+        use paneflow_terminal_ghostty as ghostty;
+
+        let (columns, rows, cell_width, line_height) = (100usize, 30usize, 7.8f32, 16.4f32);
+        let size = ghostty::WindowSize::new(columns, rows, 8, 16).expect("valid size");
+        let mut terminal =
+            ghostty::DisplayTerminal::new(size, 100, ghostty::TerminalAppearance::default())
+                .expect("terminal must initialize");
+        terminal
+            .feed(b"\x1b[?1000h\x1b[?1006h")
+            .expect("sgr mouse on");
+
+        for (column, row) in [(0usize, 0usize), (49, 14), (columns - 1, rows - 1)] {
+            let position = (
+                (column as f32 + 0.5) * cell_width,
+                (row as f32 + 0.5) * line_height,
+            );
+            let geometry = engine_mouse_geometry(position, cell_width, line_height, columns, rows);
+            assert_eq!(geometry.screen_width, 800);
+            assert_eq!(geometry.screen_height, 480);
+            let bytes = terminal
+                .encode_mouse(ghostty::MouseInput {
+                    action: ghostty::MouseAction::Press,
+                    button: Some(ghostty::MouseButton::Left),
+                    modifiers: ghostty::Modifiers::empty(),
+                    x: geometry.x,
+                    y: geometry.y,
+                    screen_width: geometry.screen_width,
+                    screen_height: geometry.screen_height,
+                    padding_top: 0,
+                    padding_bottom: 0,
+                    padding_left: 0,
+                    padding_right: 0,
+                    any_button_pressed: true,
+                })
+                .expect("encode");
+            assert_eq!(
+                String::from_utf8(bytes).expect("ascii"),
+                format!("\x1b[<0;{};{}M", column + 1, row + 1),
+                "cell ({column}, {row})"
+            );
+        }
+    }
+
+    /// An integer-pixel click on a cell boundary must report that cell.
+    /// 8.6px rounds to 9. At x=172 the measured grid is column 20, but
+    /// multiplying by 9 before dividing by 8.6 stops at 179.99998 and the
+    /// engine reports column 19.
+    #[test]
+    fn a_click_on_an_integer_pixel_cell_boundary_reports_that_column() {
+        use super::engine_mouse_geometry;
+        use paneflow_terminal_ghostty as ghostty;
+
+        let (columns, rows, cell_width, line_height) = (40usize, 10usize, 8.6f32, 16.0f32);
+        let (column, row) = (20usize, 4usize);
+        let position = (172.0f32, (row as f32 + 0.5) * line_height);
+        assert_eq!((position.0 / cell_width) as usize, column);
+
+        let size = ghostty::WindowSize::new(columns, rows, 9, 16).expect("valid size");
+        let mut terminal =
+            ghostty::DisplayTerminal::new(size, 100, ghostty::TerminalAppearance::default())
+                .expect("terminal must initialize");
+        terminal
+            .feed(b"\x1b[?1000h\x1b[?1006h")
+            .expect("sgr mouse on");
+
+        let geometry = engine_mouse_geometry(position, cell_width, line_height, columns, rows);
+        assert_eq!(geometry.screen_width, 360);
+        let bytes = terminal
+            .encode_mouse(ghostty::MouseInput {
+                action: ghostty::MouseAction::Press,
+                button: Some(ghostty::MouseButton::Left),
+                modifiers: ghostty::Modifiers::empty(),
+                x: geometry.x,
+                y: geometry.y,
+                screen_width: geometry.screen_width,
+                screen_height: geometry.screen_height,
+                padding_top: 0,
+                padding_bottom: 0,
+                padding_left: 0,
+                padding_right: 0,
+                any_button_pressed: true,
+            })
+            .expect("encode");
+        assert_eq!(
+            String::from_utf8(bytes).expect("ascii"),
+            format!("\x1b[<0;{};{}M", column + 1, row + 1),
+        );
+    }
+
+    #[test]
+    fn engine_mouse_geometry_clamps_a_pointer_left_of_the_grid() {
+        let geometry = super::engine_mouse_geometry((-5.0, -1.0), 8.4, 16.0, 80, 24);
+        assert_eq!((geometry.x, geometry.y), (0.0, 0.0));
+        assert_eq!((geometry.screen_width, geometry.screen_height), (640, 384));
+    }
 
     /// Issue #299: swap-mode Escape is a per-view flag, not a process-global.
     /// Only the armed view intercepts Escape, one Escape disarms it, and a
