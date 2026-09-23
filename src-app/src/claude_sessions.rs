@@ -303,7 +303,11 @@ pub fn read_sessions_for_cwd_with_omitted(cwd: &str) -> (Vec<SessionMeta>, usize
             project_dir.display()
         );
     }
-    if let Some(snapshot_mtime) = project_snapshot_mtime(&project_dir) {
+    if let Some(snapshot_mtime) = snapshot_mtime {
+        // #718: test seam. A write here is invisible to the scan above;
+        // the cache key must stay the pre-scan fingerprint.
+        #[cfg(test)]
+        crate::agent_sessions::cache::run_after_scan_hook();
         crate::agent_sessions::cache::store_result_with_mtime(
             SessionAgent::Claude,
             cwd,
@@ -1069,6 +1073,7 @@ mod tests {
     #[test]
     fn session_cache_round_trips_and_invalidates_on_mtime_change() {
         use crate::agent_sessions::cache;
+        let _cache_lock = cache::cache_test_lock();
         cache::clear();
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1285,6 +1290,7 @@ mod tests {
     /// not require `~/.claude`.
     #[test]
     fn read_sessions_for_cwd_honors_claude_config_dir() {
+        let _cache_lock = crate::agent_sessions::cache::cache_test_lock();
         crate::agent_sessions::cache::clear();
         let dir = tempfile::tempdir().expect("tempdir");
         let cwd = "/tmp/issue-31-claude-proj";
@@ -1309,6 +1315,100 @@ mod tests {
             "aaaaaaaa-1111-2222-3333-444444444444"
         );
         assert_eq!(sessions[0].cwd, cwd);
+    }
+
+    /// Issue #718: a transcript written after enumeration is not in the scan
+    /// result. Caching under the post-scan fingerprint makes the next lookup
+    /// hit that stale list; the pre-scan key must miss.
+    #[test]
+    fn session_cache_keys_on_pre_scan_fingerprint() {
+        let _cache_lock = crate::agent_sessions::cache::cache_test_lock();
+        crate::agent_sessions::cache::clear();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = "/tmp/issue-718-claude";
+        let project = dir.path().join("projects").join(slug_for_cwd(cwd));
+        std::fs::create_dir_all(&project).expect("mkdir");
+        let old_id = "aaaaaaaa-1111-2222-3333-444444444444";
+        let new_id = "bbbbbbbb-1111-2222-3333-444444444444";
+        let old_path = project.join(format!("{old_id}.jsonl"));
+        std::fs::write(
+            &old_path,
+            concat!(
+                r#"{"parentUuid":null,"type":"user","message":{"role":"user","content":"old title"},"uuid":"u","timestamp":"2026-08-26T00:00:00Z","cwd":"/tmp/issue-718-claude","sessionId":"aaaaaaaa-1111-2222-3333-444444444444"}"#,
+                "\n",
+            ),
+        )
+        .expect("write old session");
+
+        let anchor =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        pin_mtime(&old_path, anchor);
+        pin_mtime(&project, anchor);
+        let pre = project_snapshot_mtime(&project).expect("pre-scan fingerprint");
+
+        let new_path = project.join(format!("{new_id}.jsonl"));
+        let advanced = anchor + std::time::Duration::from_secs(30);
+        crate::agent_sessions::cache::set_after_scan_hook(Some(Box::new(move || {
+            std::fs::write(
+                &new_path,
+                concat!(
+                    r#"{"parentUuid":null,"type":"user","message":{"role":"user","content":"new title"},"uuid":"u2","timestamp":"2026-08-26T00:00:01Z","cwd":"/tmp/issue-718-claude","sessionId":"bbbbbbbb-1111-2222-3333-444444444444"}"#,
+                    "\n",
+                ),
+            )
+            .expect("write session the scan must miss");
+            pin_mtime(&new_path, advanced);
+        })));
+        let _hook = AfterScanHookGuard;
+        let _env = ClaudeConfigDirGuard::set(dir.path());
+
+        let sessions = read_sessions_for_cwd(cwd);
+        assert_eq!(
+            sessions.len(),
+            1,
+            "scan must miss the transcript written after enumeration"
+        );
+        assert_eq!(sessions[0].session_id, old_id);
+        assert!(
+            project.join(format!("{new_id}.jsonl")).exists(),
+            "after-scan hook must run before the cache store"
+        );
+
+        let post = project_snapshot_mtime(&project).expect("post-scan fingerprint");
+        assert!(
+            post.duration_since(pre)
+                .expect("post fingerprint moved forward")
+                >= std::time::Duration::from_millis(5),
+            "fixture must advance the fingerprint past the 1ms lookup fuzz"
+        );
+        assert!(
+            crate::agent_sessions::cache::lookup_with_mtime(SessionAgent::Claude, cwd, post)
+                .is_none(),
+            "post-scan fingerprint includes a write the scan missed and must not hit"
+        );
+        let (hit, _) =
+            crate::agent_sessions::cache::lookup_with_mtime(SessionAgent::Claude, cwd, pre)
+                .expect("pre-scan fingerprint must hit the list the scan actually produced");
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit[0].session_id, old_id);
+
+        crate::agent_sessions::cache::clear();
+    }
+
+    fn pin_mtime(path: &Path, mtime: std::time::SystemTime) {
+        let file = std::fs::File::open(path)
+            .unwrap_or_else(|err| panic!("open {}: {err}", path.display()));
+        file.set_modified(mtime)
+            .unwrap_or_else(|err| panic!("set mtime on {}: {err}", path.display()));
+    }
+
+    struct AfterScanHookGuard;
+
+    impl Drop for AfterScanHookGuard {
+        fn drop(&mut self) {
+            crate::agent_sessions::cache::set_after_scan_hook(None);
+        }
     }
 
     /// Serializes process-wide `CLAUDE_CONFIG_DIR` mutation for the walker test.
