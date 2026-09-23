@@ -152,10 +152,9 @@ fn keep_session_after_surface_purge(
 /// Retention rule after a fresh process scan reports an interactive shell as
 /// the surface's representative command.
 ///
-/// [`crate::workspace::PaneScan::foreground_command`] is a descendant-selection
-/// heuristic, not a PTY foreground-process-group query. A live agent can launch
-/// a shell tool and make that heuristic say `bash`, so only an already-stalled
-/// badge is safe to reap from this weak signal. Active, waiting, finished, and
+/// The command is the terminal's foreground process group. A live agent can
+/// still foreground a shell tool and make that command `bash`, so only an
+/// already-stalled badge is reaped from it. Active, waiting, finished, and
 /// sticky-error sessions require stronger lifecycle or OSC 133 evidence.
 fn keep_session_at_cached_shell(
     shell_surface_id: u64,
