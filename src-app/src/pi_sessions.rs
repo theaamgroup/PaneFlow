@@ -195,23 +195,26 @@ enum CappedLine {
     Line(String),
 }
 
+/// One capped line. Bytes are decoded lossily: `read_line` returns
+/// `InvalidData` when [`MAX_LINE_BYTES`] splits a multibyte character, and
+/// that error used to abort the file after a header was already parsed.
 fn read_capped_line<R: BufRead>(
     reader: &mut R,
     path: &Path,
     budget: &mut u64,
 ) -> Option<CappedLine> {
-    let mut line = String::new();
+    let mut bytes = Vec::new();
     let read = reader
         .by_ref()
         .take(MAX_LINE_BYTES)
-        .read_line(&mut line)
+        .read_until(b'\n', &mut bytes)
         .ok()?;
     if read == 0 {
         return Some(CappedLine::Eof);
     }
     *budget = budget.saturating_sub(read as u64);
 
-    if read as u64 == MAX_LINE_BYTES && !line.ends_with('\n') {
+    if read as u64 == MAX_LINE_BYTES && !bytes.ends_with(b"\n") {
         let more_follows = match reader.fill_buf() {
             Ok(buf) => !buf.is_empty(),
             Err(_) => return None,
@@ -228,7 +231,9 @@ fn read_capped_line<R: BufRead>(
         }
     }
 
-    Some(CappedLine::Line(line))
+    Some(CappedLine::Line(
+        String::from_utf8_lossy(&bytes).into_owned(),
+    ))
 }
 
 /// Discard the rest of an oversized line in bounded chunks, charging every
@@ -338,6 +343,32 @@ mod tests {
         assert_eq!(omitted, 0);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].summary.as_deref(), Some("Still readable"));
+    }
+
+    #[test]
+    fn header_survives_oversized_multibyte_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        // U+3042 is 3 bytes and 64 KiB % 3 == 1, so the cap splits a character.
+        let oversized = "\u{3042}".repeat((MAX_LINE_BYTES as usize / 3) + 8);
+        assert!(oversized.len() > MAX_LINE_BYTES as usize);
+        assert!(!oversized.is_char_boundary(MAX_LINE_BYTES as usize));
+        fs::write(
+            &path,
+            format!(
+                "{}\n{oversized}\n{}\n",
+                r#"{"type":"session","version":3,"id":"550e8400-e29b-41d4-a716-446655440000","timestamp":"2026-06-29T09:10:11Z","cwd":"/repo"}"#,
+                r#"{"type":"message","message":{"role":"user","content":"Still here"}}"#
+            ),
+        )
+        .unwrap();
+
+        let meta = read_session_meta(&path);
+        assert!(meta.is_some());
+        let (sessions, omitted) = read_sessions_under_root(dir.path(), "/repo");
+        assert_eq!(omitted, 0);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].summary.as_deref(), Some("Still here"));
     }
 
     #[test]
