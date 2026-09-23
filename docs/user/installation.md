@@ -3,7 +3,7 @@
 PaneFlow is macOS-only. Download the signed, notarized Apple Silicon DMG
 from [GitHub Releases](https://github.com/theaamgroup/PaneFlow/releases/latest),
 open it, and drag PaneFlow to Applications. Repository access is required for
-this private fork. The current release is 0.7.1. There is no Homebrew tap.
+this private fork. The current release is 0.7.2. There is no Homebrew tap.
 
 Building and packaging from source remain available:
 
@@ -14,7 +14,7 @@ Building and packaging from source remain available:
 - Symptom-first fixes: [troubleshooting.md](troubleshooting.md)
 
 The app bundles its helper binaries. To package a local release build, run
-`scripts/bundle-macos.sh --version 0.7.1 --arch aarch64` to produce
+`scripts/bundle-macos.sh --version 0.7.2 --arch aarch64` to produce
 `dist/PaneFlow.app`.
 
 ## Where the config lives

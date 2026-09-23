@@ -14,7 +14,7 @@ The steps below package a local source build.
 
 ```bash
 cargo build --release
-scripts/bundle-macos.sh --version 0.7.1 --arch aarch64
+scripts/bundle-macos.sh --version 0.7.2 --arch aarch64
 ```
 
 That writes `dist/PaneFlow.app` with the executable at

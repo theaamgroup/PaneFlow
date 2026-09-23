@@ -41,7 +41,7 @@ cargo build                                # exit 0
 cargo test --workspace                     # diff test names against the last landing; do not trust the integer
 cargo clippy --workspace --all-targets     # exit 0; compare warnings against the baseline
 cargo fmt --check                          # exit 0
-./target/debug/paneflow --version          # paneflow 0.7.1
+./target/debug/paneflow --version          # paneflow 0.7.2
 cargo deny check advisories licenses sources   # exit 0; same gate run_tests.yml::security_audit blocks on
 ```
 
