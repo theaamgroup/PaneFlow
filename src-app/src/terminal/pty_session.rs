@@ -318,10 +318,9 @@ impl TerminalSessionBackend {
     ///
     /// A click with nothing to read never asks the runtime (issue #704).
     /// `Ok(None)` and an empty string are an empty selection: the highlight
-    /// goes away and `(true, copied)` is returned. Text over the engine's copy
-    /// cap is `Err`: nothing was copied, so the highlight stays and the pair
-    /// is `(false, None)`. An unanswered runtime is not that refusal: the pair
-    /// is `(true, None)` so a link still opens, and the highlight stays.
+    /// goes away and `(true, copied)` is returned. Any read error, including
+    /// an unanswered runtime and text over the copy cap, is `(false, None)`
+    /// and the highlight stays, so the gesture is not turned into a link open.
     pub(crate) fn finish_selection(&self) -> (bool, Option<String>) {
         self.complete_mouse_up_selection(self.mouse_up_selection_read(), true)
     }
@@ -4014,9 +4013,9 @@ mod tests {
             "refusing the copy must leave the selection installed"
         );
 
-        // Issue #704: an unanswered read is an empty report that keeps the
-        // highlight, not a copy-cap refusal. A large grid can still miss the
-        // one-second budget, so retry until the engine actually refuses.
+        // A timeout and a copy-cap error both report non-empty and keep the
+        // highlight. Retry only while a read comes back empty with the range
+        // still installed, which means the engine has not refused yet.
         let started = std::time::Instant::now();
         let (is_empty, copied) = loop {
             let (is_empty, copied) = backend.finish_selection();

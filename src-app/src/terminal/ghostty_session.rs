@@ -1702,8 +1702,8 @@ impl GhosttySession {
     /// `Ok(None)` is nothing selected. `Err` is an engine failure, including a
     /// selection over [`paneflow_terminal_ghostty`]'s copy cap, and is not the
     /// same as an empty selection. A mailbox failure or a one-second silence
-    /// is [`RUNTIME_UNANSWERED`], which mouse-up must not treat as a copy-cap
-    /// refusal (issue #704).
+    /// is [`RUNTIME_UNANSWERED`]. Mouse-up treats that like any other read
+    /// error: not an empty click, and the highlight stays (issue #704).
     pub(super) fn selection_text(&self) -> Result<Option<String>, String> {
         let text = match self.request(RuntimeMessage::SelectionText) {
             Some(Ok(text)) => text,
@@ -2137,12 +2137,6 @@ impl GhosttySession {
 /// or no reply landed within the one-second budget.
 const RUNTIME_UNANSWERED: &str =
     "the runtime did not answer (mailbox full or closed, or no reply within 1 s)";
-
-/// True when `selection_text` failed because the runtime never answered, not
-/// because the engine refused the copy.
-pub(super) fn selection_read_unanswered(error: &str) -> bool {
-    error == RUNTIME_UNANSWERED
-}
 
 fn search_result_from_ghostty(result: ghostty::SearchResult) -> crate::search::SearchResult {
     crate::search::SearchResult {
@@ -4449,10 +4443,10 @@ pub(super) fn mouse_up_requests_selection_text(
 /// `(is_empty, copied, clear_highlight)` for a mouse-up selection read.
 ///
 /// `None` means the runtime was not asked. `Ok(None)` and empty text are an
-/// empty selection: the highlight is cleared and a stashed link may open. A
-/// copy-cap `Err` is not empty and the highlight stays. An unanswered runtime
-/// is not that refusal, so it must not suppress the link; the highlight stays
-/// because the text was never read.
+/// empty selection: the highlight is cleared and a stashed link may open. Any
+/// `Err`, including an unanswered runtime, means the read was requested
+/// because a drag, word or line gesture, or spanning range exists. That is
+/// not a click: the highlight stays and the stashed link must not open.
 pub(super) fn mouse_up_selection_outcome(
     read: Option<Result<Option<String>, String>>,
 ) -> (bool, Option<String>, bool) {
@@ -4462,7 +4456,8 @@ pub(super) fn mouse_up_selection_outcome(
             let is_empty = text.as_ref().is_none_or(String::is_empty);
             (is_empty, text, true)
         }
-        Some(Err(error)) if selection_read_unanswered(&error) => (true, None, false),
+        // A read ran only because a selection exists. An unanswered read must
+        // not be reported as a click, or a Cmd-drag opens the stashed link.
         Some(Err(_)) => (false, None, false),
     }
 }
@@ -6146,14 +6141,11 @@ mod tests {
         let (empty, copied, clear) =
             mouse_up_selection_outcome(Some(Err(RUNTIME_UNANSWERED.to_owned())));
         assert!(
-            empty,
-            "a timeout must not be reported as a non-empty selection"
+            !empty,
+            "an unanswered read is a selection, not a click that opens a link"
         );
         assert!(copied.is_none());
-        assert!(
-            !clear,
-            "a timeout is not an empty read, so the highlight stays"
-        );
+        assert!(!clear, "an unanswered read keeps the highlight");
 
         let (session, pending, _events) =
             GhosttySession::pending(TerminalWindowSize::new(80, 24, 8, 16));

@@ -703,7 +703,7 @@ impl TerminalView {
                 self.pixel_to_grid(event.position),
                 self.pane_relative(event.position),
             );
-            self.selecting = true;
+            self.note_selection_press();
             cx.notify();
             return;
         }
@@ -746,8 +746,13 @@ impl TerminalView {
             self.pane_relative(event.position),
         );
 
-        self.selecting = true;
+        self.note_selection_press();
         cx.notify();
+    }
+
+    fn note_selection_press(&mut self) {
+        self.selection_press_generation = self.selection_press_generation.wrapping_add(1);
+        self.selecting = true;
     }
 
     pub(super) fn handle_mouse_move(
@@ -1019,8 +1024,9 @@ impl TerminalView {
         // used to look like a non-empty selection, so a Cmd-click link never
         // opened. A real selection still reads, off this thread; the clipboard
         // write comes back here. The highlight clears only after a read that
-        // actually produced text (or an empty one), which is what tells the
-        // user the copy landed.
+        // actually produced text (or an empty one). A read error is not a
+        // click, so the stashed link stays closed.
+        let press_generation = self.selection_press_generation;
         self.terminal
             .session_backend()
             .release_selection(self.grid_cell_at(event.position));
@@ -1028,7 +1034,9 @@ impl TerminalView {
         if !backend.mouse_up_requests_selection_text() {
             // Nothing to read: `finish_selection` returns without the runtime.
             let (selection_empty, copied) = backend.finish_selection();
-            self.present_mouse_up_selection(selection_empty, copied, down_link, cx);
+            let current =
+                mouse_up_press_is_current(press_generation, self.selection_press_generation);
+            self.present_mouse_up_selection(selection_empty, copied, down_link, current, cx);
             return;
         }
         cx.spawn(
@@ -1036,31 +1044,47 @@ impl TerminalView {
                 let read = smol::unblock(move || backend.mouse_up_selection_read()).await;
                 let _ = this.update(cx, |view, cx| {
                     // A newer press owns the gesture. Copy the release, but
-                    // do not clear the selection it started.
-                    let allow_clear = !view.selecting;
+                    // do not clear the selection it started or open its link.
+                    let current = mouse_up_press_is_current(
+                        press_generation,
+                        view.selection_press_generation,
+                    );
+                    let allow_clear = mouse_up_may_clear_selection(
+                        press_generation,
+                        view.selection_press_generation,
+                        view.selecting,
+                    );
                     let (selection_empty, copied) = view
                         .terminal
                         .session_backend()
                         .complete_mouse_up_selection(read, allow_clear);
-                    view.present_mouse_up_selection(selection_empty, copied, down_link, cx);
+                    view.present_mouse_up_selection(
+                        selection_empty,
+                        copied,
+                        down_link,
+                        current,
+                        cx,
+                    );
                 });
             },
         )
         .detach();
     }
 
-    /// Open a stashed link when the selection is empty, otherwise copy.
+    /// Open a stashed link when this press is still current and the selection
+    /// is empty. Otherwise copy.
     fn present_mouse_up_selection(
         &mut self,
         selection_empty: bool,
         copied: Option<String>,
         down_link: Option<HyperlinkZone>,
+        press_is_current: bool,
         cx: &mut Context<Self>,
     ) {
         // US-012: open on a genuine click (empty selection = no drag). A
-        // newer press (`selecting`) means this result is stale.
+        // later press bumps the generation, so this result is stale.
         if selection_empty
-            && !self.selecting
+            && press_is_current
             && let Some(link) = down_link
             && link.is_openable
         {
@@ -1374,9 +1398,22 @@ impl TerminalView {
     }
 }
 
+/// The mouse-up completion for `captured` still belongs to the latest press.
+fn mouse_up_press_is_current(captured: u64, generation: u64) -> bool {
+    captured == generation
+}
+
+/// Clear only when that press is still current and the button is up.
+fn mouse_up_may_clear_selection(captured: u64, generation: u64, selecting: bool) -> bool {
+    mouse_up_press_is_current(captured, generation) && !selecting
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{paths_to_pty_text, wrap_bracketed_paste};
+    use super::{
+        mouse_up_may_clear_selection, mouse_up_press_is_current, paths_to_pty_text,
+        wrap_bracketed_paste,
+    };
     use crate::terminal::types::{Modes, ShellQuoting};
     use gpui::AppContext;
     use std::path::PathBuf;
@@ -1447,6 +1484,18 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(cancels.get(), 1, "a disarmed view forwards Escape again");
+    }
+
+    #[test]
+    fn a_later_selection_press_invalidates_the_previous_mouse_up() {
+        assert!(mouse_up_press_is_current(1, 1));
+        assert!(mouse_up_may_clear_selection(1, 1, false));
+        // The button is still down on this same press: do not clear.
+        assert!(!mouse_up_may_clear_selection(1, 1, true));
+        // The next press has already been released. `selecting` is false
+        // again, but this completion must not clear or open its old link.
+        assert!(!mouse_up_press_is_current(1, 2));
+        assert!(!mouse_up_may_clear_selection(1, 2, false));
     }
 
     #[test]
