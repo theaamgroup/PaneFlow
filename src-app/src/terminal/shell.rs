@@ -372,6 +372,9 @@ fn to_shell_path(p: &std::path::Path) -> String {
 /// and env vars needed to activate them. Scripts are written to
 /// `runtime_paths::shell_integration_dir()/{zsh,bash,fish,pwsh}/`.
 ///
+/// Unchanged bytes are left in place. A change is a same-directory rename so a
+/// shell spawned by another pane never sources a truncated file.
+///
 /// Supported shells:
 /// - **zsh, bash, fish** - BEL-terminated OSC 7 via per-prompt hooks.
 /// - **pwsh** (PowerShell 7) (US-012) - `prompt` function wrapper,
@@ -402,7 +405,7 @@ pub(super) fn setup_shell_integration(
             // hijacking ZDOTDIR to point at a dir with no `.zshenv` - that
             // would suppress the user's real zsh startup AND give no
             // integration. Bail before touching `env`.
-            if std::fs::write(dir.join(".zshenv"), ZSH_OSC7).is_err() {
+            if publish_shell_integration_script(&dir.join(".zshenv"), ZSH_OSC7).is_err() {
                 return vec![];
             }
             if let Ok(orig) = std::env::var("ZDOTDIR") {
@@ -420,7 +423,7 @@ pub(super) fn setup_shell_integration(
             // U-022: abort if the write fails - handing bash `--rcfile <path>`
             // for a file that doesn't exist breaks startup instead of
             // gracefully falling back to the user's normal `.bashrc`.
-            if std::fs::write(&rcfile, BASH_OSC7).is_err() {
+            if publish_shell_integration_script(&rcfile, BASH_OSC7).is_err() {
                 return vec![];
             }
             vec!["--rcfile".into(), to_shell_path(&rcfile)]
@@ -433,7 +436,7 @@ pub(super) fn setup_shell_integration(
             let initfile = dir.join("osc7.fish");
             // U-022: abort if the write fails - sourcing a missing init file
             // errors fish startup rather than degrading cleanly.
-            if std::fs::write(&initfile, FISH_OSC7).is_err() {
+            if publish_shell_integration_script(&initfile, FISH_OSC7).is_err() {
                 return vec![];
             }
             vec![
@@ -454,7 +457,7 @@ pub(super) fn setup_shell_integration(
             let initfile = dir.join("osc7.ps1");
             // U-022: abort if the write fails - dot-sourcing a missing script
             // breaks the pwsh session rather than degrading cleanly.
-            if std::fs::write(&initfile, PWSH_OSC7).is_err() {
+            if publish_shell_integration_script(&initfile, PWSH_OSC7).is_err() {
                 return vec![];
             }
             // Single-quote the path and escape any embedded single
@@ -466,6 +469,40 @@ pub(super) fn setup_shell_integration(
         }
         _ => vec![],
     }
+}
+
+/// Publish `contents` at `path` without truncating the live file.
+///
+/// Pane spawns share these rc scripts. `std::fs::write` empties the file
+/// before the new bytes land, so a shell that sources it in that window
+/// skips the user's startup files (#703). Matching bytes are left untouched.
+/// A change is written to a unique temporary file in the same directory and
+/// renamed over `path`, which is atomic on the same volume. Dropping the
+/// temporary file removes it when the write or rename fails.
+fn publish_shell_integration_script(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    match std::fs::read(path) {
+        Ok(existing) if existing == contents.as_bytes() => return Ok(()),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "shell integration script path has no parent directory",
+        ));
+    };
+
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::Write::write_all(&mut temporary, contents.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    // `PersistError` still owns the temporary file; dropping it deletes it.
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 fn powershell_startup_args(profile: TerminalSurfaceProfile, init_command: String) -> Vec<String> {
@@ -820,6 +857,90 @@ mod tests {
         assert!(super::PWSH_OSC7.contains(")]133;C"));
         assert!(super::PWSH_OSC7.contains(")]133;D;"));
         assert!(super::PWSH_OSC7.contains(")]133;A"));
+    }
+
+    /// Readers of a shared rc file must observe only complete previous or new
+    /// bytes. `std::fs::write` truncates first, so a tight reader loop would
+    /// see an empty file while the replacement is in flight.
+    #[test]
+    fn shell_integration_rc_is_replaced_atomically() {
+        use std::os::unix::fs::MetadataExt;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".zshenv");
+        let first: Arc<str> = Arc::from("a".repeat(256 * 1024));
+        let second: Arc<str> = Arc::from("b".repeat(256 * 1024));
+        super::publish_shell_integration_script(&path, &first).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let saw_empty = Arc::new(AtomicBool::new(false));
+        let saw_other = Arc::new(AtomicBool::new(false));
+        let mut readers = Vec::new();
+        for _ in 0..4 {
+            let path = path.clone();
+            let first = Arc::clone(&first);
+            let second = Arc::clone(&second);
+            let stop = Arc::clone(&stop);
+            let saw_empty = Arc::clone(&saw_empty);
+            let saw_other = Arc::clone(&saw_other);
+            readers.push(thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    match std::fs::read(&path) {
+                        Ok(bytes)
+                            if bytes.as_slice() == first.as_bytes()
+                                || bytes.as_slice() == second.as_bytes() => {}
+                        Ok(bytes) if bytes.is_empty() => {
+                            saw_empty.store(true, Ordering::Relaxed);
+                        }
+                        _ => saw_other.store(true, Ordering::Relaxed),
+                    }
+                }
+            }));
+        }
+
+        for _ in 0..24 {
+            super::publish_shell_integration_script(&path, &second).unwrap();
+            super::publish_shell_integration_script(&path, &second).unwrap();
+            super::publish_shell_integration_script(&path, &first).unwrap();
+            super::publish_shell_integration_script(&path, &first).unwrap();
+        }
+
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        super::publish_shell_integration_script(&path, &first).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().ino(),
+            inode,
+            "matching bytes must not replace the rc file"
+        );
+
+        stop.store(true, Ordering::Relaxed);
+        for reader in readers {
+            reader.join().unwrap();
+        }
+
+        assert!(
+            !saw_empty.load(Ordering::Relaxed),
+            "concurrent reader observed an empty shell rc"
+        );
+        assert!(
+            !saw_other.load(Ordering::Relaxed),
+            "concurrent reader observed a partial or missing shell rc"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), first.as_bytes());
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
     }
 
     #[test]
