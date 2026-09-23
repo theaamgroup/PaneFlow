@@ -6,6 +6,7 @@ use paneflow_config::schema::{LayoutNode, SurfaceDefinition};
 
 use super::MAX_REVIEW_PANES;
 use crate::PaneFlowApp;
+use crate::app::session::{RESTORED_CWD_PROBE_TIMEOUT, persisted_dir_is_live_within};
 use crate::diff::{DiffWorktree, ReviewSubject};
 use crate::layout::LayoutTree;
 
@@ -133,7 +134,11 @@ impl PaneFlowApp {
             .collect();
         let keep = |surface: &SurfaceDefinition| {
             subject_from_surface(surface).is_some_and(|subject| {
-                open_roots.contains(&subject.repo_root) && subject.worktree.path.is_dir()
+                open_roots.contains(&subject.repo_root)
+                    && persisted_dir_is_live_within(
+                        &subject.worktree.path,
+                        RESTORED_CWD_PROBE_TIMEOUT,
+                    )
             })
         };
         let Some(mut pruned) = prune_layout(node, &keep) else {

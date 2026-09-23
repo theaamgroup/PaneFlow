@@ -206,8 +206,12 @@ fn read_sessions_for_cwd_inner(
 
     if !scan_usage
         && cap.is_some()
-        && let Some(cache_mtime) = jsonl_tree_mtime(&root)
+        && let Some(cache_mtime) = cache_mtime
     {
+        // #718: test seam. A write here is invisible to the scan above;
+        // the cache key must stay the pre-scan fingerprint.
+        #[cfg(test)]
+        crate::agent_sessions::cache::run_after_scan_hook();
         crate::agent_sessions::cache::store_result_with_mtime(
             SessionAgent::Codex,
             cwd,
@@ -1103,6 +1107,7 @@ mod tests {
     /// not require `~/.codex`.
     #[test]
     fn read_sessions_for_cwd_honors_codex_home() {
+        let _cache_lock = crate::agent_sessions::cache::cache_test_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let day = dir
             .path()
@@ -1132,6 +1137,107 @@ mod tests {
             "019dc9ea-38d7-7372-9cc4-253ce944d41b"
         );
         assert_eq!(sessions[0].cwd, "/tmp/issue-32-codex-proj");
+    }
+
+    /// Issue #718: a rollout written after the tree walk is not in the scan
+    /// result. Caching under the post-scan fingerprint makes the next lookup
+    /// hit that stale list; the pre-scan key must miss.
+    #[test]
+    fn session_cache_keys_on_pre_scan_fingerprint() {
+        let _cache_lock = crate::agent_sessions::cache::cache_test_lock();
+        crate::agent_sessions::cache::clear();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = "/tmp/issue-718-codex";
+        let day = dir
+            .path()
+            .join("sessions")
+            .join("2026")
+            .join("08")
+            .join("26");
+        std::fs::create_dir_all(&day).expect("mkdir");
+        let old_id = "aaaaaaaa-1111-2222-3333-444444444444";
+        let new_id = "bbbbbbbb-1111-2222-3333-444444444444";
+        let old_path = day.join("rollout-old.jsonl");
+        std::fs::write(&old_path, codex_rollout(old_id, cwd)).expect("write old");
+
+        let anchor =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let root = dir.path().join("sessions");
+        pin_mtime(&old_path, anchor);
+        pin_mtime(&root, anchor);
+        let pre = jsonl_tree_mtime(&root).expect("pre-scan fingerprint");
+
+        let new_path = day.join("rollout-new.jsonl");
+        let advanced = anchor + std::time::Duration::from_secs(30);
+        let cwd_owned = cwd.to_string();
+        crate::agent_sessions::cache::set_after_scan_hook(Some(Box::new(move || {
+            std::fs::write(&new_path, codex_rollout(new_id, &cwd_owned))
+                .expect("write rollout the scan must miss");
+            pin_mtime(&new_path, advanced);
+        })));
+        let _hook = AfterScanHookGuard;
+        let _env = CodexHomeGuard::set(dir.path());
+
+        let sessions = read_sessions_for_cwd(cwd);
+        assert_eq!(
+            sessions.len(),
+            1,
+            "scan must miss the rollout written after the tree walk"
+        );
+        assert_eq!(sessions[0].session_id, old_id);
+        assert!(
+            day.join("rollout-new.jsonl").exists(),
+            "after-scan hook must run before the cache store"
+        );
+
+        let post = jsonl_tree_mtime(&root).expect("post-scan fingerprint");
+        assert!(
+            post.duration_since(pre)
+                .expect("post fingerprint moved forward")
+                >= std::time::Duration::from_millis(5),
+            "fixture must advance the fingerprint past the 1ms lookup fuzz"
+        );
+        assert!(
+            crate::agent_sessions::cache::lookup_with_mtime(SessionAgent::Codex, cwd, post)
+                .is_none(),
+            "post-scan fingerprint includes a write the scan missed and must not hit"
+        );
+        let (hit, _) =
+            crate::agent_sessions::cache::lookup_with_mtime(SessionAgent::Codex, cwd, pre)
+                .expect("pre-scan fingerprint must hit the list the scan actually produced");
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit[0].session_id, old_id);
+
+        crate::agent_sessions::cache::clear();
+    }
+
+    fn codex_rollout(id: &str, cwd: &str) -> String {
+        format!(
+            concat!(
+                r#"{{"type":"session_meta","payload":{{"id":"{id}","cwd":"{cwd}","timestamp":"2026-08-26T00:00:00Z"}}}}"#,
+                "\n",
+                r#"{{"type":"event_msg","payload":{{"type":"task_started"}}}}"#,
+                "\n",
+            ),
+            id = id,
+            cwd = cwd,
+        )
+    }
+
+    fn pin_mtime(path: &Path, mtime: std::time::SystemTime) {
+        let file = std::fs::File::open(path)
+            .unwrap_or_else(|err| panic!("open {}: {err}", path.display()));
+        file.set_modified(mtime)
+            .unwrap_or_else(|err| panic!("set mtime on {}: {err}", path.display()));
+    }
+
+    struct AfterScanHookGuard;
+
+    impl Drop for AfterScanHookGuard {
+        fn drop(&mut self) {
+            crate::agent_sessions::cache::set_after_scan_hook(None);
+        }
     }
 
     /// Serializes process-wide `CODEX_HOME` mutation for the walker test.

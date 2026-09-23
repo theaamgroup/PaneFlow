@@ -24,6 +24,7 @@ use crate::terminal::types::{
 #[cfg(debug_assertions)]
 use super::probe_enabled;
 use super::pty_session::BackendInputResult;
+use super::view::point_in_hover_zone;
 use super::{TerminalEvent, TerminalView};
 
 /// Returns true when the "open link" modifier is held: Cmd on macOS.
@@ -867,19 +868,20 @@ impl TerminalView {
         // lookup needs the engine, so the runtime thread is asked and
         // `apply_resolved_hover_link` applies its answer when it comes back:
         // a runtime busy parsing a burst could otherwise hold the UI thread
-        // for up to a second per hover.
+        // for up to a second per hover. File and code paths canonicalize,
+        // which can block on a dead mount, so they take the same shape:
+        // `spawn_hover_path_scan` runs them on the background executor and
+        // `apply_hover_path_zones` underlines only if this hover is still current.
         self.terminal
             .session_backend()
             .request_osc8_hyperlink_at(hover_point);
-        let in_zone = |z: &HyperlinkZone| {
-            hover_point.line == z.start.line
-                && hover_point.column >= z.start.column
-                && hover_point.column <= z.end.column
-        };
-        self.ctrl_hovered_link = self
-            .detect_links_at_hover()
+        let (zones, path_scan) = self.collect_sync_hover_zones();
+        self.ctrl_hovered_link = zones
             .into_iter()
-            .find(|z| in_zone(z));
+            .find(|zone| point_in_hover_zone(zone, hover_point));
+        if let Some(scan) = path_scan {
+            self.spawn_hover_path_scan(scan, cx);
+        }
         cx.notify();
     }
 
@@ -1339,6 +1341,7 @@ impl TerminalView {
 mod tests {
     use super::{paths_to_pty_text, wrap_bracketed_paste};
     use crate::terminal::types::{Modes, ShellQuoting};
+    use gpui::AppContext;
     use std::path::PathBuf;
 
     /// Issue #299: swap-mode Escape is a per-view flag, not a process-global.
@@ -1597,5 +1600,189 @@ mod tests {
             ),
             Some("'C:\\dev\\my file.txt'".to_string())
         );
+    }
+
+    fn fn_source<'a>(src: &'a str, name: &str) -> &'a str {
+        let marker = format!("fn {name}(");
+        let start = src
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing {name}"));
+        let rest = &src[start + marker.len()..];
+        let end = ["\nfn ", "\n    fn ", "\n    pub("]
+            .iter()
+            .filter_map(|needle| rest.find(needle))
+            .min()
+            .unwrap_or_else(|| panic!("no following item after {name}"));
+        &src[start..start + marker.len() + end]
+    }
+
+    /// Issue #707: `refresh_hovered_link` must not call the file or code
+    /// scanners. Those canonicalize, so they belong in the background task.
+    #[test]
+    fn refresh_hovered_link_does_not_call_hyperlink_path_scanners() {
+        let refresh = fn_source(include_str!("input.rs"), "refresh_hovered_link");
+        assert!(
+            !refresh.contains("detect_file_paths_on_line_mapped"),
+            "file scanner must not run inside refresh_hovered_link"
+        );
+        assert!(
+            !refresh.contains("detect_code_paths_on_line_mapped"),
+            "code scanner must not run inside refresh_hovered_link"
+        );
+        assert!(
+            refresh.contains("detect_urls") || refresh.contains("collect_sync_hover_zones"),
+            "regex URL scan stays on the hover path"
+        );
+        let spawn = fn_source(include_str!("view.rs"), "spawn_hover_path_scan");
+        let scheduled = spawn
+            .find("background_spawn")
+            .expect("path scan must use background_spawn");
+        let call = spawn
+            .find("scan_hover_path_zones")
+            .expect("background task must run the path scanners");
+        assert!(
+            call > scheduled,
+            "scanners must run inside background_spawn, not before it"
+        );
+        let scan = fn_source(include_str!("view.rs"), "scan_hover_path_zones");
+        assert!(scan.contains("detect_file_paths_on_line_mapped"));
+        assert!(scan.contains("detect_code_paths_on_line_mapped"));
+    }
+
+    fn path_hover_fixture(
+        cx: &mut gpui::VisualTestContext,
+    ) -> (
+        gpui::Entity<crate::terminal::TerminalView>,
+        tempfile::TempDir,
+        crate::terminal::types::Point,
+        crate::terminal::types::Point,
+        crate::terminal::types::Point,
+    ) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("notes.md"), b"# notes\n").expect("notes.md");
+        std::fs::write(tmp.path().join("main.rs"), b"fn main() {}\n").expect("main.rs");
+        let view = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+        view.update(cx, |view, _cx| {
+            view.terminal.current_cwd = Some(tmp.path().to_string_lossy().into_owned());
+            view.terminal
+                .write_output(b"see https://example.com/x ./notes.md and ./main.rs:8\n");
+        });
+        let points = view.update(cx, |view, _cx| {
+            let grid = view
+                .terminal
+                .session_backend()
+                .line_text_at(crate::terminal::types::Point::new(0, 0))
+                .expect("hovered line");
+            let column = |needle: &str| {
+                let byte = grid.text.find(needle).unwrap_or_else(|| {
+                    panic!("{needle} missing from {:?}", grid.text);
+                });
+                let chars = grid.text[..byte].chars().count();
+                grid.char_to_column[chars]
+            };
+            (
+                crate::terminal::types::Point::new(grid.line.0, column("https://")),
+                crate::terminal::types::Point::new(grid.line.0, column("./notes.md")),
+                crate::terminal::types::Point::new(grid.line.0, column("./main.rs")),
+            )
+        });
+        (view, tmp, points.0, points.1, points.2)
+    }
+
+    fn hovered_link(
+        view: &gpui::Entity<crate::terminal::TerminalView>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Option<crate::terminal::types::HyperlinkZone> {
+        cx.update(|_, cx| view.read(cx).ctrl_hovered_link.clone())
+    }
+
+    /// Issue #707: regex URLs stay synchronous. File and code zones come back
+    /// on the UI thread after the background scan, and a URL under the pointer
+    /// is not replaced by a path.
+    #[gpui::test]
+    fn hyperlink_path_scan_keeps_a_regex_link_and_then_applies_cached_paths(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::terminal::types::HyperlinkSource;
+
+        let cx = cx.add_empty_window();
+        let (view, _tmp, url_point, md_point, rs_point) = path_hover_fixture(cx);
+
+        view.update(cx, |view, cx| {
+            view.hovered_cell = Some(url_point);
+            view.link_modifier_held = true;
+            view.refresh_hovered_link(url_point, cx);
+        });
+        let immediate = hovered_link(&view, cx).expect("regex link is synchronous");
+        assert_eq!(immediate.source, HyperlinkSource::Regex);
+        assert!(immediate.uri.starts_with("https://example.com/"));
+
+        cx.run_until_parked();
+        let after_scan = hovered_link(&view, cx).expect("regex link survives the path scan");
+        assert_eq!(after_scan.source, HyperlinkSource::Regex);
+
+        view.update(cx, |view, cx| {
+            view.hovered_cell = Some(md_point);
+            view.refresh_hovered_link(md_point, cx);
+        });
+        let markdown = hovered_link(&view, cx).expect("cached markdown path");
+        assert_eq!(markdown.source, HyperlinkSource::FilePath);
+        assert!(markdown.uri.ends_with("notes.md"));
+
+        view.update(cx, |view, cx| {
+            view.hovered_cell = Some(rs_point);
+            view.refresh_hovered_link(rs_point, cx);
+        });
+        let code = hovered_link(&view, cx).expect("cached code path");
+        assert_eq!(code.source, HyperlinkSource::CodePath);
+        assert!(code.uri.ends_with("main.rs"));
+        assert_eq!(code.line, Some(8));
+    }
+
+    /// Issue #707: a scan that finishes after the pointer leaves the path must
+    /// not underline the cell it moved to. The result is still cached for the
+    /// line, so moving back does not canonicalize again.
+    #[gpui::test]
+    fn hyperlink_path_scan_does_not_underline_a_cell_the_pointer_left(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::terminal::types::{HyperlinkSource, Point};
+
+        let cx = cx.add_empty_window();
+        let (view, _tmp, _url_point, md_point, _rs_point) = path_hover_fixture(cx);
+        let left = Point::new(md_point.line.0, 0);
+
+        view.update(cx, |view, cx| {
+            view.hovered_cell = Some(md_point);
+            view.link_modifier_held = true;
+            view.refresh_hovered_link(md_point, cx);
+        });
+        assert!(
+            hovered_link(&view, cx).is_none_or(|link| {
+                !matches!(
+                    link.source,
+                    HyperlinkSource::FilePath | HyperlinkSource::CodePath
+                )
+            }),
+            "path scanners must not finish inside refresh_hovered_link"
+        );
+
+        view.update(cx, |view, _cx| {
+            view.hovered_cell = Some(left);
+        });
+        cx.run_until_parked();
+        let left_behind = hovered_link(&view, cx);
+        assert!(
+            left_behind.is_none(),
+            "a finished scan must not underline a cell the pointer left, got {left_behind:?}"
+        );
+
+        view.update(cx, |view, cx| {
+            view.hovered_cell = Some(md_point);
+            view.refresh_hovered_link(md_point, cx);
+        });
+        let markdown = hovered_link(&view, cx).expect("returning to the path uses the cache");
+        assert_eq!(markdown.source, HyperlinkSource::FilePath);
+        assert!(markdown.uri.ends_with("notes.md"));
     }
 }
