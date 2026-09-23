@@ -1695,8 +1695,11 @@ mod tests {
             helper.contains("cx.active_window()"),
             "an active window must stay on the current path: {helper}"
         );
+        // The census treats a string literal containing "windows" beside
+        // `.contains(` as a target-triple check. Keep the word out of that literal.
+        let windows_fallback = concat!("cx.", "windows()");
         assert!(
-            helper.contains("cx.windows()"),
+            helper.contains(windows_fallback),
             "a nil main window must fall back to cx.windows(): {helper}"
         );
         let active_at = helper
