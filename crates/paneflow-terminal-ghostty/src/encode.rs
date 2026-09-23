@@ -122,8 +122,9 @@ impl DisplayTerminal {
         // is exactly the state that collapses a stream of pixel-level motion
         // into one report per cell. Reconfiguring on every event therefore
         // defeats the deduplication entirely, so it only runs when the mouse
-        // modes have actually changed.
-        let mouse_modes = crate::engine::MouseModes::from(self.modes()?);
+        // modes have actually changed. The key is every mode that call reads,
+        // including X10 versus normal tracking and the URXVT/SGR-pixel formats.
+        let mouse_modes = crate::engine::MouseModes::from_terminal(self)?;
         if self.mouse_encoder_modes != Some(mouse_modes) {
             // SAFETY: both handles are owned by `self`.
             unsafe {
