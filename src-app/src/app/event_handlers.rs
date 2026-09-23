@@ -2058,8 +2058,10 @@ pub(crate) fn retarget_workspace_git_dir(
         let count = watch_counts.entry(dir.clone()).or_insert(0);
         *count += 1;
         // Increment stands even if `watch` fails: see the doc comment.
+        // `as_deref_mut` is a no-op on `Option<&mut _>` (clippy
+        // `needless_option_as_deref`); moving the option is the last use.
         if *count == 1
-            && let Some(watcher) = watcher.as_deref_mut()
+            && let Some(watcher) = watcher
             && let Err(e) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive)
         {
             log::warn!("git watcher: failed to watch {}: {e}", dir.display());
