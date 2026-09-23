@@ -30,24 +30,29 @@
 //!   still sources `/etc/profile` + `/etc/profile.d` + `~/.profile`, i.e. the
 //!   system PATH;
 //! - **bounded** by a 5 s deadline so a pathological rc script can't wedge
-//!   startup. That deadline covers the stdout read and the reap after stdout
-//!   closes: a child that exits its pipe and keeps running is terminated
-//!   instead of holding startup in `wait`. A 256 KiB read cap stops one that
-//!   writes continuously from ballooning the capture buffer meanwhile;
+//!   startup. The wait is on the capture child exiting, not on stdout EOF.
+//!   A login profile that leaves a background job holding the pipe must not
+//!   drop a `PATH=` line the shell already wrote (issue #712). A child still
+//!   running at the deadline with no complete PATH line is terminated and
+//!   the inherited PATH stands. Stdout closing is still not process exit
+//!   (issue #683): once the pipe does hit EOF, a child that keeps running is
+//!   reaped only until the same deadline, then killed. A 256 KiB read cap
+//!   stops one that writes continuously from ballooning the capture buffer;
 //! - **best-effort** - any failure logs and leaves the inherited PATH untouched.
 //!
 //! Safety: like [`crate::runtime_paths::augment_path_for_gui_launch`], this
 //! mutates the process-global environment and MUST run on the main thread
 //! before any other thread is spawned (Rust 2024 marks `set_var` `unsafe`). The
-//! one helper thread it spawns to read stdout is always joined before the
-//! `set_var`. On timeout the capture process group is killed and the reader
-//! may be detached instead of wedging startup behind an inherited stdout FD.
+//! one helper thread it spawns publishes stdout into a shared buffer and is
+//! joined before the `set_var` when the read can be unblocked. The PATH bytes
+//! are snapshotted under that mutex first. If a holder keeps the read blocked,
+//! the reader is detached and keeps its own handle to the buffer, so it cannot
+//! overlap `set_var` or use-after-free it.
 
 #[cfg(unix)]
 pub fn load_login_shell_env() {
     use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};
-    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     // A terminal launch already inherited the login PATH from its parent shell
@@ -120,65 +125,30 @@ pub fn load_login_shell_env() {
         }
     };
 
-    let Some(mut stdout) = child.stdout.take() else {
+    let Some(stdout) = child.stdout.take() else {
         terminate_login_shell_capture(&mut child);
         let _ = child.wait();
         return;
     };
 
-    // Read stdout on a helper thread so the main thread can bound the wait. If
-    // the shell wedges, the timeout fires, we kill it, and the reader unblocks
-    // on EOF. The reader is joined before the `set_var` below, so no other
-    // thread is touching the environment when we mutate it.
-    let (tx, rx) = mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let buf = read_login_shell_capture(&mut stdout);
-        // Close our end of the pipe before handing the bytes over, so a child
-        // still writing past the cap gets EPIPE instead of wedging on a full
-        // pipe while the main thread is in `child.wait()`.
-        drop(stdout);
-        let _ = tx.send(buf);
-    });
-
-    // One deadline for the reader and for the reap after stdout closes.
-    // `recv_timeout` returning `Ok` only means the pipe hit EOF or the cap;
-    // the child can still be alive (a background job, a closed stdout).
+    // Wait on the child, not on stdout EOF. A background job that inherited
+    // the pipe would otherwise keep `read_to_end` blocked until the deadline
+    // and the timeout arm would drop a PATH line already in the buffer.
     let deadline = Instant::now() + Duration::from_secs(5);
-    let buf = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        Ok(buf) => {
-            if buf.len() as u64 >= LOGIN_ENV_CAPTURE_CAP {
-                // The child out-wrote the cap; it may still be running (and
-                // may ignore SIGPIPE), so stop it before waiting on it.
-                log::warn!(
-                    "login-shell env: {capture_shell:?} wrote more than {LOGIN_ENV_CAPTURE_CAP} bytes; capture truncated"
-                );
-                terminate_login_shell_capture(&mut child);
-            }
-            // `false` means the child outlived the deadline and was killed.
-            // A buffer that still holds a complete `PATH=` line is adopted
-            // below; anything incomplete leaves the inherited PATH alone.
-            let _ = reap_login_shell_capture(&mut child, deadline);
-            let _ = reader.join();
-            buf
-        }
-        Err(_) => {
-            log::warn!(
-                "login-shell env: {capture_shell:?} did not finish within 5s; keeping the inherited PATH"
-            );
-            terminate_login_shell_capture(&mut child);
-            let _ = child.wait();
-            if rx.recv_timeout(Duration::from_millis(250)).is_ok() {
-                let _ = reader.join();
-            } else {
-                log::warn!(
-                    "login-shell env: stdout reader stayed blocked after timeout; continuing startup"
-                );
-            }
-            return;
-        }
-    };
+    let captured = capture_login_shell_stdout(&mut child, stdout, deadline, MARKER.as_bytes());
+    if captured.truncated {
+        log::warn!(
+            "login-shell env: {capture_shell:?} wrote more than {LOGIN_ENV_CAPTURE_CAP} bytes; capture truncated"
+        );
+    }
+    if captured.timed_out {
+        log::warn!(
+            "login-shell env: {capture_shell:?} did not finish within 5s; keeping the inherited PATH"
+        );
+        return;
+    }
 
-    match extract_path(&buf, MARKER.as_bytes()) {
+    match captured.path {
         Some(path) if !captured_path_has_system_bin(&path) => {
             log::warn!(
                 "login-shell env: PATH captured from {capture_shell:?} lacks /usr/bin and /bin ({} bytes); keeping the inherited PATH",
@@ -186,8 +156,9 @@ pub fn load_login_shell_env() {
             );
         }
         Some(path) if !path.is_empty() => {
-            // SAFETY: main thread, before GPUI / any worker thread is spawned;
-            // the reader thread was joined above. We import ONLY PATH - see the
+            // SAFETY: main thread, before GPUI / any worker thread is spawned.
+            // The reader was joined, or detached after the PATH snapshot, and
+            // does not read the environment. We import ONLY PATH - see the
             // module doc for why adopting the full login environment is unsafe.
             unsafe { std::env::set_var("PATH", &path) };
             log::info!(
@@ -213,12 +184,304 @@ const LOGIN_ENV_CAPTURE_CAP: u64 = 256 * 1024;
 /// Read the capture shell's stdout into a buffer, stopping after
 /// [`LOGIN_ENV_CAPTURE_CAP`] bytes. The buffer can never grow past the cap, no
 /// matter how much the child writes before the deadline.
-#[cfg(unix)]
+///
+/// Production capture does not use this. `read_to_end` returns only at EOF or
+/// the cap, which is the issue #712 hang; the cap test still pins the bound.
+#[cfg(all(test, unix))]
 fn read_login_shell_capture<R: std::io::Read>(stdout: &mut R) -> Vec<u8> {
     use std::io::Read as _;
     let mut buf = Vec::new();
     let _ = stdout.take(LOGIN_ENV_CAPTURE_CAP).read_to_end(&mut buf);
     buf
+}
+
+/// After the capture child has exited or been killed, how long to keep the
+/// reader publishing before freezing the buffer. Long enough to copy a PATH
+/// line already in the pipe; a write end held open by a background job must
+/// not stretch this to the 5 s deadline.
+#[cfg(unix)]
+const LOGIN_ENV_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Bytes read from the capture pipe, plus the flags the reader and the main
+/// thread use to meet without waiting for EOF.
+#[cfg(unix)]
+struct CaptureRead {
+    bytes: std::sync::Mutex<Vec<u8>>,
+    stop: std::sync::atomic::AtomicBool,
+    done: std::sync::atomic::AtomicBool,
+    /// Set only when the reader observed stdout EOF. Cap and `stop` are not EOF:
+    /// treating them as one would reap a still-running child until the deadline.
+    eof: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(unix)]
+impl CaptureRead {
+    fn new() -> Self {
+        use std::sync::Mutex;
+        use std::sync::atomic::AtomicBool;
+        Self {
+            bytes: Mutex::new(Vec::new()),
+            stop: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+            eof: AtomicBool::new(false),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.lock().unwrap().len()
+    }
+
+    fn has_complete_path(&self, marker: &[u8]) -> bool {
+        let guard = self.bytes.lock().unwrap();
+        extract_path(&guard, marker).is_some()
+    }
+
+    /// Copy the bytes out while holding the mutex. Callers adopt PATH from
+    /// this snapshot, never from the live buffer the reader may still append to.
+    fn snapshot(&self) -> Vec<u8> {
+        self.bytes.lock().unwrap().clone()
+    }
+}
+
+/// Why [`wait_for_capture_child`] stopped. `Exited` means `try_wait` already
+/// reaped the child; the pid must not be signalled after that.
+#[cfg(unix)]
+enum CaptureWait {
+    Exited,
+    Reaped,
+    Truncated,
+    TimedOut,
+}
+
+/// Result of one login-shell capture attempt. `timed_out` is set only when the
+/// child was still running at the deadline and the snapshot held no complete
+/// `PATH=` line; the caller then keeps the inherited PATH.
+#[cfg(unix)]
+struct LoginShellCapture {
+    path: Option<String>,
+    truncated: bool,
+    timed_out: bool,
+}
+
+/// Spawn a reader on `stdout` and wait until `child` exits or `deadline`.
+///
+/// Bytes are published as they arrive. After the child exits, the buffer is
+/// polled briefly so the reader can drain what `env` already wrote even if a
+/// background job still holds the write end. The returned PATH is a snapshot
+/// taken under the mutex after the reader is joined, or before it is detached
+/// if the read cannot be unblocked.
+#[cfg(unix)]
+fn capture_login_shell_stdout<R>(
+    child: &mut std::process::Child,
+    mut stdout: R,
+    deadline: std::time::Instant,
+    marker: &[u8],
+) -> LoginShellCapture
+where
+    R: std::io::Read + std::os::unix::io::AsRawFd + Send + 'static,
+{
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    let capture = Arc::new(CaptureRead::new());
+    let reader = {
+        let capture = Arc::clone(&capture);
+        std::thread::spawn(move || {
+            let eof = publish_login_shell_capture(&mut stdout, &capture);
+            // Drop the read end before advertising completion so a finished
+            // reader is not still holding the pipe.
+            drop(stdout);
+            if eof {
+                capture.eof.store(true, Ordering::Release);
+            }
+            capture.done.store(true, Ordering::Release);
+        })
+    };
+
+    let wait = wait_for_capture_child(child, deadline, &capture);
+    if matches!(wait, CaptureWait::TimedOut) {
+        terminate_login_shell_capture(child);
+        let _ = child.wait();
+    }
+    wait_for_published_path(&capture, marker);
+    let buf = finish_capture_reader(&capture, reader);
+    let path = extract_path(&buf, marker);
+    let truncated =
+        matches!(wait, CaptureWait::Truncated) || buf.len() as u64 >= LOGIN_ENV_CAPTURE_CAP;
+    // A complete record is adopted even if we had to kill a child that
+    // outlived the deadline. The hang that keeps the inherited PATH is the
+    // one with no newline-terminated `PATH=` line.
+    let timed_out = matches!(wait, CaptureWait::TimedOut) && path.is_none();
+    LoginShellCapture {
+        path,
+        truncated,
+        timed_out,
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_capture_child(
+    child: &mut std::process::Child,
+    deadline: std::time::Instant,
+    capture: &CaptureRead,
+) -> CaptureWait {
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
+    loop {
+        if capture.len() as u64 >= LOGIN_ENV_CAPTURE_CAP {
+            // The child out-wrote the cap and may still be running (and may
+            // ignore SIGPIPE). Stop it before waiting on it. The pid has not
+            // been reaped, so this kill cannot hit a reused pid.
+            terminate_login_shell_capture(child);
+            let _ = child.wait();
+            return CaptureWait::Truncated;
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                // `try_wait` reaped the child. Do not `kill(-pid)` afterwards:
+                // the pid may already have been reused.
+                return CaptureWait::Exited;
+            }
+            Ok(None) if Instant::now() >= deadline => return CaptureWait::TimedOut,
+            Ok(None) if capture.eof.load(Ordering::Acquire) => {
+                // Stdout closed; the child can still be alive (issue #683).
+                // Reap only until the same deadline, then kill.
+                let _ = reap_login_shell_capture(child, deadline);
+                return CaptureWait::Reaped;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(error) => {
+                log::warn!("login-shell env: waiting on the capture child failed: {error}");
+                terminate_login_shell_capture(child);
+                let _ = child.wait();
+                return CaptureWait::Reaped;
+            }
+        }
+    }
+}
+
+/// Poll until a complete PATH record is visible, the reader finishes, or
+/// [`LOGIN_ENV_DRAIN_GRACE`] elapses. Does not wait for EOF.
+#[cfg(unix)]
+fn wait_for_published_path(capture: &CaptureRead, marker: &[u8]) {
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
+    let grace = Instant::now() + LOGIN_ENV_DRAIN_GRACE;
+    loop {
+        if capture.has_complete_path(marker) || capture.done.load(Ordering::Acquire) {
+            return;
+        }
+        if Instant::now() >= grace {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Stop the reader and copy the buffer. Joins when the reader exits; if a
+/// holder keeps a blocking read stuck, detaches after a short grace so startup
+/// does not wait on that fd. The snapshot is taken under the mutex either way.
+#[cfg(unix)]
+fn finish_capture_reader(capture: &CaptureRead, reader: std::thread::JoinHandle<()>) -> Vec<u8> {
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    capture.stop.store(true, Ordering::Release);
+    // The reader drains bytes already in the pipe before it honors `stop`,
+    // then exits on the following empty read. 100 ms is enough to notice
+    // `stop`; a holder that keeps `read` blocked falls through to detach.
+    let grace = Instant::now() + Duration::from_millis(100);
+    while !capture.done.load(Ordering::Acquire) && Instant::now() < grace {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if capture.done.load(Ordering::Acquire) {
+        let _ = reader.join();
+        capture.snapshot()
+    } else {
+        let snapshot = capture.snapshot();
+        log::warn!(
+            "login-shell env: stdout reader stayed blocked after timeout; continuing startup"
+        );
+        // Detach. The reader still holds its `Arc`, so dropping ours cannot
+        // free the buffer under it.
+        drop(reader);
+        snapshot
+    }
+}
+
+/// Publish `stdout` into `capture` until EOF, the byte cap, or `stop` observed
+/// against an empty pipe. Returns `true` only on EOF.
+#[cfg(unix)]
+fn publish_login_shell_capture<R>(stdout: &mut R, capture: &CaptureRead) -> bool
+where
+    R: std::io::Read + std::os::unix::io::AsRawFd,
+{
+    use std::sync::atomic::Ordering;
+
+    // Nonblocking so `stop` can end the thread when a background job holds
+    // the write end. A blocking `read` would ignore `stop` until EOF and
+    // could not be joined before `set_var`.
+    let nonblocking = set_login_capture_nonblocking(stdout.as_raw_fd());
+    let mut chunk = [0u8; 8192];
+    let mut saw_eof = false;
+    // Set when a `WouldBlock` has already been seen after `stop`. The next
+    // empty read means bytes that raced with `stop` have been drained.
+    let mut stop_was_empty = false;
+    loop {
+        let filled = capture.len() as u64;
+        if filled >= LOGIN_ENV_CAPTURE_CAP {
+            break;
+        }
+        let room = ((LOGIN_ENV_CAPTURE_CAP - filled) as usize).min(chunk.len());
+        if room == 0 {
+            break;
+        }
+        match stdout.read(&mut chunk[..room]) {
+            Ok(0) => {
+                saw_eof = true;
+                break;
+            }
+            Ok(n) => {
+                let mut guard = capture.bytes.lock().unwrap();
+                let room = (LOGIN_ENV_CAPTURE_CAP as usize).saturating_sub(guard.len());
+                let n = n.min(room);
+                if n == 0 {
+                    break;
+                }
+                guard.extend_from_slice(&chunk[..n]);
+                stop_was_empty = false;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if capture.stop.load(Ordering::Acquire) {
+                    if stop_was_empty || !nonblocking {
+                        break;
+                    }
+                    stop_was_empty = true;
+                    continue;
+                }
+                stop_was_empty = false;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => break,
+        }
+    }
+    saw_eof
+}
+
+#[cfg(unix)]
+fn set_login_capture_nonblocking(fd: std::os::unix::io::RawFd) -> bool {
+    // SAFETY: `fd` is the capture pipe's read end, owned by the reader thread
+    // for this call. `F_GETFL` / `F_SETFL` only change that descriptor's flags.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 {
+            return false;
+        }
+        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == 0
+    }
 }
 
 /// Shells whose `-l -i -c '<posix script>'` invocation runs our capture script.
@@ -340,9 +603,9 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::{
-        LOGIN_ENV_CAPTURE_CAP, captured_path_has_system_bin, extract_path, find_subslice,
-        is_launchd_default_path, is_posix_capture_shell, read_login_shell_capture,
-        reap_login_shell_capture,
+        LOGIN_ENV_CAPTURE_CAP, capture_login_shell_stdout, captured_path_has_system_bin,
+        extract_path, find_subslice, is_launchd_default_path, is_posix_capture_shell,
+        read_login_shell_capture, reap_login_shell_capture,
     };
     use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};
@@ -504,5 +767,104 @@ mod tests {
                 "{s} should fall back to /bin/sh"
             );
         }
+    }
+
+    /// A background process keeps the capture pipe open after the writer
+    /// prints a complete PATH line and exits. Adoption must not wait for
+    /// stdout EOF (issue #712). The sleeper is its own session so a
+    /// process-group kill of the writer does not unblock the reader.
+    #[test]
+    fn login_shell_env_adopts_path_when_a_background_job_holds_stdout() {
+        use std::os::unix::io::FromRawFd;
+
+        struct KillOnDrop(Option<std::process::Child>);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let Some(child) = self.0.as_mut() else {
+                    return;
+                };
+                // Already reaped (including by `try_wait` inside the capture).
+                // Killing afterwards can signal a reused pid.
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+
+        let mut fds = [0i32; 2];
+        // SAFETY: `pipe` creates a fresh pair this test owns.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+        let read_fd = fds[0];
+        let write_fd = fds[1];
+        // SAFETY: both fds came from `pipe` just above and are still open.
+        unsafe {
+            libc::fcntl(read_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(write_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+
+        let dup_stdio = |fd: i32| {
+            // SAFETY: `fd` is the open write end. `dup` yields a new owned fd,
+            // which `from_raw_fd` takes.
+            let duped = unsafe { libc::dup(fd) };
+            assert!(duped >= 0, "dup of the capture pipe failed");
+            unsafe { Stdio::from_raw_fd(duped) }
+        };
+
+        let mut sleeper_cmd = Command::new("/bin/sleep");
+        sleeper_cmd.arg("60");
+        sleeper_cmd
+            .stdin(Stdio::null())
+            .stdout(dup_stdio(write_fd))
+            .stderr(Stdio::null());
+        unsafe {
+            sleeper_cmd.pre_exec(|| {
+                // Own session: `kill(-writer_pgid)` must not reach this holder.
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let sleeper = KillOnDrop(Some(sleeper_cmd.spawn().expect("stdout holder must spawn")));
+
+        let script = "printf '%s\\n' '__PANEFLOW_LOGIN_ENV_V2__'; printf '%s\\n' 'PATH=/usr/bin:/bin:/opt/homebrew/bin'";
+        let mut writer_cmd = Command::new("/bin/sh");
+        writer_cmd.arg("-c").arg(script);
+        writer_cmd
+            .stdin(Stdio::null())
+            .stdout(dup_stdio(write_fd))
+            .stderr(Stdio::null());
+        let mut writer = KillOnDrop(Some(writer_cmd.spawn().expect("writer must spawn")));
+
+        // SAFETY: the parent still owns `write_fd`; both children have their
+        // own dups. Closing here drops the parent's write end only.
+        unsafe { libc::close(write_fd) };
+        // SAFETY: `read_fd` is the open read end and is not closed elsewhere.
+        let stdout = unsafe { std::fs::File::from_raw_fd(read_fd) };
+
+        let started = Instant::now();
+        let captured = capture_login_shell_stdout(
+            writer.0.as_mut().expect("writer"),
+            stdout,
+            started + Duration::from_secs(5),
+            b"__PANEFLOW_LOGIN_ENV_V2__",
+        );
+        let elapsed = started.elapsed();
+
+        // Reap before asserts so a failing assert cannot skip the kill.
+        drop(sleeper);
+
+        assert!(
+            !captured.timed_out,
+            "a background stdout holder must not force the 5s timeout"
+        );
+        assert_eq!(
+            captured.path.as_deref(),
+            Some("/usr/bin:/bin:/opt/homebrew/bin")
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "capture took {elapsed:?}; a held stdout must not wait out the deadline"
+        );
     }
 }
