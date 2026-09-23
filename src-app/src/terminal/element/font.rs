@@ -251,9 +251,8 @@ fn font_weight_from_key(key: &str) -> FontWeight {
 }
 
 static FONT_CONFIG_CACHE: std::sync::Mutex<Option<CachedFontConfig>> = std::sync::Mutex::new(None);
-static DEFAULT_MONO_FAMILY: LazyLock<&'static str> =
-    LazyLock::new(|| select_default_font_family(crate::fonts::load_mono_fonts()));
 
+#[cfg(test)]
 fn select_default_font_family<I, S>(_available_families: I) -> &'static str
 where
     I: IntoIterator<Item = S>,
@@ -273,7 +272,7 @@ where
 /// override against the installed-mono registry (when populated) and
 /// degrades back to this default with a warning otherwise.
 pub(crate) fn default_font_family() -> &'static str {
-    *DEFAULT_MONO_FAMILY
+    EMBEDDED_MONO_FAMILY
 }
 
 pub fn resolve_font_family(configured: Option<&str>) -> String {
@@ -288,7 +287,7 @@ fn resolve_font_family_with_registry(
         .map(str::trim)
         .filter(|family| !family.is_empty())
         .map(expand_paneflow_alias)
-        .unwrap_or(default_font_family());
+        .unwrap_or_else(default_font_family);
 
     // Embedded families are always resolvable: Assets::load_fonts
     // registers them directly with GPUI's text system at boot,
