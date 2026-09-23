@@ -77,6 +77,21 @@ fn config_directory(config_path: &Path) -> &Path {
     }
 }
 
+/// `plugins/` beside the config file, as an absolute path.
+///
+/// OpenCode treats a `plugin` string as a file only when it is absolute,
+/// `file://`, or begins with `.`. A relative `OPENCODE_CONFIG` such as
+/// `cfg/oc.json` would otherwise record `cfg/plugins/...`, which is neither,
+/// so the sidebar plugin never loads. Absolute paths are left unchanged.
+fn plugins_directory(config_path: &Path) -> std::io::Result<PathBuf> {
+    let directory = config_directory(config_path).join("plugins");
+    if directory.is_absolute() {
+        Ok(directory)
+    } else {
+        std::path::absolute(directory)
+    }
+}
+
 /// `serde_json` cannot round-trip comments. Refuse when the resolved file is
 /// `opencode.jsonc`, or when a sibling `opencode.jsonc` sits beside the
 /// default `opencode.json` (OpenCode loads the jsonc first). A custom
@@ -109,6 +124,9 @@ impl OpenCodePluginGuard {
         Self::install_config(&config_path).map(HookInstall::Installed)
     }
 
+    /// Test helper: install against `directory/opencode.json`. Production
+    /// install uses the resolved config file, which may not have that name.
+    #[cfg(test)]
     pub(crate) fn install_at(directory: &Path) -> std::io::Result<Self> {
         Self::install_config(&directory.join("opencode.json"))
     }
@@ -121,7 +139,7 @@ impl OpenCodePluginGuard {
             ));
         }
 
-        let plugins_dir = config_directory(config_path).join("plugins");
+        let plugins_dir = plugins_directory(config_path)?;
         let config_path = config_path.to_path_buf();
         refuse_symlink(&plugins_dir, "OpenCode plugin")?;
         std::fs::create_dir_all(&plugins_dir)?;
@@ -188,11 +206,10 @@ impl OpenCodePluginGuard {
         if config_path.file_name() == Some(OsStr::new("opencode.jsonc")) {
             return;
         }
-        let plugin_path = config_directory(config_path)
-            .join("plugins")
-            .join(PANEFLOW_TS_BASENAME);
+        let plugin_path =
+            plugins_directory(config_path).map(|directory| directory.join(PANEFLOW_TS_BASENAME));
         let config_ok = with_orphan_lease(config_path, config_path, |created_config| {
-            let Some(content) = read_optional_text(&config_path)? else {
+            let Some(content) = read_optional_text(config_path)? else {
                 return Ok(());
             };
             let mut root = serde_json::from_str::<serde_json::Value>(&content)
@@ -203,11 +220,14 @@ impl OpenCodePluginGuard {
                 return Ok(());
             }
             if created_config && root.as_object().is_some_and(serde_json::Map::is_empty) {
-                std::fs::remove_file(&config_path)
+                std::fs::remove_file(config_path)
             } else {
-                write_json_atomic(&config_path, &root)
+                write_json_atomic(config_path, &root)
             }
         });
+        let Ok(plugin_path) = plugin_path else {
+            return;
+        };
         if config_ok.is_ok() {
             let _ = with_orphan_lease(&plugin_path, &plugin_path, |created_plugin| {
                 remove_created_file(&plugin_path, created_plugin)
@@ -404,6 +424,24 @@ mod tests {
         assert_eq!(
             opencode_config_file_from(home, None, None, None),
             Some(PathBuf::from("/Users/alice/.config/opencode/opencode.json")),
+        );
+    }
+
+    #[test]
+    fn relative_config_records_an_absolute_plugin_directory() {
+        // `cfg/plugins/...` is not absolute, `file://`, or dot-relative, so
+        // OpenCode would treat it as an npm spec. The recorded directory
+        // has to be absolute before it is written into the config.
+        let plugins = plugins_directory(Path::new("cfg/custom.json")).unwrap();
+        let plugin = plugins.join(PANEFLOW_TS_BASENAME);
+        assert!(plugin.is_absolute());
+        assert_eq!(
+            plugin,
+            std::env::current_dir()
+                .unwrap()
+                .join("cfg")
+                .join("plugins")
+                .join(PANEFLOW_TS_BASENAME)
         );
     }
 
