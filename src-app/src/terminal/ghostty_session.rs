@@ -1701,7 +1701,9 @@ impl GhosttySession {
 
     /// `Ok(None)` is nothing selected. `Err` is an engine failure, including a
     /// selection over [`paneflow_terminal_ghostty`]'s copy cap, and is not the
-    /// same as an empty selection.
+    /// same as an empty selection. A mailbox failure or a one-second silence
+    /// is [`RUNTIME_UNANSWERED`], which mouse-up must not treat as a copy-cap
+    /// refusal (issue #704).
     pub(super) fn selection_text(&self) -> Result<Option<String>, String> {
         let text = match self.request(RuntimeMessage::SelectionText) {
             Some(Ok(text)) => text,
@@ -1714,6 +1716,37 @@ impl GhosttySession {
             self.selection_range(),
             text,
         ))
+    }
+
+    /// Whether mouse-up has selection text the runtime must format.
+    ///
+    /// A plain click does not: nothing was dragged, and a published point
+    /// range is the focus click [`filter_copyable_selection_text`] already
+    /// drops. Reading it anyway waits on [`Self::request`]'s one-second
+    /// timeout on the GPUI thread (issue #704). A word or line click, a drag
+    /// the runtime has not published yet, and any range that spans cells
+    /// still have text.
+    pub(super) fn mouse_up_requests_selection_text(&self) -> bool {
+        let (kind, drag_pending) = self.gesture_selection_query();
+        mouse_up_requests_selection_text(kind, drag_pending, self.selection_range())
+    }
+
+    /// `None` when mouse-up must not ask the runtime. Otherwise the blocking
+    /// [`Self::selection_text`] answer, which must not run on the GPUI thread.
+    pub(super) fn mouse_up_selection_read(&self) -> Option<Result<Option<String>, String>> {
+        if !self.mouse_up_requests_selection_text() {
+            return None;
+        }
+        Some(self.selection_text())
+    }
+
+    fn gesture_selection_query(&self) -> (Option<SelectionKind>, bool) {
+        let gesture = self.lock_gesture();
+        let drag_pending = gesture.requested.is_some()
+            || gesture.in_flight.is_some()
+            || gesture.applied.is_some()
+            || gesture.queued_generation.is_some();
+        (gesture.kind, drag_pending)
     }
 
     /// Drop the scrollback and clear the screen. Ghostty owns the history, so
@@ -2104,6 +2137,12 @@ impl GhosttySession {
 /// or no reply landed within the one-second budget.
 const RUNTIME_UNANSWERED: &str =
     "the runtime did not answer (mailbox full or closed, or no reply within 1 s)";
+
+/// True when `selection_text` failed because the runtime never answered, not
+/// because the engine refused the copy.
+pub(super) fn selection_read_unanswered(error: &str) -> bool {
+    error == RUNTIME_UNANSWERED
+}
 
 fn search_result_from_ghostty(result: ghostty::SearchResult) -> crate::search::SearchResult {
     crate::search::SearchResult {
@@ -4385,6 +4424,49 @@ fn selection_range_from_ghostty(selection: ghostty::SelectionRange) -> Selection
     }
 }
 
+/// Whether mouse-up must call `selection_text`.
+///
+/// `drag_pending` covers a drag the runtime has not published yet: the
+/// control queue still has the gesture ahead of the text request, so the
+/// read sees the drag instead of wiping it. Word and line clicks are the
+/// same shape. A plain click (`Simple` or no gesture, no drag) has nothing
+/// to copy unless a published range spans more than one cell.
+pub(super) fn mouse_up_requests_selection_text(
+    kind: Option<SelectionKind>,
+    drag_pending: bool,
+    range: Option<SelectionRange>,
+) -> bool {
+    if drag_pending {
+        return true;
+    }
+    match kind {
+        Some(SelectionKind::Semantic) | Some(SelectionKind::Lines) => true,
+        Some(SelectionKind::Simple) => range.is_some_and(|range| range.start != range.end),
+        None => range.is_some(),
+    }
+}
+
+/// `(is_empty, copied, clear_highlight)` for a mouse-up selection read.
+///
+/// `None` means the runtime was not asked. `Ok(None)` and empty text are an
+/// empty selection: the highlight is cleared and a stashed link may open. A
+/// copy-cap `Err` is not empty and the highlight stays. An unanswered runtime
+/// is not that refusal, so it must not suppress the link; the highlight stays
+/// because the text was never read.
+pub(super) fn mouse_up_selection_outcome(
+    read: Option<Result<Option<String>, String>>,
+) -> (bool, Option<String>, bool) {
+    match read {
+        None => (true, None, true),
+        Some(Ok(text)) => {
+            let is_empty = text.as_ref().is_none_or(String::is_empty);
+            (is_empty, text, true)
+        }
+        Some(Err(error)) if selection_read_unanswered(&error) => (true, None, false),
+        Some(Err(_)) => (false, None, false),
+    }
+}
+
 fn filter_copyable_selection_text(
     kind: Option<SelectionKind>,
     range: Option<SelectionRange>,
@@ -5971,6 +6053,150 @@ mod tests {
             ),
             Some("x".into())
         );
+    }
+
+    fn mailbox_has_selection_text(pending: &GhosttyRuntimePending) -> bool {
+        pending
+            .mailbox
+            .drain()
+            .iter()
+            .any(|message| matches!(message, RuntimeMessage::SelectionText(_)))
+    }
+
+    /// Issue #704. A pending session has no runtime thread, so this calls the
+    /// mouse-up read itself: a real `selection_text` would block on
+    /// `recv_timeout` for a full second and leave `SelectionText` queued. A
+    /// live GPUI mouse event is not built here; mouse-up calls this read and
+    /// `mouse_up_selection_outcome`, and neither needs a window.
+    #[test]
+    fn mouse_up_without_selection_does_not_request_selection_text() {
+        let point = Point::new(1, 2);
+        let point_range = SelectionRange {
+            start: point,
+            end: point,
+            is_block: false,
+        };
+        let dragged = SelectionRange {
+            end: Point::new(1, 5),
+            ..point_range
+        };
+        assert!(!mouse_up_requests_selection_text(None, false, None));
+        assert!(!mouse_up_requests_selection_text(
+            Some(SelectionKind::Simple),
+            false,
+            None,
+        ));
+        assert!(!mouse_up_requests_selection_text(
+            Some(SelectionKind::Simple),
+            false,
+            Some(point_range),
+        ));
+        assert!(mouse_up_requests_selection_text(
+            Some(SelectionKind::Simple),
+            false,
+            Some(dragged),
+        ));
+        assert!(mouse_up_requests_selection_text(
+            Some(SelectionKind::Simple),
+            true,
+            None,
+        ));
+        assert!(mouse_up_requests_selection_text(
+            Some(SelectionKind::Semantic),
+            false,
+            None,
+        ));
+        assert!(mouse_up_requests_selection_text(
+            Some(SelectionKind::Lines),
+            false,
+            None,
+        ));
+        // Select-all leaves a range and clears the gesture kind.
+        assert!(mouse_up_requests_selection_text(
+            None,
+            false,
+            Some(point_range)
+        ));
+
+        let (empty, copied, clear) = mouse_up_selection_outcome(Some(Ok(None)));
+        assert!(empty, "Ok(None) stays on the empty-selection path");
+        assert!(copied.is_none());
+        assert!(clear);
+
+        let (empty, copied, clear) = mouse_up_selection_outcome(Some(Ok(Some(String::new()))));
+        assert!(empty);
+        assert_eq!(copied.as_deref(), Some(""));
+        assert!(clear);
+
+        let (empty, copied, clear) = mouse_up_selection_outcome(Some(Ok(Some("hello".into()))));
+        assert!(!empty);
+        assert_eq!(copied.as_deref(), Some("hello"));
+        assert!(clear);
+
+        let (empty, copied, clear) = mouse_up_selection_outcome(Some(Err(
+            "selection text exceeds the 400000-unit safety cap".into(),
+        )));
+        assert!(
+            !empty,
+            "a copy-cap Err stays distinguishable from an empty selection"
+        );
+        assert!(copied.is_none());
+        assert!(!clear, "a copy-cap Err keeps the highlight");
+
+        let (empty, copied, clear) =
+            mouse_up_selection_outcome(Some(Err(RUNTIME_UNANSWERED.to_owned())));
+        assert!(
+            empty,
+            "a timeout must not be reported as a non-empty selection"
+        );
+        assert!(copied.is_none());
+        assert!(
+            !clear,
+            "a timeout is not an empty read, so the highlight stays"
+        );
+
+        let (session, pending, _events) =
+            GhosttySession::pending(TerminalWindowSize::new(80, 24, 8, 16));
+        assert!(session.selection_range().is_none());
+        assert!(!session.mouse_up_requests_selection_text());
+        let started = Instant::now();
+        let read = session.mouse_up_selection_read();
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "mouse-up with no selection waited on the runtime"
+        );
+        assert!(read.is_none());
+        assert!(
+            !mailbox_has_selection_text(&pending),
+            "no selection must not send SelectionText"
+        );
+
+        {
+            let mut gesture = session.lock_gesture();
+            gesture.kind = Some(SelectionKind::Simple);
+        }
+        update_shared_selection(&session.inner, Some(point_range));
+        assert!(!session.mouse_up_requests_selection_text());
+        let started = Instant::now();
+        let read = session.mouse_up_selection_read();
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "a point click waited on the runtime"
+        );
+        assert!(read.is_none());
+        assert!(
+            !mailbox_has_selection_text(&pending),
+            "a point click must not send SelectionText"
+        );
+
+        // An unpublished drag still has text. Asking the predicate must not
+        // itself send the request (that send would block the test for 1s).
+        {
+            let mut gesture = session.lock_gesture();
+            gesture.queued_generation = Some(1);
+        }
+        assert!(session.mouse_up_requests_selection_text());
+        assert!(!mailbox_has_selection_text(&pending));
     }
 
     #[test]

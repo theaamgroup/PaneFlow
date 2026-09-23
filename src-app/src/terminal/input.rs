@@ -1014,16 +1014,53 @@ impl TerminalView {
         // started on a link became a text selection and copies instead.
         let down_link = self.mouse_down_link.take();
 
-        // Clear empty selections, or auto-copy non-empty selections (tmux-style):
-        // write to both PRIMARY (middle-click paste) and CLIPBOARD (Ctrl+V),
-        // then clear the selection so the disappearing highlight signals the copy.
+        // Issue #704: a plain click has no selection text. Reading it on this
+        // thread waits on the runtime for up to a second, and that timeout
+        // used to look like a non-empty selection, so a Cmd-click link never
+        // opened. A real selection still reads, off this thread; the clipboard
+        // write comes back here. The highlight clears only after a read that
+        // actually produced text (or an empty one), which is what tells the
+        // user the copy landed.
         self.terminal
             .session_backend()
             .release_selection(self.grid_cell_at(event.position));
-        let (selection_empty, copied) = self.terminal.session_backend().finish_selection();
+        let backend = self.terminal.session_backend();
+        if !backend.mouse_up_requests_selection_text() {
+            // Nothing to read: `finish_selection` returns without the runtime.
+            let (selection_empty, copied) = backend.finish_selection();
+            self.present_mouse_up_selection(selection_empty, copied, down_link, cx);
+            return;
+        }
+        cx.spawn(
+            async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let read = smol::unblock(move || backend.mouse_up_selection_read()).await;
+                let _ = this.update(cx, |view, cx| {
+                    // A newer press owns the gesture. Copy the release, but
+                    // do not clear the selection it started.
+                    let allow_clear = !view.selecting;
+                    let (selection_empty, copied) = view
+                        .terminal
+                        .session_backend()
+                        .complete_mouse_up_selection(read, allow_clear);
+                    view.present_mouse_up_selection(selection_empty, copied, down_link, cx);
+                });
+            },
+        )
+        .detach();
+    }
 
-        // US-012: open on a genuine click (empty selection = no drag).
+    /// Open a stashed link when the selection is empty, otherwise copy.
+    fn present_mouse_up_selection(
+        &mut self,
+        selection_empty: bool,
+        copied: Option<String>,
+        down_link: Option<HyperlinkZone>,
+        cx: &mut Context<Self>,
+    ) {
+        // US-012: open on a genuine click (empty selection = no drag). A
+        // newer press (`selecting`) means this result is stale.
         if selection_empty
+            && !self.selecting
             && let Some(link) = down_link
             && link.is_openable
         {

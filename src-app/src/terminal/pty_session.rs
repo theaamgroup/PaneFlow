@@ -316,19 +316,39 @@ impl TerminalSessionBackend {
 
     /// Copy the selection and clear it.
     ///
+    /// A click with nothing to read never asks the runtime (issue #704).
     /// `Ok(None)` and an empty string are an empty selection: the highlight
     /// goes away and `(true, copied)` is returned. Text over the engine's copy
     /// cap is `Err`: nothing was copied, so the highlight stays and the pair
-    /// is `(false, None)` rather than an empty copy.
+    /// is `(false, None)`. An unanswered runtime is not that refusal: the pair
+    /// is `(true, None)` so a link still opens, and the highlight stays.
     pub(crate) fn finish_selection(&self) -> (bool, Option<String>) {
-        match self.ghostty.selection_text() {
-            Ok(copied) => {
-                let is_empty = copied.as_ref().is_none_or(String::is_empty);
-                self.ghostty.clear_selection();
-                (is_empty, copied)
-            }
-            Err(_) => (false, None),
+        self.complete_mouse_up_selection(self.mouse_up_selection_read(), true)
+    }
+
+    /// Whether [`Self::mouse_up_selection_read`] would block on the runtime.
+    pub(crate) fn mouse_up_requests_selection_text(&self) -> bool {
+        self.ghostty.mouse_up_requests_selection_text()
+    }
+
+    /// `None` when mouse-up has nothing to read. `Some` is the blocking
+    /// selection read and must not run on the GPUI thread.
+    pub(crate) fn mouse_up_selection_read(&self) -> Option<Result<Option<String>, String>> {
+        self.ghostty.mouse_up_selection_read()
+    }
+
+    /// Apply a mouse-up read. `allow_clear` is false when a newer press owns
+    /// the gesture, so this completion cannot wipe it.
+    pub(crate) fn complete_mouse_up_selection(
+        &self,
+        read: Option<Result<Option<String>, String>>,
+        allow_clear: bool,
+    ) -> (bool, Option<String>) {
+        let (is_empty, copied, clear) = super::ghostty_session::mouse_up_selection_outcome(read);
+        if allow_clear && clear {
+            self.ghostty.clear_selection();
         }
+        (is_empty, copied)
     }
 
     pub(crate) fn clear_selection(&self) {
@@ -3994,7 +4014,17 @@ mod tests {
             "refusing the copy must leave the selection installed"
         );
 
-        let (is_empty, copied) = backend.finish_selection();
+        // Issue #704: an unanswered read is an empty report that keeps the
+        // highlight, not a copy-cap refusal. A large grid can still miss the
+        // one-second budget, so retry until the engine actually refuses.
+        let started = std::time::Instant::now();
+        let (is_empty, copied) = loop {
+            let (is_empty, copied) = backend.finish_selection();
+            let unanswered = is_empty && backend.selection_range().is_some();
+            if !unanswered || started.elapsed() >= std::time::Duration::from_secs(45) {
+                break (is_empty, copied);
+            }
+        };
         assert!(!is_empty, "a limit error is not an empty copy");
         assert!(copied.is_none());
         let error = selection_text_when_the_runtime_catches_up(&backend)
