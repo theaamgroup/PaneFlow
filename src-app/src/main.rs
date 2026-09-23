@@ -1956,15 +1956,11 @@ impl PaneFlowApp {
     /// Remove a workspace's `.git` directory from the file watcher.
     /// Only unwatches when the last workspace using this git dir is removed.
     fn unwatch_git_dir(&mut self, git_dir: &std::path::Path) {
-        if let Some(count) = self.git_watch_counts.get_mut(git_dir) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                self.git_watch_counts.remove(git_dir);
-                if let Some(ref mut watcher) = self.git_watcher {
-                    let _ = watcher.unwatch(git_dir);
-                }
-            }
-        }
+        crate::app::event_handlers::release_git_watch(
+            &mut self.git_watch_counts,
+            self.git_watcher.as_mut(),
+            git_dir,
+        );
     }
 
     /// Create a new pane wrapping a terminal, and subscribe to its events.
