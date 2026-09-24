@@ -1656,6 +1656,7 @@ fn write_corruption_backup(
     session_path: &Path,
     contents: &[u8],
 ) -> std::io::Result<Option<PathBuf>> {
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
     let parent = match session_path.parent() {
         Some(p) => p,
         None => {
@@ -1665,7 +1666,13 @@ fn write_corruption_backup(
             ));
         }
     };
-    std::fs::create_dir_all(parent)?;
+    // Owner-only, like `write_session_json_inner`: the backup holds the same
+    // session bytes (absolute cwds, tab titles). `mode` only applies to
+    // directories this call creates; a pre-existing parent keeps its mode.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)?;
 
     let ts = match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(d) => d.as_nanos(),
@@ -1680,7 +1687,17 @@ fn write_corruption_backup(
         "{stem}.corrupted-{ts}-{}-{seq}",
         std::process::id()
     ));
-    std::fs::write(&backup, contents)?;
+    // The name is unique per call (nanos, pid, sequence), so `create_new`
+    // never trips on our own earlier backup. It is O_EXCL: a symlink planted
+    // at the name fails the open instead of being written through. The
+    // explicit chmod pins 0600 whatever the umask.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&backup)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    std::io::Write::write_all(&mut file, contents)?;
 
     rotate_corruption_backups(parent, stem);
     Ok(Some(backup))
@@ -2336,6 +2353,37 @@ mod tests {
         assert_ne!(first, second, "backups must not overwrite each other");
         assert_eq!(std::fs::read(&first).expect("first readable"), b"first");
         assert_eq!(std::fs::read(&second).expect("second readable"), b"second");
+    }
+
+    /// Issue #737: a corruption backup carries the same session bytes as
+    /// session.json, so it gets the same owner-only modes.
+    #[test]
+    fn corruption_backup_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let parent = tmp.path().join("created-by-backup");
+        let session_path = parent.join("session.json");
+
+        let backup = write_corruption_backup(&session_path, b"{broken")
+            .expect("backup written")
+            .expect("backup path");
+
+        let file_mode = std::fs::metadata(&backup)
+            .expect("backup metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600, "backup must be 0600, got {file_mode:o}");
+        let dir_mode = std::fs::metadata(&parent)
+            .expect("parent metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "a parent created for the backup must be 0700, got {dir_mode:o}"
+        );
+        assert_eq!(std::fs::read(&backup).expect("backup readable"), b"{broken");
     }
 
     #[test]
