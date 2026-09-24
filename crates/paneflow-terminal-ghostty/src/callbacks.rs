@@ -155,10 +155,14 @@ impl CallbackState {
                 events.push_back(BackendEvent::Progress(report));
             }
             BackendEvent::Bell => {
+                // A bell carries nothing to lose, so a burst past the cap
+                // coalesces into the bells already queued. It is not an
+                // overflow: the kernel echoes a BEL for every byte of a
+                // pasted line past the canonical input limit, so a paste
+                // into a program that is not reading can put a thousand in
+                // one PTY read.
                 let pending = self.pending_bell_events.get();
-                if pending >= MAX_PENDING_BELL_EVENTS {
-                    push_overflow(&mut events, 1, 0);
-                } else {
+                if pending < MAX_PENDING_BELL_EVENTS {
                     self.pending_bell_events.set(pending + 1);
                     events.push_back(BackendEvent::Bell);
                 }
@@ -408,6 +412,22 @@ mod tests {
         }
 
         assert_eq!(state.drain(), [BackendEvent::WritePty(vec![b'x'; 1_000])]);
+    }
+
+    #[test]
+    fn excess_bells_are_coalesced_without_an_overflow() {
+        let state = CallbackState::new(WindowSize::new(80, 24, 8, 16).unwrap(), ColorScheme::Dark);
+        for _ in 0..MAX_PENDING_BELL_EVENTS * 4 {
+            state.push(BackendEvent::Bell);
+        }
+
+        let events = state.drain();
+        assert_eq!(events.len(), MAX_PENDING_BELL_EVENTS);
+        assert!(events.iter().all(|event| *event == BackendEvent::Bell));
+
+        // The cap is per drain: the next burst is reported again.
+        state.push(BackendEvent::Bell);
+        assert_eq!(state.drain(), [BackendEvent::Bell]);
     }
 
     #[test]
