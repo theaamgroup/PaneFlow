@@ -40,7 +40,22 @@ pub struct ShortcutEntry {
 /// the menu bar always shows the actual key the user will press.
 pub fn format_keystroke(key: &str) -> String {
     let is_macos = cfg!(target_os = "macos");
-    let parts = key.split('-').map(|part| match part {
+    // The key itself can be `-` (font_size_decrease is `secondary--`, and the
+    // rebind toast unparses Cmd+Minus as `cmd--`), so peel it off before
+    // splitting, as `ascii_key_forms` does; a bare `split('-')` turns it into
+    // empty tokens and the label loses the key.
+    let (modifier_part, key) = match key.strip_suffix("--") {
+        Some(modifiers) => (modifiers, "-"),
+        None => match key.rsplit_once('-') {
+            Some((modifiers, key)) => (modifiers, key),
+            None => ("", key),
+        },
+    };
+    let tokens = modifier_part
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .chain(std::iter::once(key));
+    let parts = tokens.map(|part| match part {
         // Modifiers - platform-dependent rendering.
         "secondary" => {
             if is_macos {
@@ -593,6 +608,19 @@ mod tests {
         assert_eq!(format_keystroke("secondary-1"), "\u{2318}1");
         // Explicit `cmd` token also renders as ⌘ (user override form from AC5).
         assert_eq!(format_keystroke("cmd-shift-d"), "\u{2318}\u{21E7}D");
+    }
+
+    /// Issue #739: the minus key must survive formatting, or the label reads
+    /// as a bare modifier (`⌘`) for font_size_decrease and the rebind toast.
+    #[test]
+    fn format_keystroke_renders_minus_key() {
+        assert_eq!(format_keystroke("secondary--"), "\u{2318}-");
+        assert_eq!(format_keystroke("cmd--"), "\u{2318}-");
+        assert_eq!(format_keystroke("secondary-shift--"), "\u{2318}\u{21E7}-");
+        assert_eq!(format_keystroke("ctrl-alt--"), "\u{2303}\u{2325}-");
+        // Ordinary chords are unchanged by the trailing-key split.
+        assert_eq!(format_keystroke("secondary-="), "\u{2318}=");
+        assert_eq!(format_keystroke("tab"), "Tab");
     }
 
     #[test]
