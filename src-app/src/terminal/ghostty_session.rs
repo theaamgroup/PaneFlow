@@ -947,208 +947,6 @@ impl Drop for RuntimeChildCleanupGuard {
     }
 }
 
-#[cfg(test)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ChildExitReport {
-    code: i32,
-    signal: Option<String>,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RuntimeLifecyclePhase {
-    Running,
-    Draining,
-    Published,
-}
-
-#[cfg(test)]
-struct RuntimeLifecycle {
-    phase: RuntimeLifecyclePhase,
-    output_sealed: bool,
-    exit: Option<ChildExitReport>,
-    drain_deadline: Option<Instant>,
-}
-
-#[cfg(test)]
-impl RuntimeLifecycle {
-    fn new() -> Self {
-        Self {
-            phase: RuntimeLifecyclePhase::Running,
-            output_sealed: false,
-            exit: None,
-            drain_deadline: None,
-        }
-    }
-
-    fn is_running(&self) -> bool {
-        self.phase == RuntimeLifecyclePhase::Running
-    }
-
-    fn record_eof(&mut self) {
-        self.output_sealed = true;
-    }
-
-    fn start_draining(&mut self, exit: ChildExitReport, now: Instant) -> bool {
-        if !self.is_running() {
-            return false;
-        }
-        self.phase = RuntimeLifecyclePhase::Draining;
-        self.exit = Some(exit);
-        self.drain_deadline = now.checked_add(FINAL_DRAIN_TIMEOUT);
-        true
-    }
-
-    fn drain_deadline_reached(&self, now: Instant) -> bool {
-        self.phase == RuntimeLifecyclePhase::Draining
-            && !self.output_sealed
-            && self.drain_deadline.is_none_or(|deadline| now >= deadline)
-    }
-
-    fn seal_output(&mut self) {
-        self.output_sealed = true;
-    }
-
-    fn take_ready_exit(
-        &mut self,
-        _now: Instant,
-        pending_output_count: usize,
-    ) -> Option<ChildExitReport> {
-        if self.phase != RuntimeLifecyclePhase::Draining {
-            return None;
-        }
-        if pending_output_count > 0 || !self.output_sealed {
-            return None;
-        }
-        self.phase = RuntimeLifecyclePhase::Published;
-        self.exit.take()
-    }
-}
-
-/// Test double for the final-drain path: a one-shot worker thread that
-/// receives a PTY master and drops it off the caller's thread.
-#[cfg(test)]
-struct PtyCloser<M: Send + 'static> {
-    sender: Option<std::sync::mpsc::Sender<M>>,
-    worker: Option<std::thread::JoinHandle<()>>,
-}
-
-#[cfg(test)]
-impl<M: Send + 'static> PtyCloser<M> {
-    fn new(thread_name: &str) -> std::io::Result<Self> {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let worker = std::thread::Builder::new()
-            .name(thread_name.to_owned())
-            .spawn(move || {
-                if let Ok(master) = receiver.recv() {
-                    drop(master);
-                }
-            })?;
-        Ok(Self {
-            sender: Some(sender),
-            worker: Some(worker),
-        })
-    }
-
-    fn submit(&mut self, master: M) -> Result<(), M> {
-        let Some(sender) = self.sender.take() else {
-            return Err(master);
-        };
-        sender.send(master).map_err(|error| error.0)
-    }
-
-    fn join_until(&mut self, deadline: Instant) -> bool {
-        loop {
-            let Some(worker) = self.worker.as_ref() else {
-                return true;
-            };
-            if worker.is_finished() {
-                return self
-                    .worker
-                    .take()
-                    .is_none_or(|worker| worker.join().is_ok());
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return false;
-            }
-            std::thread::sleep(remaining.min(Duration::from_millis(1)));
-        }
-    }
-}
-
-#[cfg(test)]
-impl<M: Send + 'static> Drop for PtyCloser<M> {
-    fn drop(&mut self) {
-        drop(self.sender.take());
-        if self
-            .worker
-            .as_ref()
-            .is_some_and(std::thread::JoinHandle::is_finished)
-        {
-            let _ = self.worker.take().and_then(|worker| worker.join().ok());
-        }
-    }
-}
-
-/// Test double for the final-drain path: owns a PTY master and guarantees
-/// that even an unwind hands the close to a dedicated thread, so the owner
-/// stays free to consume its output pool while the close completes. Only
-/// the `close_pty_for_final_drain` test exercises it.
-#[cfg(test)]
-struct DrainablePtyMaster<M: Send + 'static> {
-    master: Option<M>,
-    closer: PtyCloser<M>,
-}
-
-#[cfg(test)]
-impl<M: Send + 'static> DrainablePtyMaster<M> {
-    fn new(master: M, closer: PtyCloser<M>) -> Self {
-        Self {
-            master: Some(master),
-            closer,
-        }
-    }
-
-    fn close_async(&mut self) -> bool {
-        let Some(master) = self.master.take() else {
-            return true;
-        };
-        match self.closer.submit(master) {
-            Ok(()) => true,
-            Err(master) => {
-                // A dead closer thread is already a fatal invariant failure.
-                // Leaking the handle here preserves bounded shutdown instead
-                // of risking a synchronous close on this thread.
-                std::mem::forget(master);
-                false
-            }
-        }
-    }
-
-    fn join_until(&mut self, deadline: Instant) -> bool {
-        self.closer.join_until(deadline)
-    }
-}
-
-#[cfg(test)]
-impl<M: Send + 'static> Drop for DrainablePtyMaster<M> {
-    fn drop(&mut self) {
-        let _ = self.close_async();
-    }
-}
-
-/// Test double for the final-drain path: drop the writer, then hand the
-/// master to the closer thread. Reports whether the closer accepted it.
-#[cfg(test)]
-fn close_pty_for_final_drain<W, M: Send + 'static>(
-    writer: &mut Option<W>,
-    master: &mut DrainablePtyMaster<M>,
-) -> bool {
-    drop(writer.take());
-    master.close_async()
-}
-
 fn publish_child_exit_once(inner: &SessionInner, code: i32, signal: Option<String>) {
     if inner
         .exit_published
@@ -2783,49 +2581,42 @@ fn run_runtime(
             }
             Ok(Some(RuntimeMessage::Resize(command))) => {
                 let size = command.size;
-                let resize_allowed = true;
-                if !resize_allowed {
-                    complete_resize_during_drain(&inner);
-                } else {
-                    let resized = window_size(size)
-                        .map_err(|error| error.to_string())
-                        .and_then(|ghostty_size| {
+                let resized = window_size(size)
+                    .map_err(|error| error.to_string())
+                    .and_then(|ghostty_size| {
+                        terminal
+                            .resize(ghostty_size)
+                            .map_err(|error| error.to_string())
+                    })
+                    .and_then(|()| {
+                        if command.clear_initial {
                             terminal
-                                .resize(ghostty_size)
-                                .map_err(|error| error.to_string())
-                        })
-                        .and_then(|()| {
-                            if command.clear_initial {
-                                terminal
-                                    .clear_screen_and_scrollback()
-                                    .map_err(|error| error.to_string())?;
-                            }
-                            Ok(())
-                        })
-                        .and_then(|()| {
-                            let active_master = Some(master.as_ref());
-                            active_master
-                                .ok_or_else(|| {
-                                    "Ghostty PTY master closed during resize".to_owned()
-                                })?
-                                .resize(pty_size(size))
-                                .map_err(|error| error.to_string())
-                        })
-                        .and_then(|()| publish_gate.publish_now(&inner, &mut terminal));
-                    let resize_succeeded = match resized {
-                        Ok(()) => true,
-                        Err(error) => {
-                            log::warn!(
-                                target: "paneflow::terminal::ghostty",
-                                "Ghostty resize to {}x{} failed: {error}",
-                                size.cols,
-                                size.rows,
-                            );
-                            false
+                                .clear_screen_and_scrollback()
+                                .map_err(|error| error.to_string())?;
                         }
-                    };
-                    complete_resize(&inner, command, resize_succeeded);
-                }
+                        Ok(())
+                    })
+                    .and_then(|()| {
+                        let active_master = Some(master.as_ref());
+                        active_master
+                            .ok_or_else(|| "Ghostty PTY master closed during resize".to_owned())?
+                            .resize(pty_size(size))
+                            .map_err(|error| error.to_string())
+                    })
+                    .and_then(|()| publish_gate.publish_now(&inner, &mut terminal));
+                let resize_succeeded = match resized {
+                    Ok(()) => true,
+                    Err(error) => {
+                        log::warn!(
+                            target: "paneflow::terminal::ghostty",
+                            "Ghostty resize to {}x{} failed: {error}",
+                            size.cols,
+                            size.rows,
+                        );
+                        false
+                    }
+                };
+                complete_resize(&inner, command, resize_succeeded);
             }
             #[cfg(test)]
             Ok(Some(RuntimeMessage::SimulateWorkerCrash)) => {
@@ -3525,17 +3316,6 @@ fn complete_resize(inner: &SessionInner, command: ResizeCommand, succeeded: bool
     if resize.requested != size || resize.clear_initial_requested {
         inner.command_backpressure.store(true, Ordering::Release);
     }
-    drop(resize);
-    notify_command_capacity(inner);
-}
-
-fn complete_resize_during_drain(inner: &SessionInner) {
-    let mut resize = inner
-        .resize
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    resize.submitted = None;
-    resize.clear_initial_requested = false;
     drop(resize);
     notify_command_capacity(inner);
 }
@@ -5879,19 +5659,23 @@ mod tests {
     }
 
     #[test]
-    fn resize_during_drain_is_completed_without_apply_or_requeue() {
+    fn resize_after_shutdown_is_neither_submitted_nor_retried() {
         let initial = TerminalWindowSize::new(80, 24, 8, 16);
-        let requested = TerminalWindowSize::new(100, 30, 9, 18);
         let (session, pending, _events_rx) = GhosttySession::pending(initial);
-        session.resize(requested);
-        let command = match pending.mailbox.try_recv().unwrap() {
-            RuntimeMessage::Resize(command) => command,
-            _ => panic!("expected queued resize"),
-        };
-
         session.inner.shutdown_sent.store(true, Ordering::Release);
-        complete_resize_during_drain(&session.inner);
-        session.resize(TerminalWindowSize::new(120, 40, 10, 20));
+
+        session.resize(TerminalWindowSize::new(100, 30, 9, 18));
+        assert!(pending.mailbox.drain().is_empty());
+
+        // A request that was recorded before the shutdown must not be sent by
+        // a later backpressure retry either.
+        let pending_size = TerminalWindowSize::new(120, 40, 10, 20);
+        session
+            .inner
+            .resize
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .requested = pending_size;
         session.retry_backpressured_commands();
 
         assert!(pending.mailbox.drain().is_empty());
@@ -5902,7 +5686,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(resize.submitted, None);
         assert_eq!(resize.applied, Some(initial));
-        assert_eq!(resize.requested, command.size);
+        assert_eq!(resize.requested, pending_size);
     }
 
     #[test]
@@ -6807,117 +6591,6 @@ printf 'PANEFLOW_FINAL_LINE_%s\\n' MARKER; exit\n"
             shutdown_pending.mailbox.try_recv(),
             Ok(RuntimeMessage::Shutdown)
         ));
-    }
-
-    #[test]
-    fn lifecycle_publishes_once_after_eof() {
-        let now = Instant::now();
-        let exit = ChildExitReport {
-            code: 7,
-            signal: None,
-        };
-        let mut lifecycle = RuntimeLifecycle::new();
-
-        assert!(lifecycle.start_draining(exit.clone(), now));
-        assert!(!lifecycle.start_draining(
-            ChildExitReport {
-                code: 99,
-                signal: None,
-            },
-            now,
-        ));
-        assert_eq!(lifecycle.take_ready_exit(now, 0), None);
-        lifecycle.record_eof();
-        assert_eq!(lifecycle.take_ready_exit(now, 1), None);
-        assert_eq!(lifecycle.take_ready_exit(now, 0), Some(exit));
-        assert_eq!(lifecycle.take_ready_exit(now, 0), None);
-    }
-
-    #[test]
-    fn lifecycle_deadline_and_early_eof_converge() {
-        let now = Instant::now();
-        let deadline = now.checked_add(FINAL_DRAIN_TIMEOUT).unwrap_or(now);
-        let mut timed = RuntimeLifecycle::new();
-        assert!(timed.start_draining(
-            ChildExitReport {
-                code: -1,
-                signal: None,
-            },
-            now,
-        ));
-        assert_eq!(timed.take_ready_exit(now, 0), None);
-        assert!(timed.drain_deadline_reached(deadline));
-        assert_eq!(timed.take_ready_exit(deadline, 0), None);
-        timed.seal_output();
-        assert_eq!(timed.take_ready_exit(deadline, 1), None);
-        assert_eq!(
-            timed.take_ready_exit(deadline, 0),
-            Some(ChildExitReport {
-                code: -1,
-                signal: None,
-            })
-        );
-
-        let mut eof_first = RuntimeLifecycle::new();
-        eof_first.record_eof();
-        assert!(eof_first.start_draining(
-            ChildExitReport {
-                code: 0,
-                signal: None,
-            },
-            now,
-        ));
-        assert_eq!(
-            eof_first.take_ready_exit(now, 0),
-            Some(ChildExitReport {
-                code: 0,
-                signal: None,
-            })
-        );
-    }
-
-    #[test]
-    fn final_drain_closes_writer_and_master_before_reader_eof() {
-        struct DropProbe {
-            dropped: Arc<AtomicBool>,
-        }
-
-        impl Drop for DropProbe {
-            fn drop(&mut self) {
-                self.dropped.store(true, Ordering::Release);
-            }
-        }
-
-        let writer_dropped = Arc::new(AtomicBool::new(false));
-        let master_dropped = Arc::new(AtomicBool::new(false));
-        let mut writer = Some(DropProbe {
-            dropped: writer_dropped.clone(),
-        });
-        let closer = PtyCloser::new("paneflow-ghostty-test-pty-closer")
-            .expect("test closer thread must start");
-        let mut master = DrainablePtyMaster::new(
-            DropProbe {
-                dropped: master_dropped.clone(),
-            },
-            closer,
-        );
-        assert!(close_pty_for_final_drain(&mut writer, &mut master));
-        assert!(writer_dropped.load(Ordering::Acquire));
-        assert!(master.join_until(Instant::now() + Duration::from_secs(1)));
-        assert!(master_dropped.load(Ordering::Acquire));
-
-        let now = Instant::now();
-        let mut lifecycle = RuntimeLifecycle::new();
-        assert!(lifecycle.start_draining(
-            ChildExitReport {
-                code: 0,
-                signal: None,
-            },
-            now,
-        ));
-        assert_eq!(lifecycle.take_ready_exit(now, 0), None);
-        lifecycle.record_eof();
-        assert!(lifecycle.take_ready_exit(now, 0).is_some());
     }
 
     /// Spawn `/bin/sh -c <script>` on its own PTY, the same shape
