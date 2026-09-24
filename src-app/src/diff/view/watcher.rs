@@ -1,4 +1,5 @@
-use std::ffi::OsStr;
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -35,15 +36,112 @@ enum Revalidation {
     Attribution(Vec<SessionMeta>),
 }
 
-pub(super) fn event_relevant(res: &notify::Result<Event>) -> bool {
-    let Ok(event) = res else {
-        return false;
-    };
-    match event.kind {
-        EventKind::Access(_) | EventKind::Modify(ModifyKind::Metadata(_)) => return false,
-        _ => {}
+/// What the watcher covers, kept beside the [`RecommendedWatcher`] so the
+/// event loop can judge paths against it.
+///
+/// Issue #734: FSEvents reports absolute paths, so an ANCESTOR of the
+/// worktree named `target` or `node_modules` made every event look like
+/// noise. Noise is judged only below the longest matching root. FSEvents
+/// reports the real path (`/private/var/...` for a watch on `/var/...`,
+/// symlinks resolved), so each root is kept as given and canonicalised. A
+/// path under neither form is judged whole, as before.
+#[derive(Default)]
+struct WatchScope {
+    /// The worktree root, as given and canonicalised.
+    worktree: Vec<PathBuf>,
+    /// The repository root, whose `.git` holds the watched refs. Kept above
+    /// `.git` so the `.git/<name>` noise pairs still match.
+    repo: Vec<PathBuf>,
+    /// Names of the top-level directories with a recursive watch (issue #735).
+    watched: HashSet<OsString>,
+}
+
+impl WatchScope {
+    fn new(worktree: &Path, repo_root: &Path) -> Self {
+        Self {
+            worktree: root_forms(worktree),
+            repo: root_forms(repo_root),
+            watched: HashSet::new(),
+        }
     }
-    event.paths.iter().any(|path| !is_noise_path(path))
+
+    /// `path` below its longest matching root, or `path` itself.
+    fn relative<'a>(&self, path: &'a Path) -> &'a Path {
+        self.worktree
+            .iter()
+            .chain(&self.repo)
+            .filter_map(|root| path.strip_prefix(root).ok())
+            .min_by_key(|rest| rest.components().count())
+            .unwrap_or(path)
+    }
+
+    fn event_relevant(&self, res: &notify::Result<Event>) -> bool {
+        let Ok(event) = res else {
+            return false;
+        };
+        match event.kind {
+            EventKind::Access(_) | EventKind::Modify(ModifyKind::Metadata(_)) => return false,
+            _ => {}
+        }
+        event
+            .paths
+            .iter()
+            .any(|path| !is_noise_path(self.relative(path)))
+    }
+
+    /// Issue #735: `build` watches the root non-recursively and adds a
+    /// recursive watch only for the top-level directories that existed then.
+    /// A directory created (or renamed into place) later is queued on
+    /// `pending` so the loop can watch it; otherwise edits inside it never
+    /// arrive.
+    fn note_new_dirs(&self, res: &notify::Result<Event>, pending: &mut Vec<PathBuf>) {
+        let Ok(event) = res else {
+            return;
+        };
+        if !matches!(
+            event.kind,
+            EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_))
+        ) {
+            return;
+        }
+        for path in &event.paths {
+            let Some(name) = path.file_name() else {
+                continue;
+            };
+            let top_level = path
+                .parent()
+                .is_some_and(|parent| self.worktree.iter().any(|root| root == parent));
+            if !top_level
+                || ignored_watch_dir(name)
+                || self.watched.contains(name)
+                || pending
+                    .iter()
+                    .any(|queued| queued.file_name() == Some(name))
+                || !path.is_dir()
+            {
+                continue;
+            }
+            pending.push(path.clone());
+        }
+    }
+
+    fn mark_watched(&mut self, dirs: &[PathBuf]) {
+        self.watched.extend(
+            dirs.iter()
+                .filter_map(|dir| dir.file_name())
+                .map(OsStr::to_owned),
+        );
+    }
+}
+
+fn root_forms(root: &Path) -> Vec<PathBuf> {
+    let mut forms = vec![root.to_path_buf()];
+    if let Ok(real) = std::fs::canonicalize(root)
+        && real != root
+    {
+        forms.push(real);
+    }
+    forms
 }
 
 fn component_eq(component: &OsStr, expected: &str) -> bool {
@@ -89,11 +187,11 @@ fn is_noise_path(path: &Path) -> bool {
             .is_some_and(super::super::git::is_skipped_name)
 }
 
-pub(super) fn build(
+fn build(
     tx: mpsc::UnboundedSender<notify::Result<Event>>,
     worktree: PathBuf,
     repo_root: PathBuf,
-) -> Option<RecommendedWatcher> {
+) -> Option<(RecommendedWatcher, WatchScope)> {
     let mut watcher = match RecommendedWatcher::new(
         move |res: notify::Result<Event>| {
             let _ = tx.unbounded_send(res);
@@ -107,6 +205,7 @@ pub(super) fn build(
         }
     };
 
+    let mut scope = WatchScope::new(&worktree, &repo_root);
     let mut targets: Vec<(PathBuf, RecursiveMode)> = Vec::new();
     targets.push((worktree.clone(), RecursiveMode::NonRecursive));
     if let Ok(entries) = std::fs::read_dir(&worktree) {
@@ -118,6 +217,7 @@ pub(super) fn build(
             let path = entry.path();
             let ignored = path.file_name().is_some_and(ignored_watch_dir);
             if !ignored {
+                scope.watched.insert(entry.file_name());
                 targets.push((path, RecursiveMode::Recursive));
             }
         }
@@ -145,7 +245,26 @@ pub(super) fn build(
         targets.len(),
         worktree.display()
     );
-    Some(watcher)
+    Some((watcher, scope))
+}
+
+/// Add a recursive watch for each new top-level directory and return the
+/// ones that took. On FSEvents every `watch` restarts the stream, so this
+/// runs off the main thread, like [`build`].
+fn watch_new_dirs(watcher: &mut RecommendedWatcher, dirs: &[PathBuf]) -> Vec<PathBuf> {
+    dirs.iter()
+        .filter(|dir| match watcher.watch(dir, RecursiveMode::Recursive) {
+            Ok(()) => {
+                log::debug!("diff watcher: watching new directory {}", dir.display());
+                true
+            }
+            Err(e) => {
+                log::debug!("diff watcher: skip new {}: {e}", dir.display());
+                false
+            }
+        })
+        .cloned()
+        .collect()
 }
 
 /// How many notify events one wake may take before yielding the frame.
@@ -166,21 +285,36 @@ const MAX_EVENTS_PER_WAKE: usize = 32;
 /// Each deadline is polled before the event stream. A ready timer wins even
 /// when events are queued, and a wake drains at most [`MAX_EVENTS_PER_WAKE`]
 /// of them before yielding (issue #678).
-async fn drive_refresh_loop<S, T, TF, R>(mut events: S, mut make_timer: T, mut revalidate: R)
-where
+///
+/// New top-level directories are queued as events arrive and handed to
+/// `watch_dirs` right before each revalidate (issue #735). `watch_dirs`
+/// returns the directories it watched, or `None` when the view is gone. An
+/// edit inside a new directory that lands before its watch is still caught:
+/// the revalidate that follows the watch reads the whole worktree.
+async fn drive_refresh_loop<S, T, TF, W, WF, R>(
+    mut events: S,
+    mut scope: WatchScope,
+    mut make_timer: T,
+    mut watch_dirs: W,
+    mut revalidate: R,
+) where
     S: futures::Stream<Item = notify::Result<Event>> + Unpin,
     T: FnMut(Duration) -> TF,
     TF: Future + Unpin,
+    W: FnMut(Vec<PathBuf>) -> WF,
+    WF: Future<Output = Option<Vec<PathBuf>>>,
     R: FnMut() -> bool,
 {
     let mut relevant_events = 0u64;
+    let mut pending: Vec<PathBuf> = Vec::new();
     loop {
         // Idle: block until the next relevant event.
         loop {
             let Some(result) = events.next().await else {
                 return;
             };
-            if event_relevant(&result) {
+            scope.note_new_dirs(&result, &mut pending);
+            if scope.event_relevant(&result) {
                 relevant_events += 1;
                 if let Ok(event) = &result {
                     log::debug!(
@@ -195,7 +329,11 @@ where
 
         // Debounce: a fixed window that coalesces the burst into one refresh.
         // The deadline is polled first, so queued events cannot hold it off.
-        if await_deadline(&mut events, make_timer(REFRESH_DEBOUNCE), |_| {}).await {
+        let stream_ended = await_deadline(&mut events, make_timer(REFRESH_DEBOUNCE), |result| {
+            scope.note_new_dirs(&result, &mut pending);
+        })
+        .await;
+        if stream_ended {
             return;
         }
 
@@ -204,13 +342,20 @@ where
         // enters a fresh cooldown (trailing edge, still bounded to one refresh
         // per cooldown period). Irrelevant events do not set `dirty`.
         loop {
+            if !pending.is_empty() {
+                let Some(watched) = watch_dirs(std::mem::take(&mut pending)).await else {
+                    return;
+                };
+                scope.mark_watched(&watched);
+            }
             if !revalidate() {
                 return;
             }
             let mut dirty = false;
             let stream_ended =
                 await_deadline(&mut events, make_timer(REFRESH_COOLDOWN), |result| {
-                    if event_relevant(&result) {
+                    scope.note_new_dirs(&result, &mut pending);
+                    if scope.event_relevant(&result) {
                         dirty = true;
                     }
                 })
@@ -218,7 +363,7 @@ where
             if stream_ended {
                 return;
             }
-            if !dirty {
+            if !dirty && pending.is_empty() {
                 break;
             }
             log::debug!("diff: watcher dirty during cooldown -> trailing revalidate");
@@ -264,6 +409,46 @@ where
     }
 }
 
+/// Watch new top-level directories on this view's watcher (issue #735).
+///
+/// The watcher is taken off the view so the `watch` calls run off the main
+/// thread, then put back. `None` means the view is gone or its watch epoch
+/// moved on (suspend), which ends the refresh loop; a watcher taken back
+/// after a suspend is dropped, as `suspend` would have done.
+async fn add_recursive_watches(
+    this: gpui::WeakEntity<DiffView>,
+    cx: gpui::AsyncApp,
+    epoch: u64,
+    dirs: Vec<PathBuf>,
+) -> Option<Vec<PathBuf>> {
+    let taken = cx.update(|cx| {
+        this.update(cx, |view: &mut DiffView, _| {
+            (view.watch_epoch == epoch).then(|| view._watchers.pop())
+        })
+        .ok()
+        .flatten()
+    })?;
+    let Some(mut watcher) = taken else {
+        return Some(Vec::new());
+    };
+    let (watcher, watched) = smol::unblock(move || {
+        let watched = watch_new_dirs(&mut watcher, &dirs);
+        (watcher, watched)
+    })
+    .await;
+    let restored = cx.update(|cx| {
+        this.update(cx, |view: &mut DiffView, _| {
+            if view.watch_epoch != epoch {
+                return false;
+            }
+            view._watchers.push(watcher);
+            true
+        })
+        .unwrap_or(false)
+    });
+    restored.then_some(watched)
+}
+
 impl DiffView {
     pub(super) fn start_watchers(&mut self, cx: &mut gpui::Context<Self>) {
         let worktree = self.column.path.clone();
@@ -274,8 +459,8 @@ impl DiffView {
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 log::debug!("diff: start_watchers building watcher off-thread");
-                let watcher = smol::unblock(move || build(tx, worktree, repo_root)).await;
-                let Some(watcher) = watcher else {
+                let built = smol::unblock(move || build(tx, worktree, repo_root)).await;
+                let Some((watcher, scope)) = built else {
                     log::warn!("diff: watcher build returned None");
                     return;
                 };
@@ -294,7 +479,12 @@ impl DiffView {
                     return;
                 }
 
-                drive_refresh_loop(rx, smol::Timer::after, move || {
+                let watch_this = this.clone();
+                let watch_cx = cx.clone();
+                let watch_dirs = move |dirs: Vec<PathBuf>| {
+                    add_recursive_watches(watch_this.clone(), watch_cx.clone(), epoch, dirs)
+                };
+                drive_refresh_loop(rx, scope, smol::Timer::after, watch_dirs, move || {
                     cx.update(|cx| {
                         this.update(cx, |view: &mut Self, cx| {
                             if view.watch_epoch != epoch {
@@ -393,6 +583,19 @@ mod tests {
         })
     }
 
+    fn created_dir(path: PathBuf) -> notify::Result<Event> {
+        Ok(Event {
+            kind: EventKind::Create(notify::event::CreateKind::Folder),
+            paths: vec![path],
+            attrs: Default::default(),
+        })
+    }
+
+    /// Judged with no roots: the whole path, as the relative-path tests expect.
+    fn event_relevant(res: &notify::Result<Event>) -> bool {
+        WatchScope::default().event_relevant(res)
+    }
+
     #[test]
     fn ignores_noise_directories_using_native_components() {
         assert!(!event_relevant(&event(
@@ -414,6 +617,206 @@ mod tests {
         assert!(!event_relevant(&event(
             ["repo", "Cargo.lock"].iter().collect()
         )));
+    }
+
+    #[test]
+    fn accepts_source_changes_in_a_worktree_under_a_target_ancestor() {
+        let worktree = Path::new("/Users/dev/work/target/myrepo");
+        let scope = WatchScope::new(worktree, worktree);
+        let relevant = |rel: &str| scope.event_relevant(&event(worktree.join(rel)));
+
+        // The ancestor `target` is outside the worktree: not noise.
+        assert!(relevant("src/main.rs"));
+        assert!(relevant(".git/refs/heads/main"));
+        // Noise inside the worktree is still noise.
+        assert!(!relevant("target/debug/paneflow"));
+        assert!(!relevant("src/target/generated.rs"));
+        assert!(!relevant("web/node_modules/pkg/index.js"));
+        assert!(!relevant(".git/objects/ab/hash"));
+        assert!(!relevant("Cargo.lock"));
+
+        // A linked worktree whose repository sits under `node_modules`: the
+        // refs under the repository root are not noise either.
+        let repo = Path::new("/Users/dev/node_modules/repo");
+        let linked = WatchScope::new(Path::new("/Users/dev/wt"), repo);
+        assert!(linked.event_relevant(&event(repo.join(".git/refs/heads/topic"))));
+        assert!(!linked.event_relevant(&event(repo.join(".git/objects/ab/hash"))));
+
+        // FSEvents reports the real path. The temp dir is `/var/...`, a
+        // symlink to `/private/var/...`, so the canonical form must match too.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let given = tmp.path().join("target").join("myrepo");
+        std::fs::create_dir_all(&given).expect("create worktree");
+        let real = std::fs::canonicalize(&given).expect("canonicalize");
+        let scope = WatchScope::new(&given, &given);
+        assert!(scope.event_relevant(&event(given.join("src/main.rs"))));
+        assert!(scope.event_relevant(&event(real.join("src/main.rs"))));
+        assert!(!scope.event_relevant(&event(real.join("target/debug/paneflow"))));
+    }
+
+    /// Wait up to `timeout` for an event that satisfies `accept`.
+    fn wait_for_event(
+        rx: &mut mpsc::UnboundedReceiver<notify::Result<Event>>,
+        timeout: Duration,
+        mut accept: impl FnMut(&notify::Result<Event>) -> bool,
+    ) -> bool {
+        smol::block_on(async {
+            let deadline = smol::Timer::after(timeout);
+            futures::pin_mut!(deadline);
+            loop {
+                match futures::future::select(rx.next(), deadline.as_mut()).await {
+                    Either::Left((Some(result), _)) => {
+                        if accept(&result) {
+                            return true;
+                        }
+                    }
+                    Either::Left((None, _)) | Either::Right(_) => return false,
+                }
+            }
+        })
+    }
+
+    /// Drives a real FSEvents watcher from [`build`]: a directory created after
+    /// the build is queued by [`WatchScope::note_new_dirs`], watched by
+    /// [`watch_new_dirs`], and a write inside it then arrives as a relevant
+    /// event. Without the new watch notify drops that write (the root watch is
+    /// non-recursive), so the final wait times out. FSEvents delivery took
+    /// several seconds under parallel build load, hence the generous timeout.
+    #[test]
+    fn new_top_level_directory_is_watched() {
+        const TIMEOUT: Duration = Duration::from_secs(30);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree = tmp.path().join("repo");
+        std::fs::create_dir_all(worktree.join("src")).expect("create worktree");
+        let (tx, mut rx) = mpsc::unbounded();
+        let (mut watcher, mut scope) =
+            build(tx, worktree.clone(), worktree.clone()).expect("build watcher");
+        assert!(scope.watched.contains(OsStr::new("src")));
+
+        let fresh = worktree.join("fresh");
+        std::fs::create_dir(&fresh).expect("create new top-level dir");
+        let mut pending = Vec::new();
+        assert!(
+            wait_for_event(&mut rx, TIMEOUT, |result| {
+                scope.note_new_dirs(result, &mut pending);
+                !pending.is_empty()
+            }),
+            "no create event for the new directory"
+        );
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].file_name(), Some(OsStr::new("fresh")));
+
+        let watched = watch_new_dirs(&mut watcher, &pending);
+        assert_eq!(watched.len(), 1, "watch was not added");
+        scope.mark_watched(&watched);
+
+        // Queued once: a later event for the same directory is not re-queued.
+        let mut again = Vec::new();
+        scope.note_new_dirs(&created_dir(watched[0].clone()), &mut again);
+        assert!(again.is_empty());
+
+        std::fs::write(fresh.join("lib.rs"), "pub fn f() {}\n").expect("write file");
+        assert!(
+            wait_for_event(&mut rx, TIMEOUT, |result| {
+                scope.event_relevant(result)
+                    && result.as_ref().is_ok_and(|event| {
+                        event
+                            .paths
+                            .iter()
+                            .any(|path| path.ends_with("fresh/lib.rs"))
+                    })
+            }),
+            "no event for a file written inside the new directory"
+        );
+        drop(watcher);
+    }
+
+    /// A watched top-level directory that is deleted and recreated stays
+    /// covered without a new watch. notify's FSEvents backend matches events
+    /// by path prefix, and the watched path outlives the directory, so
+    /// `WatchScope::watched` never needs to forget a name. Covers a directory
+    /// watched by [`build`] and one watched later by [`watch_new_dirs`].
+    #[test]
+    fn recreated_top_level_directory_stays_watched() {
+        const TIMEOUT: Duration = Duration::from_secs(30);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree = tmp.path().join("repo");
+        std::fs::create_dir_all(worktree.join("src")).expect("create worktree");
+        let (tx, mut rx) = mpsc::unbounded();
+        let (mut watcher, mut scope) =
+            build(tx, worktree.clone(), worktree.clone()).expect("build watcher");
+
+        let fresh = worktree.join("fresh");
+        std::fs::create_dir(&fresh).expect("create new top-level dir");
+        let mut pending = Vec::new();
+        assert!(
+            wait_for_event(&mut rx, TIMEOUT, |result| {
+                scope.note_new_dirs(result, &mut pending);
+                !pending.is_empty()
+            }),
+            "no create event for the new directory"
+        );
+        let watched = watch_new_dirs(&mut watcher, &pending);
+        assert_eq!(watched.len(), 1, "watch was not added");
+        scope.mark_watched(&watched);
+
+        for name in ["fresh", "src"] {
+            let dir = worktree.join(name);
+            std::fs::remove_dir_all(&dir).expect("remove dir");
+            std::fs::create_dir(&dir).expect("recreate dir");
+            let file = format!("{name}/after_recreate.rs");
+            std::fs::write(worktree.join(&file), "pub fn f() {}\n").expect("write file");
+            // No re-watch happens: the name is still marked watched.
+            let mut requeued = Vec::new();
+            assert!(
+                wait_for_event(&mut rx, TIMEOUT, |result| {
+                    scope.note_new_dirs(result, &mut requeued);
+                    scope.event_relevant(result)
+                        && result
+                            .as_ref()
+                            .is_ok_and(|event| event.paths.iter().any(|path| path.ends_with(&file)))
+                }),
+                "no event for {file} after {name}/ was deleted and recreated"
+            );
+            assert!(requeued.is_empty(), "re-queued {requeued:?}");
+        }
+        drop(watcher);
+    }
+
+    #[test]
+    fn noise_and_existing_directories_are_not_queued() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree = tmp.path().join("repo");
+        for dir in ["src", "src/nested", "target", "node_modules", "fresh"] {
+            std::fs::create_dir_all(worktree.join(dir)).expect("create dir");
+        }
+        std::fs::write(worktree.join("README.md"), "").expect("write file");
+        let mut scope = WatchScope::new(&worktree, &worktree);
+        scope.mark_watched(&[worktree.join("src")]);
+
+        let mut pending = Vec::new();
+        for path in [
+            worktree.join("src"),
+            worktree.join("src/nested"),
+            worktree.join("target"),
+            worktree.join("node_modules"),
+            worktree.join("README.md"),
+        ] {
+            scope.note_new_dirs(&created_dir(path), &mut pending);
+        }
+        assert!(pending.is_empty(), "queued {pending:?}");
+
+        // A rename into place counts; an edit to the directory does not.
+        scope.note_new_dirs(&event(worktree.join("fresh")), &mut pending);
+        assert!(pending.is_empty());
+        let renamed = Ok(Event {
+            kind: EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::To)),
+            paths: vec![worktree.join("fresh")],
+            attrs: Default::default(),
+        });
+        scope.note_new_dirs(&renamed, &mut pending);
+        scope.note_new_dirs(&renamed, &mut pending);
+        assert_eq!(pending, [worktree.join("fresh")]);
     }
 
     #[test]
@@ -478,16 +881,24 @@ mod tests {
         }
     }
 
+    /// Each `watch_dirs` call, with the revalidate count at that moment.
+    type WatchCalls = Rc<std::cell::RefCell<Vec<(usize, Vec<PathBuf>)>>>;
+
     struct Harness {
         tx: Option<mpsc::UnboundedSender<notify::Result<Event>>>,
         fut: Pin<Box<dyn Future<Output = ()>>>,
         released: Rc<Cell<usize>>,
         revalidations: Rc<Cell<usize>>,
         events_taken: Rc<Cell<usize>>,
+        watch_calls: WatchCalls,
     }
 
     impl Harness {
         fn new() -> Self {
+            Self::with_scope(WatchScope::default())
+        }
+
+        fn with_scope(scope: WatchScope) -> Self {
             let (tx, rx) = mpsc::unbounded();
             let released = Rc::new(Cell::new(0usize));
             let created = Rc::new(Cell::new(0usize));
@@ -511,17 +922,39 @@ mod tests {
                     true
                 }
             };
+            let watch_calls: WatchCalls = Rc::default();
+            let watch_dirs = {
+                let watch_calls = watch_calls.clone();
+                let revalidations = revalidations.clone();
+                move |dirs: Vec<PathBuf>| {
+                    watch_calls
+                        .borrow_mut()
+                        .push((revalidations.get(), dirs.clone()));
+                    futures::future::ready(Some(dirs))
+                }
+            };
             let events = CountingStream {
                 inner: rx,
                 taken: events_taken.clone(),
             };
             Self {
                 tx: Some(tx),
-                fut: Box::pin(drive_refresh_loop(events, make_timer, revalidate)),
+                fut: Box::pin(drive_refresh_loop(
+                    events, scope, make_timer, watch_dirs, revalidate,
+                )),
                 released,
                 revalidations,
                 events_taken,
+                watch_calls,
             }
+        }
+
+        fn send_event(&self, result: notify::Result<Event>) {
+            self.tx
+                .as_ref()
+                .expect("sender dropped")
+                .unbounded_send(result)
+                .expect("send event");
         }
 
         fn send(&self, path: PathBuf) {
@@ -690,5 +1123,45 @@ mod tests {
             harness.events_taken() - taken_idle < queued,
             "follow-up wake emptied the backlog"
         );
+    }
+
+    #[test]
+    fn new_directory_is_watched_before_the_revalidate_that_follows_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree = tmp.path().join("repo");
+        std::fs::create_dir_all(worktree.join("fresh")).expect("create dir");
+        std::fs::create_dir_all(worktree.join("later")).expect("create dir");
+        let mut harness = Harness::with_scope(WatchScope::new(&worktree, &worktree));
+
+        // The create opens the debounce; the watch lands before the refresh.
+        harness.send_event(created_dir(worktree.join("fresh")));
+        assert!(harness.poll().is_pending());
+        assert!(harness.watch_calls.borrow().is_empty());
+        harness.expire_timer();
+        assert!(harness.poll().is_pending());
+        assert_eq!(harness.revalidations(), 1);
+        assert_eq!(
+            *harness.watch_calls.borrow(),
+            [(0, vec![worktree.join("fresh")])]
+        );
+
+        // A directory created during the cooldown is watched before the
+        // trailing refresh. The first one is not watched twice.
+        harness.send_event(created_dir(worktree.join("fresh")));
+        harness.send_event(created_dir(worktree.join("later")));
+        assert!(harness.poll().is_pending());
+        harness.expire_timer();
+        assert!(harness.poll().is_pending());
+        assert_eq!(harness.revalidations(), 2);
+        assert_eq!(
+            *harness.watch_calls.borrow(),
+            [
+                (0, vec![worktree.join("fresh")]),
+                (1, vec![worktree.join("later")]),
+            ]
+        );
+
+        harness.tx = None;
+        assert!(harness.poll().is_ready());
     }
 }
