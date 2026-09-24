@@ -2231,6 +2231,24 @@ pub(super) fn is_inherited_host_terminal_env_key(key: &str) -> bool {
         .any(|known| key.eq_ignore_ascii_case(known))
 }
 
+/// The one line that says which shell a pane launched, next to the one the
+/// config asked for. Logged at info level by `spawn_params` under the
+/// `paneflow::terminal::backend` target, so `RUST_LOG=info` tells an ignored
+/// `default_shell` apart from a shell that is merely slow to start.
+fn shell_resolution_log_line(resolved: &str, configured: Option<&str>) -> String {
+    format!("Terminal shell resolved: {resolved:?} (default_shell={configured:?})")
+}
+
+/// True if an INHERITED variable named `key` must be removed at the spawn
+/// boundary: a host-terminal identity marker, one of the launching agent
+/// session's markers, or a PaneFlow-owned name only this instance may set.
+/// Pure, so both families are unit-tested without touching the process env.
+fn should_strip_inherited(key: &str) -> bool {
+    is_inherited_host_terminal_env_key(key)
+        || is_inherited_agent_session_env_key(key)
+        || is_paneflow_owned_inherited_env_key(key)
+}
+
 /// The names Paneflow inherited that must not reach a pane: host-terminal
 /// identity markers, plus the launching agent session's own markers.
 ///
@@ -2246,24 +2264,17 @@ pub(super) fn is_inherited_host_terminal_env_key(key: &str) -> bool {
 ///
 /// Non-UTF-8 names are left alone: none of the targets can be spelled that way,
 /// and guessing at a lossy comparison would risk unsetting an unrelated var.
-/// The one line that says which shell a pane launched, next to the one the
-/// config asked for. Logged at info level by `spawn_params` under the
-/// `paneflow::terminal::backend` target, so `RUST_LOG=info` tells an ignored
-/// `default_shell` apart from a shell that is merely slow to start.
-fn shell_resolution_log_line(resolved: &str, configured: Option<&str>) -> String {
-    format!("Terminal shell resolved: {resolved:?} (default_shell={configured:?})")
+pub(super) fn inherited_env_keys_to_strip() -> Vec<std::ffi::OsString> {
+    inherited_env_keys_to_strip_from(std::env::vars_os().map(|(key, _)| key))
 }
 
-pub(super) fn inherited_env_keys_to_strip() -> Vec<std::ffi::OsString> {
-    std::env::vars_os()
-        .map(|(key, _)| key)
-        .filter(|key| {
-            key.to_str().is_some_and(|key| {
-                is_inherited_host_terminal_env_key(key)
-                    || is_inherited_agent_session_env_key(key)
-                    || is_paneflow_owned_inherited_env_key(key)
-            })
-        })
+/// [`inherited_env_keys_to_strip`] over an explicit set of names, so the real
+/// filter is testable against a synthetic environment.
+fn inherited_env_keys_to_strip_from(
+    keys: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Vec<std::ffi::OsString> {
+    keys.into_iter()
+        .filter(|key| key.to_str().is_some_and(should_strip_inherited))
         .collect()
 }
 
@@ -3699,20 +3710,63 @@ mod tests {
 
     #[test]
     fn the_strip_list_covers_both_families_it_claims_to() {
-        // `inherited_env_keys_to_strip` reads the real process env, so what is
-        // pinned here is its predicate: an agent-session marker must be
-        // removed at the spawn boundary too, not only filtered out of the
-        // assembled map - a `retain` cannot unset an INHERITED variable.
+        // `inherited_env_keys_to_strip` reads the real process env, so this
+        // drives the filter it delegates to over a synthetic environment: an
+        // agent-session marker must be removed at the spawn boundary too, not
+        // only filtered out of the assembled map - a `retain` cannot unset an
+        // INHERITED variable.
         for key in INHERITED_AGENT_SESSION_ENV {
             assert!(
-                is_inherited_agent_session_env_key(key) || is_inherited_host_terminal_env_key(key),
+                should_strip_inherited(key),
                 "{key} must be stripped from the inherited env, not just the map"
             );
         }
+        for key in INHERITED_HOST_TERMINAL_ENV {
+            assert!(
+                should_strip_inherited(key),
+                "{key} must be stripped from the inherited env"
+            );
+            assert!(
+                should_strip_inherited(&key.to_lowercase()),
+                "{key} must be stripped whatever its inherited casing"
+            );
+        }
         assert!(
-            !is_inherited_agent_session_env_key("PANEFLOW_SURFACE_ID")
-                && !is_inherited_host_terminal_env_key("PANEFLOW_SURFACE_ID"),
-            "the strip must not reach a variable Paneflow sets for the pane"
+            should_strip_inherited(AI_HOOK_PATH_ENV),
+            "{AI_HOOK_PATH_ENV} must be stripped from the inherited env"
+        );
+        for key in ["PANEFLOW_SURFACE_ID", "PATH", "TERM", "HOME", "KEEP_ME"] {
+            assert!(
+                !should_strip_inherited(key),
+                "the strip must not reach {key}"
+            );
+        }
+
+        let agent = INHERITED_AGENT_SESSION_ENV[0];
+        let host = INHERITED_HOST_TERMINAL_ENV[0];
+        let environment: Vec<std::ffi::OsString> = [
+            "PATH",
+            agent,
+            "PANEFLOW_SURFACE_ID",
+            host,
+            AI_HOOK_PATH_ENV,
+            "KEEP_ME",
+        ]
+        .into_iter()
+        .map(std::ffi::OsString::from)
+        .chain(std::iter::once({
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(b"CLAUDECODE\xff".to_vec())
+        }))
+        .collect();
+        assert_eq!(
+            inherited_env_keys_to_strip_from(environment),
+            [agent, host, AI_HOOK_PATH_ENV]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>(),
+            "exactly the listed families are stripped, in environment order; \
+             a non-UTF-8 name is left alone"
         );
     }
 

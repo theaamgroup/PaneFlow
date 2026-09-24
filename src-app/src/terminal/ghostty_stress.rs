@@ -244,16 +244,26 @@ fn cycle_spec() -> SpawnSpec {
     SpawnSpec {
         shell: "/bin/sh",
         quoting: ShellQuoting::Posix,
+        // The background `sleep` is a real forked child, so every cycle has a
+        // descendant the close path must not leave behind. It outlives the
+        // shell unless the PTY teardown takes it down.
         args: vec![
             "-c".into(),
-            "IFS= read -r line; printf 'PANEFLOW_STRESS:%s\\n' \"$line\"".into(),
+            "sleep 60 & IFS= read -r line; printf 'PANEFLOW_STRESS:%s\\n' \"$line\"".into(),
         ],
     }
 }
 
 fn run_cycle(surface_id: u64) -> (Duration, usize) {
     let mut pane = StressPane::spawn(surface_id, cycle_spec());
-    let descendants = descendant_pids(pane.pid);
+    let descendants = wait_for_descendants(pane.pid, Instant::now() + CYCLE_TIMEOUT);
+    // The spec forks before it reads, so an empty set means the walk is
+    // broken and the cleanup loop below would silently check nothing.
+    assert!(
+        !descendants.is_empty(),
+        "scenario=cycle surface={surface_id} pid={} phase=descendants",
+        pane.pid,
+    );
     let output_before = pane.session.processed_output_bytes_for_test();
     pane.resize_storm();
     pane.write(format!("cycle-{surface_id}\r").into_bytes());
@@ -306,8 +316,60 @@ fn wait_process_inactive(pid: u32, deadline: Instant) -> bool {
     !process_active(pid)
 }
 
-fn descendant_pids(_root_pid: u32) -> Vec<u32> {
-    Vec::new()
+/// Poll until `root_pid` has at least one descendant, or the deadline passes.
+fn wait_for_descendants(root_pid: u32, deadline: Instant) -> Vec<u32> {
+    loop {
+        let descendants = descendant_pids(root_pid);
+        if !descendants.is_empty() || Instant::now() >= deadline {
+            return descendants;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Every live descendant of `root_pid`, breadth first, excluding the root.
+fn descendant_pids(root_pid: u32) -> Vec<u32> {
+    let mut descendants = Vec::new();
+    let mut queue = std::collections::VecDeque::from([root_pid]);
+    while let Some(parent) = queue.pop_front() {
+        for child in direct_child_pids(parent) {
+            if child != root_pid && !descendants.contains(&child) {
+                descendants.push(child);
+                queue.push_back(child);
+            }
+        }
+    }
+    descendants
+}
+
+/// Direct children of `parent`. A process that exits mid-walk reads as a
+/// leaf rather than an error: the cleanup check only needs the pids that were
+/// alive when the walk ran.
+fn direct_child_pids(parent: u32) -> Vec<u32> {
+    let Ok(parent) = i32::try_from(parent) else {
+        return Vec::new();
+    };
+    // Both the size query and the fill return a pid COUNT, not a byte count
+    // (issue #255), so neither result is divided by `sizeof(pid_t)`.
+    // SAFETY: the documented size query, with a null buffer.
+    let required = unsafe { libc::proc_listchildpids(parent, std::ptr::null_mut(), 0) };
+    if required <= 0 {
+        return Vec::new();
+    }
+    let mut children = vec![0u32; (required as usize).saturating_add(32)];
+    let Ok(buffer_size) = i32::try_from(children.len().saturating_mul(std::mem::size_of::<u32>()))
+    else {
+        return Vec::new();
+    };
+    // SAFETY: `children` owns `buffer_size` writable bytes.
+    let read =
+        unsafe { libc::proc_listchildpids(parent, children.as_mut_ptr().cast(), buffer_size) };
+    if read <= 0 {
+        return Vec::new();
+    }
+    children.truncate(read as usize);
+    children.retain(|pid| *pid > 1);
+    children
 }
 
 fn resource_snapshot() -> ResourceSnapshot {
