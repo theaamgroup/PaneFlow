@@ -16,6 +16,7 @@ pub(crate) enum HookEvent {
     UserPromptSubmit,
     Notification,
     Stop,
+    SubagentStart,
     SubagentStop,
     PreToolUse,
     PostToolUse,
@@ -31,6 +32,7 @@ impl HookEvent {
             Self::UserPromptSubmit => "UserPromptSubmit",
             Self::Notification => "Notification",
             Self::Stop => "Stop",
+            Self::SubagentStart => "SubagentStart",
             Self::SubagentStop => "SubagentStop",
             Self::PreToolUse => "PreToolUse",
             Self::PostToolUse => "PostToolUse",
@@ -62,6 +64,7 @@ impl FromStr for HookEvent {
             "UserPromptSubmit" => Ok(Self::UserPromptSubmit),
             "Notification" => Ok(Self::Notification),
             "Stop" => Ok(Self::Stop),
+            "SubagentStart" => Ok(Self::SubagentStart),
             "SubagentStop" => Ok(Self::SubagentStop),
             "PreToolUse" => Ok(Self::PreToolUse),
             "PostToolUse" => Ok(Self::PostToolUse),
@@ -91,6 +94,7 @@ pub(crate) struct FrameContext {
 pub(crate) enum DropReason {
     InformationalNotification(Option<String>),
     LlmCallContinuesWithToolCalls(u64),
+    MissingSubagentId,
 }
 
 impl fmt::Display for DropReason {
@@ -104,6 +108,9 @@ impl fmt::Display for DropReason {
                     formatter,
                     "dropping PostLLMCall with tool_call_count={count}"
                 )
+            }
+            Self::MissingSubagentId => {
+                formatter.write_str("dropping subagent event without an agent id")
             }
         }
     }
@@ -167,13 +174,27 @@ pub(crate) fn build_frame(
             }
             AiHookMethod::Notification
         }
-        HookEvent::Stop | HookEvent::SubagentStop => {
+        HookEvent::Stop => {
             if let Some(count) = pending_tool_calls_after_llm_call(&hook_payload) {
                 return Ok(BuildOutcome::Drop(
                     DropReason::LlmCallContinuesWithToolCalls(count),
                 ));
             }
             AiHookMethod::Stop
+        }
+        // A subagent ending is not the parent's turn ending: mapping it to
+        // `ai.stop` marked the whole session finished while it still worked.
+        // An event with no id cannot be paired with its other half, and an
+        // unpaired start would hold the count up for the life of the agent.
+        HookEvent::SubagentStart | HookEvent::SubagentStop => {
+            if subagent_id(&hook_payload).is_none() {
+                return Ok(BuildOutcome::Drop(DropReason::MissingSubagentId));
+            }
+            if event == HookEvent::SubagentStart {
+                AiHookMethod::SubagentStart
+            } else {
+                AiHookMethod::SubagentStop
+            }
         }
         HookEvent::PreToolUse | HookEvent::PostToolUse => AiHookMethod::ToolUse,
         HookEvent::PermissionRequest => AiHookMethod::Notification,
@@ -211,6 +232,24 @@ pub(crate) fn build_frame(
     Ok(BuildOutcome::Send(AiHookFrame::new(method, params)))
 }
 
+/// Payload keys that carry a subagent's pairing id, one per agent family:
+/// Claude Code and Codex (`agent_id`), Cursor (`subagent_id`), and Grok's
+/// camelCase spellings. The same id arrives on both halves of the pair.
+const SUBAGENT_ID_KEYS: &[&str] = &["agent_id", "subagent_id", "subagentId", "agentId"];
+
+fn subagent_id(payload: &Value) -> Option<String> {
+    SUBAGENT_ID_KEYS.iter().find_map(|key| {
+        payload
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| {
+                !id.is_empty() && id.len() <= paneflow_ipc_client::ai_hook::MAX_SUBAGENT_ID_BYTES
+            })
+            .map(str::to_owned)
+    })
+}
+
 fn pending_tool_calls_after_llm_call(payload: &Value) -> Option<u64> {
     if payload.get("hook_event_name").and_then(Value::as_str) != Some("PostLLMCall") {
         return None;
@@ -239,7 +278,12 @@ fn compact_hook_payload(event: HookEvent, payload: &Value) -> Value {
         HookEvent::PreToolUse | HookEvent::PostToolUse => {
             copy_string_field(payload, &mut compact, "tool_name", 128);
         }
-        HookEvent::Stop | HookEvent::SubagentStop | HookEvent::SessionEnd => {
+        HookEvent::SubagentStart | HookEvent::SubagentStop => {
+            if let Some(id) = subagent_id(payload) {
+                compact.insert("subagent_id".to_owned(), Value::String(id));
+            }
+        }
+        HookEvent::Stop | HookEvent::SessionEnd => {
             copy_string_field(payload, &mut compact, "summary", MAX_HOOK_TEXT_BYTES);
             copy_string_field(payload, &mut compact, "last_result", MAX_HOOK_TEXT_BYTES);
             copy_string_field(payload, &mut compact, "transcript_path", 2048);
@@ -333,7 +377,16 @@ mod tests {
                 json!({"hook_event_name": "PostLLMCall", "tool_call_count": 0}),
                 "ai.stop",
             ),
-            (HookEvent::SubagentStop, json!({}), "ai.stop"),
+            (
+                HookEvent::SubagentStart,
+                json!({"agent_id": "a68ad35317fb486f6"}),
+                "ai.subagent_start",
+            ),
+            (
+                HookEvent::SubagentStop,
+                json!({"agent_id": "a68ad35317fb486f6"}),
+                "ai.subagent_stop",
+            ),
             (
                 HookEvent::PreToolUse,
                 json!({"tool_name": "Bash"}),
@@ -368,6 +421,45 @@ mod tests {
                 assert_eq!(reason, DropReason::LlmCallContinuesWithToolCalls(2));
             }
             BuildOutcome::Send(frame) => panic!("unexpected frame: {:?}", frame.to_value()),
+        }
+    }
+
+    #[test]
+    fn subagent_events_carry_the_pairing_id_from_each_agent_family() {
+        let cases = [
+            (json!({"agent_id": "claude-or-codex"}), "claude-or-codex"),
+            (json!({"subagent_id": "cursor-id"}), "cursor-id"),
+            (json!({"subagentId": "grok-id"}), "grok-id"),
+            (json!({"agentId": " grok-alt "}), "grok-alt"),
+        ];
+        for (payload, expected) in cases {
+            for event in [HookEvent::SubagentStart, HookEvent::SubagentStop] {
+                let frame = sent_frame(
+                    build_frame(event, test_context(), payload.clone()).expect("valid frame"),
+                );
+                assert_eq!(frame["params"]["hook_payload"]["subagent_id"], expected);
+                assert!(frame["params"]["hook_payload"].get("summary").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn subagent_event_without_an_id_is_dropped_not_sent_as_a_stop() {
+        for payload in [
+            json!({}),
+            json!({"agent_id": ""}),
+            json!({"agent_id": "x".repeat(129)}),
+        ] {
+            for event in [HookEvent::SubagentStart, HookEvent::SubagentStop] {
+                match build_frame(event, test_context(), payload.clone()).expect("not an error") {
+                    BuildOutcome::Drop(reason) => {
+                        assert_eq!(reason, DropReason::MissingSubagentId);
+                    }
+                    BuildOutcome::Send(frame) => {
+                        panic!("unexpected frame: {:?}", frame.to_value())
+                    }
+                }
+            }
         }
     }
 

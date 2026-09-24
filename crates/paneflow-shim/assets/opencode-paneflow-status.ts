@@ -40,6 +40,13 @@ export const PaneflowStatus = async () => {
       // Status reporting must never break the session.
     }
   };
+  // Child sessions the task tool created in this process: OpenCode's
+  // subagents. Their busy/idle events are the subagent's, not the turn's, so
+  // they must not reach `ai.stop`. `session.status` carries no parent id, so a
+  // resumed child is recognised only by having been seen created here.
+  const children = new Set();
+  const subagent = (method, id) =>
+    send(method, { hook_payload: { subagent_id: String(id) } });
   return {
     "chat.message": async () => send("ai.prompt_submit", { hook_payload: {} }),
     "tool.execute.before": async (input) =>
@@ -53,8 +60,23 @@ export const PaneflowStatus = async () => {
         hook_payload: { tool_name: input?.tool },
       }),
     event: async ({ event }) => {
-      if (event?.type === "session.idle") {
-        send("ai.stop", { hook_payload: {} });
+      const props = event?.properties;
+      if (event?.type === "session.created") {
+        const info = props?.info;
+        if (info?.parentID && info?.id) {
+          children.add(info.id);
+          subagent("ai.subagent_start", info.id);
+        }
+      } else if (event?.type === "session.status") {
+        if (children.has(props?.sessionID) && props?.status?.type === "busy") {
+          subagent("ai.subagent_start", props.sessionID);
+        }
+      } else if (event?.type === "session.idle") {
+        if (children.has(props?.sessionID)) {
+          subagent("ai.subagent_stop", props.sessionID);
+        } else {
+          send("ai.stop", { hook_payload: {} });
+        }
       } else if (event?.type === "permission.asked") {
         send("ai.notification", {
           hook_payload: {

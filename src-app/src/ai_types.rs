@@ -564,9 +564,160 @@ where
     rows
 }
 
+/// Subagents a workspace's agents are running right now, from the
+/// `ai.subagent_start` / `ai.subagent_stop` frames.
+///
+/// Keyed by the parent agent's PID, then by the agent's own pairing id. This
+/// is kept beside `agent_sessions` rather than inside it because the two die
+/// on different clocks: a `Finished` session row is dropped seconds after the
+/// turn ends, while a background subagent it spawned keeps working. The ids
+/// leave when their stop arrives or when the parent process is gone.
+///
+/// Both halves are idempotent: Grok also runs the Claude and Cursor hook
+/// files, so one start can arrive twice, and a Codex child woken again can
+/// report a second stop with no start in between.
+#[derive(Debug, Clone, Default)]
+pub struct RunningSubagents {
+    by_pid: HashMap<u32, HashSet<String>>,
+}
+
+impl RunningSubagents {
+    /// Ceiling per agent process. A stop that never arrives can only hold the
+    /// count up until the parent exits; the cap keeps a misbehaving producer
+    /// from growing the set without bound in the meantime.
+    pub const MAX_PER_SESSION: usize = 64;
+
+    /// Record a started subagent. Returns whether anything changed.
+    pub fn start(&mut self, pid: u32, id: &str) -> bool {
+        let ids = self.by_pid.entry(pid).or_default();
+        if ids.len() >= Self::MAX_PER_SESSION || ids.contains(id) {
+            return false;
+        }
+        ids.insert(id.to_owned())
+    }
+
+    /// Record a finished subagent. Returns whether anything changed.
+    pub fn stop(&mut self, pid: u32, id: &str) -> bool {
+        let Some(ids) = self.by_pid.get_mut(&pid) else {
+            return false;
+        };
+        let removed = ids.remove(id);
+        if ids.is_empty() {
+            self.by_pid.remove(&pid);
+        }
+        removed
+    }
+
+    /// Drop every subagent of one agent process: it exited or ended.
+    pub fn forget(&mut self, pid: u32) -> bool {
+        self.by_pid.remove(&pid).is_some()
+    }
+
+    /// Keep only the agent processes `keep` accepts.
+    pub fn retain_pids(&mut self, mut keep: impl FnMut(u32) -> bool) -> bool {
+        let before = self.by_pid.len();
+        self.by_pid.retain(|pid, _| keep(*pid));
+        self.by_pid.len() != before
+    }
+
+    pub fn total(&self) -> usize {
+        self.by_pid.values().map(HashSet::len).sum()
+    }
+}
+
+/// Whether a session counts as a running agent: working, blocked on the user,
+/// or silent mid-turn. `Finished` and `Errored` are not running. The raw
+/// `state` is read, not the presented one: marking a tab read hides its badge,
+/// it does not stop the agent.
+pub fn session_is_running(session: &AgentSession) -> bool {
+    matches!(
+        session.state,
+        AgentState::Thinking | AgentState::WaitingForInput | AgentState::Stalled
+    )
+}
+
+/// How many of a workspace's sessions are running agents. The number beside
+/// the workspace's name adds [`RunningSubagents::total`] to this; a subagent
+/// still counts after its parent's turn ended, because a background subagent
+/// outlives it.
+pub fn running_session_count<'a, I>(sessions: I) -> usize
+where
+    I: IntoIterator<Item = &'a AgentSession>,
+{
+    sessions
+        .into_iter()
+        .filter(|session| session_is_running(session))
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_count_is_busy_sessions_and_scoped_subagents() {
+        let sessions = [
+            s(TerminalAgent::ClaudeCode, AgentState::Thinking),
+            s(TerminalAgent::Codex, AgentState::WaitingForInput),
+            s(TerminalAgent::ClaudeCode, AgentState::Stalled),
+            s(TerminalAgent::ClaudeCode, AgentState::Finished),
+            s(TerminalAgent::Codex, AgentState::Errored),
+        ];
+        assert_eq!(running_session_count(&sessions), 3);
+
+        let mut subagents = RunningSubagents::default();
+        assert!(subagents.start(10, "a"));
+        assert!(subagents.start(10, "b"));
+        assert!(subagents.start(20, "a"), "ids are scoped to their parent");
+        assert_eq!(subagents.total(), 3);
+    }
+
+    #[test]
+    fn a_session_marked_read_still_counts_as_running() {
+        let mut waiting = s(TerminalAgent::ClaudeCode, AgentState::WaitingForInput);
+        waiting.read = true;
+        assert_eq!(running_session_count([&waiting]), 1);
+    }
+
+    #[test]
+    fn subagent_starts_and_stops_are_idempotent() {
+        let mut subagents = RunningSubagents::default();
+        assert!(subagents.start(10, "a"));
+        assert!(!subagents.start(10, "a"), "a duplicate start counts once");
+        assert_eq!(subagents.total(), 1);
+
+        assert!(subagents.stop(10, "a"));
+        assert!(!subagents.stop(10, "a"), "a repeated stop is a no-op");
+        assert!(!subagents.stop(99, "a"), "an unknown parent is a no-op");
+        assert_eq!(subagents.total(), 0);
+        assert!(!subagents.forget(10), "an emptied parent leaves no entry");
+    }
+
+    #[test]
+    fn subagents_leave_with_their_parent_process() {
+        let mut subagents = RunningSubagents::default();
+        subagents.start(10, "a");
+        subagents.start(10, "b");
+        subagents.start(20, "c");
+
+        assert!(subagents.forget(10));
+        assert!(!subagents.forget(10));
+        assert_eq!(subagents.total(), 1);
+
+        assert!(subagents.retain_pids(|pid| pid != 20));
+        assert!(!subagents.retain_pids(|_| true));
+        assert_eq!(subagents.total(), 0);
+    }
+
+    #[test]
+    fn subagents_per_parent_are_capped() {
+        let mut subagents = RunningSubagents::default();
+        for i in 0..RunningSubagents::MAX_PER_SESSION + 10 {
+            subagents.start(10, &i.to_string());
+        }
+        assert_eq!(subagents.total(), RunningSubagents::MAX_PER_SESSION);
+        assert!(subagents.start(11, "other"), "the cap is per parent");
+    }
 
     fn s(tool: TerminalAgent, state: AgentState) -> AgentSession {
         AgentSession::new(tool, state)

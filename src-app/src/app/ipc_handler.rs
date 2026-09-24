@@ -20,8 +20,9 @@ use std::time::{Duration, Instant};
 use gpui::{App, AppContext, BackgroundExecutor, Context, Entity};
 use paneflow_config::schema::PaneFlowConfig;
 use paneflow_ipc_client::ai_hook::{
-    AiToolName, LifecycleEventSource, METHOD_EXIT, METHOD_NOTIFICATION, METHOD_PROMPT_SUBMIT,
-    METHOD_SESSION_END, METHOD_SESSION_START, METHOD_STOP, METHOD_TOOL_USE, SessionPid, SurfaceId,
+    AiToolName, LifecycleEventSource, MAX_SUBAGENT_ID_BYTES, METHOD_EXIT, METHOD_NOTIFICATION,
+    METHOD_PROMPT_SUBMIT, METHOD_SESSION_END, METHOD_SESSION_START, METHOD_STOP,
+    METHOD_SUBAGENT_START, METHOD_SUBAGENT_STOP, METHOD_TOOL_USE, SessionPid, SurfaceId,
 };
 
 use crate::agent_launcher::TerminalAgent;
@@ -2922,6 +2923,14 @@ impl PaneFlowApp {
                             cx.background_executor().clone(),
                         );
                     }
+                    // The binary is gone, and every subagent it ran went
+                    // with it, whether or not their stops were delivered.
+                    if let (Some(pid), Some(ws)) = (
+                        pid,
+                        self.workspaces.iter_mut().find(|ws| ws.id == workspace_id),
+                    ) {
+                        ws.running_subagents.forget(pid);
+                    }
                     // Clean exits intentionally fire no notification here.
                     self.sync_attention(cx);
                     self.agent_sessions_changed(cx);
@@ -2945,6 +2954,10 @@ impl PaneFlowApp {
                 let explicit_surface_id = self.validated_frame_surface_id(params, cx);
 
                 if let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id == workspace_id) {
+                    let subagents_cleared = pid.is_some_and(|pid| ws.running_subagents.forget(pid));
+                    if subagents_cleared {
+                        cx.notify();
+                    }
                     // Prefer exact PID removal. Legacy no-PID frames are only
                     // allowed to clear an unambiguous row: first by explicit
                     // surface_id when present, otherwise by tool only when a
@@ -2997,9 +3010,54 @@ impl PaneFlowApp {
                     serde_json::json!({"error": format!("Unknown workspace_id: {workspace_id}")})
                 }
             }
+            // A subagent's lifecycle only moves the workspace's running
+            // count. It never writes the parent's session row: the parent's
+            // own tool and stop frames already describe the parent, and a
+            // subagent stopping is not the parent's turn ending.
+            METHOD_SUBAGENT_START | METHOD_SUBAGENT_STOP => {
+                let Some(workspace_id) = frame_workspace_id(&self.workspaces, params, cx) else {
+                    return serde_json::json!({"error": "Missing workspace_id"});
+                };
+                // The PID scopes the id and is what reaps it if the stop is
+                // lost, so a frame without one could never be cleaned up.
+                let Some(pid) = read_session_pid(params) else {
+                    return serde_json::json!({"error": "Missing or invalid pid"});
+                };
+                if read_tool(params).is_none() {
+                    return serde_json::json!({"error": "Unknown tool"});
+                }
+                let Some(subagent_id) = read_subagent_id(params) else {
+                    return serde_json::json!({"error": "Missing or invalid subagent_id"});
+                };
+                let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id == workspace_id) else {
+                    return serde_json::json!({"error": format!("Unknown workspace_id: {workspace_id}")});
+                };
+                let changed = if method == METHOD_SUBAGENT_START {
+                    ws.running_subagents.start(pid, &subagent_id)
+                } else {
+                    ws.running_subagents.stop(pid, &subagent_id)
+                };
+                if changed {
+                    cx.notify();
+                }
+                serde_json::json!({"running_subagents": ws.running_subagents.total()})
+            }
             _ => JsonRpcError::method_not_found(format!("Method not found: {method}")).into_value(),
         }
     }
+}
+
+/// The subagent pairing id from `hook_payload.subagent_id`, trimmed. Empty or
+/// over-long values are refused: they are not ids, and an unpairable start
+/// would hold the running count up until the agent exits.
+fn read_subagent_id(params: &serde_json::Value) -> Option<String> {
+    params
+        .get("hook_payload")
+        .and_then(|payload| payload.get("subagent_id"))
+        .and_then(|id| id.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && id.len() <= MAX_SUBAGENT_ID_BYTES)
+        .map(str::to_owned)
 }
 
 // ---------------------------------------------------------------------------
@@ -3681,6 +3739,30 @@ mod tests {
     // rejected - that band is server-reserved (synthetic keys) AND immune to
     // the stale-PID sweep, so accepting it would allow unbounded permanent
     // session accumulation from forged frames on the same-UID socket.
+    #[test]
+    fn read_subagent_id_takes_the_payload_id_and_refuses_non_ids() {
+        let id = |v: serde_json::Value| {
+            read_subagent_id(&serde_json::json!({ "hook_payload": { "subagent_id": v } }))
+        };
+        assert_eq!(
+            id(serde_json::json!("a68ad35317fb486f6")).as_deref(),
+            Some("a68ad35317fb486f6")
+        );
+        assert_eq!(id(serde_json::json!("  ses_1  ")).as_deref(), Some("ses_1"));
+        assert_eq!(id(serde_json::json!("")), None);
+        assert_eq!(id(serde_json::json!("   ")), None);
+        assert_eq!(id(serde_json::json!(42)), None);
+        assert_eq!(
+            id(serde_json::json!("x".repeat(MAX_SUBAGENT_ID_BYTES + 1))),
+            None
+        );
+        assert_eq!(
+            read_subagent_id(&serde_json::json!({ "subagent_id": "top-level" })),
+            None,
+            "the id travels in hook_payload, like tool_name"
+        );
+    }
+
     #[test]
     fn read_session_pid_rejects_server_reserved_high_band() {
         let pid = |v: serde_json::Value| read_session_pid(&serde_json::json!({ "pid": v }));

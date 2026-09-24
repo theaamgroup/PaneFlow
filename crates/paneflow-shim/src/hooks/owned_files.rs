@@ -65,6 +65,8 @@ const GROK_HOOK_EVENTS: &[&str] = &[
     "PostToolUse",
     "PermissionRequest",
     "Stop",
+    "SubagentStart",
+    "SubagentStop",
 ];
 
 pub(crate) struct GrokHookFileGuard {

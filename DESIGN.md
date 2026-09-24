@@ -602,6 +602,17 @@ bell when the agent needs input, a light blue 7 px dot when it finished, a
 stalled. The bell and the dot use the fixed colors from 4.3. The agent icon
 stack caps at four 16 px marks with an 11 px overlap.
 
+A workspace row with running agents shows their count right after its name:
+a 16 px `rounded_full` pill, min width 16, px 5, 10 px Medium `muted` on
+`text` at 0.08, 5 px from the name. It counts sessions that are thinking,
+waiting for input, or stalled, plus the subagents they run
+(`ai.subagent_start` / `ai.subagent_stop`), across the whole workspace
+whatever the fold, and disappears at zero. The name truncates before the
+pill does. It carries `Role::Status` and names itself ("2 agents running,
+3 subagents") as its accessible label and tooltip. It is a count, not a
+state; the trailing status slot still owns state. It is hidden while the row
+is being renamed.
+
 Drop placeholder while dragging: margin 6, radius 8, `text` at 0.10 with a
 0.22 border and a 2 px line. The row-reorder insertion line is a separate 2 px
 `text` at 0.5 rule.

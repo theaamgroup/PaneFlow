@@ -88,18 +88,27 @@ scan.
 
 | Agent | Mechanism | Where the shim writes | Events mapped |
 |-------|-----------|----------------------|---------------|
-| Claude Code | Claude hooks (matcher groups) | `./.claude/settings.local.json` | UserPromptSubmit, Notification, Stop, Pre/PostToolUse |
-| Codex | hooks.json + TOML feature flag | `./.codex/hooks.json` | SessionStart, UserPromptSubmit, Stop, Pre/PostToolUse, PermissionRequest |
-| CodeBuddy | Claude-compatible clone | `./.codebuddy/settings.local.json` | same five as Claude Code |
+| Claude Code | Claude hooks (matcher groups) | `./.claude/settings.local.json` | UserPromptSubmit, Notification, Stop, Pre/PostToolUse, SubagentStart/Stop |
+| Codex | hooks.json + TOML feature flag | `./.codex/hooks.json` | SessionStart, UserPromptSubmit, Stop, Pre/PostToolUse, PermissionRequest, SubagentStart/Stop |
+| CodeBuddy | Claude-compatible clone | `./.codebuddy/settings.local.json` | same seven as Claude Code |
 | Qoder | Claude-compatible clone | `./.qoder/settings.local.json` | four (no Notification) |
 | Gemini CLI | matcher-group hooks in settings | `~/.gemini/settings.json` | BeforeAgent→UserPromptSubmit, AfterAgent→Stop, Before/AfterTool→Pre/PostToolUse |
-| Cursor | flat hooks.json (`version: 1`) | `~/.cursor/hooks.json` | beforeSubmitPrompt, stop, pre/postToolUse |
-| OpenCode | TS plugin + `plugin` entry | `~/.config/opencode/plugins/paneflow-status.ts` + `opencode.json` | chat.message, tool.execute.before/after, session.idle, permission.asked |
+| Cursor | flat hooks.json (`version: 1`) | `~/.cursor/hooks.json` | beforeSubmitPrompt, stop, pre/postToolUse, subagentStart/Stop |
+| OpenCode | TS plugin + `plugin` entry | `~/.config/opencode/plugins/paneflow-status.ts` + `opencode.json` | chat.message, tool.execute.before/after, session.created/status/idle (child sessions as subagents), permission.asked |
 | Pi | TS extension (auto-loaded) | `~/.pi/agent/extensions/paneflow-status.ts` | agent_start/end, tool_execution_start/end |
 | Hermes | marked YAML block | `~/.hermes/config.yaml` | pre/post_llm_call, pre/post_tool_call, pre_approval_request |
-| Grok | dedicated merged hook file (wholly PaneFlow-owned) | `~/.grok/hooks/paneflow.json` | UserPromptSubmit, Stop, Pre/PostToolUse |
+| Grok | dedicated merged hook file (wholly PaneFlow-owned) | `~/.grok/hooks/paneflow.json` | UserPromptSubmit, Stop, Pre/PostToolUse, PermissionRequest, SubagentStart/Stop |
 | DeepSeek Harness | `--patch` overlay + Claude-compatible bridge | `~/.dsh/paneflow/{hooks.json,paneflow-overlay.yml}` | UserPromptSubmit, Pre/PostToolUse, Stop |
 | Muse Code | managed hook file (`managed_hooks_path` + `managed_hooks_env_vars` merged into `settings.json`; hooks run with a cleared environment) | `~/.config/muse/{paneflow-hooks.json,settings.json}` | UserPromptSubmit, Pre/PostToolUse, PermissionRequest, PostLLMCall (as Stop), Stop |
+
+Subagent events become `ai.subagent_start` / `ai.subagent_stop`, never
+`ai.stop`: a subagent finishing is not the parent's turn ending. Each frame
+carries the agent's own pairing id as `hook_payload.subagent_id` (Claude Code
+and Codex `agent_id`, Cursor `subagent_id`, Grok `subagentId`); a frame
+without one is dropped, since an unpaired start would hold the sidebar's
+running count up until the agent exits. The count keys ids per agent PID, so a
+start that arrives twice (Grok also runs the Claude and Cursor hook files) is
+counted once. Grok's id field is read from its binary, not its docs.
 
 Safety properties shared by every ephemeral installer: idempotent merge,
 ownership detection by command basename (`paneflow-ai-hook`), orphan sweep on

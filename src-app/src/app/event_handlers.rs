@@ -1269,6 +1269,18 @@ impl PaneFlowApp {
             Option<u64>,
         )> = Vec::new();
         for ws in &mut self.workspaces {
+            // Subagents die with the agent process that ran them. This is the
+            // backstop for a lost `ai.subagent_stop`, `ai.exit`, and
+            // `ai.session_end` all at once (a SIGKILLed agent). A parent
+            // session row, when there is one, pins the process start time
+            // against PID reuse.
+            let sessions = &ws.agent_sessions;
+            if ws.running_subagents.retain_pids(|pid| {
+                pid <= i32::MAX as u32
+                    && pid_matches(pid, sessions.get(&pid).and_then(|s| s.proc_start))
+            }) {
+                changed = true;
+            }
             if ws.agent_sessions.is_empty() {
                 continue;
             }
