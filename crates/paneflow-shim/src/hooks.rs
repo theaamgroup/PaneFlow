@@ -41,7 +41,7 @@ use paneflow_agent_config::claude_hooks::{
     paneflow_hook_program_token, reconcile_matcher_hooks_replacing_invalid_container,
     remove_matcher_hooks_lenient, render_bare_hook_command, render_hook_command, HookConfigError,
 };
-use paneflow_agent_config::{read_optional_text, with_config_lock, write_json_atomic, ConfigLease};
+use paneflow_agent_config::{read_optional_text, with_config_lock, write_json_atomic};
 use std::env;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -52,7 +52,55 @@ pub(crate) enum InvalidJsonPolicy {
     Refuse,
 }
 
-pub(crate) type HookLease = ConfigLease;
+#[cfg(not(test))]
+pub(crate) type HookLease = paneflow_agent_config::ConfigLease;
+
+/// Unit tests lease through a per-process temporary directory. The
+/// production lease directory is shared by every PaneFlow build on the
+/// machine, and a test that simulates a crash leaves a durable `.created`
+/// marker keyed by a temp path nothing will ever consume again (#796).
+#[cfg(test)]
+pub(crate) type HookLease = test_lease::TestLease;
+
+#[cfg(test)]
+pub(crate) mod test_lease {
+    use paneflow_agent_config::ConfigLease;
+    use std::path::Path;
+    use std::sync::OnceLock;
+
+    pub(crate) struct TestLease(ConfigLease);
+
+    impl TestLease {
+        pub(crate) fn acquire(resource: &Path) -> std::io::Result<Self> {
+            ConfigLease::acquire_in(directory(), resource).map(Self)
+        }
+    }
+
+    impl std::ops::Deref for TestLease {
+        type Target = ConfigLease;
+        fn deref(&self) -> &ConfigLease {
+            &self.0
+        }
+    }
+
+    impl std::ops::DerefMut for TestLease {
+        fn deref_mut(&mut self) -> &mut ConfigLease {
+            &mut self.0
+        }
+    }
+
+    pub(crate) fn directory() -> &'static Path {
+        static DIRECTORY: OnceLock<tempfile::TempDir> = OnceLock::new();
+        DIRECTORY
+            .get_or_init(|| {
+                tempfile::Builder::new()
+                    .prefix("paneflow-shim-test-leases-")
+                    .tempdir()
+                    .expect("create the test lease directory")
+            })
+            .path()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HookInstallSkip {

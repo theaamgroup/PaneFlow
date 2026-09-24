@@ -493,3 +493,49 @@ fn cleanup_keeps_the_directory_when_the_file_delete_fails() {
         "a failed file delete must not be reported as a successful removal"
     );
 }
+
+// Issue #796: shim unit tests simulate crashed sessions by leaving durable
+// `.created` markers keyed by temp paths. Those must land in the per-process
+// test directory, never the lease directory every installed build shares.
+#[test]
+fn test_leases_live_in_the_per_process_test_directory() {
+    use crate::hooks::{test_lease, HookLease};
+
+    let td = tempfile::TempDir::new().unwrap();
+    let mut lease = HookLease::acquire(&td.path().join("settings.local.json")).unwrap();
+    lease.mark_created().unwrap();
+    assert!(lease.lock_path().starts_with(test_lease::directory()));
+    let marker = lease.lock_path().with_extension("created");
+    assert!(marker.exists());
+    let mut last = lease.try_take_last().unwrap().unwrap();
+    assert!(last.take_created().unwrap());
+}
+
+#[test]
+fn shim_code_acquires_leases_only_through_hook_lease() {
+    // Spelled in two halves so this file does not match itself.
+    let bypass = concat!("ConfigLease", "::acquire(");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    assert!(root.join("hooks.rs").is_file(), "walk root moved: {root:?}");
+    let mut pending = vec![root];
+    let mut scanned = 0;
+    let mut offenders = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                scanned += 1;
+                if std::fs::read_to_string(&path).unwrap().contains(bypass) {
+                    offenders.push(path);
+                }
+            }
+        }
+    }
+    assert!(scanned > 10, "only {scanned} source files scanned");
+    assert!(
+        offenders.is_empty(),
+        "acquire leases through HookLease so tests stay out of the shared lease directory: {offenders:?}"
+    );
+}

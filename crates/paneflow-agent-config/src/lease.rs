@@ -2,9 +2,12 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Error, ErrorKind, Result};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+/// [`sweep_orphan_locks`] skips lock files younger than this, so it never
+/// races the create-then-lock window of an acquire in progress.
+const ORPHAN_LOCK_MIN_AGE: Duration = Duration::from_secs(60);
 
 /// Crash-safe lifetime lease for an agent configuration resource.
 ///
@@ -34,7 +37,17 @@ pub struct LastConfigLease {
 
 impl ConfigLease {
     pub fn acquire(resource: &Path) -> Result<Self> {
-        let path = lease_path(resource)?;
+        Self::acquire_in(&lease_dir()?, resource)
+    }
+
+    /// [`Self::acquire`] with an explicit lease directory. Tests only:
+    /// every production caller must use [`Self::acquire`], because a lease
+    /// in any other directory is invisible to the other PaneFlow instances
+    /// sharing the resource. Unit tests route here so a durable marker they
+    /// leave behind never lands in the user's real lease directory (#796).
+    pub fn acquire_in(directory: &Path, resource: &Path) -> Result<Self> {
+        std::fs::create_dir_all(directory)?;
+        let path = directory.join(format!("{:016x}.lock", resource_hash(resource)));
         let marker = path.with_extension("created");
         let started = Instant::now();
         let file = loop {
@@ -86,6 +99,11 @@ impl ConfigLease {
     /// owner to consume.
     pub fn is_created(&self) -> bool {
         self.marker.exists()
+    }
+
+    /// The lock file backing this lease.
+    pub fn lock_path(&self) -> &Path {
+        &self.path
     }
 
     /// Persist that the leased resource was created by PaneFlow.
@@ -198,7 +216,7 @@ impl Drop for LastConfigLease {
     }
 }
 
-fn lease_path(resource: &Path) -> Result<PathBuf> {
+fn lease_dir() -> Result<PathBuf> {
     // These leases protect external agent files shared by every PaneFlow
     // instance. App-specific homes and debug/release namespaces would split
     // their ownership, allowing one instance to clean up another's live hooks.
@@ -208,9 +226,71 @@ fn lease_path(resource: &Path) -> Result<PathBuf> {
             "could not resolve the user configuration directory",
         )
     })?;
-    let directory = config_dir.join("paneflow").join("agent-config-leases");
-    std::fs::create_dir_all(&directory)?;
-    Ok(directory.join(format!("{:016x}.lock", resource_hash(resource))))
+    Ok(config_dir.join("paneflow").join("agent-config-leases"))
+}
+
+#[cfg(test)]
+fn lease_path(resource: &Path) -> Result<PathBuf> {
+    Ok(lease_dir()?.join(format!("{:016x}.lock", resource_hash(resource))))
+}
+
+/// Remove lease lock files that no live session holds, returning how many
+/// were removed.
+///
+/// Builds before #594 never unlinked a lock file, so an install can carry
+/// tens of thousands of them. Each is removed under the same protocol the
+/// final holder uses on drop: take the exclusive lock (a live shared holder
+/// makes this fail), confirm the path still names the locked inode, then
+/// unlink. An acquirer that opened the inode just before the unlink
+/// re-validates it after locking and retries on a fresh file, so the sweep
+/// cannot split a lease. Durable `.created` markers are never touched: a
+/// marker is the only record that PaneFlow created a user-visible file.
+pub fn sweep_orphan_locks() -> Result<usize> {
+    sweep_orphan_locks_in(&lease_dir()?, ORPHAN_LOCK_MIN_AGE)
+}
+
+fn sweep_orphan_locks_in(directory: &Path, min_age: Duration) -> Result<usize> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let now = SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "lock") {
+            continue;
+        }
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let old_enough = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= min_age);
+        if old_enough && remove_if_orphaned(&path) {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+fn remove_if_orphaned(path: &Path) -> bool {
+    let Ok(file) = OpenOptions::new().read(true).open(path) else {
+        return false;
+    };
+    if file.try_lock().is_err() {
+        return false;
+    }
+    let current = file_is_current(&file, path).unwrap_or(false);
+    if current {
+        let _ = std::fs::remove_file(path);
+    }
+    let _ = file.unlock();
+    current
 }
 
 fn resource_hash(path: &Path) -> u64 {
@@ -448,6 +528,49 @@ mod tests {
         assert!(
             lease.try_take_last().unwrap().is_none(),
             "the parent still owns the resource"
+        );
+    }
+
+    #[test]
+    fn sweep_removes_only_old_unheld_lock_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let old = SystemTime::now() - Duration::from_secs(600);
+        let age = |path: &Path| {
+            OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        };
+        let orphan = directory.path().join("00000000000000aa.lock");
+        std::fs::write(&orphan, b"").unwrap();
+        age(&orphan);
+        let young = directory.path().join("00000000000000bb.lock");
+        std::fs::write(&young, b"").unwrap();
+        let marker = directory.path().join("00000000000000aa.created");
+        std::fs::write(&marker, b"").unwrap();
+        age(&marker);
+        let held = ConfigLease::acquire_in(directory.path(), &unique_resource("sweep")).unwrap();
+        age(held.lock_path());
+
+        let removed = sweep_orphan_locks_in(directory.path(), ORPHAN_LOCK_MIN_AGE).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!orphan.exists(), "an old lock nobody holds is swept");
+        assert!(young.exists(), "a lock inside the acquire window is kept");
+        assert!(marker.exists(), "an ownership marker is never swept");
+        assert!(held.lock_path().exists(), "a live lease keeps its lock");
+        drop(held);
+    }
+
+    #[test]
+    fn sweep_of_a_missing_directory_is_a_no_op() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("absent");
+        assert_eq!(
+            sweep_orphan_locks_in(&missing, ORPHAN_LOCK_MIN_AGE).unwrap(),
+            0
         );
     }
 

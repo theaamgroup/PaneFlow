@@ -20,6 +20,6 @@ pub use agent_dirs::{
     codex_config_dir_from, codex_config_toml, linked_worktree_main_checkout,
 };
 pub use io::{config_dir, home_dir, read_optional_text, write_json_atomic, write_text_atomic};
-pub use lease::{ConfigLease, LastConfigLease};
+pub use lease::{sweep_orphan_locks, ConfigLease, LastConfigLease};
 pub use lock::{lock_config, with_config_lock, ConfigLock};
 pub use project_hooks::{prune_dead_hook_file, reap_dead_project_hooks, ProjectHookReap};

@@ -3318,6 +3318,22 @@ fn main() {
     }
     startup_trace::mark("ai_hook_extracted");
 
+    // Issue #796: builds before #594 never unlinked an agent-config lease
+    // lock, so an install can carry tens of thousands. Sweep the ones no
+    // live session holds, off the launch path; ownership markers are kept.
+    if let Err(e) = std::thread::Builder::new()
+        .name("paneflow-lease-sweep".into())
+        .spawn(|| match paneflow_agent_config::sweep_orphan_locks() {
+            Ok(0) => {}
+            Ok(removed) => {
+                log::info!("paneflow: removed {removed} orphaned agent-config lease locks")
+            }
+            Err(e) => log::warn!("paneflow: agent-config lease sweep failed: {e}"),
+        })
+    {
+        log::warn!("paneflow: could not start the agent-config lease sweep: {e}");
+    }
+
     application()
         .with_assets(assets::Assets)
         .run(|cx: &mut App| {
