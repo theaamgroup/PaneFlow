@@ -317,6 +317,18 @@ pub enum BackendEvent {
     InputDropped {
         bytes: usize,
     },
+    /// Effects dropped past their per-drain cap since the last drain.
+    ///
+    /// Not a fault: the output that produced them was merely noisy, so the
+    /// terminal keeps running. At most one is reported per drain, after
+    /// every other event of that drain.
+    EffectsDropped {
+        notifications: usize,
+        clipboard_stores: usize,
+        unknown_sequences: usize,
+    },
+    /// Protocol replies past the per-drain byte budget. Dropping a reply
+    /// would corrupt the child's input stream, so this one is fatal.
     EffectsOverflow {
         dropped_events: usize,
         dropped_bytes: usize,

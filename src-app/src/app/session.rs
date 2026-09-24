@@ -2692,29 +2692,56 @@ mod tests {
 
     /// US-011 AC: a burst of `save_session` calls (e.g. closing 20 workspaces)
     /// must coalesce to a single disk write - only the most-recent snapshot
-    /// wins. This guards the `save_seq` monotonic-token predicate that the
-    /// deferred path uses (`save_session` checks `load() == seq` after its
-    /// debounce). A full `save_session` needs a live GPUI `App`, so this tests
-    /// the coalescing invariant directly on the same atomic logic.
+    /// wins. A full `save_session` needs a live GPUI `App`, so this drives the
+    /// write every deferred task funnels into, `write_session_json_if_current`,
+    /// with 20 tokens captured the way `save_session` captures them and
+    /// completed out of order, the way detached background tasks can finish.
     #[test]
     fn save_seq_burst_coalesces_to_a_single_write() {
         use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("session.json");
         let save_seq = AtomicU64::new(0);
-        // Simulate 20 saves fired in a burst; each captures its token the way
-        // `save_session` does (`fetch_add(1) + 1`).
-        let captured: Vec<u64> = (0..20).map(|_| save_seq.fetch_add(1, SeqCst) + 1).collect();
-
-        // After the burst, exactly one captured token equals the latest value,
-        // so exactly one deferred task survives its post-debounce check.
+        // Each save captures its token (`fetch_add(1) + 1`) with a snapshot
+        // that names it, so the file says which snapshot landed.
+        let burst: Vec<(u64, paneflow_config::schema::SessionState)> = (0..20)
+            .map(|_| {
+                let seq = save_seq.fetch_add(1, SeqCst) + 1;
+                let mut state = empty_session_state();
+                state.active_workspace = seq as usize;
+                (seq, state)
+            })
+            .collect();
         let latest = save_seq.load(SeqCst);
-        let survivors = captured.iter().filter(|&&s| s == latest).count();
-        assert_eq!(survivors, 1, "a 20-save burst coalesces to one write");
-        assert_eq!(
-            captured.last().copied(),
-            Some(latest),
-            "the most-recent snapshot is the survivor"
-        );
+        assert_eq!(latest, 20);
+        let landed = || -> Option<usize> {
+            let bytes = std::fs::read(&path).ok()?;
+            let state: paneflow_config::schema::SessionState =
+                serde_json::from_slice(&bytes).expect("a written session parses");
+            Some(state.active_workspace)
+        };
+
+        // Older tasks finish first: none of them may reach the disk.
+        for (seq, state) in burst.iter().filter(|(seq, _)| *seq <= 10) {
+            assert!(write_session_json_if_current(&path, state, &save_seq, *seq));
+        }
+        assert_eq!(landed(), None, "a superseded snapshot must not be written");
+
+        // The latest writes...
+        let (seq, state) = &burst[latest as usize - 1];
+        assert!(write_session_json_if_current(&path, state, &save_seq, *seq));
+        assert_eq!(landed(), Some(20), "the most-recent snapshot is written");
+
+        // ...and the stragglers that finish after it cannot overwrite it.
+        for (seq, state) in burst.iter().filter(|(seq, _)| (11..20).contains(seq)) {
+            assert!(write_session_json_if_current(&path, state, &save_seq, *seq));
+            assert_eq!(
+                landed(),
+                Some(20),
+                "stale snapshot {seq} must not replace the latest one"
+            );
+        }
     }
 
     /// Regression guard for the US-011 quit-path race: a deferred save that
