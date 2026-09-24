@@ -855,13 +855,18 @@ mod tests {
     /// Wall-clock budget for one fixture wait: readiness lines, shells
     /// honoring SIGTERM, and process groups vanishing after SIGKILL.
     ///
-    /// Issue #568: a 10 s deadline is not what these tests are about, and a
-    /// loaded `cargo test --workspace` (the CI runner, run 35127045880) can
-    /// hold a trap handler's `exit 42` plus the reap past it, which read as
-    /// `shell did not honor SIGTERM`. Like the #562 / #564 budget in
-    /// `workspace/git.rs`, a budget no scheduler stall reaches keeps the
-    /// assertions about the mechanism: the wait ends on the observed exit or
-    /// disappearance, never on the deadline.
+    /// Like the #562 / #564 budget in `workspace/git.rs`, a budget no
+    /// scheduler stall reaches keeps the assertions about the mechanism: the
+    /// wait ends on the observed exit or disappearance, never on the deadline.
+    ///
+    /// Issue #568: `shell did not honor SIGTERM` was not a slow runner, and no
+    /// budget fixes it. The fixtures whose leader runs `trap 'exit 42' TERM`
+    /// used to end in `(...) & wait`. macOS `/bin/sh` is bash 3.2, whose `wait`
+    /// builtin only acts on a trapped signal that arrives once it is blocked.
+    /// A TERM landing between the fork and that point is left pending, and
+    /// `wait` then blocks forever on a descendant that ignores TERM. Those
+    /// leaders now idle in `while :; do sleep 0.05; done`: bash runs pending
+    /// traps at the next command boundary, at most one short sleep later.
     const FIXTURE_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
     #[test]
@@ -1199,11 +1204,13 @@ mod tests {
         use std::os::unix::process::CommandExt;
         use std::time::{Duration, Instant};
 
+        // The leader polls instead of `wait`ing: see FIXTURE_WAIT_BUDGET for
+        // the bash 3.2 race (#568) that a `& wait` tail loses to this TERM.
         let mut command = Command::new("sh");
         command
             .args([
                 "-c",
-                "trap 'exit 42' TERM; trap '' HUP; (trap '' HUP TERM; echo ready; while :; do sleep 30; done) & wait",
+                "trap 'exit 42' TERM; trap '' HUP; (trap '' HUP TERM; echo ready; while :; do sleep 30; done) & while :; do sleep 0.05; done",
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1283,11 +1290,14 @@ mod tests {
         use std::os::unix::process::CommandExt;
         use std::time::{Duration, Instant};
 
+        // The leader polls instead of `wait`ing: see FIXTURE_WAIT_BUDGET for
+        // the bash 3.2 race (#568) that a `& wait` tail loses to the guard's
+        // TERM, which would leave the leader to the KILL escalation.
         let mut command = Command::new("sh");
         command
             .args([
                 "-c",
-                "trap 'exit 42' TERM; trap '' HUP; echo shell-ready; IFS= read -r go; (trap '' HUP TERM; echo descendant-ready; while :; do sleep 30; done) & wait",
+                "trap 'exit 42' TERM; trap '' HUP; echo shell-ready; IFS= read -r go; (trap '' HUP TERM; echo descendant-ready; while :; do sleep 30; done) & while :; do sleep 0.05; done",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
