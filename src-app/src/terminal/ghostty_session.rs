@@ -3507,6 +3507,13 @@ fn handle_engine_events(
                     "Ghostty dropped oversized callback input ({bytes} bytes)"
                 );
             }
+            ghostty::BackendEvent::EffectsDropped {
+                notifications,
+                clipboard_stores,
+                unknown_sequences,
+            } => log_dropped_effects(notifications, clipboard_stores, unknown_sequences),
+            // Only protocol replies overflow: a dropped reply would corrupt
+            // the child's input, so the pane cannot continue.
             ghostty::BackendEvent::EffectsOverflow {
                 dropped_events,
                 dropped_bytes,
@@ -3518,6 +3525,30 @@ fn handle_engine_events(
         }
     }
     Ok(())
+}
+
+/// One summary per drain for the effects noisy output pushed past their
+/// per-drain caps. The pane keeps running; the latest notifications and
+/// clipboard stores were kept.
+fn log_dropped_effects(notifications: usize, clipboard_stores: usize, unknown_sequences: usize) {
+    if notifications > 0 {
+        log::warn!(
+            target: "paneflow::terminal::ghostty",
+            "Ghostty dropped {notifications} older desktop notification(s) from one burst of output"
+        );
+    }
+    if clipboard_stores > 0 {
+        log::warn!(
+            target: "paneflow::terminal::ghostty",
+            "Ghostty dropped {clipboard_stores} older clipboard store(s) from one burst of output"
+        );
+    }
+    if unknown_sequences > 0 {
+        log::debug!(
+            target: "paneflow::terminal::ghostty",
+            "Ghostty did not log {unknown_sequences} more unsupported sequence(s) from one burst of output"
+        );
+    }
 }
 
 /// Decides when a grid change becomes a published frame.
@@ -6343,6 +6374,92 @@ mod tests {
             "a long pasted line must not fail the runtime; runtime_failures={runtime_failures:?}"
         );
         assert!(exited, "ChildExited must arrive after the paste");
+    }
+
+    /// Runs `script` under `/bin/sh -c` until the child exits and returns the
+    /// session with every runtime failure it reported.
+    #[cfg(unix)]
+    fn run_script_to_exit(script: &str) -> (GhosttySession, Vec<String>, bool) {
+        let params = SpawnParams {
+            shell: "/bin/sh".into(),
+            shell_quoting: super::super::types::ShellQuoting::Posix,
+            extra_args: vec!["-c".into(), script.into()],
+            env: std::collections::HashMap::from([("TERM".into(), "xterm-256color".into())]),
+            cwd: std::env::current_dir().unwrap(),
+            cols: 80,
+            rows: 24,
+            profile: TerminalSurfaceProfile::Normal,
+        };
+        let (session, pending, mut events_rx) =
+            GhosttySession::pending(TerminalWindowSize::new(80, 24, 8, 16));
+        let spawned = session
+            .start(pending, params, None, 1_000)
+            .expect("Ghostty runtime must spawn a portable PTY shell");
+        assert!(spawned.child_pid > 0);
+        session.promote();
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut exited = false;
+        let mut runtime_failures = Vec::new();
+        while !exited && Instant::now() < deadline {
+            while let Ok(event) = events_rx.try_recv() {
+                match event {
+                    GhosttyUiEvent::ChildExited { .. } => exited = true,
+                    GhosttyUiEvent::RuntimeFailed(error) => runtime_failures.push(error),
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        (session, runtime_failures, exited)
+    }
+
+    /// A program that prints many OSC 9 notifications in one write is noisy,
+    /// not broken (#805). The excess is dropped, the newest is kept, and the
+    /// pane stays alive.
+    #[test]
+    #[cfg(unix)]
+    fn a_burst_of_notifications_in_one_output_chunk_does_not_fail_the_runtime() {
+        // One printf, one format reused per argument: about 3 KB of
+        // notifications in a single write, far past the per-drain cap in
+        // every PTY read that carries them.
+        let (session, runtime_failures, exited) =
+            run_script_to_exit("printf '\\033]9;note %d\\007' $(seq 0 199)");
+
+        assert!(
+            runtime_failures.is_empty(),
+            "a notification burst must not fail the runtime; runtime_failures={runtime_failures:?}"
+        );
+        assert!(
+            exited,
+            "ChildExited must arrive after the notification burst"
+        );
+        let slot = session
+            .inner
+            .ui_events
+            .notifications
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            slot.pending.back().map(|note| note.body.as_str()),
+            Some("note 199"),
+            "the newest notification must survive the burst"
+        );
+    }
+
+    /// The same for OSC 52 clipboard stores (#805). The clipboard gate denies
+    /// them in a test, but the per-drain cap is applied before the gate.
+    #[test]
+    #[cfg(unix)]
+    fn a_burst_of_clipboard_stores_in_one_output_chunk_does_not_fail_the_runtime() {
+        let (_session, runtime_failures, exited) =
+            run_script_to_exit("printf '\\033]52;c;b2s=\\007%.0s' $(seq 1 100)");
+
+        assert!(
+            runtime_failures.is_empty(),
+            "a clipboard burst must not fail the runtime; runtime_failures={runtime_failures:?}"
+        );
+        assert!(exited, "ChildExited must arrive after the clipboard burst");
     }
 
     /// The frame that precedes `ChildExited` bypasses the gate: a burst that
