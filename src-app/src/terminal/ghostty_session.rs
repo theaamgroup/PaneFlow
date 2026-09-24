@@ -6380,7 +6380,7 @@ mod tests {
         let params = SpawnParams {
             shell: "/bin/sh".into(),
             shell_quoting: super::super::types::ShellQuoting::Posix,
-            extra_args: vec!["-c".into(), "yes | head -c 50000000".into()],
+            extra_args: vec!["-c".into(), "yes | head -c 8000000".into()],
             env: std::collections::HashMap::from([
                 ("TERM".into(), "xterm-256color".into()),
                 ("COLORTERM".into(), "truecolor".into()),
@@ -6402,11 +6402,20 @@ mod tests {
             pid: Some(child_pid),
         };
         session.promote();
-        assert!(session.write_paste("x".repeat(65536), true).is_sent());
+        // The paste must be made of complete lines. A canonical-mode PTY
+        // only blocks the master's writer once a finished line is waiting
+        // unread; one long line past the input limit is dropped byte by
+        // byte (with a BEL echoed for each) and the write never blocks, so
+        // a runtime writing it synchronously would not wedge either.
+        let line = format!("{}\n", "x".repeat(63));
+        assert!(session.write_paste(line.repeat(1024), true).is_sent());
 
-        // A debug runtime ingests this flood at about 2–4 MB/s, so 50MB
-        // needs well over 8s (about 20s observed). A wedged runtime never
-        // publishes ChildExited; this deadline still fails closed.
+        // The flood only has to outlast every buffer between the child and
+        // the runtime, so a runtime stuck on the paste leaves the child
+        // blocked in write(2) for good. A debug runtime ingests about
+        // 2–4 MB/s, and 8 MB keeps a loaded host well inside the deadline.
+        // A wedged runtime never publishes ChildExited; the deadline still
+        // fails closed.
         let deadline = Instant::now() + Duration::from_secs(45);
         let mut exited = false;
         let mut runtime_failures = Vec::new();
@@ -6445,6 +6454,111 @@ mod tests {
             Some(libc::ESRCH)
         );
         kill_on_drop.pid = None;
+    }
+
+    /// A burst of BEL bytes is ordinary output, not an effect overflow. The
+    /// kernel produces one when a single line longer than the canonical
+    /// input limit is pasted into a program that is not reading (IMAXBEL
+    /// echoes a BEL for every byte it drops), and a program can print one
+    /// itself. Thousands of bells in one PTY read must leave the pane alive.
+    #[test]
+    #[cfg(unix)]
+    fn a_burst_of_bells_in_one_output_chunk_does_not_fail_the_runtime() {
+        let cwd = std::env::current_dir().unwrap();
+        let params = SpawnParams {
+            shell: "/bin/sh".into(),
+            shell_quoting: super::super::types::ShellQuoting::Posix,
+            extra_args: vec![
+                "-c".into(),
+                "head -c 4096 /dev/zero | tr '\\000' '\\007'".into(),
+            ],
+            env: std::collections::HashMap::from([("TERM".into(), "xterm-256color".into())]),
+            cwd,
+            cols: 80,
+            rows: 24,
+            profile: TerminalSurfaceProfile::Normal,
+        };
+        let (session, pending, mut events_rx) =
+            GhosttySession::pending(TerminalWindowSize::new(80, 24, 8, 16));
+        let spawned = session
+            .start(pending, params, None, 1_000)
+            .expect("Ghostty runtime must spawn a portable PTY shell");
+        assert!(spawned.child_pid > 0);
+        session.promote();
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut exited = false;
+        let mut runtime_failures = Vec::new();
+        while !exited && Instant::now() < deadline {
+            while let Ok(event) = events_rx.try_recv() {
+                match event {
+                    GhosttyUiEvent::ChildExited { .. } => exited = true,
+                    GhosttyUiEvent::RuntimeFailed(error) => runtime_failures.push(error),
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            runtime_failures.is_empty(),
+            "bells in the output must not fail the runtime; runtime_failures={runtime_failures:?}"
+        );
+        assert!(exited, "ChildExited must arrive after the bell burst");
+    }
+
+    /// The production shape of the bell burst: a pasted line longer than the
+    /// canonical input limit, into a program that never reads stdin. Once
+    /// the line is full, every further byte is dropped and echoed as a BEL,
+    /// up to a full output queue per write (1024 on macOS), and the runtime
+    /// reads them back as one chunk. The first paste fills the line; the
+    /// pause lets the runtime drain its echo so the second one's BELs have
+    /// room.
+    #[test]
+    #[cfg(unix)]
+    fn a_long_pasted_line_into_a_program_that_is_not_reading_does_not_fail_the_runtime() {
+        let cwd = std::env::current_dir().unwrap();
+        let params = SpawnParams {
+            shell: "/bin/sh".into(),
+            shell_quoting: super::super::types::ShellQuoting::Posix,
+            extra_args: vec!["-c".into(), "sleep 2".into()],
+            env: std::collections::HashMap::from([("TERM".into(), "xterm-256color".into())]),
+            cwd,
+            cols: 80,
+            rows: 24,
+            profile: TerminalSurfaceProfile::Normal,
+        };
+        let (session, pending, mut events_rx) =
+            GhosttySession::pending(TerminalWindowSize::new(80, 24, 8, 16));
+        let spawned = session
+            .start(pending, params, None, 1_000)
+            .expect("Ghostty runtime must spawn a portable PTY shell");
+        assert!(spawned.child_pid > 0);
+        session.promote();
+        for _ in 0..2 {
+            assert!(session.write_paste("x".repeat(2048), true).is_sent());
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut exited = false;
+        let mut runtime_failures = Vec::new();
+        while !exited && Instant::now() < deadline {
+            while let Ok(event) = events_rx.try_recv() {
+                match event {
+                    GhosttyUiEvent::ChildExited { .. } => exited = true,
+                    GhosttyUiEvent::RuntimeFailed(error) => runtime_failures.push(error),
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            runtime_failures.is_empty(),
+            "a long pasted line must not fail the runtime; runtime_failures={runtime_failures:?}"
+        );
+        assert!(exited, "ChildExited must arrive after the paste");
     }
 
     /// The frame that precedes `ChildExited` bypasses the gate: a burst that
