@@ -37,6 +37,9 @@ pub(crate) struct CallbackState {
     pending_bell_events: Cell<usize>,
     pending_notification_events: Cell<usize>,
     pending_unknown_sequence_events: Cell<usize>,
+    dropped_notifications: Cell<usize>,
+    dropped_clipboard_stores: Cell<usize>,
+    dropped_unknown_sequences: Cell<usize>,
     /// What a clipboard read is answered with. `None`, the default, denies
     /// every read. See [`crate::DisplayTerminal::set_clipboard_readable`].
     readable_clipboard: RefCell<Option<String>>,
@@ -56,6 +59,9 @@ impl CallbackState {
             pending_bell_events: Cell::new(0),
             pending_notification_events: Cell::new(0),
             pending_unknown_sequence_events: Cell::new(0),
+            dropped_notifications: Cell::new(0),
+            dropped_clipboard_stores: Cell::new(0),
+            dropped_unknown_sequences: Cell::new(0),
             readable_clipboard: RefCell::new(None),
             size: Cell::new(size),
             color_scheme: Cell::new(color_scheme),
@@ -134,13 +140,18 @@ impl CallbackState {
                 }
             }
             BackendEvent::ClipboardStore(text) => {
-                let pending = self.pending_clipboard_events.get();
-                if pending >= MAX_PENDING_CLIPBOARD_EVENTS {
-                    push_overflow(&mut events, 1, text.len());
+                // Every store replaces the clipboard, so the last one is what
+                // the program meant it to hold: past the cap the oldest queued
+                // store makes room for the new one.
+                if self.pending_clipboard_events.get() >= MAX_PENDING_CLIPBOARD_EVENTS {
+                    remove_oldest(&mut events, |event| {
+                        matches!(event, BackendEvent::ClipboardStore(_))
+                    });
+                    increment(&self.dropped_clipboard_stores);
                 } else {
-                    self.pending_clipboard_events.set(pending + 1);
-                    events.push_back(BackendEvent::ClipboardStore(text));
+                    increment(&self.pending_clipboard_events);
                 }
+                events.push_back(BackendEvent::ClipboardStore(text));
             }
             BackendEvent::Title(title) => {
                 events.retain(|event| !matches!(event, BackendEvent::Title(_)));
@@ -168,20 +179,28 @@ impl CallbackState {
                 }
             }
             BackendEvent::DesktopNotification { title, body } => {
-                let pending = self.pending_notification_events.get();
-                if pending >= MAX_PENDING_NOTIFICATION_EVENTS {
-                    push_overflow(&mut events, 1, title.len() + body.len());
+                // A burst of notifications is noisy output, not a fault. The
+                // newest is the program's current state, and the embedder
+                // also keeps the newest when its own queue is full, so past
+                // the cap the oldest queued notification makes room.
+                if self.pending_notification_events.get() >= MAX_PENDING_NOTIFICATION_EVENTS {
+                    remove_oldest(&mut events, |event| {
+                        matches!(event, BackendEvent::DesktopNotification { .. })
+                    });
+                    increment(&self.dropped_notifications);
                 } else {
-                    self.pending_notification_events.set(pending + 1);
-                    events.push_back(BackendEvent::DesktopNotification { title, body });
+                    increment(&self.pending_notification_events);
                 }
+                events.push_back(BackendEvent::DesktopNotification { title, body });
             }
             BackendEvent::UnknownSequence { content, truncated } => {
-                let pending = self.pending_unknown_sequence_events.get();
-                if pending >= MAX_PENDING_UNKNOWN_SEQUENCE_EVENTS {
-                    push_overflow(&mut events, 1, content.len());
+                // Diagnostics only: past the cap the rest are counted, never
+                // queued, and never a fault.
+                if self.pending_unknown_sequence_events.get() >= MAX_PENDING_UNKNOWN_SEQUENCE_EVENTS
+                {
+                    increment(&self.dropped_unknown_sequences);
                 } else {
-                    self.pending_unknown_sequence_events.set(pending + 1);
+                    increment(&self.pending_unknown_sequence_events);
                     events.push_back(BackendEvent::UnknownSequence { content, truncated });
                 }
             }
@@ -203,6 +222,15 @@ impl CallbackState {
                     events.push_back(BackendEvent::InputDropped { bytes });
                 }
             }
+            BackendEvent::EffectsDropped {
+                notifications,
+                clipboard_stores,
+                unknown_sequences,
+            } => {
+                add(&self.dropped_notifications, notifications);
+                add(&self.dropped_clipboard_stores, clipboard_stores);
+                add(&self.dropped_unknown_sequences, unknown_sequences);
+            }
             BackendEvent::EffectsOverflow {
                 dropped_events,
                 dropped_bytes,
@@ -216,7 +244,34 @@ impl CallbackState {
         self.pending_bell_events.set(0);
         self.pending_notification_events.set(0);
         self.pending_unknown_sequence_events.set(0);
-        self.events.borrow_mut().drain(..).collect()
+        let notifications = self.dropped_notifications.take();
+        let clipboard_stores = self.dropped_clipboard_stores.take();
+        let unknown_sequences = self.dropped_unknown_sequences.take();
+        let mut events: Vec<_> = self.events.borrow_mut().drain(..).collect();
+        if notifications != 0 || clipboard_stores != 0 || unknown_sequences != 0 {
+            events.push(BackendEvent::EffectsDropped {
+                notifications,
+                clipboard_stores,
+                unknown_sequences,
+            });
+        }
+        events
+    }
+}
+
+fn increment(counter: &Cell<usize>) {
+    add(counter, 1);
+}
+
+fn add(counter: &Cell<usize>, count: usize) {
+    counter.set(counter.get().saturating_add(count));
+}
+
+/// Remove the first queued event `is_kind` matches, keeping the rest in
+/// order.
+fn remove_oldest(events: &mut VecDeque<BackendEvent>, is_kind: impl Fn(&BackendEvent) -> bool) {
+    if let Some(index) = events.iter().position(is_kind) {
+        events.remove(index);
     }
 }
 
@@ -428,6 +483,148 @@ mod tests {
         // The cap is per drain: the next burst is reported again.
         state.push(BackendEvent::Bell);
         assert_eq!(state.drain(), [BackendEvent::Bell]);
+    }
+
+    fn new_state() -> CallbackState {
+        CallbackState::new(WindowSize::new(80, 24, 8, 16).unwrap(), ColorScheme::Dark)
+    }
+
+    fn has_overflow(events: &[BackendEvent]) -> bool {
+        events
+            .iter()
+            .any(|event| matches!(event, BackendEvent::EffectsOverflow { .. }))
+    }
+
+    fn notification(index: usize) -> BackendEvent {
+        BackendEvent::DesktopNotification {
+            title: String::new(),
+            body: format!("note {index}"),
+        }
+    }
+
+    #[test]
+    fn excess_notifications_keep_the_latest_without_an_overflow() {
+        let state = new_state();
+        let sent = MAX_PENDING_NOTIFICATION_EVENTS * 4;
+        for index in 0..sent {
+            state.push(notification(index));
+        }
+
+        let events = state.drain();
+        assert!(!has_overflow(&events), "{events:?}");
+        let kept: Vec<_> = (sent - MAX_PENDING_NOTIFICATION_EVENTS..sent)
+            .map(notification)
+            .collect();
+        assert_eq!(events[..MAX_PENDING_NOTIFICATION_EVENTS], kept[..]);
+        assert_eq!(
+            events[MAX_PENDING_NOTIFICATION_EVENTS..],
+            [BackendEvent::EffectsDropped {
+                notifications: sent - MAX_PENDING_NOTIFICATION_EVENTS,
+                clipboard_stores: 0,
+                unknown_sequences: 0,
+            }]
+        );
+
+        // The cap and the drop count are per drain.
+        state.push(notification(0));
+        assert_eq!(state.drain(), [notification(0)]);
+    }
+
+    #[test]
+    fn excess_clipboard_stores_keep_the_latest_in_order_without_an_overflow() {
+        let state = new_state();
+        let sent = MAX_PENDING_CLIPBOARD_EVENTS + 8;
+        state.push(BackendEvent::Bell);
+        for index in 0..sent {
+            state.push(BackendEvent::ClipboardStore(format!("copy {index}")));
+        }
+        state.push(BackendEvent::Bell);
+
+        let events = state.drain();
+        assert!(!has_overflow(&events), "{events:?}");
+        let mut expected = vec![BackendEvent::Bell];
+        expected.extend(
+            (sent - MAX_PENDING_CLIPBOARD_EVENTS..sent)
+                .map(|index| BackendEvent::ClipboardStore(format!("copy {index}"))),
+        );
+        expected.push(BackendEvent::Bell);
+        expected.push(BackendEvent::EffectsDropped {
+            notifications: 0,
+            clipboard_stores: sent - MAX_PENDING_CLIPBOARD_EVENTS,
+            unknown_sequences: 0,
+        });
+        assert_eq!(events, expected);
+    }
+
+    #[test]
+    fn excess_unknown_sequences_are_counted_without_an_overflow() {
+        let state = new_state();
+        let sent = MAX_PENDING_UNKNOWN_SEQUENCE_EVENTS * 3;
+        let unknown = |index: usize| BackendEvent::UnknownSequence {
+            content: format!("apc {index}"),
+            truncated: false,
+        };
+        for index in 0..sent {
+            state.push(unknown(index));
+        }
+
+        let events = state.drain();
+        assert!(!has_overflow(&events), "{events:?}");
+        let mut expected: Vec<_> = (0..MAX_PENDING_UNKNOWN_SEQUENCE_EVENTS)
+            .map(unknown)
+            .collect();
+        expected.push(BackendEvent::EffectsDropped {
+            notifications: 0,
+            clipboard_stores: 0,
+            unknown_sequences: sent - MAX_PENDING_UNKNOWN_SEQUENCE_EVENTS,
+        });
+        assert_eq!(events, expected);
+    }
+
+    /// One chunk past every cap at once, through libghostty itself: noisy
+    /// output is reported as drops, never as the fatal overflow.
+    #[test]
+    fn one_noisy_chunk_past_every_cap_is_not_an_overflow() {
+        let size = WindowSize::new(80, 24, 8, 16).expect("valid terminal size");
+        let mut terminal =
+            crate::DisplayTerminal::new(size, 100, crate::TerminalAppearance::default())
+                .expect("terminal must initialize");
+        terminal
+            .capture_unknown_sequences(true)
+            .expect("capture must enable");
+        let notifications = MAX_PENDING_NOTIFICATION_EVENTS * 4;
+        let stores = MAX_PENDING_CLIPBOARD_EVENTS * 2;
+        let unknown = MAX_PENDING_UNKNOWN_SEQUENCE_EVENTS * 2;
+        let mut chunk = Vec::new();
+        for index in 0..notifications {
+            chunk.extend_from_slice(format!("\x1b]9;note {index}\x07").as_bytes());
+        }
+        for _ in 0..stores {
+            chunk.extend_from_slice(b"\x1b]52;c;b2s=\x07");
+        }
+        for _ in 0..unknown {
+            chunk.extend_from_slice(b"\x1b_Zunsupported\x1b\\");
+        }
+        terminal.feed(&chunk).expect("noisy chunk must parse");
+
+        let events = terminal.drain_events();
+        assert!(!has_overflow(&events), "{events:?}");
+        assert_eq!(
+            events.last(),
+            Some(&BackendEvent::EffectsDropped {
+                notifications: notifications - MAX_PENDING_NOTIFICATION_EVENTS,
+                clipboard_stores: stores - MAX_PENDING_CLIPBOARD_EVENTS,
+                unknown_sequences: unknown - MAX_PENDING_UNKNOWN_SEQUENCE_EVENTS,
+            })
+        );
+        let last_notification = events.iter().rev().find_map(|event| match event {
+            BackendEvent::DesktopNotification { body, .. } => Some(body.as_str()),
+            _ => None,
+        });
+        assert_eq!(
+            last_notification,
+            Some(format!("note {}", notifications - 1).as_str())
+        );
     }
 
     #[test]
