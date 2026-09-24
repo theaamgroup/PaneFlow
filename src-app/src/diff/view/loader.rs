@@ -191,46 +191,224 @@ impl DiffView {
     }
 
     fn schedule_mode_build(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
-        let col = &mut self.column;
-        if col.has_rows_for_mode(mode) || col.loading_mode.is_some() {
+        let Some(build) = self.column.begin_mode_build(mode) else {
             return;
-        }
-        let (files, row_caches) = match &col.state {
-            ColumnState::Loaded {
-                files_full,
-                row_caches,
-                ..
-            } => (files_full.clone(), row_caches.clone()),
-            _ => return,
         };
-        let generation = col.generation;
-        col.loading_mode = Some(mode);
         log::debug!(
-            "diff: scheduling lazy {} row build (gen={generation})",
-            mode.label()
+            "diff: scheduling lazy {} row build (gen={})",
+            mode.label(),
+            build.generation
         );
         cx.spawn(async move |this, cx| {
+            let files = build.files.clone();
+            let row_caches = build.row_caches.clone();
             let rows = smol::unblock(move || {
                 build_rows_for_mode_with_caches(files.as_ref(), mode, row_caches.as_ref())
             })
             .await;
             let _ = cx.update(|cx| {
                 this.update(cx, |view: &mut Self, cx| {
-                    let col = &mut view.column;
-                    if col.generation != generation || col.loading_mode != Some(mode) {
-                        return;
+                    if view.column.finish_mode_build(&build, rows) {
+                        cx.notify();
                     }
-                    if !matches!(col.state, ColumnState::Loaded { .. }) {
-                        col.loading_mode = None;
-                        return;
-                    }
-                    col.loading_mode = None;
-                    col.insert_mode_rows(rows);
-                    col.recompute_display_for(mode);
-                    cx.notify();
                 })
             });
         })
         .detach();
+    }
+}
+
+/// The inputs one lazy mode build read. The task keeps the `Arc`s alive, so
+/// a later load can never reuse their addresses and pass as the same state.
+struct LazyModeBuild {
+    mode: ViewMode,
+    generation: u64,
+    files: Arc<Vec<super::super::git::FileDiff>>,
+    row_caches: Arc<Vec<FileRowCache>>,
+}
+
+/// What a finished lazy mode build may do with its rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LazyBuildVerdict {
+    /// Built from the state now shown: install the rows.
+    Install,
+    /// Superseded. Another build owns `loading_mode`, so leave it set.
+    Discard,
+    /// The column holds no loaded rows any more: release `loading_mode`.
+    Release,
+}
+
+impl Column {
+    /// Claim `loading_mode` for `mode` and snapshot the loaded inputs, or
+    /// `None` when the rows exist, a build is already running, or nothing is
+    /// loaded.
+    fn begin_mode_build(&mut self, mode: ViewMode) -> Option<LazyModeBuild> {
+        if self.has_rows_for_mode(mode) || self.loading_mode.is_some() {
+            return None;
+        }
+        let ColumnState::Loaded {
+            files_full,
+            row_caches,
+            ..
+        } = &self.state
+        else {
+            return None;
+        };
+        let build = LazyModeBuild {
+            mode,
+            generation: self.generation,
+            files: files_full.clone(),
+            row_caches: row_caches.clone(),
+        };
+        self.loading_mode = Some(mode);
+        Some(build)
+    }
+
+    /// Issue #736: `start_loading` bumps `generation` but keeps the old
+    /// `Loaded` state on screen, so a mode switch mid-reload builds from the
+    /// OLD `files_full` under the NEW generation. Generation and
+    /// `loading_mode` alone then accept those rows into the fresh state.
+    /// Matching the exact `Arc`s the build read rejects them.
+    fn lazy_build_verdict(&self, build: &LazyModeBuild) -> LazyBuildVerdict {
+        if self.generation != build.generation || self.loading_mode != Some(build.mode) {
+            return LazyBuildVerdict::Discard;
+        }
+        match &self.state {
+            ColumnState::Loaded {
+                files_full,
+                row_caches,
+                ..
+            } => {
+                if Arc::ptr_eq(files_full, &build.files)
+                    && Arc::ptr_eq(row_caches, &build.row_caches)
+                {
+                    LazyBuildVerdict::Install
+                } else {
+                    LazyBuildVerdict::Discard
+                }
+            }
+            _ => LazyBuildVerdict::Release,
+        }
+    }
+
+    /// Apply a finished lazy build. Returns whether rows were installed.
+    fn finish_mode_build(&mut self, build: &LazyModeBuild, rows: BuiltModeRows) -> bool {
+        match self.lazy_build_verdict(build) {
+            LazyBuildVerdict::Discard => false,
+            LazyBuildVerdict::Release => {
+                self.loading_mode = None;
+                false
+            }
+            LazyBuildVerdict::Install => {
+                self.loading_mode = None;
+                self.insert_mode_rows(rows);
+                self.recompute_display_for(build.mode);
+                true
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_at(path: &str) -> super::super::super::git::FileDiff {
+        let base = "alpha\nold\nomega\n".to_string();
+        let new = "alpha\nnew\nomega\n".to_string();
+        super::super::super::git::FileDiff {
+            path: path.into(),
+            change: super::super::super::git::FileChange::Modified,
+            old_path: None,
+            hunks: super::super::super::engine::compute_hunks(&base, &new),
+            base_text: base,
+            new_text: new,
+            is_binary: false,
+        }
+    }
+
+    /// A `Loaded` state holding unified rows only, as `start_loading` leaves it
+    /// when the active mode is unified.
+    fn loaded_unified(path: &str) -> ColumnState {
+        let files = vec![file_at(path)];
+        let row_caches = build_file_row_caches(&files, None);
+        let BuiltModeRows::Unified { rows, anchors } =
+            build_rows_for_mode_with_caches(&files, ViewMode::Unified, &row_caches)
+        else {
+            unreachable!("requested unified rows");
+        };
+        ColumnState::Loaded {
+            unified: Some(Rc::new(rows)),
+            split: None,
+            file_count: 1,
+            files: Rc::new(Vec::new()),
+            anchors_unified: Some(Rc::new(anchors)),
+            anchors_split: None,
+            files_full: Arc::new(files),
+            row_caches: Arc::new(row_caches),
+            theme_generation: crate::theme::theme_generation(),
+        }
+    }
+
+    fn rows_for(build: &LazyModeBuild) -> BuiltModeRows {
+        build_rows_for_mode_with_caches(&build.files, build.mode, &build.row_caches)
+    }
+
+    #[test]
+    fn stale_lazy_mode_build_is_discarded_after_reload() {
+        let mut col = Column::new_loading("feature".into(), PathBuf::from("."), None);
+        col.state = loaded_unified("src/before.rs");
+
+        // A reload starts: `start_loading` bumps the generation and keeps the
+        // old rows on screen until the fresh load lands.
+        col.generation = col.generation.wrapping_add(1);
+        col.loading_mode = None;
+
+        // A switch to split mid-reload snapshots the OLD files under the NEW
+        // generation.
+        let stale = col
+            .begin_mode_build(ViewMode::Split)
+            .expect("mid-reload split build scheduled");
+
+        // The reload lands (same generation): fresh state, `loading_mode`
+        // cleared, and the other mode scheduled from the fresh files.
+        col.loading_mode = None;
+        col.state = loaded_unified("src/after.rs");
+        let fresh = col
+            .begin_mode_build(ViewMode::Split)
+            .expect("post-reload split build scheduled");
+
+        // The stale build finishes first. Generation and mode both match, so
+        // only the source identity can reject it. It must not install and
+        // must not release the fresh build's claim on `loading_mode`.
+        assert_eq!(col.lazy_build_verdict(&stale), LazyBuildVerdict::Discard);
+        assert!(!col.finish_mode_build(&stale, rows_for(&stale)));
+        assert!(!col.has_rows_for_mode(ViewMode::Split));
+        assert!(col.loading_mode == Some(ViewMode::Split));
+
+        // The fresh build still lands, with rows from the fresh files.
+        assert_eq!(col.lazy_build_verdict(&fresh), LazyBuildVerdict::Install);
+        assert!(col.finish_mode_build(&fresh, rows_for(&fresh)));
+        assert!(col.loading_mode.is_none());
+        let paths: Vec<&str> = col
+            .disp_anchors_split
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect();
+        assert_eq!(paths, ["src/after.rs"]);
+    }
+
+    #[test]
+    fn lazy_mode_build_releases_the_claim_when_the_load_failed() {
+        let mut col = Column::new_loading("feature".into(), PathBuf::from("."), None);
+        col.state = loaded_unified("src/lib.rs");
+        let build = col
+            .begin_mode_build(ViewMode::Split)
+            .expect("split build scheduled");
+        col.state = ColumnState::Failed("boom".into());
+
+        assert_eq!(col.lazy_build_verdict(&build), LazyBuildVerdict::Release);
+        assert!(!col.finish_mode_build(&build, rows_for(&build)));
+        assert!(col.loading_mode.is_none());
     }
 }
