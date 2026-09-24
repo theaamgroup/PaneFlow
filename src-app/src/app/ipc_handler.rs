@@ -4132,9 +4132,12 @@ mod tests {
             super::surface_read_offset_out_of_range(4, 3),
             "offset > total is out of range"
         );
+        // Bound the search to the production `surface.read` arm: the whole
+        // file would also match this test's own needle literal (issue #740).
         let source = include_str!("ipc_handler.rs");
+        let arm = production_match_arm(source, "\"surface.read\"", "\"surface.status\"");
         assert!(
-            source.contains("surface_read_offset_out_of_range(offset, total)"),
+            arm.contains("surface_read_offset_out_of_range(offset, total)"),
             "the live surface.read arm must use the shared predicate"
         );
     }
