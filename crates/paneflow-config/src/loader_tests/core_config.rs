@@ -39,25 +39,37 @@ fn test_session_path_uses_config_dir_not_cache_dir() {
         "session_path parent must be APP_SUBDIR under config_dir, got {path:?}"
     );
 
-    let config_dir = dirs::config_dir().expect("config dir must resolve on macOS");
+    // Expectations come from the same `user_dirs` roots `session_path` reads,
+    // not `dirs::*`: an absolute PANEFLOW_HOME (the documented smoke-run
+    // setup) relocates both roots, and `user_dirs` latches it on first use,
+    // so the platform directories are the wrong baseline under it (#738).
+    let roots = user_dirs().expect("user dirs must resolve on macOS");
+    assert_ne!(
+        roots.config, roots.cache,
+        "config and cache roots must differ for this test to mean anything"
+    );
     assert_eq!(
         parent,
-        config_dir.join(APP_SUBDIR),
+        roots.config.join(APP_SUBDIR),
         "session_path {path:?} must sit next to paneflow.json"
     );
+    assert_eq!(
+        config_path().expect("config path").parent(),
+        Some(parent),
+        "session_path {path:?} must share paneflow.json's directory"
+    );
 
-    if let Some(cache_dir) = dirs::cache_dir() {
-        assert!(
-            !path.starts_with(&cache_dir),
-            "session_path {path:?} must not live under cache_dir {cache_dir:?}"
-        );
-        let legacy = legacy_session_cache_path().expect("cache dir resolved");
-        assert_eq!(legacy.parent(), Some(cache_dir.join(APP_SUBDIR).as_path()));
-        assert_ne!(
-            path, legacy,
-            "session_path must not still be the cache-dir location"
-        );
-    }
+    let cache_dir = &roots.cache;
+    assert!(
+        !path.starts_with(cache_dir),
+        "session_path {path:?} must not live under cache_dir {cache_dir:?}"
+    );
+    let legacy = legacy_session_cache_path().expect("cache dir resolved");
+    assert_eq!(legacy.parent(), Some(cache_dir.join(APP_SUBDIR).as_path()));
+    assert_ne!(
+        path, legacy,
+        "session_path must not still be the cache-dir location"
+    );
 
     if cfg!(debug_assertions) {
         assert_eq!(APP_SUBDIR, "paneflow-dev");
