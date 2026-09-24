@@ -494,8 +494,32 @@ fn trim_leading_table_metadata(mut summary: &str) -> &str {
     }
 }
 
+/// Whether `line` names `cwd` itself or a path beneath it. A bare substring
+/// test also accepts sibling directories that share the prefix
+/// (`/Users/x/repo-old` for `/Users/x/repo`), so an occurrence only counts
+/// when a path boundary follows it. Every occurrence is tried, since a row
+/// can mention a sibling before the real cwd.
 fn line_mentions_cwd(line: &str, cwd: &str) -> bool {
-    line.contains(cwd)
+    // A cwd that already ends in a separator carries its own boundary.
+    if cwd.is_empty() || cwd.ends_with('/') {
+        return line.contains(cwd);
+    }
+    let mut from = 0;
+    while let Some(offset) = line[from..].find(cwd) {
+        let start = from + offset;
+        let after = line[start + cwd.len()..].chars().next();
+        if after.is_none_or(is_path_boundary) {
+            return true;
+        }
+        // Step one character, not past the match, so overlapping
+        // occurrences are still considered.
+        from = start + line[start..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
+fn is_path_boundary(c: char) -> bool {
+    c == '/' || c.is_whitespace() || matches!(c, ')' | ']' | '"' | '\'' | ',')
 }
 
 fn sanitized_stderr(stderr: &[u8]) -> String {
@@ -754,6 +778,52 @@ Available sessions for this project (3):\n\
             out,
             SessionAgent::Grok,
             "/repo",
+            false,
+            CommandScope::LineMustMentionCwd,
+        );
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "ses_current_123456");
+    }
+
+    /// Issue #733: a sibling directory that shares the cwd as a prefix is a
+    /// different project, so its rows must not be attributed to this one.
+    #[test]
+    fn line_must_mention_cwd_rejects_sibling_prefix_directories() {
+        let cwd = "/Users/x/repo";
+        for line in [
+            "ses_1 /Users/x/repo-old summary",
+            "ses_1 /Users/x/repo2 summary",
+            "ses_1 /Users/x/repo.bak",
+            "ses_1 \"/Users/x/repository\"",
+        ] {
+            assert!(!line_mentions_cwd(line, cwd), "{line:?} must not match");
+        }
+        for line in [
+            "ses_1 /Users/x/repo",
+            "ses_1 /Users/x/repo summary",
+            "ses_1 /Users/x/repo/sub summary",
+            "ses_1 \"/Users/x/repo\" summary",
+            "ses_1 '/Users/x/repo' summary",
+            "ses_1 (/Users/x/repo) summary",
+            "ses_1 [/Users/x/repo, other]",
+            // A sibling mentioned first must not hide the real cwd after it.
+            "ses_1 /Users/x/repo-old -> /Users/x/repo",
+        ] {
+            assert!(line_mentions_cwd(line, cwd), "{line:?} must match");
+        }
+        // A cwd written with a trailing separator already ends on a boundary.
+        assert!(line_mentions_cwd(
+            "ses_1 /Users/x/repo/sub",
+            "/Users/x/repo/"
+        ));
+
+        // Hermes is the production `LineMustMentionCwd` reader.
+        let out =
+            b"ses_sibling_123456 /Users/x/repo-old old\nses_current_123456 /Users/x/repo current\n";
+        let (sessions, _) = parse_command_sessions(
+            out,
+            SessionAgent::Hermes,
+            cwd,
             false,
             CommandScope::LineMustMentionCwd,
         );
