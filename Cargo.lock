@@ -4641,6 +4641,7 @@ dependencies = [
  "objc",
  "objc2-metal 0.3.2",
  "open",
+ "paneflow-agent-config",
  "paneflow-agent-setup",
  "paneflow-config",
  "paneflow-ipc-client",
