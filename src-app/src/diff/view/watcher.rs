@@ -731,6 +731,58 @@ mod tests {
         drop(watcher);
     }
 
+    /// A watched top-level directory that is deleted and recreated stays
+    /// covered without a new watch. notify's FSEvents backend matches events
+    /// by path prefix, and the watched path outlives the directory, so
+    /// `WatchScope::watched` never needs to forget a name. Covers a directory
+    /// watched by [`build`] and one watched later by [`watch_new_dirs`].
+    #[test]
+    fn recreated_top_level_directory_stays_watched() {
+        const TIMEOUT: Duration = Duration::from_secs(30);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree = tmp.path().join("repo");
+        std::fs::create_dir_all(worktree.join("src")).expect("create worktree");
+        let (tx, mut rx) = mpsc::unbounded();
+        let (mut watcher, mut scope) =
+            build(tx, worktree.clone(), worktree.clone()).expect("build watcher");
+
+        let fresh = worktree.join("fresh");
+        std::fs::create_dir(&fresh).expect("create new top-level dir");
+        let mut pending = Vec::new();
+        assert!(
+            wait_for_event(&mut rx, TIMEOUT, |result| {
+                scope.note_new_dirs(result, &mut pending);
+                !pending.is_empty()
+            }),
+            "no create event for the new directory"
+        );
+        let watched = watch_new_dirs(&mut watcher, &pending);
+        assert_eq!(watched.len(), 1, "watch was not added");
+        scope.mark_watched(&watched);
+
+        for name in ["fresh", "src"] {
+            let dir = worktree.join(name);
+            std::fs::remove_dir_all(&dir).expect("remove dir");
+            std::fs::create_dir(&dir).expect("recreate dir");
+            let file = format!("{name}/after_recreate.rs");
+            std::fs::write(worktree.join(&file), "pub fn f() {}\n").expect("write file");
+            // No re-watch happens: the name is still marked watched.
+            let mut requeued = Vec::new();
+            assert!(
+                wait_for_event(&mut rx, TIMEOUT, |result| {
+                    scope.note_new_dirs(result, &mut requeued);
+                    scope.event_relevant(result)
+                        && result
+                            .as_ref()
+                            .is_ok_and(|event| event.paths.iter().any(|path| path.ends_with(&file)))
+                }),
+                "no event for {file} after {name}/ was deleted and recreated"
+            );
+            assert!(requeued.is_empty(), "re-queued {requeued:?}");
+        }
+        drop(watcher);
+    }
+
     #[test]
     fn noise_and_existing_directories_are_not_queued() {
         let tmp = tempfile::tempdir().expect("tempdir");
