@@ -25,7 +25,7 @@ without Electron.
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 79 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 76 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
@@ -43,7 +43,6 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   │                                     Expand all / Collapse all, #349); footer mode tabs
 │                                         + IPC banner (no Settings affordance at all)
 │   ├── agent_status.rs                ← hookless agent state: pane OSC observations + Claude session-registry sweep
-│   ├── broadcast.rs / composer.rs     ← multi-pane prompt fan-out, prompt composer
 │   ├── pane_overview/                 ← Cmd+Shift+P expose: every terminal pane across every
 │                                         workspace in a compact grid; tabs stay adjacent with
 │                                         split-pane labels and eight-row previews (rows.rs: packing/navigation)
@@ -109,12 +108,13 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │                                        rebuilt every frame made the whole settings surface lag
 ├── diff/                              ← git diff engine + single-ReviewSubject viewer (custom Element, own hscroll);
 │                                         per-pane base + unified/split display, no embedded terminals or scope/sync layer
-├── text_sanitize.rs                   ← strip bidi and zero-width characters from untrusted labels
+├── text_sanitize.rs                   ← strip bidi and zero-width characters from untrusted labels;
+│                                         normalize a prompt for the session-handoff PTY prefill
 ├── agents/                            ← agent process supervision, notifications
 ├── ai_hooks/                          ← ai.* hook payload extraction
 ├── {claude,codex,opencode,pi,command}_sessions.rs ← per-agent session-file readers
 ├── agent_launcher.rs / agent_sessions.rs ← spawn agents through the PATH shim
-├── widgets/                           ← text_input, text_area, scrollbar, callout
+├── widgets/                           ← text_input, scrollbar, callout
 ├── fonts.rs                           ← load_mono_fonts (Core Text on macOS)
 ├── ai_types.rs                        ← AiToolState, AgentStateSource ranking, lifecycle reducer
 ├── claude_session_registry.rs         ← reads Claude Code's sessions/<pid>.json (state without hooks)

@@ -795,38 +795,6 @@ fn restore_closed_surface_record(
     }
 }
 
-/// Longest a click on an `Open recent` row (issue #521) waits for `stat` on
-/// the folder before giving up on the mount: the same bound session restore
-/// uses for a persisted cwd. A local folder answers in microseconds.
-const RECENT_OPEN_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
-
-/// The recent folders whose click-time probe is still outstanding (issue
-/// #521). `probe_persisted_dir_within` spawns a helper thread per call and
-/// leaves a timed-out `stat` to unwind on its own, so a held `Cmd+N` on a
-/// mount that is not responding must coalesce into one probe rather than
-/// one thread per repeat.
-#[derive(Debug, Default)]
-pub(crate) struct RecentProbes {
-    in_flight: Vec<std::path::PathBuf>,
-}
-
-impl RecentProbes {
-    /// Claim a probe for `path`: `true` when the caller should start one,
-    /// `false` while an earlier probe of the same path is still pending.
-    pub(crate) fn begin(&mut self, path: &std::path::Path) -> bool {
-        if self.in_flight.iter().any(|pending| pending == path) {
-            return false;
-        }
-        self.in_flight.push(path.to_path_buf());
-        true
-    }
-
-    /// Release the claim once the probe has answered (or not).
-    pub(crate) fn finish(&mut self, path: &std::path::Path) {
-        self.in_flight.retain(|pending| pending != path);
-    }
-}
-
 /// The toast every UI workspace-create path shows once [`MAX_WORKSPACES`] is
 /// reached.
 ///
@@ -1379,10 +1347,6 @@ impl PaneFlowApp {
             return;
         }
         let mut opened = false;
-        // Issue #521: only the folders that actually became (or re-selected)
-        // a workspace are promoted in recents.json, so a stray file in a drop
-        // never lands in the list.
-        let mut recent_paths: Vec<std::path::PathBuf> = Vec::with_capacity(paths.len());
         let mut refused_at_cap = false;
         for path in paths {
             // A drop carries whatever the file manager had selected, so the
@@ -1403,7 +1367,6 @@ impl PaneFlowApp {
             if let Some(at) = self.workspaces.iter().position(|ws| ws.cwd == cwd) {
                 self.active_idx = at;
                 opened = true;
-                recent_paths.push(path.clone());
                 continue;
             }
             // Only a new workspace is refused here. Later paths in this batch
@@ -1427,7 +1390,6 @@ impl PaneFlowApp {
             self.workspaces.push(ws);
             self.active_idx = self.workspaces.len() - 1;
             opened = true;
-            recent_paths.push(path.clone());
         }
         if refused_at_cap {
             self.show_toast(workspace_limit_reached(), cx);
@@ -1435,108 +1397,11 @@ impl PaneFlowApp {
         if !opened {
             return;
         }
-        crate::recents::record(&recent_paths, cx);
         self.save_session(cx);
         cx.notify();
         // US-016 (prd-git-diff-mode-2026-Q3.md): a new repo must surface in
         // Multi-project / re-target the diff.
         self.reconcile_diff_after_workspace_change(cx);
-    }
-
-    /// Open the `idx`-th entry of the recent-folders list (issue #521): the
-    /// sidebar's empty-state `Open recent` rows and the `Cmd+1..5` fallback
-    /// both land here, and both go through `open_workspace_folders` so the
-    /// folder is filed exactly like a picked one. A folder deleted since the
-    /// list was loaded is forgotten instead of opened.
-    ///
-    /// The existence check never runs on the GPUI thread: this is an action
-    /// handler, and `stat` on a recent folder whose SMB/NFS/iCloud mount went
-    /// dead after the background load would pin the window for the mount's
-    /// own timeout. The probe runs on the unblock pool through the bounded
-    /// session-restore helper; the handler returns at once and the answer
-    /// re-enters with the window. No answer within
-    /// [`RECENT_OPEN_PROBE_TIMEOUT`] keeps the row (the mount may come back)
-    /// and does not reach `open_workspace_folders`, whose own `is_dir` is
-    /// pre-existing behaviour shared with the picker and drop paths.
-    ///
-    /// One probe per path (`RecentProbes`): a repeat click or held shortcut
-    /// while that path's claim is held is a no-op with a toast, and on a
-    /// timeout the claim stays held until the blocked worker has actually
-    /// answered (`ProbeOutcome::TimedOut` hands back its receiver), so a
-    /// retry after the toast cannot start a second permanently stuck thread.
-    pub(crate) fn open_recent_workspace(
-        &mut self,
-        idx: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(entry) = crate::recents::current(cx).get(idx).cloned() else {
-            return;
-        };
-        if !self.recent_probes.begin(&entry.path) {
-            log::debug!(
-                "recent folder {} is already being probed; coalescing the repeat",
-                entry.path.display()
-            );
-            self.show_toast("Still checking that folder", cx);
-            cx.notify();
-            return;
-        }
-        let probed = entry.path.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let outcome = smol::unblock(move || {
-                super::session::start_persisted_dir_probe(&probed, RECENT_OPEN_PROBE_TIMEOUT)
-            })
-            .await;
-            let rx = match outcome {
-                super::session::ProbeOutcome::Answered(is_dir) => {
-                    let _ = this.update_in(cx, |app, window, cx| {
-                        app.recent_probes.finish(&entry.path);
-                        app.finish_open_recent_workspace(entry.path, is_dir, window, cx);
-                    });
-                    return;
-                }
-                super::session::ProbeOutcome::TimedOut(rx) => rx,
-            };
-            let _ = this.update_in(cx, |app, _window, cx| {
-                app.show_toast("That folder is not responding", cx);
-                cx.notify();
-            });
-            // Hold the claim until the stat thread really exits: block on
-            // the pool, never on the GPUI thread.
-            let late = smol::unblock(move || rx.recv()).await;
-            let _ = this.update_in(cx, |app, _window, cx| {
-                app.recent_probes.finish(&entry.path);
-                if late == Ok(false) {
-                    crate::recents::forget(&entry.path, cx);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// The second half of `open_recent_workspace`, back on the GPUI thread
-    /// with a definite verdict: `true` opens and selects, `false` forgets
-    /// the row.
-    fn finish_open_recent_workspace(
-        &mut self,
-        path: std::path::PathBuf,
-        is_dir: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !is_dir {
-            crate::recents::forget(&path, cx);
-            self.show_toast("That folder is gone", cx);
-            cx.notify();
-            return;
-        }
-        self.open_workspace_folders(std::slice::from_ref(&path), cx);
-        let active = self.active_idx;
-        if active < self.workspaces.len() {
-            self.select_workspace(active, window, cx);
-        }
     }
 
     pub(crate) fn create_workspace_with_picker(
@@ -2287,15 +2152,6 @@ impl PaneFlowApp {
         }
         self.save_session(cx);
         cx.notify();
-        // EP-001 (cli-cockpit): the closed workspace's panes may have carried
-        // a Composer target, queued prompts, or group memberships. Refresh:
-        // a dead-target Composer closes itself (refresh_composer_slot),
-        // stale group members are pruned, and orphaned buffers drop on the
-        // next flush (their terminals no longer resolve).
-        self.refresh_composer_slot(cx);
-        self.sync_broadcast_stripes(cx);
-        self.flush_pending_prefill(cx);
-        self.sync_pending_chips(cx);
         // US-014 (prd-git-diff-mode-2026-Q3.md): in Diff mode, closing a
         // workspace reconciles the diff (a Multi-project group / column for the
         // closed workspace must drop). Deferred so the rebuild runs after the
@@ -2545,13 +2401,6 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Issue #521: with no workspace open the chord has nothing to select,
-        // so `Cmd+1..5` open the matching row of the sidebar's `Open recent`
-        // list instead (`recents::shortcut_fallback` keeps 6..9 inert).
-        if let Some(recent) = crate::recents::shortcut_fallback(self.workspaces.len(), idx) {
-            self.open_recent_workspace(recent, window, cx);
-            return;
-        }
         let display_order = self.workspace_display_order(cx);
         if let Some(storage_idx) = workspace_at_display_position(&display_order, idx) {
             self.activate_workspace_at(
@@ -2774,108 +2623,6 @@ fn editor_search_paths() -> Vec<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    /// Issue #521: the click on a recent row must not `stat` on the GPUI
-    /// thread. `PaneFlowApp` cannot be built in a unit test, so the body is
-    /// pinned: the only probe sits inside `smol::unblock`, no bare `is_dir`
-    /// appears in either half, a timeout keeps the row, and the per-path
-    /// claim is released only after the worker has answered.
-    #[test]
-    fn open_recent_workspace_probes_the_folder_off_thread() {
-        let src = include_str!("mod.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production half");
-        let start = src
-            .find("pub(crate) fn open_recent_workspace(")
-            .expect("open_recent_workspace");
-        let end = src[start..]
-            .find("pub(crate) fn create_workspace_with_picker(")
-            .expect("next fn")
-            + start;
-        let body = &src[start..end];
-        let unblock = body
-            .find("smol::unblock(")
-            .expect("the probe runs on the unblock pool");
-        let probe = body
-            .find("start_persisted_dir_probe(&probed, RECENT_OPEN_PROBE_TIMEOUT)")
-            .expect("the bounded session-restore probe");
-        assert!(
-            unblock < probe && probe < body.find(".await").expect("await"),
-            "the probe must be the unblock closure's body"
-        );
-        assert!(
-            body.contains("cx.spawn_in(window,"),
-            "the handler must return at once and re-enter with the window"
-        );
-        assert!(
-            !body.contains(".is_dir()"),
-            "no stat on the GPUI thread anywhere in the click path"
-        );
-        assert!(
-            body.contains("if !self.recent_probes.begin(&entry.path) {"),
-            "a repeat while the probe is outstanding must coalesce"
-        );
-        let timed_out = body
-            .find("ProbeOutcome::TimedOut(rx) => rx,")
-            .expect("the timeout keeps the worker's receiver");
-        let not_responding = body
-            .find("That folder is not responding")
-            .expect("a timeout tells the user");
-        let late = body
-            .find("smol::unblock(move || rx.recv()).await")
-            .expect("the late answer is awaited on the pool");
-        let releases: Vec<usize> = body
-            .match_indices("app.recent_probes.finish(&entry.path);")
-            .map(|(at, _)| at)
-            .collect();
-        assert_eq!(releases.len(), 2, "one release per outcome: {releases:?}");
-        assert!(
-            releases[0] < timed_out && timed_out < not_responding && not_responding < late,
-            "the answered branch releases at once; the timeout toasts and waits"
-        );
-        assert!(
-            late < releases[1],
-            "on a timeout the claim is released only after the late answer"
-        );
-        assert!(
-            body[late..].contains("if late == Ok(false) {")
-                && body[late..].contains("crate::recents::forget("),
-            "a late definite miss still forgets the row"
-        );
-        assert!(
-            body.contains("if !is_dir {") && body.contains("That folder is gone"),
-            "only a definite miss forgets the row with a toast"
-        );
-    }
-
-    /// Issue #521: one outstanding probe per path; a different path is not
-    /// blocked, and the claim is released by `finish` whatever the answer.
-    #[test]
-    fn recent_probes_coalesce_repeats_for_one_path_only() {
-        let mut probes = RecentProbes::default();
-        let stalled = std::path::Path::new("/Volumes/dead/project");
-        let other = std::path::Path::new("/Users/me/project");
-        assert!(probes.begin(stalled), "the first request starts a probe");
-        assert!(
-            !probes.begin(stalled),
-            "a repeat while pending must not start another"
-        );
-        assert!(probes.begin(other), "a different path is not blocked");
-        assert!(!probes.begin(other), "and it is pending in its own right");
-        probes.finish(stalled);
-        assert!(
-            probes.begin(stalled),
-            "after finish the path can be probed again"
-        );
-        assert!(
-            !probes.begin(other),
-            "finishing one path releases only that path"
-        );
-        probes.finish(other);
-        probes.finish(other);
-        assert!(probes.begin(other), "finish is idempotent");
-    }
-
     use super::*;
     use crate::source_probe::source_slice;
 
@@ -4818,14 +4565,10 @@ mod tests {
     }
 
     #[test]
-    fn close_workspace_shared_closer_runs_composer_and_diff_teardown() {
+    fn close_workspace_shared_closer_runs_diff_teardown() {
         let src = include_str!("mod.rs");
         let closer = source_slice(src, "fn close_workspace_at_inner", "fn reorder_workspace");
         for helper in [
-            "refresh_composer_slot",
-            "sync_broadcast_stripes",
-            "flush_pending_prefill",
-            "sync_pending_chips",
             "reconcile_diff_after_workspace_change",
             "active_idx_after_workspace_remove",
         ] {
@@ -5017,7 +4760,7 @@ mod tests {
         let folders = source_slice(
             src,
             "pub(crate) fn open_workspace_folders(",
-            "pub(crate) fn open_recent_workspace(",
+            "pub(crate) fn create_workspace_with_picker(",
         );
         let reselect = folders
             .find("position(|ws| ws.cwd == cwd)")

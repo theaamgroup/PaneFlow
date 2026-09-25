@@ -241,8 +241,8 @@ pub struct AgentSession {
     pub last_event_at_ms: Option<u64>,
     /// The user dismissed this session's badge from the sidebar tab menu
     /// ("Mark as read", issue #408). `state` stays the truth for everything
-    /// that reasons about what the agent is doing - the Composer's delivery
-    /// gate, the stall clock, IPC status - while everything that asks the
+    /// that reasons about what the agent is doing - the stall clock, IPC
+    /// status - while everything that asks the
     /// user for attention reads [`Self::presented_state`] and sees nothing.
     /// Cleared by the next frame the write choke point accepts, so an agent
     /// that speaks again is heard.

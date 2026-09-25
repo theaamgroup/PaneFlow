@@ -127,14 +127,6 @@ actions!(
         DiffToggleView,
         DiffReviewWithAgent,
         DiffDismiss,
-        // EP-001 (CLI Cockpit) - CLI cockpit
-        // steering. `OpenComposer` (US-001) anchors the multi-line prompt
-        // Composer to the focused pane; `ToggleBroadcastMember` and
-        // `OpenBroadcastGroups` (US-002) manage the named pane groups the
-        // Composer's broadcast mode targets (US-003).
-        OpenComposer,
-        ToggleBroadcastMember,
-        OpenBroadcastGroups,
         // Issue #106: collapse/expand the primary left rail from the keyboard.
         // Until this existed the rail was mouse-only - the title-bar button
         // was the single way to reach it.
@@ -157,7 +149,7 @@ mod tests {
     #[test]
     fn claude_md_action_count_matches_the_actions_macro() {
         let declared = actions_macro_entries(include_str!("actions.rs"));
-        assert_eq!(declared, 79, "review action surface is pinned");
+        assert_eq!(declared, 76, "review action surface is pinned");
 
         let claude_md = include_str!("../../../CLAUDE.md");
         for phrase in ["GPUI action types", "actions total"] {

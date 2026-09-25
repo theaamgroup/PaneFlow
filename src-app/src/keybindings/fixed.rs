@@ -31,50 +31,6 @@ pub(super) const FIXED: &[(&str, &str)] = &[
     ("cmd-v", "Text field · paste"),
     ("cmd-x", "Text field · cut"),
     ("ctrl-cmd-space", "Text field · emoji and symbols"),
-    ("backspace", "Text area / Composer · backspace"),
-    ("delete", "Text area / Composer · delete"),
-    ("left", "Text area / Composer · left"),
-    ("right", "Text area / Composer · right"),
-    ("up", "Text area / Composer · up"),
-    ("down", "Text area / Composer · down"),
-    ("shift-left", "Text area / Composer · select left"),
-    ("shift-right", "Text area / Composer · select right"),
-    ("shift-up", "Text area / Composer · select up"),
-    ("shift-down", "Text area / Composer · select down"),
-    ("home", "Text area / Composer · line start"),
-    ("end", "Text area / Composer · line end"),
-    ("shift-home", "Text area / Composer · select home"),
-    ("shift-end", "Text area / Composer · select end"),
-    ("enter", "Text area / Composer · submit / queue prompt"),
-    ("shift-enter", "Text area / Composer · insert newline"),
-    ("escape", "Text area / Composer · dismiss"),
-    (
-        "secondary-enter",
-        "Text area / Composer · send prompt immediately",
-    ),
-    ("alt-left", "Text area / Composer · word left"),
-    ("alt-right", "Text area / Composer · word right"),
-    ("alt-shift-left", "Text area / Composer · select word left"),
-    (
-        "alt-shift-right",
-        "Text area / Composer · select word right",
-    ),
-    (
-        "alt-backspace",
-        "Text area / Composer · delete previous word",
-    ),
-    ("cmd-left", "Text area / Composer · line start"),
-    ("cmd-right", "Text area / Composer · line end"),
-    ("cmd-shift-left", "Text area / Composer · select home"),
-    ("cmd-shift-right", "Text area / Composer · select end"),
-    ("cmd-a", "Text area / Composer · select all"),
-    ("cmd-c", "Text area / Composer · copy"),
-    ("cmd-v", "Text area / Composer · paste"),
-    ("cmd-x", "Text area / Composer · cut"),
-    (
-        "cmd-shift-enter",
-        "Text area / Composer · send prompt immediately",
-    ),
     ("f2", "Sidebar · rename focused workspace or tab"),
     ("enter", "Sidebar rename · confirm"),
     ("escape", "Sidebar rename · cancel"),
@@ -85,17 +41,11 @@ pub(super) const FIXED: &[(&str, &str)] = &[
     ("enter", "Pane overview · open selected pane"),
     ("escape", "Pane overview · close"),
     ("backspace", "Pane overview · delete filter character"),
-    ("up", "Theme picker, broadcast groups · previous result"),
-    ("down", "Theme picker, broadcast groups · next result"),
-    (
-        "enter",
-        "Theme picker, broadcast groups · activate selection",
-    ),
-    ("escape", "Theme picker, broadcast groups · close"),
-    (
-        "backspace",
-        "Theme picker, broadcast groups · delete filter character",
-    ),
+    ("up", "Theme picker · previous result"),
+    ("down", "Theme picker · next result"),
+    ("enter", "Theme picker · activate selection"),
+    ("escape", "Theme picker · close"),
+    ("backspace", "Theme picker · delete filter character"),
     ("up", "Sessions sidebar · previous row"),
     ("down", "Sessions sidebar · next row"),
     ("home", "Sessions sidebar · first row"),
@@ -206,13 +156,7 @@ mod tests {
     fn widget_bindings_are_all_documented() {
         let pattern =
             regex::Regex::new(r#"KeyBinding::new\(\s*"([^"]+)""#).expect("binding pattern");
-        for (source, context) in [
-            (include_str!("../widgets/text_input.rs"), "Text field"),
-            (
-                include_str!("../widgets/text_area.rs"),
-                "Text area / Composer",
-            ),
-        ] {
+        for (source, context) in [(include_str!("../widgets/text_input.rs"), "Text field")] {
             for binding in pattern.captures_iter(source) {
                 assert!(
                     FIXED.iter().any(|(key, description)| *key == &binding[1]
@@ -258,7 +202,7 @@ mod tests {
     fn fixed_bindings_survive_global_overrides() {
         let entries = settings_shortcuts(&HashMap::from([("cmd-c".into(), "none".into())]));
         assert!(entries.iter().any(|entry| entry.fixed
-            && entry.description == "Text area / Composer · copy"
+            && entry.description == "Text field · copy"
             && entry.key == format_keystroke("cmd-c")));
         assert!(entries.iter().any(|entry| !entry.fixed
             && entry.action_name == "open_pane_overview"

@@ -80,7 +80,7 @@ impl PaneFlowApp {
             return;
         }
         // Stacking: the chord can arrive while another overlay owns the
-        // focus (Pane Overview, the broadcast picker, the pane palette).
+        // focus (Pane Overview, the pane palette).
         // None of those is a descendant of a pane, so capturing focus now
         // would hand it back to the overlay before dispatch and leave Split /
         // Close pane without a target. Fold each one first, through its own
@@ -112,10 +112,6 @@ impl PaneFlowApp {
         // inherited one; the outermost origin read above still wins.
         if self.pane_overview.is_some() {
             self.close_pane_overview_and_restore_focus(window, cx);
-            folded_without_restore = true;
-        }
-        if self.broadcast_picker_open {
-            self.close_broadcast_picker(cx);
             folded_without_restore = true;
         }
         // Only a fold consults the recorded origin, and then it outranks
@@ -580,7 +576,7 @@ mod tests {
         let entries = vec![
             entry("split_horizontally", "⌘⇧D", "Split horizontal"),
             entry("split_vertically", "⌘⇧E", "Split vertical"),
-            entry("open_composer", "⌘⇧Space", "Open prompt composer"),
+            entry("open_pane_overview", "⌘⇧P", "Pane overview"),
         ];
         let rows = command_matches(&entries, "vert split");
         assert_eq!(rows.len(), 1);
@@ -655,7 +651,6 @@ mod tests {
             // Issue #584: the split pane palette folds like its siblings.
             "self.close_pane_palette(window, cx);",
             "self.close_pane_overview_and_restore_focus(window, cx);",
-            "self.close_broadcast_picker(cx);",
             "let origin_pane = self.outermost_open_overlay_origin();",
             "let origin_pane = origin_pane.filter(|_| folded_without_restore);",
             "self.command_palette_return_pane = origin_pane",
@@ -694,7 +689,6 @@ mod tests {
         for closer in [
             "self.close_pane_palette(window, cx);",
             "self.close_pane_overview_and_restore_focus(window, cx);",
-            "self.close_broadcast_picker(cx);",
         ] {
             let close_at = palette.find(closer).expect(closer);
             assert!(

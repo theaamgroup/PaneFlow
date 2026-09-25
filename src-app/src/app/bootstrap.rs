@@ -731,7 +731,6 @@ impl PaneFlowApp {
             tab_menu_open: None,
             pane_menu_open: None,
             pending_pane_focus: None,
-            recent_probes: crate::app::workspace_ops::RecentProbes::default(),
             agent_sessions: crate::AgentSessionsState {
                 sessions_sidebar_open: false,
                 sessions_sidebar_animation: None,
@@ -772,15 +771,6 @@ impl PaneFlowApp {
             command_palette_return_pane: None,
             command_palette_return_focus: None,
             overlay_origins: Default::default(),
-            // EP-001 (cli-cockpit): Composer closed, no groups, no buffers.
-            composer: None,
-            broadcast: crate::app::broadcast::BroadcastState::default(),
-            broadcast_picker_open: false,
-            broadcast_picker_query: String::new(),
-            broadcast_picker_selected: 0,
-            broadcast_picker_renaming: None,
-            broadcast_picker_error: None,
-            broadcast_picker_focus: cx.focus_handle(),
             // Issue #339: Pane Overview closed.
             pane_overview: None,
             pane_overview_focus: cx.focus_handle(),
@@ -830,11 +820,6 @@ impl PaneFlowApp {
         // pane scan re-probes when a pane resolves an agent the cache does
         // not know about.
         app.refresh_mcp_status(cx);
-        // Issue #521: read and prune recents.json on the background pool now,
-        // so the empty state's Open recent rows fill within milliseconds on
-        // a local disk and a stalled network folder can never block startup
-        // (the cache reads as empty until the load publishes).
-        crate::recents::warm(cx);
 
         // Issue #518 (upstream df375ba5): warm the installed-agent cache
         // off-thread so the first pane palette frame never walks PATH on

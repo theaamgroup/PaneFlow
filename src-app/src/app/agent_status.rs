@@ -215,7 +215,6 @@ impl PaneFlowApp {
         cx.notify();
         self.set_session_surface(ws_id, key, surface_id, cx);
         self.sync_attention(cx);
-        self.agent_sessions_changed(cx);
         // A turn that ended has to stop being a row, exactly as `ai.stop`
         // arranges. Without this the sidebar keeps a `Finished` session alive
         // for as long as the pane exists.
@@ -259,7 +258,6 @@ impl PaneFlowApp {
                         {
                             ws.agent_sessions.remove(&key);
                             app.sync_attention(cx);
-                            app.agent_sessions_changed(cx);
                             cx.notify();
                         }
                     });
@@ -294,18 +292,10 @@ impl PaneFlowApp {
     ///
     /// The row stays in the map with its state, source, and watermark
     /// intact, and that is the point (PR #413 review):
-    ///
-    /// - A hook-held wait that the registry sweep keeps re-observing is still
-    ///   refused by the source rule, because the row it defers to is still
-    ///   there. Deleting the row let the very next sweep (400 ms) open a
-    ///   fresh `WaitingForInput` and relight the bell.
-    /// - A stalled agent may still be mid-generation, and
-    ///   `broadcast::state_blocks_delivery` keeps a queued Composer prompt
-    ///   out of its PTY only while the `Stalled` row exists. Deleting it
-    ///   would have flushed that prompt into the pane.
-    ///
-    /// Nothing about delivery changes here, so `agent_sessions_changed` (the
-    /// prefill flush) is deliberately not called.
+    /// a hook-held wait that the registry sweep keeps re-observing is still
+    /// refused by the source rule, because the row it defers to is still
+    /// there. Deleting the row let the very next sweep (400 ms) open a fresh
+    /// `WaitingForInput` and relight the bell.
     pub(crate) fn mark_tab_read(&mut self, ws_idx: usize, tab_idx: usize, cx: &mut Context<Self>) {
         let surfaces = match self
             .workspaces
@@ -659,12 +649,11 @@ mod tests {
             &surfaces
         ));
         // Once read there is nothing left to mark, so the menu row goes,
-        // while the state itself is untouched for the delivery gate.
+        // while the state itself is untouched.
         let mut read = bound(AgentState::Stalled, Some(7));
         read.read = true;
         assert!(!session_is_unread_on(&read, &surfaces));
         assert_eq!(read.state, AgentState::Stalled);
-        assert!(crate::app::broadcast::state_blocks_delivery(&read.state));
     }
 
     #[test]

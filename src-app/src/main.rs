@@ -49,7 +49,6 @@ mod opencode_sessions;
 mod pane;
 mod pane_drag;
 mod pi_sessions;
-mod recents;
 mod release_notes;
 mod runtime_paths;
 mod search;
@@ -1520,10 +1519,6 @@ struct PaneFlowApp {
     /// `Window` - and consumed by `drain_pending_window_actions`, the
     /// window-bearing notify observer (issue #211). One-shot.
     pending_pane_focus: Option<Entity<Pane>>,
-    /// Recent folders whose click-time existence probe is outstanding
-    /// (issue #521): a repeat click or held `Cmd+N` on a mount that is not
-    /// responding coalesces instead of spawning another probe thread.
-    recent_probes: crate::app::workspace_ops::RecentProbes,
     /// US-053: agent-sessions sidebar state (see `AgentSessionsState`).
     agent_sessions: AgentSessionsState,
     /// Ephemeral bottom-right toast.
@@ -1596,25 +1591,10 @@ struct PaneFlowApp {
     /// the empty-workspace placeholder.
     command_palette_return_focus: Option<FocusHandle>,
     /// The pane each open overlay was opened from, keyed by overlay (#584:
-    /// broadcast picker, Pane Overview, pane palette). An
+    /// Pane Overview, pane palette). An
     /// overlay's own close returns the focus to its entry; the command
     /// palette reads the outermost one when it folds them (#523).
     overlay_origins: app::overlay_origin::OverlayOrigins,
-    /// EP-001 US-001/US-003 (cli-cockpit): live Composer session, `None` =
-    /// closed. The target pane renders the pushed slot snapshot.
-    composer: Option<app::composer::ComposerState>,
-    /// EP-001 US-002/US-003 (cli-cockpit): broadcast groups + active index +
-    /// per-terminal queued-prompt buffers. Volatile by design (v1).
-    broadcast: app::broadcast::BroadcastState,
-    /// Broadcast-group picker modal: visibility,
-    /// name-input buffer (create/rename), keyboard cursor, in-place rename
-    /// target, inline validation error, and the key-routing focus handle.
-    broadcast_picker_open: bool,
-    broadcast_picker_query: String,
-    broadcast_picker_selected: usize,
-    broadcast_picker_renaming: Option<usize>,
-    broadcast_picker_error: Option<String>,
-    broadcast_picker_focus: FocusHandle,
     /// Issue #339: Pane Overview overlay, `None` = closed. Cards are derived
     /// from the live workspace tree on every render, never stored - a pane
     /// that closes while the overlay is open disappears at the next repaint.
@@ -2202,7 +2182,7 @@ impl Render for PaneFlowApp {
             // `SelectAll` delegate to the existing terminal clipboard and
             // selection actions so Edit > Copy / Paste / Select All work
             // when a terminal pane is focused. Widget cmd-a stays on its
-            // own action type (TextInput / PaneflowTextArea).
+            // own action type (TextInput).
             .on_action(cx.listener(|this: &mut Self, _: &Quit, _window, cx| {
                 this.quit_after_session_save(cx);
             }))
@@ -2280,10 +2260,6 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_toggle_primary_sidebar))
             // Issue #523: the command palette (every context-free action).
             .on_action(cx.listener(Self::handle_open_command_palette))
-            // EP-001 (cli-cockpit): Composer + broadcast groups.
-            .on_action(cx.listener(Self::handle_open_composer))
-            .on_action(cx.listener(Self::handle_toggle_broadcast_member))
-            .on_action(cx.listener(Self::handle_open_broadcast_groups))
             .on_action(cx.listener(Self::handle_open_pane_overview))
             // EP-001 US-003: Escape cancels an in-flight tab drag. Capture
             // phase runs ancestor-before-descendant, so this pre-empts the
@@ -2549,11 +2525,6 @@ impl Render for PaneFlowApp {
             } else {
                 app_content = app_content.child(self.render_command_palette(cx));
             }
-        }
-
-        // EP-001 US-002 (cli-cockpit): broadcast-group picker modal.
-        if self.broadcast_picker_open {
-            app_content = app_content.child(self.render_broadcast_picker(cx));
         }
 
         // Cockpit overlays stay in Cli mode so a mode switch does not paint
@@ -3206,8 +3177,7 @@ fn main() {
             // read cleaner without colored LCD fringes on thin mono glyphs.
             cx.set_text_rendering_mode(gpui::TextRenderingMode::Grayscale);
             // `apply_keybindings` clears the whole registry, so it now also
-            // (re-)registers the TextInput / TextArea widget bindings itself
-            // (US-016: agents composer textarea included) - no separate startup
+            // (re-)registers the TextInput widget bindings itself - no separate startup
             // call is needed, and a later re-apply can no longer strip them.
             keybindings::apply_keybindings(cx, &config.shortcuts);
 
