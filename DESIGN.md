@@ -121,7 +121,7 @@ fonts come from the user's system, with a bundled Nerd Font as the default.
    status spinners. Any new animation MUST read
    `reduce_motion`; section 4.8 lists which existing ones do.
 6. Color carries meaning first: added, modified, deleted, conflict, error,
-   stalled, and the eight broadcast groups keep their hues across presets.
+   and stalled keep their hues across presets.
 7. Density over decoration. Body text is 12 px, labels are 11 px, micro chips
    are 9 to 10 px. Whitespace is spent on the grid, not on padding.
 8. Every surface holds with the AppKit material on and off, in light and dark,
@@ -195,7 +195,7 @@ is not rendered at all — one reachable mode is not a choice — and
 Every overlay is deferred at an explicit priority, and that ladder is itself
 part of the contract: **1** settings selects · **2** toasts · **3** menus
 (branch, Customize Sidebar, palette branch) · **4**
-Composer, the diff feedback flash
+the diff feedback flash
 (`diff/view/interaction.rs`) · **6** full-surface overlays · **8**
 the Review-with-agent popover · **10** dialogs ·
 **11** close confirm. A new overlay picks the rung that matches its kind rather
@@ -209,9 +209,7 @@ explicit priority.
 | Overlay | Placement | Shell | Source |
 | --- | --- | --- | --- |
 | Pane palette | Fills an empty tab, titled `New pane` | A centered 260 px column on a 20 px squircle of the terminal background: 13 px Semibold title, an optional branch row 28 tall, preset rows 34 tall with a 14 px agent mark, gap 2, list capped at 420 tall, inline error at 11 px | `app/pane_palette.rs:36-40,654-782,1021-1059` |
-| Composer | Scrim over the whole pane, panel docked at its bottom | Black scrim at 0.25 on the 20 px squircle; panel on `overlay` with margin 8, padding 8, gap 6, 1 px border, radius 8, `shadow_lg`; header chips 10 px; input max height 180 | `pane.rs:690-732` |
 | Pane Overview | Horizontally centered, top-anchored at 24 (`OVERVIEW_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; 312.5 by 192.5 cards, gap 10, radius 8, grid padding 16 | `app/pane_overview/mod.rs:36-41,486-559` |
-| Broadcast groups | Horizontally centered, top-anchored at 96 | 420 wide, radius 8, black 0.4 scrim | `app/broadcast.rs:432-439` |
 | Close confirm | Centered | 360 wide, radius 10, padding 16, gap 10 | `app/close_confirm.rs:922-931` |
 | Menus and selects | Deferred, anchored under the trigger | Squircle 18, list padding 4, item height 28 | `settings/components.rs:482,551,627` |
 | Tooltip | After 800 ms | Squircle 14 on the title bar color with a 1 px `border` at full alpha | `ui_primitives.rs:494,524,539-549` |
@@ -251,9 +249,7 @@ Cursor. The PaneFlow Dark and PaneFlow Light `UiColors` are computed in
 `theme/model.rs:458-461`. Cite both files when changing a role.
 
 `UiColors::diff_colors()` (`theme/model.rs:600-620`) is the single source the
-Review view and the Changes rail read; `UiColors::group_color(i)`
-(`:622-636`) wraps modulo 8 so no render site indexes the broadcast slots by
-hand.
+Review view and the Changes rail read.
 
 ### 4.2 Semantic roles
 
@@ -269,7 +265,6 @@ hand.
 | `accent` | Links, selected metadata, the one primary action, info callouts | `#57d5c4` | `#4c6fff` |
 | `vc_added`, `vc_modified`, `vc_deleted`, `vc_conflict` | Diffstat, status letters, change bars, attention border | `#57d992`, `#ffd166`, `#ff6f6a`, `#ffa657` | `#40a02b`, `#df8e1d`, `#d20f39`, `#fe640b` |
 | `vc_added_background`, `vc_deleted_background` | Row washes in the diff | the matching hue at 0.12 | at 0.16 |
-| `group_1` to `group_8` | Broadcast group stripe and picker | `#7eb6ff`, `#57d992`, `#ffd166`, `#ff6f6a`, `#c79bff`, `#57d5c4`, `#ffa657`, `#9ea7ff` | Catppuccin Latte hues |
 | `agent_error`, `agent_stalled` | Failed and stalled agent states | `#ff6f6a`, `#a0a0a0` | `#d20f39`, `#808080` |
 
 The dark work surface is `#181818` and the dark chrome is `#141414`: the panel
@@ -357,11 +352,11 @@ neutral `text` tints.
 | Pane Overview panel | 12 | round | 1 px `border`, plus `shadow_lg` |
 | Theme tile | 10 | round | 2 px `text` at 0.12, 0.32 on hover, 0.85 when selected |
 | About dialog | 10 | round | 1 px, plus `shadow_lg`; **Migration** |
-| Filter field, settings control, select trigger, toast, composer, drop overlay, drop placeholder, theme mockup inner frame | 8 | round | drop overlay 2 px blue |
+| Filter field, settings control, select trigger, toast, drop overlay, drop placeholder, theme mockup inner frame | 8 | round | drop overlay 2 px blue |
 | About close button | 7 | round | none |
 | Toolbar pill, sidebar IPC banner, sidebar hover action button, sidebar branch chip, title bar menu trigger | 6 | round | IPC banner 1 px `border` |
 | Title bar sidebar toggle | 5 | round | none |
-| Icon button, composer chip, sidebar context menu row | 4 | round | none |
+| Icon button, sidebar context menu row | 4 | round | none |
 | Scrollbar thumb, header chip, filter clear | 3 | round | none |
 
 Squircle means `squircle_fill` and `squircle_border` from
@@ -408,7 +403,7 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | --- | --- | --- | --- |
 | Interface | Geist, bundled, set on the root element (`main.rs:2153`) | 12 Normal for body, Medium for titles in rows | Everything that is not a terminal or code |
 | Labels | Geist | 11 Normal muted for eyebrows and descriptions, Semibold for `section_eyebrow` | Settings, rails, pills |
-| Micro | Geist | 9 to 10 | Header chips, composer chips, hints |
+| Micro | Geist | 9 to 10 | Header chips, hints |
 | Emphasis | Geist | 13 Medium | Row titles that need to outrank body |
 | Title | Geist | 14 Semibold | Pane header, empty-state titles, callout titles, System Info title |
 | Page heading | Geist | 26 Semibold | Settings page title |
@@ -492,7 +487,7 @@ text color. Do not invent a brand tint for a mark that returns `None`.
 | Unfocused pane dim, drop overlay glide | 130 ms, scaled by distance | ease-out quint | Cross-fade dropped below 0.002; the overlay lerps its absolute rect between regions |
 | Primary sidebar slide | 280 ms | cubic ease-out `1 − (1 − p)³` | Panel inset and gutter follow the width |
 | Menu reveal | 140 ms | cubic ease-out `1 − (1 − p)³` (`ui_primitives::ease_out_cubic`, shared with the sidebar slide) | `menu_reveal`: every menu, select popup, context menu, and submenu fades in from 0 while dropping 4 px into place. No exit animation: GPUI drops the element when its state flips |
-| Toast | 180 ms in, **1440 ms default** hold, 180 ms out | ease-in-out | 8 px lift on entry, 8 px drop on exit. `hold_ms` is carried per `Toast`: the Composer recap and queued-prompt toasts hold 4000 ms, and a session-save failure holds `TOAST_HOLD_MS * 2` (2880 ms). Longer holds are deliberate, not drift. The **sticky** toast (5.8) plays the 180 ms entry only: it has no hold timer and no exit, and leaves on the frame it is dismissed |
+| Toast | 180 ms in, **1440 ms default** hold, 180 ms out | ease-in-out | 8 px lift on entry, 8 px drop on exit. `hold_ms` is carried per `Toast`: a session-save failure holds `TOAST_HOLD_MS * 2` (2880 ms). The longer hold is deliberate, not drift. The **sticky** toast (5.8) plays the 180 ms entry only: it has no hold timer and no exit, and leaves on the frame it is dismissed |
 | Status spinner | 1 s loop | linear rotate | Empty states while scanning |
 | Sidebar comet-trail loader | 720 ms cycle | stepped | 3 by 3 perimeter of 3 px dots, gap 1, trailing opacities 0.81, 0.49, 0.26 over a 0.06 base |
 | Tooltip | 800 ms delay | none | `delayed_tooltip` |
@@ -642,9 +637,8 @@ The header is **34 px** (28 content plus the 3 px inset twice), gap 7, padding
 3. The surface title sits at 14 px on an 18 px line, centered by three flex
 zones, ellipsized, with a tooltip past 13 characters and a hard cap at 24. A
 6 px status dot leads (`agent_error` wins over `vc_conflict`). **At most two
-adornments** paint, ranked dot, then queued, then progress: 9 px
-chips on `subtle` at padding 4 / radius 3 carrying `1 queued`, the OSC 9;4
-or progress. There is no worktree chip
+adornments** paint: the dot, then the OSC 9;4 progress chip at 9 px on
+`subtle` at padding 4 / radius 3. There is no worktree chip
 — the sidebar row owns the worktree — and there is no identity pill, because
 the sidebar owns identity.
 
@@ -663,12 +657,10 @@ confirm: once armed it fills at 0.72 over `vc_deleted`, its tooltip becomes
 double-click is swallowed so the second click cannot confirm the arm.
 
 State layers, painted in this order: card fill, content (header, review menu,
-body, **dim layer**, **drop overlay**), **peek overlay**, broadcast stripe
-(3 px of the group color, inset by the radius top and bottom), border,
-composer. Unfocused panes in a multi-pane workspace fade under a 0.3 overlay by
+body, **dim layer**, **drop overlay**), **peek overlay**, border.
+Unfocused panes in a multi-pane workspace fade under a 0.3 overlay by
 default; the dim is a plain compositing quad with no id and no handlers, so it
-takes no hit test, it covers the header too, it cross-fades over 130 ms, and it
-is suppressed entirely while a Composer is attached.
+takes no hit test, it covers the header too, and it cross-fades over 130 ms.
 
 The split-drop overlay is blue at 0.10 with a 2 px blue border, radius 8,
 margin 8, and it glides between regions over 130 ms rather than jumping; the
@@ -753,7 +745,7 @@ trigger, whose 8 px corner is round — the one non-squircle in the family.
 Destructive actions use the fixed red button on a `ROW_RADIUS` squircle.
 
 Keyboard Shortcuts includes a searchable Fixed shortcuts section documenting
-text-field, Composer, copy-mode, sidebar, and overlay controls. Each row
+text-field, copy-mode, sidebar, and overlay controls. Each row
 names the context in which it applies and is marked Fixed; clicking it cannot
 arm recording or write a binding. Hover reveals a truncated description. Live
 alternative chords for the same action are also listed; editing either row
@@ -802,17 +794,7 @@ Tooltips are squircle 14 on the title bar color, padding 8 by 6, small text,
 shown after 800 ms through `delayed_tooltip`. Their border is `border` at
 **full** alpha, unlike the menu's 0.6.
 
-### 5.7 Composer, palette
-
-**The Composer** dims the whole pane under a 0.25 black scrim and docks a
-bordered panel on `overlay` at the bottom: a `Composer` label at 11 px Medium,
-then 10 px chips on radius 4 for the broadcast toggle (`Single pane` on
-`subtle`, or `Broadcast: {group}` on `accent` at 0.15), `agent generating -
-Enter queues` on `vc_modified` at 0.15 while the agent is busy, and a
-`{n} queued · cancel` chip whose hover lerps `muted` into `vc_deleted`.
-**Enter pre-fills without submitting**; `Cmd+Enter` pre-fills and submits; a
-broadcast never submits even explicitly, and the hint line says so. Escape
-closes. Input caps at 64 KiB.
+### 5.7 Pane palette
 
 **The pane palette** fills an empty tab named `New pane` with a centered 260 px
 column: a 13 px Semibold title, an optional 28 px branch row whose select opens
@@ -965,10 +947,8 @@ a chord or a menu item, and MUST NOT rely on a surface that has neither.
 | Pane overview | `secondary-shift-p` |
 | Work review | `secondary-shift-u` |
 | Primary sidebar | `secondary-alt-b` |
-| Composer | `secondary-shift-space` |
 | Command palette | `secondary-shift-o` |
 | Jump to next waiting agent | `secondary-shift-j` |
-| Broadcast groups, toggle member | `secondary-shift-m`, `secondary-shift-b` |
 | Copy, paste (Terminal) | `cmd-c` / `cmd-v`, plus `ctrl-shift-c` / `ctrl-shift-v` |
 | Clear scrollback, reset terminal | `secondary-shift-k` and `cmd-k`; `secondary-shift-r` |
 | Prompt marks | `secondary-shift-up`, `secondary-shift-down` |
@@ -1097,7 +1077,7 @@ row washes carry no floor today.
 ### 7.4 Keyboard-operable surfaces
 
 These answer arrows, Enter, and Escape in full: Pane Overview
-(two-dimensional), sessions rail, pane palette, work review, and broadcast groups. The diff branch menu, close confirm, and About answer Escape and Enter
+(two-dimensional), sessions rail, pane palette, and work review. The diff branch menu, close confirm, and About answer Escape and Enter
 only. **System Info is Escape-only** — it carries
 two footer buttons, Close and Copy, and neither is the default, so Enter is
 deliberately ignored. The pane palette's one exception is the last-surface case
@@ -1108,9 +1088,8 @@ A new overlay MUST at minimum dismiss on Escape, and MUST confirm on Enter
 when it has a single default action. A new list surface SHOULD be
 arrow-navigable.
 
-This paragraph covers the three origin-tracked overlays, the `OverlayKind`
-variants in `app/overlay_origin.rs`: broadcast picker, Pane Overview, and the
-pane palette. The
+This paragraph covers the two origin-tracked overlays, the `OverlayKind`
+variants in `app/overlay_origin.rs`: Pane Overview and the pane palette. The
 modal dialogs (About, System Info, close confirm, Work
 Review), and the diff branch menu keep their own
 restore paths and are not part of it. Dismissing a tracked overlay (Escape,

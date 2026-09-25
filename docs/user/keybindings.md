@@ -63,7 +63,7 @@ load. `+` and `-` both parse as separators.
 
 ## Default binding reference
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 79 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in CLAUDE.md drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 76 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in CLAUDE.md drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 
@@ -85,8 +85,6 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 79 ac
 | `Cmd+Shift+J` | Jump to next waiting agent, including background tabs | Global |
 | `Cmd+Shift+P` | Pane overview (every terminal pane, all workspaces and tabs) | Global |
 | `Cmd+Shift+G` | Diff view | Global |
-| `Cmd+Shift+Space` | Composer | Global |
-| `Cmd+Shift+B` / `Cmd+Shift+M` | Toggle broadcast member / broadcast groups | Global |
 | `Cmd+Shift+O` | Command palette (every context-free action with its live binding; `app/command_palette.rs`, #523; upstream's `Cmd+Shift+P` is Pane Overview here) | Global |
 | `Cmd+Alt+B` | Toggle primary sidebar (persisted across launches) | Global |
 | `Ctrl+Alt+R` / `Ctrl+Shift+Alt+C` | Reveal in Finder / copy workspace path | Global |

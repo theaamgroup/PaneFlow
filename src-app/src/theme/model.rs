@@ -551,19 +551,6 @@ pub struct UiColors {
     pub vc_added_background: Hsla,
     /// Deleted-line background wash.
     pub vc_deleted_background: Hsla,
-    // EP-001 (CLI Cockpit, US-002): broadcast-group
-    // stripe palette - eight first-class slots so render code never inlines a
-    // hex (FR-08). Positional identity colors (not semantic status colors):
-    // they only need to stay mutually distinguishable and readable as a 3px
-    // pane-edge stripe on both bundled themes.
-    pub group_1: Hsla,
-    pub group_2: Hsla,
-    pub group_3: Hsla,
-    pub group_4: Hsla,
-    pub group_5: Hsla,
-    pub group_6: Hsla,
-    pub group_7: Hsla,
-    pub group_8: Hsla,
     // EP-004 (CLI Cockpit): agent terminal-state
     // slots (FR-08 - no inline hex in render code). Both are deliberately
     // distinct from `vc_conflict` (the attention/waiting dot) so a crashed
@@ -617,22 +604,6 @@ impl UiColors {
             deleted_gutter_background: h(0x2c1718),
         }
     }
-
-    /// Stripe color for broadcast-group slot `idx` (0-based). Wraps modulo 8
-    /// so an out-of-range index (impossible via the picker, which caps group
-    /// creation at 8) can never panic the render path.
-    pub fn group_color(&self, idx: usize) -> Hsla {
-        match idx % 8 {
-            0 => self.group_1,
-            1 => self.group_2,
-            2 => self.group_3,
-            3 => self.group_4,
-            4 => self.group_5,
-            5 => self.group_6,
-            6 => self.group_7,
-            _ => self.group_8,
-        }
-    }
 }
 
 /// Derive UI colors from the active terminal theme.
@@ -641,7 +612,7 @@ impl UiColors {
 /// [`ui_colors_with`] under the hood after a single theme lookup --
 /// render paths that already have a `TerminalTheme` in hand should
 /// call [`ui_colors_with`] directly to avoid re-locking the theme
-/// cache (Composer / ThreadView render do this).
+/// cache (the sidebar and the MCP settings tab do this).
 pub fn ui_colors() -> UiColors {
     let theme = super::watcher::active_theme();
     ui_colors_with(&theme)
@@ -685,16 +656,6 @@ pub fn ui_colors_with(theme: &TerminalTheme) -> UiColors {
             // the opaque gutter hunk bar carries the strong status signal.
             vc_added_background: ha(0x40a02b, 0.16),
             vc_deleted_background: ha(0xd20f39, 0.16),
-            // Broadcast stripes (Catppuccin Latte family) - saturated hues
-            // that hold up as a thin stripe on a light pane edge.
-            group_1: h(0x1e66f5),
-            group_2: h(0x40a02b),
-            group_3: h(0xdf8e1d),
-            group_4: h(0xd20f39),
-            group_5: h(0x8839ef),
-            group_6: h(0x179299),
-            group_7: h(0xfe640b),
-            group_8: h(0x7287fd),
             // Agent state (Latte family): saturated red for a crash, the
             // neutral overlay grey for a silent session.
             agent_error: h(0xd20f39),
@@ -704,8 +665,8 @@ pub fn ui_colors_with(theme: &TerminalTheme) -> UiColors {
         UiColors {
             use_theme_diff_washes: false,
             // Every neutral in the shell is hue-free: greys carry no blue
-            // cast, so color in the UI only ever means status (`vc_*`),
-            // identity (`group_*`) or the accent. The greys below hold the
+            // cast, so color in the UI only ever means status (`vc_*`)
+            // or the accent. The greys below hold the
             // luminance the blue-tinted ones had, so contrast is unchanged -
             // only the hue is gone.
             base: h(TERMINAL_BACKGROUND_HEX),
@@ -728,16 +689,6 @@ pub fn ui_colors_with(theme: &TerminalTheme) -> UiColors {
             // the opaque gutter hunk bar carries the strong status signal.
             vc_added_background: ha(0x57d992, 0.12),
             vc_deleted_background: ha(0xff6f6a, 0.12),
-            // Broadcast stripes: high-luminance accents that keep their
-            // identity against the neutral pane edge.
-            group_1: h(0x7eb6ff),
-            group_2: h(0x57d992),
-            group_3: h(0xffd166),
-            group_4: h(0xff6f6a),
-            group_5: h(0xc79bff),
-            group_6: h(0x57d5c4),
-            group_7: h(0xffa657),
-            group_8: h(0x9ea7ff),
             // Agent state: clear, bright marks on the muted cockpit shell.
             agent_error: h(0xff6f6a),
             agent_stalled: h(0xa0a0a0),

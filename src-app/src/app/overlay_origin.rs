@@ -1,11 +1,10 @@
 //! Per-overlay focus origin (issue #584).
 //!
-//! Every overlay that takes the focus (broadcast picker, Pane Overview, the
-//! pane palette) records the pane it was opened from,
-//! keyed by the overlay, so that:
+//! Every overlay that takes the focus (Pane Overview, the pane palette)
+//! records the pane it was opened from, keyed by the overlay, so that:
 //!
 //! - its own close hands focus back to that pane, not to the first leaf;
-//! - an inner overlay closed over an outer one (broadcast picker from pane B,
+//! - an inner overlay closed over an outer one (pane palette from pane B,
 //!   then Pane Overview, then Escape) takes only its own entry, so the outer
 //!   overlay's origin survives for its close or for a command palette fold;
 //! - the command palette, which folds every open overlay before it captures
@@ -25,7 +24,6 @@ use crate::pane::Pane;
 /// The overlays that take the focus and remember where it came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlayKind {
-    BroadcastPicker,
     PaneOverview,
     PanePalette,
 }
@@ -117,7 +115,6 @@ impl PaneFlowApp {
     /// Whether `kind`'s overlay is open right now.
     pub(crate) fn overlay_is_open(&self, kind: OverlayKind) -> bool {
         match kind {
-            OverlayKind::BroadcastPicker => self.broadcast_picker_open,
             OverlayKind::PaneOverview => self.pane_overview.is_some(),
             OverlayKind::PanePalette => self.pane_palette.is_some(),
         }
@@ -126,14 +123,10 @@ impl PaneFlowApp {
     /// The origins whose overlays are still open. `PaneFlowApp` stays
     /// borrowed immutably here; the callers apply the result to the stack.
     fn open_overlay_kinds(&self) -> Vec<OverlayKind> {
-        [
-            OverlayKind::BroadcastPicker,
-            OverlayKind::PaneOverview,
-            OverlayKind::PanePalette,
-        ]
-        .into_iter()
-        .filter(|kind| self.overlay_is_open(*kind))
-        .collect()
+        [OverlayKind::PaneOverview, OverlayKind::PanePalette]
+            .into_iter()
+            .filter(|kind| self.overlay_is_open(*kind))
+            .collect()
     }
 
     /// Record the pane `kind` is being opened from. Called BEFORE the overlay
@@ -271,30 +264,30 @@ mod tests {
         let b = make_pane(cx);
         let mut origins = OverlayOrigins::default();
 
-        origins.remember(OverlayKind::BroadcastPicker, Some(b.downgrade()));
-        // Pane Overview opens while the broadcast picker owns the focus: no
+        origins.remember(OverlayKind::PanePalette, Some(b.downgrade()));
+        // Pane Overview opens while the pane palette owns the focus: no
         // pane does, so it inherits the innermost origin.
         let inherited = origins.innermost();
         origins.remember(OverlayKind::PaneOverview, inherited);
         assert_eq!(
             origins.kinds(),
-            vec![OverlayKind::BroadcastPicker, OverlayKind::PaneOverview]
+            vec![OverlayKind::PanePalette, OverlayKind::PaneOverview]
         );
 
         assert_eq!(origins.take(OverlayKind::PaneOverview), Some(b.clone()));
         assert_eq!(
             origins.kinds(),
-            vec![OverlayKind::BroadcastPicker],
-            "Escape on Pane Overview must not clear the broadcast picker's origin"
+            vec![OverlayKind::PanePalette],
+            "Escape on Pane Overview must not clear the pane palette's origin"
         );
         assert_eq!(
             origins.outermost(|_| true),
             Some(b.clone()),
             "a palette command after that still targets pane B"
         );
-        assert_eq!(origins.take(OverlayKind::BroadcastPicker), Some(b));
+        assert_eq!(origins.take(OverlayKind::PanePalette), Some(b));
         assert!(origins.kinds().is_empty());
-        assert_eq!(origins.take(OverlayKind::BroadcastPicker), None);
+        assert_eq!(origins.take(OverlayKind::PanePalette), None);
     }
 
     #[gpui::test]
@@ -303,7 +296,7 @@ mod tests {
         let a = make_pane(cx);
         let b = make_pane(cx);
         let mut origins = OverlayOrigins::default();
-        origins.remember(OverlayKind::BroadcastPicker, Some(b.downgrade()));
+        origins.remember(OverlayKind::PaneOverview, Some(b.downgrade()));
         origins.remember(OverlayKind::PanePalette, Some(a.downgrade()));
         assert_eq!(origins.outermost(|_| true), Some(b.clone()));
         // Only open overlays count: a stale bottom entry never wins.
@@ -383,36 +376,24 @@ mod tests {
         // `main.rs` carries several test modules; the render root sits
         // between them, so it is read whole.
         let main = include_str!("../main.rs");
-        for (module, src, kind, escape) in [
-            (
-                "broadcast.rs",
-                production(include_str!("broadcast.rs")),
-                "OverlayKind::BroadcastPicker",
-                "self.close_broadcast_picker_and_restore_focus(window, cx);",
+        // Pane Overview records under its own kind and restores through it.
+        let overview = production(include_str!("pane_overview/mod.rs"));
+        let remember = "self.remember_overlay_origin(OverlayKind::PaneOverview, window, cx);";
+        assert!(
+            overview.contains(remember) || main.contains(remember),
+            "pane_overview/mod.rs must record its origin under OverlayKind::PaneOverview \
+             before taking the focus"
+        );
+        assert!(
+            overview.contains(
+                "self.restore_overlay_origin_focus(OverlayKind::PaneOverview, window, cx);"
             ),
-            (
-                "pane_overview/mod.rs",
-                production(include_str!("pane_overview/mod.rs")),
-                "OverlayKind::PaneOverview",
-                "self.close_pane_overview_and_restore_focus(window, cx);",
-            ),
-        ] {
-            let remember = format!("self.remember_overlay_origin({kind}, window, cx);");
-            assert!(
-                src.contains(&remember) || main.contains(&remember),
-                "{module} must record its origin under {kind} before taking the focus"
-            );
-            assert!(
-                src.contains(&format!(
-                    "self.restore_overlay_origin_focus({kind}, window, cx);"
-                )),
-                "{module} must restore the focus through its own origin"
-            );
-            assert!(
-                src.contains(escape),
-                "{module}: Escape must restore: `{escape}`"
-            );
-        }
+            "pane_overview/mod.rs must restore the focus through its own origin"
+        );
+        assert!(
+            overview.contains("self.close_pane_overview_and_restore_focus(window, cx);"),
+            "pane_overview/mod.rs: Escape must restore through its own close"
+        );
         // The pane palette records both open paths and forgets on every take.
         let pane_palette = production(include_str!("pane_palette.rs"));
         assert!(

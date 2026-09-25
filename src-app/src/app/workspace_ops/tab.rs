@@ -489,13 +489,6 @@ impl PaneFlowApp {
         }
         self.save_session(cx);
         cx.notify();
-        // The closed tab's panes may have carried a Composer target, queued
-        // prompts, or group memberships - refresh the same way a workspace
-        // close does so nothing points at a dropped terminal.
-        self.refresh_composer_slot(cx);
-        self.sync_broadcast_stripes(cx);
-        self.flush_pending_prefill(cx);
-        self.sync_pending_chips(cx);
     }
 
     pub(crate) fn handle_close_tab(

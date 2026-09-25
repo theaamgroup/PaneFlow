@@ -772,15 +772,6 @@ impl PaneFlowApp {
             command_palette_return_pane: None,
             command_palette_return_focus: None,
             overlay_origins: Default::default(),
-            // EP-001 (cli-cockpit): Composer closed, no groups, no buffers.
-            composer: None,
-            broadcast: crate::app::broadcast::BroadcastState::default(),
-            broadcast_picker_open: false,
-            broadcast_picker_query: String::new(),
-            broadcast_picker_selected: 0,
-            broadcast_picker_renaming: None,
-            broadcast_picker_error: None,
-            broadcast_picker_focus: cx.focus_handle(),
             // Issue #339: Pane Overview closed.
             pane_overview: None,
             pane_overview_focus: cx.focus_handle(),

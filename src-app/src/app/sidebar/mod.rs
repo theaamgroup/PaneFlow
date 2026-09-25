@@ -992,8 +992,7 @@ pub(crate) enum RenameKey {
 
 /// Map a keystroke onto the editor's response.
 ///
-/// `alt` suppresses insertion alongside `control` and `platform` (mirroring
-/// the broadcast picker): on macOS Option+key composes a dead key, so without
+/// `alt` suppresses insertion alongside `control` and `platform`: on macOS Option+key composes a dead key, so without
 /// this guard Option+E types a combining acute into the name instead of being
 /// ignored. `shift` is deliberately not in that set - it is how a capital
 /// arrives.
