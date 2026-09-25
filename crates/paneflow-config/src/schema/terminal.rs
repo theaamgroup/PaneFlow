@@ -161,16 +161,14 @@ impl<'de> Deserialize<'de> for Osc52ClipboardConfig {
 /// Memory budget profile for a terminal surface.
 ///
 /// Normal and Agent terminals keep the standard interactive scrollback default so
-/// long-lived CLI transcripts retain commands, diffs and tool output. Review
-/// and Cached remain reserved for fresh cold surfaces; live cached PTYs are not
-/// rebuilt just to shrink history because dropping them would kill processes.
+/// long-lived CLI transcripts retain commands, diffs and tool output. Agent
+/// surfaces cap the user setting at [`TerminalConfig::AGENT_SCROLLBACK_LINES`];
+/// Normal surfaces use it as is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TerminalSurfaceProfile {
     #[default]
     Normal,
     Agent,
-    Review,
-    Cached,
 }
 
 impl TerminalSurfaceProfile {
@@ -178,8 +176,6 @@ impl TerminalSurfaceProfile {
         match self {
             Self::Normal => None,
             Self::Agent => Some(TerminalConfig::AGENT_SCROLLBACK_LINES),
-            Self::Review => Some(TerminalConfig::REVIEW_SCROLLBACK_LINES),
-            Self::Cached => Some(TerminalConfig::CACHED_SCROLLBACK_LINES),
         }
     }
 }
@@ -275,10 +271,6 @@ impl TerminalConfig {
     pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
     /// Agent terminal profile target. Applied as a cap over the user setting.
     pub const AGENT_SCROLLBACK_LINES: usize = 10_000;
-    /// Review terminal profile target. Applied as a cap over the user setting.
-    pub const REVIEW_SCROLLBACK_LINES: usize = 2_000;
-    /// Cold cached terminal profile target for fresh cached surfaces.
-    pub const CACHED_SCROLLBACK_LINES: usize = 1_000;
     /// Lower bound: below 100 lines the buffer is too small to be useful.
     pub const MIN_SCROLLBACK_LINES: usize = 100;
     /// Upper bound: high enough for long-lived agent terminals while keeping
@@ -320,10 +312,6 @@ impl TerminalConfig {
             return 0.0;
         }
         raw.clamp(0.0, Self::MAX_MINIMUM_CONTRAST)
-    }
-
-    pub fn normalized_cursor_color(&self) -> Option<String> {
-        self.cursor_color.as_deref().and_then(normalize_hex_color)
     }
 
     /// Resolve `osc52_clipboard` to a usable value: default `CopyOnly`.
@@ -382,8 +370,8 @@ impl TerminalConfig {
     }
 
     /// Resolve scrollback for a specific terminal surface profile. The user
-    /// setting still provides the base value, then agent/review/cached surfaces
-    /// cap it to their documented memory budget.
+    /// setting still provides the base value, then agent surfaces cap it to
+    /// their documented memory budget.
     pub fn resolved_scrollback_lines_for_profile(&self, profile: TerminalSurfaceProfile) -> usize {
         let base = self.resolved_scrollback_lines();
         profile.scrollback_cap().map_or(base, |cap| base.min(cap))

@@ -64,7 +64,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `cell_width` | number or null | `1.0` | Multiplier of the font's advance, range `0.8` to `2.0`. The cell is rounded to whole device pixels. Out-of-range values revert to the default with a warning; they are not clamped. |
 | `unfocused_pane_opacity` | number or null | `0.7` | Opacity of panes without focus when a workspace has more than one pane, range `0.15` to `1.0`. `1.0` disables the dim. Values outside the range are clamped with a warning; non-finite values fall back to the default. |
 | `reduce_motion` | boolean or null | `false` | Minimize non-essential interface motion: hover transitions settle instantly and decorative animations render a static frame. |
-| `sidebar_show` | object or null | `branch` on, the rest off | What a rail row shows beyond its name, one switch per line: `branch` (boolean, default `true`) paints each terminal's current git branch beneath its name in the sidebar; split tabs show a labeled branch line per terminal; `diffstat` (boolean, default `false`) shows right-aligned insertion and deletion counts on the workspace row or a bound tab's own metadata line, drawn only when the checkout has something to report; `pr` (boolean or null) is accepted and ignored so an older file still validates (`sidebar_show` sets `additionalProperties` to false); it does not change the branch icon; `indent_guide` (boolean, default `false`) draws a hairline under a workspace's folder icon down its tab rows. Branches follow each terminal's current directory and refresh every two seconds. Counts read the tab's bound worktree, or its workspace's checkout when the tab is unbound. An absent object is the rail as it shipped before the switches existed. Toggled from the rail header's Customize Sidebar menu, or hand-edited; hot-reloads. |
+| `sidebar_show` | object or null | `branch` on, the rest off | What a rail row shows beyond its name, one switch per line: `branch` (boolean, default `true`) paints each terminal's current git branch beneath its name in the sidebar; split tabs show a labeled branch line per terminal; `diffstat` (boolean, default `false`) shows right-aligned insertion and deletion counts on the workspace row or a bound tab's own metadata line, drawn only when the checkout has something to report; `pr` is a retired key: PaneFlow ignores it, and the schema keeps a stub so editors do not flag an older file; it does not change the branch icon; `indent_guide` (boolean, default `false`) draws a hairline under a workspace's folder icon down its tab rows. Branches follow each terminal's current directory and refresh every two seconds. Counts read the tab's bound worktree, or its workspace's checkout when the tab is unbound. An absent object is the rail as it shipped before the switches existed. Toggled from the rail header's Customize Sidebar menu, or hand-edited; hot-reloads. |
 | `new_tab_branch` | string or null | `main` | Default branch for new tabs. Empty uses the workspace checkout. Settings → Workspaces → New tabs lists branches from open workspaces. Existing tabs, splits, and restored sessions keep their directories. |
 | `workspace_new_tab_branches` | object | `{}` | Branch overrides keyed by workspace cwd, e.g. `{"/projects/Aftermarket-Websites": "staging"}`. An absent entry inherits the default; an empty value uses that workspace's checkout. Set these using each workspace's branch picker in New tabs settings. |
 | `new_tabs_on_main` | boolean or null | `true` | Legacy compatibility: when `new_tab_branch` is absent, false uses the workspace checkout and true/absent uses main. |
@@ -84,7 +84,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `external_editor` | string or null | `auto` | Editor command (quoted paths and flags supported, without a shell), tried before `$VISUAL` and `$EDITOR`. `auto`/null starts with those variables, then probes the GUI CLIs `code`, `cursor`, `zed`, `subl`, `code-insiders`, and `windsurf`, then the macOS handler. Terminal editors (`hx`, `nvim`, `vim`, `emacs`) are not launched from that detached fallback, because a GUI launch has no TTY; set `external_editor`, `$VISUAL`, or `$EDITOR` to use one. Failed file-link commands fall through. `system` uses only the macOS handler, without line/column positioning. The workspace **Open in editor** action (`Ctrl+Alt+Z`) launches this same command in the workspace directory. |
 | `shortcuts` | object | `{}` | Custom keybindings: `{ "ctrl+shift+t": "new_tab" }`. |
 | `terminal` | object or null | defaults below | Terminal renderer and PTY settings. |
-| `commands` | array | `[]` | Legacy command palette entries and workspace templates. Accepted and ignored. Older files still load; PaneFlow does not launch or edit this array. Repeatable layouts come from session restore. |
+| `commands` | array | `[]` | Retired: legacy command palette entries and workspace templates. Accepted and ignored; see [Commands](#commands). |
 | `claude_code_bypass_permissions` | boolean or null | `false` | Adds Claude Code `--permission-mode bypassPermissions` when launching from PaneFlow. |
 | `ai_unrestricted` | boolean or null | `false` | Allows trusted automation to submit via IPC without `PANEFLOW_IPC_SCRIPTING=1`. |
 | `ai_injection_fence` | boolean or null | `true` | Wraps pane reads in an untrusted-output fence. Keep enabled for AI clients. |
@@ -191,74 +191,12 @@ They configure the removed Agents view and have no effect on terminal agents.
 
 ## Commands
 
-`commands` is accepted and ignored (issue #607). An older file may still
-carry the array; the loader keeps it and the rest of the file loads.
-PaneFlow does not edit the key and does not launch workspace templates
-from it. Repeatable layouts come from session restore. The published
-schema still describes the historical entry shape so an editor does not
-reject the key (`additionalProperties` is false).
-
-Every entry has `name` and may set `description`, `keywords`, and exactly
-one of `command` or `workspace`.
-
-Workspace definitions can set `name`, `cwd`, `layout_preset`, `color`,
-and `layout`. `layout_preset` accepts `even_h`, `even_v`,
-`main_vertical`, or `tiled`. Layout nodes are either:
-
-| Node | Required keys | Optional keys |
-|---|---|---|
-| pane | `type`, `surfaces` | none |
-| split | `type`, `direction`, `children` | `ratio`, `ratios` |
-
-Surface definitions accept `surface_type`, `name`, `custom_name`,
-`command`, `prompt`, `cwd`, `path`, `env`, `focus`, `scrollback`,
-`agent`, and per-surface `font_size`.
-
-```json
-{
-  "commands": [
-    {
-      "name": "API + Codex",
-      "description": "Open the API project with Codex and tests",
-      "keywords": ["api", "codex"],
-      "workspace": {
-        "name": "API",
-        "cwd": "~/projects/api",
-        "layout_preset": "even_h",
-        "layout": {
-          "type": "split",
-          "direction": "horizontal",
-          "children": [
-            {
-              "type": "pane",
-              "surfaces": [
-                {
-                  "surface_type": "terminal",
-                  "name": "Codex",
-                  "agent": "codex",
-                  "prompt": "Review the API changes",
-                  "cwd": "~/projects/api",
-                  "focus": true
-                }
-              ]
-            },
-            {
-              "type": "pane",
-              "surfaces": [
-                {
-                  "surface_type": "terminal",
-                  "name": "Tests",
-                  "command": "cargo test --workspace"
-                }
-              ]
-            }
-          ]
-        }
-      }
-    }
-  ]
-}
-```
+`commands` is accepted and ignored (issues #607 and #817). PaneFlow does
+not parse the value, launch workspace templates from it, or edit it, so an
+older file carrying the array (or any other value under the key) still
+loads and the rest of the file applies. The published schema keeps a
+deprecated `commands` stub with unchecked entries so an editor does not
+flag the key. Repeatable layouts come from session restore.
 
 ## Complete example
 
@@ -280,7 +218,6 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
   "sidebar_show": {
     "branch": true,
     "diffstat": false,
-    "pr": false,
     "indent_guide": false
   },
   "workspace_auto_sort": false,
@@ -313,7 +250,6 @@ Surface definitions accept `surface_type`, `name`, `custom_name`,
   "agent_panel": {
     "notify_when_agent_waiting": "Never"
   },
-  "commands": [],
   "claude_code_bypass_permissions": false,
   "ai_unrestricted": false,
   "ai_injection_fence": true,

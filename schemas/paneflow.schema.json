@@ -119,7 +119,7 @@
         },
         "pr": {
           "type": ["boolean", "null"],
-          "description": "Accepted and ignored. Older files set this to replace the branch icon with a pull-request glyph. The key remains because additionalProperties is false on sidebar_show; the sidebar always draws the branch icon. Default false.",
+          "description": "Accepted and ignored. Older files set this to replace the branch icon with a pull-request glyph. The key remains so editors do not flag those files; PaneFlow does not parse it, and the sidebar always draws the branch icon. Default false.",
           "default": false
         },
         "indent_guide": {
@@ -256,7 +256,7 @@
         },
         "scrollback_lines": {
           "type": ["integer", "null"],
-          "description": "Maximum scrollback history in lines for normal and agent terminals. Applied to newly-created terminals. Review and cached surfaces cap this value at 2000 and 1000 lines respectively. Live cached/hidden terminals are not rebuilt or killed to shrink history; exited cached terminals may be evicted by the cache policy.",
+          "description": "Maximum scrollback history in lines for normal and agent terminals. Applied to newly-created terminals. Agent terminals cap this value at 10000 lines.",
           "minimum": 100,
           "maximum": 100000,
           "default": 10000
@@ -303,8 +303,8 @@
     "commands": {
       "type": "array",
       "deprecated": true,
-      "description": "Legacy command palette entries and workspace templates. Accepted and ignored. Older files still validate; PaneFlow does not launch or edit this array. Repeatable layouts come from session restore.",
-      "items": { "$ref": "#/definitions/commandDefinition" },
+      "description": "Legacy command palette entries and workspace templates. Accepted and ignored: PaneFlow does not parse, launch, or edit this array, and the entries' shape is not checked. Older files still validate. Repeatable layouts come from session restore.",
+      "items": {},
       "default": []
     },
     "claude_code_bypass_permissions": {
@@ -432,189 +432,6 @@
           "type": ["string", "null"],
           "enum": ["PrimaryScreen", "AllScreens", "Never", null],
           "default": "Never"
-        }
-      }
-    }
-  },
-  "definitions": {
-    "commandDefinition": {
-      "type": "object",
-      "required": ["name"],
-      "description": "Exactly one non-null payload: a workspace definition (set 'workspace') or a non-blank shell command (set 'command').",
-      "additionalProperties": false,
-      "oneOf": [
-        { "required": ["workspace"],
-          "properties": { "workspace": { "$ref": "#/definitions/workspaceDefinition" },
-                          "command": { "type": "null" } } },
-        { "required": ["command"],
-          "properties": { "workspace": { "type": "null" },
-                          "command": { "type": "string", "pattern": "\\S" } } }
-      ],
-      "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "\\S",
-          "description": "Display name (must not be blank)."
-        },
-        "description": {
-          "type": ["string", "null"],
-          "description": "Human-readable description shown in the command palette."
-        },
-        "keywords": {
-          "type": "array",
-          "description": "Search keywords for fuzzy matching.",
-          "items": { "type": "string" },
-          "default": []
-        },
-        "workspace": {
-          "anyOf": [
-            { "$ref": "#/definitions/workspaceDefinition" },
-            { "type": "null" }
-          ]
-        },
-        "command": {
-          "type": ["string", "null"],
-          "pattern": "\\S",
-          "description": "Shell command string. Mutually exclusive with 'workspace'."
-        }
-      }
-    },
-    "workspaceDefinition": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "name": {
-          "type": ["string", "null"],
-          "description": "Workspace display name."
-        },
-        "cwd": {
-          "type": ["string", "null"],
-          "description": "Default working directory for the workspace."
-        },
-        "layout_preset": {
-          "type": ["string", "null"],
-          "enum": ["even_h", "even_v", "main_vertical", "tiled", null],
-          "description": "Historical layout preset name on a leftover commands entry: even_h, even_v, main_vertical, or tiled. The commands array is accepted and ignored."
-        },
-        "color": {
-          "type": ["string", "null"],
-          "description": "Workspace accent color as a 6-digit lowercase hex string (no leading #).",
-          "pattern": "^[0-9a-fA-F]{6}$"
-        },
-        "layout": {
-          "anyOf": [
-            { "$ref": "#/definitions/layoutNode" },
-            { "type": "null" }
-          ]
-        }
-      }
-    },
-    "layoutNode": {
-      "oneOf": [
-        {
-          "type": "object",
-          "required": ["type"],
-          "additionalProperties": false,
-          "properties": {
-            "type": { "const": "pane" },
-            "surfaces": {
-              "type": "array",
-              "minItems": 1,
-              "items": { "$ref": "#/definitions/surface" },
-              "default": []
-            }
-          }
-        },
-        {
-          "type": "object",
-          "required": ["type", "direction", "children"],
-          "additionalProperties": false,
-          "properties": {
-            "type": { "const": "split" },
-            "direction": {
-              "type": "string",
-              "enum": ["horizontal", "vertical"]
-            },
-            "ratio": {
-              "type": ["number", "null"],
-              "description": "Legacy single ratio for binary (2-child) layouts. Ignored when 'ratios' is present.",
-              "minimum": 0.1,
-              "maximum": 0.9
-            },
-            "ratios": {
-              "type": ["array", "null"],
-              "description": "Per-child ratios for N-ary layouts. When present, must match children length and sum to ~1.0.",
-              "items": { "type": "number" }
-            },
-            "children": {
-              "type": "array",
-              "minItems": 2,
-              "items": { "$ref": "#/definitions/layoutNode" }
-            }
-          }
-        }
-      ]
-    },
-    "surface": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "agent_context": {
-          "type": ["object", "null"],
-          "description": "Session-owned pane identity and current task. Manage assignments through paneflow task assign."
-        },
-        "surface_type": {
-          "type": ["string", "null"],
-          "description": "Surface kind. Currently only 'terminal' is rendered.",
-          "default": "terminal"
-        },
-        "name": {
-          "type": ["string", "null"],
-          "description": "Display name for the surface tab."
-        },
-        "custom_name": {
-          "type": ["string", "null"],
-          "description": "User-assigned surface name. When set, it overrides the auto-derived surface name and survives restart."
-        },
-        "command": {
-          "type": ["string", "null"],
-          "description": "Shell command to run on surface creation."
-        },
-        "prompt": {
-          "type": ["string", "null"],
-          "description": "Prompt text to prefill after launching an agent command."
-        },
-        "cwd": {
-          "type": ["string", "null"],
-          "description": "Working directory override (relative paths resolve against the workspace cwd)."
-        },
-        "path": {
-          "type": ["string", "null"],
-          "description": "Optional path stored with a surface. Older sessions recorded a markdown file here; the field still deserializes."
-        },
-        "env": {
-          "type": ["object", "null"],
-          "description": "Extra environment variables merged over terminal.env. The same protected-key and loader-key filtering applies at PTY spawn.",
-          "additionalProperties": { "type": "string" }
-        },
-        "focus": {
-          "type": ["boolean", "null"],
-          "description": "When true, this surface receives initial focus."
-        },
-        "scrollback": {
-          "type": ["string", "null"],
-          "description": "Saved plain-text scrollback restored with the surface."
-        },
-        "agent": {
-          "type": ["string", "null"],
-          "description": "Stable tag of the agent CLI last detected in this surface, such as 'claude_code'."
-        },
-        "font_size": {
-          "type": ["number", "null"],
-          "description": "Per-surface font-size override in points. Null follows the global font_size.",
-          "minimum": 8.0,
-          "maximum": 32.0
         }
       }
     }

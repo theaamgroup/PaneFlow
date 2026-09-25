@@ -40,6 +40,7 @@ const PANEFLOW_ORIG_ZDOTDIR_ENV: &str = "PANEFLOW_ORIG_ZDOTDIR";
 /// disables scrollback entirely. Overridable via
 /// `terminal.scrollback_lines` in `paneflow.json` - see
 /// [`paneflow_config::TerminalConfig::resolved_scrollback_lines`].
+#[cfg(test)]
 const DEFAULT_SCROLLBACK_LINES: usize = TerminalConfig::DEFAULT_SCROLLBACK_LINES;
 /// Host-terminal identity markers Paneflow inherits from whatever launched it.
 ///
@@ -85,6 +86,7 @@ const MAX_PENDING_NOTIFICATIONS: usize = 8;
 /// Read the user's configured scrollback length, clamped to the
 /// [`paneflow_config::TerminalConfig`] allowed range. Falls back to
 /// [`DEFAULT_SCROLLBACK_LINES`] when no `terminal` block exists.
+#[cfg(test)]
 fn resolved_scrollback_lines(profile: TerminalSurfaceProfile) -> usize {
     paneflow_config::loader::load_config()
         .terminal
@@ -870,7 +872,7 @@ const SPAWN_FAILURE_SCROLLBACK_LINES: usize = 256;
 
 /// The cheap, render-thread-safe half of a spawn: resolved shell, assembled
 /// child env, cwd, and grid size. Produced by
-/// [`TerminalState::resolve_spawn_params`] and consumed by
+/// [`TerminalState::resolve_spawn_params_with_profile`] and consumed by
 /// [`GhosttySession::start`], which may run on a background thread. All fields
 /// are `Send`.
 #[derive(Clone)]
@@ -1123,7 +1125,7 @@ impl TerminalState {
     /// The production GUI path spawns off-thread; this synchronous composition
     /// is the reference path, exercised end-to-end by the live PTY smoke tests
     /// and available to any future non-GUI (headless) caller.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new(
         working_directory: Option<std::path::PathBuf>,
         workspace_id: u64,
@@ -1143,7 +1145,7 @@ impl TerminalState {
         )
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new_with_profile(
         working_directory: Option<std::path::PathBuf>,
         workspace_id: u64,
@@ -1184,7 +1186,7 @@ impl TerminalState {
     /// grid size - the cheap, render-thread-safe half of a spawn. Factored out
     /// of `new` so the off-thread path (US-012) runs the *blocking* half
     /// ([`GhosttySession::start`]) on the background executor.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn resolve_spawn_params(
         working_directory: Option<std::path::PathBuf>,
         workspace_id: u64,
@@ -1285,11 +1287,12 @@ impl TerminalState {
     /// background spawn can start the same session against a real child and
     /// [`promote_ghostty`](Self::promote_ghostty) it . The returned
     /// opaque pending handle is what [`GhosttySession::start`] consumes.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn new_pending(cols: usize, rows: usize) -> (Self, PendingTerminalBackend) {
         Self::new_pending_with_profile(cols, rows, TerminalSurfaceProfile::Normal)
     }
 
+    #[cfg(test)]
     pub(super) fn new_pending_with_profile(
         cols: usize,
         rows: usize,
@@ -1315,13 +1318,14 @@ impl TerminalState {
     /// Create a display-only terminal with no PTY and no child process.
     /// Content is rendered via `write_output()`, which feeds bytes straight
     /// into the grid. The terminal supports full ANSI rendering but does not
-    /// accept keyboard input. Used by tests and by the spawn-failure pane.
-    #[allow(dead_code)]
+    /// accept keyboard input. Test-only: the spawn-failure pane builds its
+    /// own display session in place.
+    #[cfg(test)]
     pub fn new_display_only(rows: usize, cols: usize) -> Self {
         Self::new_display_only_with_profile(rows, cols, TerminalSurfaceProfile::Normal)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new_display_only_with_profile(
         rows: usize,
         cols: usize,
@@ -1415,7 +1419,6 @@ impl TerminalState {
     /// Converts bare `\n` to `\r\n` (since there is no PTY to perform CR insertion).
     /// Note: callers must not split a `\r\n` pair across two calls (the second call
     /// would insert an extra `\r`, producing `\r\r\n`). Prefer complete chunks.
-    #[allow(dead_code)]
     pub fn write_output(&self, bytes: &[u8]) {
         // Convert \n to \r\n - bare LF without preceding CR needs CR insertion
         let mut converted = Vec::with_capacity(bytes.len());
@@ -1432,7 +1435,7 @@ impl TerminalState {
 
     /// Drain the CWD fallback, then drain any pending engine events.
     /// Sets `dirty = true` when PTY output was processed.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn sync(&mut self) {
         self.sync_channels();
         if let Some(mut rx) = self.ghostty_events_rx.take() {

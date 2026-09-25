@@ -452,7 +452,6 @@ pub struct SearchHighlight {
 
 /// Where a hyperlink was detected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum HyperlinkSource {
     /// Explicit OSC 8 escape sequence from the program.
     Osc8,
@@ -475,10 +474,8 @@ pub enum HyperlinkSource {
 /// `Clone` (US-012): the press point's link is stashed on mouse-down so the
 /// open can fire on mouse-up only if no drag occurred.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct HyperlinkZone {
     pub uri: String,
-    pub id: String,
     pub start: Point,
     pub end: Point,
     /// Whether this URL's scheme is in the openable allowlist.

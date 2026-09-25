@@ -1366,64 +1366,6 @@ impl TerminalView {
             cx.notify();
         }
     }
-
-    /// Detect regex URLs on the line at the given grid point.
-    /// Extracts line text from the locked term grid, runs the URL regex,
-    /// and returns zones that cover the given column (for hover hit-testing).
-    #[allow(dead_code)]
-    pub fn detect_url_at_hover(&self) -> Vec<HyperlinkZone> {
-        let Some((line, line_text, char_to_col)) = self.hovered_line_text() else {
-            return Vec::new();
-        };
-        let trimmed = line_text.trim_end();
-        let trimmed_chars = trimmed.chars().count();
-        crate::terminal::element::detect_urls_on_line_mapped(
-            trimmed,
-            line,
-            &char_to_col[..trimmed_chars],
-        )
-    }
-
-    /// Detect `.md` / `.markdown` file paths on the line at the hovered grid
-    /// point (US-019). Mirrors `detect_url_at_hover`: extracts line text with
-    /// wide-char-aware char→column mapping, then runs the file-path scanner
-    /// against the pane's tracked CWD.
-    #[allow(dead_code)]
-    pub(super) fn detect_file_path_at_hover(&self) -> Vec<HyperlinkZone> {
-        let Some((line, line_text, char_to_col)) = self.hovered_line_text() else {
-            return Vec::new();
-        };
-        let trimmed = line_text.trim_end();
-        let trimmed_chars = trimmed.chars().count();
-        let map = &char_to_col[..trimmed_chars];
-        let cwd = self
-            .terminal
-            .current_cwd
-            .as_deref()
-            .map(std::path::Path::new);
-        crate::terminal::element::detect_file_paths_on_line_mapped(trimmed, line, map, cwd)
-    }
-
-    /// Detect source-code file paths with optional `:line[:col]` on the
-    /// hovered line. Mirrors `detect_file_path_at_hover`'s extraction; the
-    /// returned zones carry `line`/`col` populated from `path:42` or
-    /// `path:42:7` style references so the click handler can pass the
-    /// location through to the editor.
-    #[allow(dead_code)]
-    pub(super) fn detect_code_path_at_hover(&self) -> Vec<HyperlinkZone> {
-        let Some((line, line_text, char_to_col)) = self.hovered_line_text() else {
-            return Vec::new();
-        };
-        let trimmed = line_text.trim_end();
-        let trimmed_chars = trimmed.chars().count();
-        let map = &char_to_col[..trimmed_chars];
-        let cwd = self
-            .terminal
-            .current_cwd
-            .as_deref()
-            .map(std::path::Path::new);
-        crate::terminal::element::detect_code_paths_on_line_mapped(trimmed, line, map, cwd)
-    }
 }
 
 // ---------------------------------------------------------------------------

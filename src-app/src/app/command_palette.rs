@@ -118,8 +118,6 @@ impl PaneFlowApp {
             self.close_broadcast_picker(cx);
             folded_without_restore = true;
         }
-        // Issue #524: an idle clone modal folds like the rest; its own close
-        // restores the focus it took, which the capture below then reads.
         // Only a fold consults the recorded origin, and then it outranks
         // whatever pane a restoring close just focused.
         let origin_pane = origin_pane.filter(|_| folded_without_restore);

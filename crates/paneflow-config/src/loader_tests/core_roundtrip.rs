@@ -13,13 +13,6 @@ fn test_serialization_roundtrip() {
         default_shell: Some("/bin/fish".to_string()),
         theme: Some("One Dark".to_string()),
         theme_mode: Some("dark".to_string()),
-        commands: vec![CommandDefinition {
-            name: "test".to_string(),
-            description: Some("A test command".to_string()),
-            keywords: vec!["test".to_string()],
-            workspace: None,
-            command: Some("echo hello".to_string()),
-        }],
         window_backdrop: None,
         macos_chrome_material: None,
         unfocused_pane_opacity: None,

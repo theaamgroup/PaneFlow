@@ -185,12 +185,6 @@ pub struct Workspace {
     /// canonicalized. Sibling worktrees of one repo share an identical value -
     /// the invariant the sidebar uses to group them. `None` when not a git repo.
     pub repo_root: Option<std::path::PathBuf>,
-    /// Whether this workspace's CWD is a *linked* git worktree (as opposed to
-    /// the repo's main checkout). Linked worktrees carry a `commondir` file.
-    // Read by EP-002 (US-005) to target git operations at the worktree root and
-    // by EP-004 column labeling; stored at construction in EP-001 (US-001).
-    #[allow(dead_code)]
-    pub is_worktree: bool,
     /// Concrete worktree checkout root resolved at workspace construction.
     /// Review UI reads this directly so rebuilding columns stays in-memory.
     pub worktree_root: std::path::PathBuf,
@@ -316,7 +310,6 @@ impl Workspace {
             is_git_repo,
             git_dir,
             repo_root,
-            is_worktree,
             worktree_root,
             active_ports: vec![],
             port_scan_generation: 0,
@@ -644,7 +637,7 @@ impl Workspace {
     /// scrollback. Per-tab serialization is [`Tab::serialize`]; the session
     /// writer uses [`Self::serialize_tabs_without_scrollback`] with the v2
     /// schema (US-018).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn serialize_layout(&self, cx: &App) -> Option<LayoutNode> {
         self.active_tab().serialize(cx)
     }
@@ -668,9 +661,6 @@ impl Workspace {
                 unread: self
                     .agent_completion_notification
                     .is_unread_for(&tab.surface_ids(cx)),
-                // Older session.json files may still carry this. Current saves
-                // leave it unset so the key is omitted.
-                pull_request: None,
             })
             .collect()
     }

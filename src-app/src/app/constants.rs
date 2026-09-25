@@ -58,16 +58,15 @@ pub(crate) const SIDEBAR_TAB_CORNER_RADIUS: Pixels = px(8.);
 /// Native material used behind the main application window.
 ///
 /// Config values map onto these variants: `auto` (and empty) → Auto,
-/// `mica` → Mica, `blurred`/`acrylic` → Blurred, `transparent` →
-/// Transparent, `opaque`/`off` → Opaque. Unknown values warn and fall
-/// back to Auto. GPUI appearance is Opaque for Opaque, Blurred for
+/// `blurred`/`acrylic` → Blurred, `transparent` → Transparent,
+/// `opaque`/`off` → Opaque. Legacy `mica` loads silently as Auto, which it
+/// always matched on macOS. Other unknown values warn and fall back to Auto. GPUI appearance is Opaque for Opaque, Blurred for
 /// Blurred, Transparent otherwise. After the native window opens,
 /// PaneFlow installs a semantic AppKit sidebar material unless the
 /// preference is Opaque or Transparent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WindowBackdropPreference {
     Auto,
-    Mica,
     Blurred,
     Transparent,
     Opaque,
@@ -89,8 +88,9 @@ fn config_window_backdrop_preference(config_value: Option<&str>) -> WindowBackdr
 
 fn parse_window_backdrop_preference(value: &str) -> WindowBackdropPreference {
     match value.trim().to_ascii_lowercase() {
-        value if value.is_empty() || value == "auto" => WindowBackdropPreference::Auto,
-        value if value == "mica" => WindowBackdropPreference::Mica,
+        value if value.is_empty() || value == "auto" || value == "mica" => {
+            WindowBackdropPreference::Auto
+        }
         value if value == "blurred" || value == "acrylic" => WindowBackdropPreference::Blurred,
         value if value == "transparent" => WindowBackdropPreference::Transparent,
         value if value == "opaque" || value == "off" => WindowBackdropPreference::Opaque,
@@ -118,6 +118,13 @@ fn window_background_appearance_for_preference(
     }
 }
 
+/// Install gate for the native AppKit sidebar material, checked once when the
+/// main window opens. It follows the resolved backdrop preference, so it
+/// honors the `PANEFLOW_WINDOW_BACKDROP` override, and it deliberately ignores
+/// `macos_chrome_material`: the caller passes that flag to the installer
+/// separately. Not a duplicate of
+/// `PaneFlowConfig::macos_chrome_material_enabled`, which gates chrome paint
+/// from config alone.
 #[cfg(target_os = "macos")]
 pub(crate) fn macos_sidebar_material_enabled(config_value: Option<&str>) -> bool {
     !matches!(
@@ -266,6 +273,28 @@ mod material_tests {
         assert_eq!(
             cockpit_backdrop_background(background, true, false),
             background
+        );
+    }
+
+    #[test]
+    fn legacy_mica_backdrop_parses_to_auto() {
+        // Issue #815: the Mica variant is gone. An older `"mica"` value must
+        // keep loading and resolve exactly like `auto`: a transparent window
+        // with the sidebar material installed.
+        for value in ["mica", "Mica", "  MICA  "] {
+            assert_eq!(
+                parse_window_backdrop_preference(value),
+                WindowBackdropPreference::Auto,
+                "{value:?}"
+            );
+        }
+        assert_eq!(
+            config_window_backdrop_preference(Some("mica")),
+            config_window_backdrop_preference(Some("auto"))
+        );
+        assert_eq!(
+            window_background_appearance_for_preference(parse_window_backdrop_preference("mica")),
+            WindowBackgroundAppearance::Transparent
         );
     }
 }

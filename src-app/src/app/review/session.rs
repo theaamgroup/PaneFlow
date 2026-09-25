@@ -15,8 +15,6 @@ pub(crate) fn surface_for_subject(subject: &ReviewSubject) -> SurfaceDefinition 
         surface_type: Some("diff".to_string()),
         name: Some(subject.worktree.branch.clone()),
         custom_name: None,
-        command: None,
-        prompt: None,
         cwd: Some(subject.worktree.path.to_string_lossy().into_owned()),
         path: Some(subject.repo_root.to_string_lossy().into_owned()),
         env: None,

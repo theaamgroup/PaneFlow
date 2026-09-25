@@ -110,9 +110,6 @@ actions!(
         // context-free action with its live binding. `secondary-shift-o` here;
         // upstream's `secondary-shift-p` is Pane Overview in this fork (#339).
         OpenCommandPalette,
-        // Issue #524 (upstream 9aa03d09 part 5): the Clone repository modal.
-        // No default chord; reached from the palette row and the Workspaces
-        // rail's empty state.
         // Toggle the Review rails and pane grid.
         OpenDiffView,
         // US-003 of tasks/prd-ai-in-diff-2026-Q3.md - copy the hunk under the

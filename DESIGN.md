@@ -234,8 +234,8 @@ Color resolves in three layers.
    `scrollbar_thumb`, `link_text`, and two title bar colors — plus a 30-slot
    `SyntaxPalette` for Changes and Review diffs
    (`theme/model.rs:11-64,75-104`).
-2. **UI colors**: the 30 semantic roles plus one flag (`use_theme_diff_washes`)
-   that the chrome consumes, `UiColors` (`theme/model.rs:522-596`). Vercel,
+2. **UI colors**: the 24 semantic roles plus one flag (`use_theme_diff_washes`)
+   that the chrome consumes, `UiColors` (`theme/model.rs:522-576`). Vercel,
    Claude, and Cursor each ship their own; PaneFlow Dark and PaneFlow Light
    carry `ui: None` and are derived by lightness.
 3. **Local tints**: alpha washes computed at render time from `text`, `muted`,
@@ -248,13 +248,13 @@ only for the fixed and Contextual values listed in 4.3.
 **The palette lives in two files, not one.** `theme/builtin.rs` holds the ANSI
 and base slots for all eight variants and the `UiColors` of Vercel, Claude, and
 Cursor. The PaneFlow Dark and PaneFlow Light `UiColors` are computed in
-`theme/model.rs::ui_colors_with` (`:677-778`), and the dark surface constants
+`theme/model.rs::ui_colors_with` (`:657-746`), and the dark surface constants
 `CHROME_BACKGROUND_HEX`, `TERMINAL_BACKGROUND_HEX`, and `BORDER_HEX` are at
 `theme/model.rs:458-461`. Cite both files when changing a role.
 
-`UiColors::diff_colors()` (`theme/model.rs:620-640`) is the single source the
+`UiColors::diff_colors()` (`theme/model.rs:600-620`) is the single source the
 diff dock, the Review view, and the Changes rail read; `UiColors::group_color(i)`
-(`:643-658`) wraps modulo 8 so no render site indexes the broadcast slots by
+(`:622-636`) wraps modulo 8 so no render site indexes the broadcast slots by
 hand.
 
 ### 4.2 Semantic roles
@@ -269,18 +269,15 @@ hand.
 | `muted` | Secondary text, icons at rest, eyebrows | `#a0a0a0` | `#6a6a6a` |
 | `text` | Primary text, icons on hover | `#dddddd` | `#262626` |
 | `accent` | Links, selected metadata, the one primary action, info callouts | `#57d5c4` | `#4c6fff` |
-| `tool_card_header_bg` | Reserved; no surface consumes it today | `#2e2e2e` | `#f1f1f1` |
 | `vc_added`, `vc_modified`, `vc_deleted`, `vc_conflict` | Diffstat, status letters, change bars, attention border | `#57d992`, `#ffd166`, `#ff6f6a`, `#ffa657` | `#40a02b`, `#df8e1d`, `#d20f39`, `#fe640b` |
-| `vc_*_background` | Row washes in the diff | the matching hue at 0.12 | at 0.16 |
-| `vc_word_added`, `vc_word_deleted` | Reserved; word diff was removed (5.4) | the matching hue at 0.40 | at 0.40 |
+| `vc_added_background`, `vc_deleted_background` | Row washes in the diff | the matching hue at 0.12 | at 0.16 |
 | `group_1` to `group_8` | Broadcast group stripe and picker | `#7eb6ff`, `#57d992`, `#ffd166`, `#ff6f6a`, `#c79bff`, `#57d5c4`, `#ffa657`, `#9ea7ff` | Catppuccin Latte hues |
-| `agent_claude`, `agent_codex` | Identity dots and status glyphs | `#ffa657`, `#7eb6ff` | `#e89271`, `#5b6cff` |
 | `agent_error`, `agent_stalled` | Failed and stalled agent states | `#ff6f6a`, `#a0a0a0` | `#d20f39`, `#808080` |
 
 The dark work surface is `#181818` and the dark chrome is `#141414`: the panel
 is lighter than the shell around it, which is what makes the inset card read
 as a card without a shadow. Light inverts the ramp: pure white work surface,
-`#f7f7f7` cards, and a `#f3f4f9` title bar (`theme/builtin.rs:123`).
+`#f7f7f7` cards, and a `#f3f4f9` title bar (`theme/builtin.rs:119`).
 
 `apply_surface_overrides` (`theme/model.rs:491-511`) normalizes a dark preset
 that ships no `UiColors` — in practice only PaneFlow Dark, since the other six
@@ -294,9 +291,9 @@ recomputes the selection foreground.
 
 Diff colors on a dark theme fall back to PaneFlow's canonical green and red
 with opaque row washes unless the preset sets `use_theme_diff_washes`; **both
-Vercel variants do** (`builtin.rs:251,335`), and no other preset does. The
+Vercel variants do** (`builtin.rs:247,325`), and no other preset does. The
 opaque dark fallbacks are `#57d992` / `#ff6f6a` on `#1d3a2b` / `#402425`, with
-gutters `#16281f` / `#2c1718` (`theme/model.rs:631-639`).
+gutters `#16281f` / `#2c1718` (`theme/model.rs:611-619`).
 
 Status hues are functional and MUST NOT be recolored to match a brand when
 doing so weakens the meaning. The terminal selection foreground is never
@@ -807,10 +804,10 @@ the role itself carries; do not "restore" it.
 
 **Word-level diff was deliberately removed** (`diff/engine.rs:12-16`): on
 rewritten lines it painted a second, louder wash over the row tint and read as
-noise rather than precision. `vc_word_added` and `vc_word_deleted` survive as
-theme slots consumed by nothing. There is no whitespace comparison mode and no
-Highlight or Whitespace menu row; the dock's `Dock options` menu is Layout,
-Collapse/Expand all, and Refresh Changes only.
+noise rather than precision; its theme slots are gone too. There is no
+whitespace comparison mode and no Highlight or Whitespace menu row; the
+dock's `Dock options` menu is Layout, Collapse/Expand all, and Refresh
+Changes only.
 
 In the Changes tab, hovering a modified file's block shows a `Revert` pill,
 56 by 16 on the sidebar hover tint, inset 10 from the right. Changes and
@@ -1370,8 +1367,6 @@ behavior.
   `!cockpit`. Both are **Migration**; delete rather than revive.
 - The app's own context menus use plain 4 px and 7 px rounds instead of
   `ROW_RADIUS`, and there is no `menu_item` primitive to unify them.
-- `tool_card_header_bg`, `vc_word_added`, and `vc_word_deleted` are defined by
-  every preset and consumed by nothing.
 - The traffic-light brand padding is an inline `px(80.0)` literal rather than a
   named constant.
 - Roughly two hundred `text_size(px(N.))` literals remain where a named size

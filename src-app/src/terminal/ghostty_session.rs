@@ -2966,7 +2966,6 @@ fn handle_terminal_command(
                     point,
                     link: link.map(|link| HyperlinkZone {
                         uri: link.uri.clone(),
-                        id: String::new(),
                         start: point,
                         end: point,
                         is_openable: super::element::is_url_scheme_openable(&link.uri),

@@ -12,7 +12,7 @@ use crate::settings::components::{
     deferred_select_menu, hairline, select_chevron, select_listbox, select_option, select_trigger,
     setting_card,
 };
-use crate::{PaneFlowApp, WorkspaceTemplateDropdown};
+use crate::{NewTabBranchDropdown, PaneFlowApp};
 
 fn branch_label(branch: &str) -> String {
     if branch.is_empty() {
@@ -47,7 +47,7 @@ impl PaneFlowApp {
     ) -> AnyElement {
         let workspace = ws_idx.and_then(|index| self.workspaces.get(index));
         let ws_id = workspace.map(|ws| ws.id);
-        let which = WorkspaceTemplateDropdown::NewTabBranch(ws_id);
+        let which = NewTabBranchDropdown::NewTabBranch(ws_id);
         let is_open = self.new_tab_branch_dropdown == Some(which);
         let default = self.cached_config.default_new_tab_branch();
         let current = workspace.map_or_else(
@@ -227,7 +227,7 @@ impl PaneFlowApp {
         self.new_tab_branch_dropdown = if was_open {
             None
         } else {
-            Some(WorkspaceTemplateDropdown::NewTabBranch(ws_id))
+            Some(NewTabBranchDropdown::NewTabBranch(ws_id))
         };
         if !was_open {
             for index in 0..self.workspaces.len() {

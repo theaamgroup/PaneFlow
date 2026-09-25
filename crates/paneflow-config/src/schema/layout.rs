@@ -2,90 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::warn;
 
-/// A single command definition, compatible with the cmux workspace format.
-///
-/// Each entry is either a workspace definition (with `workspace`) or a simple
-/// shell command (with `command`).
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct CommandDefinition {
-    /// Display name (must not be blank).
-    pub name: String,
-    /// Optional human-readable description.
-    pub description: Option<String>,
-    /// Search keywords for fuzzy matching.
-    #[serde(default)]
-    pub keywords: Vec<String>,
-    /// Workspace layout definition (mutually exclusive with `command`).
-    pub workspace: Option<WorkspaceDefinition>,
-    /// Shell command string (mutually exclusive with `workspace`).
-    pub command: Option<String>,
-}
-
-impl<'de> Deserialize<'de> for CommandDefinition {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct RawCommandDefinition {
-            name: String,
-            description: Option<String>,
-            #[serde(default)]
-            keywords: Vec<String>,
-            workspace: Option<WorkspaceDefinition>,
-            command: Option<String>,
-        }
-        let raw = RawCommandDefinition::deserialize(deserializer)?;
-        if raw.name.trim().is_empty() {
-            return Err(serde::de::Error::custom("command name must not be blank"));
-        }
-        match (&raw.workspace, &raw.command) {
-            (Some(_), None) => {}
-            (None, Some(c)) if !c.trim().is_empty() => {}
-            (Some(_), Some(_)) => {
-                return Err(serde::de::Error::custom(
-                    "command must contain exactly one of `workspace` or `command`",
-                ));
-            }
-            (None, Some(_)) => {
-                return Err(serde::de::Error::custom("shell command must not be blank"));
-            }
-            (None, None) => {
-                return Err(serde::de::Error::custom(
-                    "command must contain either `workspace` or `command`",
-                ));
-            }
-        }
-        Ok(Self {
-            name: raw.name,
-            description: raw.description,
-            keywords: raw.keywords,
-            workspace: raw.workspace,
-            command: raw.command,
-        })
-    }
-}
-
-/// Workspace definition containing layout, working directory, and visual config.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct WorkspaceDefinition {
-    /// Workspace display name.
-    pub name: Option<String>,
-    /// Default working directory for the workspace.
-    pub cwd: Option<String>,
-    /// Historical layout preset on a leftover `commands` entry.
-    ///
-    /// Accepted values are `"even_h"`, `"even_v"`, `"main_vertical"`, and
-    /// `"tiled"`. The `commands` array is accepted and ignored (issue #607).
-    /// Older configs may omit this and rely on `layout` alone.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub layout_preset: Option<String>,
-    /// Color as a 6-digit hex string (e.g. "ff6600").
-    pub color: Option<String>,
-    /// Root layout node describing pane arrangement.
-    pub layout: Option<LayoutNode>,
-}
-
 /// A node in the layout tree: either a leaf pane or a split container.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -410,6 +326,10 @@ pub(crate) fn default_layout_pane() -> LayoutNode {
     }
 }
 /// A surface within a pane (terminal, browser, etc.).
+///
+/// Older session files may still carry a surface `command` or `prompt`
+/// (issue #817). Unknown keys are ignored, so those files load and restore
+/// never reads either value.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SurfaceDefinition {
     /// Stable pane identity and current task; absent in older sessions.
@@ -424,14 +344,6 @@ pub struct SurfaceDefinition {
     /// and survives restart via this field. Cleared by renaming to empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_name: Option<String>,
-    /// Shell command to run in this surface.
-    pub command: Option<String>,
-    /// Prompt text to prefill after launching an agent command.
-    ///
-    /// Kept optional so session persistence and plain command panes do not
-    /// carry template-only state.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
     /// Working directory override for this surface.
     pub cwd: Option<String>,
     /// Optional path stored with a surface. Older sessions recorded a
@@ -468,8 +380,6 @@ impl Default for SurfaceDefinition {
             agent_context: None,
             name: None,
             custom_name: None,
-            command: None,
-            prompt: None,
             cwd: None,
             path: None,
             env: None,
