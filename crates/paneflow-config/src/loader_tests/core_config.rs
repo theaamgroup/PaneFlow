@@ -6,7 +6,6 @@ fn test_default_config() {
     let config = PaneFlowConfig::default();
     assert!(config.shortcuts.is_empty());
     assert!(config.default_shell.is_none());
-    assert!(config.commands.is_empty());
 }
 
 #[test]
@@ -230,7 +229,6 @@ fn test_valid_minimal_config() {
     let config = parse_and_validate(json);
     assert_eq!(config.default_shell, Some("/bin/zsh".to_string()));
     assert_eq!(config.shortcuts.get("ctrl+t"), Some(&"new_tab".to_string()));
-    assert!(config.commands.is_empty());
 }
 
 #[test]
@@ -294,23 +292,51 @@ fn leftover_agent_summary_enabled_still_loads() {
 
 #[test]
 fn leftover_commands_array_still_loads() {
-    // Issue #607: the workspace-template builder is gone, but an older
-    // paneflow.json may still carry a non-empty `commands` array. The key is
-    // accepted and ignored, not a hard parse failure, and siblings still load.
+    // Issue #607 / #817: the workspace-template builder is gone, but an older
+    // paneflow.json may still carry a non-empty `commands` array. No field
+    // backs the key, so serde ignores it: the rest of the file loads and the
+    // key does not round-trip.
     let config = parse_and_validate(
         r#"{
             "theme": "Cursor Dark",
+            "default_shell": "/bin/zsh",
             "commands": [
                 {
                     "name": "dev",
                     "command": "echo hi"
+                },
+                {
+                    "name": "",
+                    "workspace": {"layout": {"type": "pane", "surfaces": []}}
                 }
-            ]
+            ],
+            "font_size": 15.0
         }"#,
     );
     assert_eq!(config.theme.as_deref(), Some("Cursor Dark"));
-    assert_eq!(config.commands.len(), 1);
-    assert_eq!(config.commands[0].name, "dev");
+    assert_eq!(config.default_shell.as_deref(), Some("/bin/zsh"));
+    assert_eq!(config.font_size, Some(15.0));
+    let json = serde_json::to_value(&config).unwrap();
+    assert!(json.get("commands").is_none(), "{json}");
+}
+
+#[test]
+fn leftover_commands_non_array_value_still_loads() {
+    // Issue #817: a malformed `commands` value (not an array) is ignored like
+    // any unknown key. It must not cost the rest of the file.
+    for bad in [
+        r#""dev""#,
+        "7",
+        "true",
+        "null",
+        r#"{"name": "dev", "command": "echo hi"}"#,
+    ] {
+        let json = format!(r#"{{"theme": "One Dark", "commands": {bad}, "font_size": 15.0}}"#);
+        let config = try_parse_and_validate(&json)
+            .unwrap_or_else(|e| panic!("`commands: {bad}` must not fail the parse: {e}"));
+        assert_eq!(config.theme.as_deref(), Some("One Dark"), "{bad}");
+        assert_eq!(config.font_size, Some(15.0), "{bad}");
+    }
 }
 
 #[test]
@@ -371,37 +397,6 @@ fn test_legacy_windows_material_and_backend_keys_still_load() {
 }
 
 #[test]
-fn test_blank_name_skipped() {
-    let json = r#"{
-        "commands": [
-            {"name": "", "keywords": []},
-            {"name": "  ", "keywords": []},
-            {"name": "valid", "keywords": ["test"], "command": "echo valid"}
-        ]
-    }"#;
-    let config = parse_and_validate(json);
-    assert_eq!(config.commands.len(), 1);
-    assert_eq!(config.commands[0].name, "valid");
-}
-
-#[test]
-fn test_malformed_command_entry_does_not_drop_valid_siblings_or_config() {
-    let json = r#"{
-        "theme": "One Dark",
-        "commands": [
-            {"description": "missing name", "command": "bad"},
-            {"name": "valid", "keywords": ["test"], "command": "echo ok"}
-        ]
-    }"#;
-
-    let config = parse_and_validate(json);
-
-    assert_eq!(config.theme.as_deref(), Some("One Dark"));
-    assert_eq!(config.commands.len(), 1);
-    assert_eq!(config.commands[0].name, "valid");
-}
-
-#[test]
 fn a_malformed_mcp_bridge_prompt_dismissed_value_loads_as_empty() {
     // Issue #443: the dismissal list is written by the sidebar callout, but a
     // hand edit can leave a string or a number there. Either must load as
@@ -413,104 +408,16 @@ fn a_malformed_mcp_bridge_prompt_dismissed_value_loads_as_empty() {
             config.mcp_bridge_prompt_dismissed.is_empty(),
             "{bad} must load as the empty list"
         );
-        assert!(!config.mcp_bridge_prompt_dismissed_for("codex"));
         assert_eq!(config.theme.as_deref(), Some("One Dark"));
     }
 
     let config = parse_and_validate(r#"{"mcp_bridge_prompt_dismissed": ["codex", "claude-code"]}"#);
     assert_eq!(config.mcp_bridge_prompt_dismissed, ["codex", "claude-code"]);
-    assert!(config.mcp_bridge_prompt_dismissed_for("codex"));
-    assert!(!config.mcp_bridge_prompt_dismissed_for("gemini"));
 
     // An absent key serializes as no key at all, so a config that never
     // dismissed anything does not grow an empty array on every save.
     let json = serde_json::to_string(&PaneFlowConfig::default()).unwrap();
     assert!(!json.contains("mcp_bridge_prompt_dismissed"));
-}
-
-#[test]
-fn test_command_requires_exactly_one_payload() {
-    let config = parse_and_validate(
-        r#"{
-            "commands": [
-                {"name": "missing"},
-                {"name": "both", "command": "echo bad", "workspace": {}},
-                {"name": "blank", "command": "   "},
-                {"name": "valid", "command": "echo ok"}
-            ]
-        }"#,
-    );
-    assert_eq!(config.commands.len(), 1);
-    assert_eq!(config.commands[0].name, "valid");
-}
-
-#[test]
-fn test_command_with_workspace() {
-    let json = r#"{
-        "commands": [{
-            "name": "dev",
-            "description": "Development workspace",
-            "keywords": ["dev", "work"],
-            "workspace": {
-                "name": "Dev Workspace",
-                "cwd": "/home/user/projects",
-                "color": "ff6600",
-                "layout": {
-                    "type": "split",
-                    "direction": "horizontal",
-                    "ratio": 0.5,
-                    "children": [
-                        {
-                            "type": "pane",
-                            "surfaces": [{"surface_type": "terminal", "command": "vim"}]
-                        },
-                        {
-                            "type": "pane",
-                            "surfaces": [{"surface_type": "terminal", "command": "cargo watch"}]
-                        }
-                    ]
-                }
-            }
-        }]
-    }"#;
-    let config = parse_and_validate(json);
-    assert_eq!(config.commands.len(), 1);
-    let cmd = &config.commands[0];
-    assert_eq!(cmd.name, "dev");
-    assert_eq!(cmd.description.as_deref(), Some("Development workspace"));
-
-    let ws = cmd.workspace.as_ref().unwrap();
-    assert_eq!(ws.name.as_deref(), Some("Dev Workspace"));
-    assert_eq!(ws.color.as_deref(), Some("ff6600"));
-
-    match ws.layout.as_ref().unwrap() {
-        LayoutNode::Split {
-            direction,
-            ratio,
-            children,
-            ..
-        } => {
-            assert_eq!(direction, "horizontal");
-            assert_eq!(*ratio, Some(0.5));
-            assert_eq!(children.len(), 2);
-        }
-        _ => panic!("expected split layout"),
-    }
-}
-
-#[test]
-fn test_command_with_shell_command() {
-    let json = r#"{
-        "commands": [{
-            "name": "htop",
-            "keywords": ["monitor"],
-            "command": "htop"
-        }]
-    }"#;
-    let config = parse_and_validate(json);
-    assert_eq!(config.commands.len(), 1);
-    assert_eq!(config.commands[0].command.as_deref(), Some("htop"));
-    assert!(config.commands[0].workspace.is_none());
 }
 
 /// Issue #241: `open(O_RDONLY)` on a FIFO with no writer blocks forever, so the

@@ -1183,7 +1183,7 @@ impl PaneFlowApp {
             .bg(crate::app::constants::cockpit_chrome_background(
                 theme.title_bar_background,
                 window.is_window_active(),
-                self.cached_config.cockpit_chrome_material_enabled(),
+                self.cached_config.macos_chrome_material_enabled(),
             ))
             .flex()
             .flex_col();
@@ -3164,7 +3164,6 @@ mod tests {
         paneflow_config::schema::SidebarShow {
             branch: Some(true),
             diffstat: Some(diffstat),
-            pr: Some(false),
             indent_guide: Some(false),
         }
     }

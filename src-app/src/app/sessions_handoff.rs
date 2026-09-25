@@ -33,10 +33,6 @@ pub(crate) enum PayloadKind {
     /// `SessionMeta::summary`: an LLM title, or the first user message every
     /// reader already folds into that field.
     Summary,
-    /// A first user message a reader records *separately* from its title.
-    /// No reader does today ([`first_user_message`] is the seam one would
-    /// fill), so [`payload_for`] never returns it; a test pins that.
-    FirstUserMessage,
     /// Nothing usable was recorded: the text is the identifier line.
     Identifier,
 }
@@ -65,26 +61,10 @@ pub(crate) fn payload_for(meta: &SessionMeta) -> HandoffPayload {
             text: cap_summary(summary),
         };
     }
-    if let Some(first) = first_user_message(meta) {
-        return HandoffPayload {
-            kind: PayloadKind::FirstUserMessage,
-            text: cap_summary(&first),
-        };
-    }
     HandoffPayload {
         kind: PayloadKind::Identifier,
         text: identifier_line(meta),
     }
-}
-
-/// The seam for a reader that records the first user message apart from the
-/// title. `SessionMeta` has no such field: Claude prefers an AI title and
-/// falls back to the first user message inside `summary`
-/// (`claude_sessions.rs`), Codex and Pi derive `summary` from the first user
-/// record, OpenCode stores a title, Gemini and Cursor scrape a line of CLI
-/// output. So this is `None` for every reader until one grows the field.
-fn first_user_message(_meta: &SessionMeta) -> Option<String> {
-    None
 }
 
 /// Clipboard text of "Copy summary": the same chain as the block, not the
@@ -94,9 +74,9 @@ pub(crate) fn copy_text(meta: &SessionMeta) -> String {
     payload_for(meta).text
 }
 
-/// The block a different harness is started with. `target` is carried for a
-/// future per-target preamble; today every target gets the same text.
-pub(crate) fn handoff_prompt(meta: &SessionMeta, _target: TerminalAgent) -> String {
+/// The block a different harness is started with. Every target gets the
+/// same text.
+pub(crate) fn handoff_prompt(meta: &SessionMeta) -> String {
     let payload = payload_for(meta);
     let mut block = format!(
         "Continue this work from a prior {} session.\nSession: {}\nCwd: {}\n",
@@ -110,7 +90,7 @@ pub(crate) fn handoff_prompt(meta: &SessionMeta, _target: TerminalAgent) -> Stri
         block.push('\n');
     }
     match payload.kind {
-        PayloadKind::Summary | PayloadKind::FirstUserMessage => block.push_str("Summary:\n"),
+        PayloadKind::Summary => block.push_str("Summary:\n"),
         PayloadKind::Identifier => {
             block.push_str("Summary: (none recorded; only the session identifier is known)\n")
         }
@@ -243,7 +223,7 @@ mod tests {
             "",
         );
         assert_eq!(
-            handoff_prompt(&m, TerminalAgent::Codex),
+            handoff_prompt(&m),
             format!(
                 "Continue this work from a prior Claude Code session.\n\
                  Session: {ID}\n\
@@ -258,7 +238,7 @@ mod tests {
     fn handoff_prompt_adds_the_branch_line_only_when_known() {
         let m = meta(SessionAgent::Codex, Some("Ship the release"), "feat/x");
         assert_eq!(
-            handoff_prompt(&m, TerminalAgent::ClaudeCode),
+            handoff_prompt(&m),
             format!(
                 "Continue this work from a prior Codex session.\n\
                  Session: {ID}\n\
@@ -269,14 +249,14 @@ mod tests {
             )
         );
         let unbranched = meta(SessionAgent::Codex, Some("Ship the release"), "");
-        assert!(!handoff_prompt(&unbranched, TerminalAgent::ClaudeCode).contains("Branch:"));
+        assert!(!handoff_prompt(&unbranched).contains("Branch:"));
     }
 
     #[test]
     fn handoff_prompt_identifier_kind_marks_the_missing_summary() {
         let m = meta(SessionAgent::Gemini, None, "main");
         assert_eq!(
-            handoff_prompt(&m, TerminalAgent::Grok),
+            handoff_prompt(&m),
             format!(
                 "Continue this work from a prior Gemini session.\n\
                  Session: {ID}\n\
@@ -292,24 +272,15 @@ mod tests {
     fn handoff_prompt_withholds_an_id_that_fails_the_resume_allow_list() {
         let mut m = meta(SessionAgent::Claude, Some("Real title"), "");
         m.session_id = "--dangerously-skip-permissions".to_string();
-        let block = handoff_prompt(&m, TerminalAgent::Codex);
+        let block = handoff_prompt(&m);
         assert!(block.contains("Session: (id withheld)\n"), "{block}");
         assert!(!block.contains("dangerously"), "{block}");
     }
 
     #[test]
-    fn handoff_prompt_is_the_same_for_every_target() {
-        let m = meta(SessionAgent::Claude, Some("Same for all"), "main");
-        let first = handoff_prompt(&m, TerminalAgent::Codex);
-        for target in TerminalAgent::ALL {
-            assert_eq!(handoff_prompt(&m, target), first, "{target:?}");
-        }
-    }
-
-    #[test]
     fn handoff_prompt_never_submits_and_never_carries_a_carriage_return() {
         let m = meta(SessionAgent::Claude, Some("line one\r\nline two\n"), "");
-        let block = handoff_prompt(&m, TerminalAgent::Codex);
+        let block = handoff_prompt(&m);
         assert!(!block.contains('\r'), "{block:?}");
         assert!(!block.ends_with('\n'), "{block:?}");
         assert!(block.ends_with("line one\nline two"), "{block:?}");
@@ -322,7 +293,7 @@ mod tests {
         // and is identifier-shaped.)
         let long = "z".repeat(10 * 1024);
         let m = meta(SessionAgent::Claude, Some(&long), "");
-        let block = handoff_prompt(&m, TerminalAgent::Codex);
+        let block = handoff_prompt(&m);
         let summary = block.split("Summary:\n").nth(1).expect("summary section");
         assert!(
             summary.ends_with(" […]"),
@@ -337,7 +308,7 @@ mod tests {
         // cap.
         let wide = "é".repeat(6 * 1024); // 12 KiB, two bytes per char
         let m = meta(SessionAgent::Claude, Some(&wide), "");
-        let block = handoff_prompt(&m, TerminalAgent::Codex);
+        let block = handoff_prompt(&m);
         let summary = block.split("Summary:\n").nth(1).expect("summary section");
         let body = summary.strip_suffix(" […]").expect("marker");
         assert!(body.len() <= HANDOFF_SUMMARY_CAP);
@@ -346,7 +317,7 @@ mod tests {
 
         // Under the cap nothing is touched.
         let short = meta(SessionAgent::Claude, Some("short"), "");
-        assert!(!handoff_prompt(&short, TerminalAgent::Codex).contains("[…]"));
+        assert!(!handoff_prompt(&short).contains("[…]"));
     }
 
     #[test]
@@ -403,22 +374,10 @@ mod tests {
     }
 
     #[test]
-    fn payload_for_never_returns_first_user_message_today() {
-        // Reserved for a reader that grows a separate first-user-message
-        // field; every reader folds it into `summary` for now.
-        for summary in [None, Some(""), Some("title"), Some("a/b.rs")] {
-            for agent in SessionAgent::ALL {
-                let m = meta(agent, summary, "");
-                assert_ne!(payload_for(&m).kind, PayloadKind::FirstUserMessage);
-            }
-        }
-    }
-
-    #[test]
     fn copy_text_equals_the_blocks_payload() {
         for summary in [None, Some("Fix the race"), Some("abc.jsonl")] {
             let m = meta(SessionAgent::Claude, summary, "");
-            let block = handoff_prompt(&m, TerminalAgent::Codex);
+            let block = handoff_prompt(&m);
             let payload = copy_text(&m);
             assert!(!payload.is_empty());
             assert!(block.ends_with(&payload), "{block:?} vs {payload:?}");
@@ -433,7 +392,7 @@ mod tests {
             Some("/Users/x/.claude/projects/-Users-x-proj/019dc9ea.jsonl"),
             "",
         );
-        let block = handoff_prompt(&m, TerminalAgent::Codex);
+        let block = handoff_prompt(&m);
         assert!(!block.contains(".jsonl"), "{block}");
         assert!(!block.contains(".claude/projects"), "{block}");
         assert!(!copy_text(&m).contains(".jsonl"));

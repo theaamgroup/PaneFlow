@@ -1392,38 +1392,6 @@ impl PaneFlowApp {
         self.leave_review_if_disabled(cx);
     }
 
-    /// Add a workspace rooted at the implicit launch directory.
-    ///
-    /// EP-003: the workspace is born empty - no tab, no pane, no PTY. Opening
-    /// a project is a filing gesture, not a request to run a shell; the user
-    /// picks what runs in it from the folder's `+` action or the new-pane picker.
-    #[allow(dead_code)]
-    pub(crate) fn create_workspace(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.session_restore.is_some() {
-            self.show_toast("Restoring session", cx);
-            return;
-        }
-        if self.workspaces.len() >= MAX_WORKSPACES {
-            self.show_toast(workspace_limit_reached(), cx);
-            return;
-        }
-        let cwd = crate::launch_cwd::implicit_launch_cwd();
-        if self.pending_worktree_teardown_conflicts(&cwd) {
-            self.show_toast("Workspace is still being retired", cx);
-            return;
-        }
-        let n = self.workspaces.len() + 1;
-        let ws_id = next_workspace_id();
-        let ws = Workspace::empty_with_cwd_and_id(ws_id, format!("Terminal {n}"), cwd);
-        // US-013: deferred git-stats probe off the render thread.
-        Self::spawn_initial_git_stats(ws_id, ws.cwd.clone(), cx);
-        self.watch_git_dir(&ws);
-        self.workspaces.push(ws);
-        self.active_idx = self.workspaces.len() - 1;
-        self.save_session(cx);
-        cx.notify();
-    }
-
     /// Open one workspace per directory in `paths`.
     ///
     /// Shared by the folder picker and the sidebar's file-manager drop: both
@@ -1894,8 +1862,8 @@ impl PaneFlowApp {
             // US-028: do NOT subscribe here - `create_pane` already wires
             // `handle_terminal_event` (main.rs:539). The duplicate subscription
             // fired every terminal event twice (double toast / port-scan /
-            // mutation) and leaked the extra subscription. `split()` and
-            // `create_workspace` prove the correct pattern (no manual subscribe).
+            // mutation) and leaked the extra subscription. `split()` proves
+            // the correct pattern (no manual subscribe).
             let new_pane = self.create_pane(terminal, ws_id, cx);
             if let Some(ws) = self.active_workspace_mut() {
                 ws.active_tab_mut().root = Some(LayoutTree::Leaf(new_pane));
@@ -5067,17 +5035,6 @@ mod tests {
         assert!(
             picker.contains("workspace_limit_reached()"),
             "the folder picker must toast at the cap: {picker}"
-        );
-
-        // The implicit launch-directory create.
-        let create = source_slice(
-            src,
-            "pub(crate) fn create_workspace(",
-            "pub(crate) fn open_workspace_folders(",
-        );
-        assert!(
-            create.contains("workspace_limit_reached()"),
-            "the launch-directory create must toast at the cap: {create}"
         );
 
         // The Open folder / drag-and-drop path: one toast after the loop, not

@@ -367,7 +367,6 @@ pub fn load_config_from_path(path: &std::path::Path) -> PaneFlowConfig {
 ///
 /// A malformed document or non-object root produces a warning and returns
 /// defaults.
-/// Individual commands with validation errors are filtered out with warnings.
 pub fn parse_and_validate(json: &str) -> PaneFlowConfig {
     parse_and_validate_with_path(json, Path::new("<config>"))
 }
@@ -386,8 +385,7 @@ pub fn parse_and_validate_with_path(json: &str, path: &Path) -> PaneFlowConfig {
 /// The hot reload path uses this so it can keep the previous config on a malformed
 /// save (never broadcasting defaults) AND avoid the old double-parse (a
 /// syntax-guard `from_str` followed by a second parse inside
-/// `parse_and_validate_with_path`). Command filtering + layout fixups are
-/// applied on the success path, unchanged.
+/// `parse_and_validate_with_path`).
 pub fn try_parse_and_validate(json: &str) -> Result<PaneFlowConfig, ConfigError> {
     // Parsing directly into a map makes a non-object root a typed error. Cold
     // start may choose defaults; hot reload can keep the last valid config.
@@ -400,18 +398,7 @@ pub fn try_parse_and_validate(json: &str) -> Result<PaneFlowConfig, ConfigError>
         Some(_) => warn!("config schema version is not a string; ignoring it"),
     }
 
-    let mut config: PaneFlowConfig = serde_json::from_value(Value::Object(root))?;
-
-    // Validate and fix layout nodes in-place.
-    for cmd in &mut config.commands {
-        if let Some(ref mut ws) = cmd.workspace {
-            if let Some(ref mut layout) = ws.layout {
-                validate_layout(layout);
-            }
-        }
-    }
-
-    Ok(config)
+    Ok(serde_json::from_value(Value::Object(root))?)
 }
 
 #[cfg(test)]

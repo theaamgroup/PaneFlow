@@ -93,10 +93,6 @@ pub fn preset_for_theme(theme_name: &str) -> &'static ThemePreset {
         .unwrap_or(&PRESETS[0])
 }
 
-pub fn preset_by_name(name: &str) -> Option<&'static ThemePreset> {
-    PRESETS.iter().find(|p| p.name.eq_ignore_ascii_case(name))
-}
-
 /// Whether `theme_name` is the light variant of its preset. Unknown names read
 /// as dark, matching [`DEFAULT_THEME`].
 pub fn theme_name_is_light(theme_name: &str) -> bool {
@@ -257,16 +253,12 @@ fn vercel_dark_ui() -> UiColors {
         muted: h(0x8a8a8a),
         text: h(0xededed),
         accent: h(0xffffff),
-        tool_card_header_bg: h(0x161616),
         vc_added: h(0x00d084),
         vc_modified: h(0xf5a623),
         vc_deleted: h(0xff5a5f),
         vc_conflict: h(0xff7a18),
         vc_added_background: ha(0x00d084, 0.16),
         vc_deleted_background: ha(0xff5a5f, 0.16),
-        vc_modified_background: ha(0xf5a623, 0.16),
-        vc_word_added: ha(0x00d084, 0.42),
-        vc_word_deleted: ha(0xff5a5f, 0.42),
         group_1: h(0xffffff),
         group_2: h(0x3291ff),
         group_3: h(0x00d084),
@@ -277,8 +269,6 @@ fn vercel_dark_ui() -> UiColors {
         group_8: h(0x999999),
         agent_error: h(0xff5a5f),
         agent_stalled: h(0x8a8a8a),
-        agent_claude: h(0xff7a18),
-        agent_codex: h(0x3291ff),
     }
 }
 
@@ -341,16 +331,12 @@ fn vercel_light_ui() -> UiColors {
         muted: h(0x666666),
         text: h(0x171717),
         accent: h(0x000000),
-        tool_card_header_bg: h(0xf0f0f0),
         vc_added: h(0x0f7b0f),
         vc_modified: h(0xa35200),
         vc_deleted: h(0xcd2b31),
         vc_conflict: h(0xbd4b00),
         vc_added_background: ha(0x0f7b0f, 0.16),
         vc_deleted_background: ha(0xcd2b31, 0.16),
-        vc_modified_background: ha(0xa35200, 0.16),
-        vc_word_added: ha(0x0f7b0f, 0.42),
-        vc_word_deleted: ha(0xcd2b31, 0.42),
         group_1: h(0x000000),
         group_2: h(0x0068d6),
         group_3: h(0x0f7b0f),
@@ -361,8 +347,6 @@ fn vercel_light_ui() -> UiColors {
         group_8: h(0x666666),
         agent_error: h(0xcd2b31),
         agent_stalled: h(0x666666),
-        agent_claude: h(0xbd4b00),
-        agent_codex: h(0x0068d6),
     }
 }
 
@@ -423,7 +407,6 @@ fn claude_dark_ui() -> UiColors {
         muted: h(0x93938b),
         text: h(0xe3dacc),
         accent: h(0xd97757),
-        tool_card_header_bg: h(0x313131),
         // Keep Paneflow's canonical dark diff/status hues. Claude only changes
         // the surrounding surfaces; Review/sidebar red, green and yellow must
         // remain stable across dark themes.
@@ -433,9 +416,6 @@ fn claude_dark_ui() -> UiColors {
         vc_conflict: h(0xffa657),
         vc_added_background: ha(0x57d992, 0.12),
         vc_deleted_background: ha(0xff6f6a, 0.12),
-        vc_modified_background: ha(0xffd166, 0.12),
-        vc_word_added: ha(0x57d992, 0.40),
-        vc_word_deleted: ha(0xff6f6a, 0.40),
         group_1: h(0xd97757),
         group_2: h(0x8fa4b8),
         group_3: h(0x9ab38a),
@@ -446,8 +426,6 @@ fn claude_dark_ui() -> UiColors {
         group_8: h(0xc3c2b7),
         agent_error: h(0xd97757),
         agent_stalled: h(0x93938b),
-        agent_claude: h(0xd97757),
-        agent_codex: h(0x8fa4b8),
     }
 }
 
@@ -508,7 +486,6 @@ fn claude_light_ui() -> UiColors {
         muted: h(0x83827d),
         text: h(0x3d3929),
         accent: h(0xd97757),
-        tool_card_header_bg: h(0xf3f0e7),
         // Keep Paneflow's canonical light diff/status hues (Latte family).
         // Claude only changes the surrounding surfaces; Review/sidebar red,
         // green and yellow must remain stable across light themes.
@@ -518,9 +495,6 @@ fn claude_light_ui() -> UiColors {
         vc_conflict: h(0xfe640b),
         vc_added_background: ha(0x40a02b, 0.16),
         vc_deleted_background: ha(0xd20f39, 0.16),
-        vc_modified_background: ha(0xdf8e1d, 0.16),
-        vc_word_added: ha(0x40a02b, 0.40),
-        vc_word_deleted: ha(0xd20f39, 0.40),
         group_1: h(0xd97757),
         group_2: h(0x4a6fa5),
         group_3: h(0x4f7a3f),
@@ -531,8 +505,6 @@ fn claude_light_ui() -> UiColors {
         group_8: h(0x83827d),
         agent_error: h(0xd20f39),
         agent_stalled: h(0x83827d),
-        agent_claude: h(0xd97757),
-        agent_codex: h(0x4a6fa5),
     }
 }
 
@@ -596,7 +568,6 @@ fn cursor_dark_ui() -> UiColors {
         muted: h(0x989898),
         text: h(0xf0f0f0),
         accent: h(0xa0d0f0),
-        tool_card_header_bg: h(0x242424),
         // Keep Paneflow's canonical dark diff/status hues. Cursor only changes
         // the surrounding IDE surfaces; Review/sidebar status colors stay
         // stable across dark themes.
@@ -606,9 +577,6 @@ fn cursor_dark_ui() -> UiColors {
         vc_conflict: h(0xffa657),
         vc_added_background: ha(0x57d992, 0.12),
         vc_deleted_background: ha(0xff6f6a, 0.12),
-        vc_modified_background: ha(0xffd166, 0.12),
-        vc_word_added: ha(0x57d992, 0.40),
-        vc_word_deleted: ha(0xff6f6a, 0.40),
         group_1: h(0xa0d0f0),
         group_2: h(0x4074e0),
         group_3: h(0x57d992),
@@ -619,8 +587,6 @@ fn cursor_dark_ui() -> UiColors {
         group_8: h(0xf0f0f0),
         agent_error: h(0xff6f6a),
         agent_stalled: h(0x989898),
-        agent_claude: h(0xffa657),
-        agent_codex: h(0xa0d0f0),
     }
 }
 
@@ -682,7 +648,6 @@ fn cursor_light_ui() -> UiColors {
         muted: h(0x767676),
         text: h(0x1e1e1e),
         accent: h(0x0f6fc5),
-        tool_card_header_bg: h(0xeaeaea),
         // Keep Paneflow's canonical light diff/status hues (Latte family).
         // Cursor only changes the surrounding IDE surfaces.
         vc_added: h(0x40a02b),
@@ -691,9 +656,6 @@ fn cursor_light_ui() -> UiColors {
         vc_conflict: h(0xfe640b),
         vc_added_background: ha(0x40a02b, 0.16),
         vc_deleted_background: ha(0xd20f39, 0.16),
-        vc_modified_background: ha(0xdf8e1d, 0.16),
-        vc_word_added: ha(0x40a02b, 0.40),
-        vc_word_deleted: ha(0xd20f39, 0.40),
         group_1: h(0x0f6fc5),
         group_2: h(0x0451a5),
         group_3: h(0x40a02b),
@@ -704,8 +666,6 @@ fn cursor_light_ui() -> UiColors {
         group_8: h(0x555555),
         agent_error: h(0xd20f39),
         agent_stalled: h(0x767676),
-        agent_claude: h(0xfe640b),
-        agent_codex: h(0x0f6fc5),
     }
 }
 

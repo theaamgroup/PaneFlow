@@ -221,10 +221,10 @@ pub(crate) enum GeneralDropdown {
     Shell,
 }
 
-/// Which Workspaces-page select is open. New-tab branch menus share it so
-/// only one popover is open at a time.
+/// Which New Tabs settings-page branch menu is open, keyed by workspace id
+/// (`None` = the default-branch row), so only one popover is open at a time.
 #[derive(Clone, Copy, PartialEq)]
-pub(crate) enum WorkspaceTemplateDropdown {
+pub(crate) enum NewTabBranchDropdown {
     NewTabBranch(Option<u64>),
 }
 
@@ -630,12 +630,20 @@ mod native_material_tests {
         // unbounded, it ran through every test module after the impl).
         let anchor = format!("impl Render for {} {{", "PaneFlowApp");
         let render = source_slice(include_str!("main.rs"), &anchor, "\n}\n");
-        for prefix in ["macos", "cockpit"] {
-            let getter = format!("{prefix}_chrome_material_enabled()");
-            let before = render
-                .split_once(getter.as_str())
-                .map(|(before, _)| before)
-                .unwrap();
+        // Issue #815 merged the two getters into one, so every read of it is
+        // checked, and both sites must still exist.
+        let getter = format!("{}_chrome_material_enabled()", "macos");
+        let sites: Vec<usize> = render
+            .match_indices(getter.as_str())
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            sites.len(),
+            2,
+            "expected the material view and shell tint reads"
+        );
+        for at in sites {
+            let before = &render[..at];
             let call = before.rfind("chrome_material_for_frame(").unwrap_or(0);
             assert!(
                 call > 0 && !before[call..].contains(';'),
@@ -1542,7 +1550,7 @@ struct PaneFlowApp {
     /// Codex settings: which General-page select is open (`None` = closed).
     general_dropdown: Option<GeneralDropdown>,
     /// Which new-tab branch select is open (`None` = closed).
-    new_tab_branch_dropdown: Option<WorkspaceTemplateDropdown>,
+    new_tab_branch_dropdown: Option<NewTabBranchDropdown>,
     /// Codex settings: cached MCP-bridge status snapshot, refreshed off-thread
     /// so the MCP page never does config I/O during a frame.
     mcp_status: Option<Vec<paneflow_mcp_install::StatusReport>>,
@@ -2079,7 +2087,7 @@ impl Render for PaneFlowApp {
         // The Cli pane grid keeps the terminal background on each pane card.
         // Diff and Settings use the opaque application surface.
         let chrome_material_active = chrome_material_for_frame(
-            self.cached_config.cockpit_chrome_material_enabled(),
+            self.cached_config.macos_chrome_material_enabled(),
             window.is_fullscreen(),
         );
         let native_material_active = chrome_material_active;
@@ -2419,7 +2427,6 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_toggle_primary_sidebar))
             // Issue #523: the command palette (every context-free action).
             .on_action(cx.listener(Self::handle_open_command_palette))
-            // Issue #524: the Clone repository modal.
             // EP-001 (cli-cockpit): Composer + broadcast groups.
             .on_action(cx.listener(Self::handle_open_composer))
             .on_action(cx.listener(Self::handle_toggle_broadcast_member))

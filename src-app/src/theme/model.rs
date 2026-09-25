@@ -532,20 +532,13 @@ pub struct UiColors {
     pub muted: Hsla,   // secondary text, labels
     pub text: Hsla,    // primary text
     pub accent: Hsla,  // active indicator, highlighted items
-    /// Distinct background for the `WaitingForConfirmation` tool-card
-    /// header (US-110 AC #2 of `tasks/prd-agent-ui-refactor-2026-Q3.md`).
-    /// Mirrors Zed's `tool_card_header_bg` -- an accent-tinted variant
-    /// of the card surface that signals "this row is actionable" at a
-    /// glance without redrawing the whole card.
-    pub tool_card_header_bg: Hsla,
     // US-007 (prd-git-diff-mode-2026-Q3.md): curated version-control
     // colors for the Git Diff surface, mirroring Zed's `StatusColors`
     // model (`crates/theme/src/styles/status.rs`) - first-class slots,
     // NOT terminal-ANSI-derived. Light/dark variants are resolved in
     // `ui_colors_with`. `vc_*` are the foreground (status icons, file
     // labels, hunk gutter); `*_background` default to the foreground at
-    // 0.25 alpha (Zed's `*_background` convention) for line washes;
-    // `vc_word_*` are the stronger intra-line word-diff emphasis.
+    // 0.25 alpha (Zed's `*_background` convention) for line washes.
     /// Added / created (green).
     pub vc_added: Hsla,
     /// Modified / changed (yellow).
@@ -558,12 +551,6 @@ pub struct UiColors {
     pub vc_added_background: Hsla,
     /// Deleted-line background wash.
     pub vc_deleted_background: Hsla,
-    /// Modified-line background wash.
-    pub vc_modified_background: Hsla,
-    /// Intra-line word-diff emphasis (added side).
-    pub vc_word_added: Hsla,
-    /// Intra-line word-diff emphasis (deleted side).
-    pub vc_word_deleted: Hsla,
     // EP-001 (CLI Cockpit, US-002): broadcast-group
     // stripe palette - eight first-class slots so render code never inlines a
     // hex (FR-08). Positional identity colors (not semantic status colors):
@@ -586,13 +573,6 @@ pub struct UiColors {
     /// US-011: `AgentState::Stalled` - sidebar badge (muted grey-blue:
     /// "silent", not "failing").
     pub agent_stalled: Hsla,
-    // EP-005 US-013: per-tool identity colors, promoted from the inline
-    // hexes the sidebar spinner rows used (FR-08). Brand hues, identical
-    // on both themes by design (they tint text on the theme surface).
-    /// Claude rows/spinner (Anthropic salmon).
-    pub agent_claude: Hsla,
-    /// Codex rows/spinner (Codex indigo).
-    pub agent_codex: Hsla,
 }
 
 /// Effective version-control diff colors for the Git Diff / Review surfaces.
@@ -696,7 +676,6 @@ pub fn ui_colors_with(theme: &TerminalTheme) -> UiColors {
             // Light theme: a surface one step darker than the card so the
             // awaiting-confirmation row stands out without overwhelming the
             // chat stream.
-            tool_card_header_bg: h(0xf1f1f1),
             // Curated diff palette (Catppuccin Latte family) - darker,
             // saturated hues that read on a light surface.
             vc_added: h(0x40a02b),
@@ -707,9 +686,6 @@ pub fn ui_colors_with(theme: &TerminalTheme) -> UiColors {
             // the opaque gutter hunk bar carries the strong status signal.
             vc_added_background: ha(0x40a02b, 0.16),
             vc_deleted_background: ha(0xd20f39, 0.16),
-            vc_modified_background: ha(0xdf8e1d, 0.16),
-            vc_word_added: ha(0x40a02b, 0.40),
-            vc_word_deleted: ha(0xd20f39, 0.40),
             // Broadcast stripes (Catppuccin Latte family) - saturated hues
             // that hold up as a thin stripe on a light pane edge.
             group_1: h(0x1e66f5),
@@ -724,8 +700,6 @@ pub fn ui_colors_with(theme: &TerminalTheme) -> UiColors {
             // neutral overlay grey for a silent session.
             agent_error: h(0xd20f39),
             agent_stalled: h(0x808080),
-            agent_claude: h(0xe89271),
-            agent_codex: h(0x5b6cff),
         }
     } else {
         UiColors {
@@ -745,7 +719,6 @@ pub fn ui_colors_with(theme: &TerminalTheme) -> UiColors {
             accent: h(0x57d5c4),
             // Dark theme: a touch lighter than the card surface so the
             // awaiting row reads even at a glance.
-            tool_card_header_bg: h(0x2e2e2e),
             // Premium dark diff palette: Codex-like red/green intent,
             // softened to sit inside the neutral terminal surface.
             vc_added: h(0x57d992),
@@ -756,9 +729,6 @@ pub fn ui_colors_with(theme: &TerminalTheme) -> UiColors {
             // the opaque gutter hunk bar carries the strong status signal.
             vc_added_background: ha(0x57d992, 0.12),
             vc_deleted_background: ha(0xff6f6a, 0.12),
-            vc_modified_background: ha(0xffd166, 0.12),
-            vc_word_added: ha(0x57d992, 0.40),
-            vc_word_deleted: ha(0xff6f6a, 0.40),
             // Broadcast stripes: high-luminance accents that keep their
             // identity against the neutral pane edge.
             group_1: h(0x7eb6ff),
@@ -772,8 +742,6 @@ pub fn ui_colors_with(theme: &TerminalTheme) -> UiColors {
             // Agent state: clear, bright marks on the muted cockpit shell.
             agent_error: h(0xff6f6a),
             agent_stalled: h(0xa0a0a0),
-            agent_claude: h(0xffa657),
-            agent_codex: h(0x7eb6ff),
         }
     }
 }
@@ -963,11 +931,7 @@ mod tests {
         assert_ne!(dark.vc_added, dark.vc_deleted);
         assert_ne!(dark.vc_added, dark.vc_modified);
         assert_ne!(dark.vc_deleted, dark.vc_modified);
-        for bg in [
-            dark.vc_added_background,
-            dark.vc_deleted_background,
-            dark.vc_modified_background,
-        ] {
+        for bg in [dark.vc_added_background, dark.vc_deleted_background] {
             assert!(
                 (bg.a - 0.12).abs() < 1e-6,
                 "dark diff background alpha must be 0.12, got {}",
@@ -978,11 +942,7 @@ mod tests {
         // a slightly stronger wash to read on the light editor surface.
         let light = ui_colors_with(&paneflow_light());
         assert_ne!(light.vc_added, dark.vc_added);
-        for bg in [
-            light.vc_added_background,
-            light.vc_deleted_background,
-            light.vc_modified_background,
-        ] {
+        for bg in [light.vc_added_background, light.vc_deleted_background] {
             assert!(
                 (bg.a - 0.16).abs() < 1e-6,
                 "light diff background alpha must be 0.16, got {}",

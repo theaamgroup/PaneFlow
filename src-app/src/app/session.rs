@@ -172,17 +172,10 @@ impl PaneFlowApp {
                     // folder is a single tab with `layout: null`, which v2
                     // reads as "no pane" - the EP-003 `empty` marker existed
                     // only because v1 could not express that.
-                    // `pull_request` stays unset. Older session.json files still
-                    // decode it; current saves omit the key.
                     tabs: ws.serialize_tabs_without_scrollback(cx),
                     active_tab: ws.active_tab_idx(),
                     legacy_layout: None,
                     legacy_empty: false,
-                    // Issue #608: older session.json files may still carry
-                    // `custom_buttons`. The field stays on `WorkspaceSession`
-                    // so those files load. Nothing reads the vec, and an empty
-                    // one is skipped on write. `SESSION_SCHEMA_VERSION` stays.
-                    custom_buttons: Vec::new(),
                     // EP-002 (orchestration-v2): persist worktree ownership so
                     // a crash/restart keeps the teardown + prune record.
                     managed_worktrees: ws
@@ -2041,9 +2034,10 @@ mod tests {
         );
     }
 
-    /// Issue #606: an older session.json may still carry `pull_request`, and
-    /// an older paneflow.json may still carry `sidebar_show.pr`. Both load.
-    /// The session schema stays v2. The stored `pr` value is not a live switch.
+    /// Issue #606 / #817: an older session.json may still carry `pull_request`,
+    /// and an older paneflow.json may still carry `sidebar_show.pr`. Both are
+    /// ignored like any unknown key, the rest of each file loads, and the
+    /// session schema stays v2.
     #[test]
     fn legacy_pull_request_session_and_sidebar_show_pr_still_load() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2097,23 +2091,16 @@ mod tests {
         assert_eq!(
             state.version,
             paneflow_config::schema::SESSION_SCHEMA_VERSION,
-            "keeping pull_request decodable must not bump the session schema"
+            "ignoring pull_request must not bump the session schema"
         );
         assert_eq!(paneflow_config::schema::SESSION_SCHEMA_VERSION, 2);
         let tabs = &state.workspaces[0].tabs;
         assert_eq!(tabs.len(), 2);
-        let first = tabs[0].pull_request.as_ref().expect("first entry kept");
-        assert_eq!(first.branch, "feat/parser");
-        assert_eq!(first.number, 46);
-        assert_eq!(first.state, "open");
-        let second = tabs[1].pull_request.as_ref().expect("second entry kept");
-        assert_eq!(second.branch, "feat/followup");
-        assert_eq!(second.number, 47);
-        assert_eq!(second.state, "draft");
+        assert_eq!(tabs[0].title, "work");
+        assert_eq!(tabs[1].title, "followup");
 
         let cfg = paneflow_config::loader::load_config_from_path(&config_path);
         assert_eq!(cfg.theme.as_deref(), Some("PaneFlow Dark"));
-        assert_eq!(cfg.sidebar_show.pr, Some(true));
         assert!(!cfg.sidebar_show.branch_enabled());
         assert!(cfg.sidebar_show.diffstat_enabled());
         assert!(!cfg.sidebar_show.indent_guide_enabled());

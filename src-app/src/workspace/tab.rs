@@ -273,6 +273,7 @@ impl Tab {
     ///
     /// When zoomed, serializes the saved (un-zoomed) layout so the full pane
     /// arrangement is captured rather than just the single zoomed pane.
+    #[cfg(test)]
     pub fn serialize(&self, cx: &App) -> Option<LayoutNode> {
         let tree = self.saved_layout.as_ref().or(self.root.as_ref())?;
         Some(tree.serialize(cx))

@@ -73,7 +73,6 @@ const NAV_GROUPS: &[NavGroup] = &[
                 icon: "icons/settings.svg",
                 keywords: &[
                     "window",
-                    "decorations",
                     "mode",
                     "shell",
                     "default shell",
@@ -304,7 +303,7 @@ impl PaneFlowApp {
             .bg(crate::app::constants::cockpit_chrome_background(
                 theme.title_bar_background,
                 window.is_window_active(),
-                self.cached_config.cockpit_chrome_material_enabled(),
+                self.cached_config.macos_chrome_material_enabled(),
             ))
             .child(self.render_settings_nav_header(ui, cx))
             .child(div().mx(px(8.)).mt(px(4.)).child(search))

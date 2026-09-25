@@ -39,6 +39,7 @@ impl LayoutTree {
     ///
     /// Not used by `workspace.current` (issue #29); the inline extract is the
     /// snapshot-with-scrollback path, taken by the undo-close-tab record.
+    #[cfg(test)]
     pub fn serialize(&self, cx: &App) -> LayoutNode {
         self.serialize_with(
             cx,
@@ -130,8 +131,6 @@ impl LayoutTree {
                                 agent_context: Some(tv_ref.agent_context.clone()),
                                 name,
                                 custom_name: tv_ref.terminal.custom_name.clone(),
-                                command: None,
-                                prompt: None,
                                 cwd,
                                 path: None,
                                 env: None,
