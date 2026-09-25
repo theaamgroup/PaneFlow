@@ -656,25 +656,6 @@ impl PaneFlowApp {
                 // exact same path.
                 self.open_sessions_sidebar_for_pane(&pane, None, cx);
             }
-            pane::PaneEvent::ToggleDiffDock => {
-                // The dock diffs the pane's *checkout*, not the shell's current
-                // directory: the checkout is the unit the git pipeline operates
-                // on. For a tab bound to a worktree (issue #347) that is the
-                // tab's worktree, so two tabs of one workspace diff two
-                // different branches instead of both reporting the repository
-                // root. The dock stays keyed by `Tab::id`; only its folder
-                // changes.
-                let owner_id = pane.read(cx).workspace_id;
-                let Some(cwd) = self.checkout_for_pane(&pane).or_else(|| {
-                    self.workspaces
-                        .iter()
-                        .find(|ws| ws.id == owner_id)
-                        .map(|ws| ws.cwd.clone())
-                }) else {
-                    return;
-                };
-                self.toggle_cli_diff_dock(cwd, cx);
-            }
             pane::PaneEvent::Renamed { name } => {
                 let name = name
                     .as_deref()
@@ -1933,10 +1914,8 @@ impl PaneFlowApp {
                             stats,
                         );
                         changed |= fields_changed;
-                        let refreshed_diff =
-                            changed && app.refresh_diff_dock_if_open_for_cwd(&tracked_cwd, cx);
                         log::debug!("workspace CWD changed to: {new_cwd}");
-                        if changed && !refreshed_diff {
+                        if changed {
                             cx.notify();
                         }
                     })
@@ -1968,9 +1947,7 @@ impl PaneFlowApp {
                         if app.workspaces.iter().any(|ws| ws.id == ws_id) {
                             let changed =
                                 app.apply_git_state_for_cwd(&cwd_for_apply, branch, is_repo, stats);
-                            let refreshed_diff = changed
-                                && app.refresh_diff_dock_if_open_for_cwd(&cwd_for_apply, cx);
-                            if changed && !refreshed_diff {
+                            if changed {
                                 cx.notify();
                             }
                         }

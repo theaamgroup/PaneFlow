@@ -456,43 +456,50 @@ mod tests {
         );
     }
 
-    /// The diff dock's terminal chord is bindable, claimed by exactly one
-    /// default, and free of any conflict with the rest of the action table.
-    /// Written with `secondary-`, so the same assertion covers Ctrl on
-    /// Linux/Windows and Cmd on macOS.
-    #[test]
-    fn diff_dock_terminal_chord_is_bindable_and_does_not_collide() {
-        use super::super::defaults::DEFAULTS;
-
-        let key = "secondary-j";
-        let action_name = "diff_new_terminal_tab";
-        let context = context_for_action(action_name);
-        let action = action_from_name(action_name).expect("registered action");
-        assert!(
-            make_binding(key, action, context).is_some(),
-            "{key} must parse into a valid KeyBinding with context {context:?}"
-        );
-
-        let claimants: Vec<&str> = DEFAULTS
-            .iter()
-            .chain(MACOS_ONLY_DEFAULTS.iter())
-            .filter(|d| keystrokes_conflict(d.key, key))
-            .map(|d| d.action_name)
-            .collect();
+    /// Issue #808: the diff dock and its two actions are gone. A
+    /// `paneflow.json` written while they existed still names them under
+    /// `shortcuts`; it must keep loading (the sibling settings survive, not a
+    /// fallback to defaults), and neither chord may bind to anything.
+    #[gpui::test]
+    fn removed_dock_actions_in_config_load_and_bind_nothing(cx: &mut gpui::TestAppContext) {
+        let json = r#"{
+            "font_size": 17,
+            "shortcuts": {
+                "cmd-shift-f": "toggle_diff_dock_maximize",
+                "cmd-j": "diff_new_terminal_tab"
+            }
+        }"#;
+        let config = paneflow_config::loader::try_parse_and_validate(json)
+            .expect("a config naming removed actions still loads");
         assert_eq!(
-            claimants,
-            vec![action_name],
-            "{key} must be claimed by exactly one default on this platform"
+            config.font_size,
+            Some(17.0),
+            "the rest of the file must load, not fall back to defaults"
         );
-
-        // The chord must not reach a shell: Ctrl+J is LF, and it stays the
-        // terminal's. Same for the text widgets, where it is ordinary input.
-        let context = context.expect("the dock chord must be context-scoped");
-        for excluded in ["Terminal", "TextInput", "PaneflowTextArea"] {
+        assert_eq!(
+            config.shortcuts.get("cmd-shift-f").map(String::as_str),
+            Some("toggle_diff_dock_maximize")
+        );
+        assert_eq!(
+            config.shortcuts.get("cmd-j").map(String::as_str),
+            Some("diff_new_terminal_tab")
+        );
+        for removed in ["toggle_diff_dock_maximize", "diff_new_terminal_tab"] {
             assert!(
-                context.contains(&format!("!{excluded}")),
-                "{key} must be scoped away from {excluded}, got `{context}`"
+                action_from_name(removed).is_none(),
+                "{removed} must no longer be a registered action"
             );
+        }
+
+        cx.update(|cx| apply_keybindings(cx, &config.shortcuts));
+        for key in ["cmd-shift-f", "cmd-j"] {
+            let chord = canonical_keystroke(key).expect("a parsable chord");
+            let bound: Vec<&'static str> = cx
+                .update(|cx| cx.all_bindings_for_input(std::slice::from_ref(&chord)))
+                .iter()
+                .map(|binding| binding.action().name())
+                .collect();
+            assert!(bound.is_empty(), "{key} must bind nothing, got {bound:?}");
         }
     }
 

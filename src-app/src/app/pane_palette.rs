@@ -696,7 +696,7 @@ impl PaneFlowApp {
         // so the check reads the tab that becomes visible: a pane closed
         // from the sidebar while the picker tab was up would otherwise get
         // the focus back through a handle no element renders. A handle
-        // outside every pane (sidebar, dock editor, placeholder) recorded
+        // outside every pane (sidebar, placeholder) recorded
         // nothing and is restored as before.
         let origin_recorded = self.overlay_origin_recorded(OverlayKind::PanePalette);
         self.close_palette_bound_sessions_sidebar(cx);

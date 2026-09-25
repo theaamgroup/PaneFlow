@@ -78,7 +78,7 @@ impl OverlayOrigins {
 
     /// Whether `kind` recorded an origin at all: a pane owned the focus when
     /// it opened. `false` when the focus sat outside every pane (the sidebar,
-    /// the dock editor, the placeholder), which records nothing.
+    /// the placeholder), which records nothing.
     pub(crate) fn recorded(&self, kind: OverlayKind) -> bool {
         self.stack.iter().any(|(k, _)| *k == kind)
     }

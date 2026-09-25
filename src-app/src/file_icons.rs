@@ -1,4 +1,4 @@
-//! Per-language file icons, shared by the diff dock's file headers and the
+//! Per-language file icons, shared by the diff file headers and the
 //! language icon set.
 //!
 //! The assets under `icons/languages/` carry their own `fill`, so they must be
@@ -8,8 +8,7 @@
 /// Map a file's basename to its language icon asset path, or `None` for a
 /// name no language claims.
 ///
-/// This is the single icon policy for the diff body and the diff-dock tab
-/// strip; callers supply only their own unknown-file fallback
+/// This is the single icon policy for the diff body; callers supply only their own unknown-file fallback
 /// (issue #220). Full-name matches win over extensions (`Dockerfile`,
 /// `Makefile`, `angular.json`), and the React Native platform suffixes are
 /// checked before the plain `.ts`/`.js` families. There is no JavaScript

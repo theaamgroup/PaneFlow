@@ -234,9 +234,6 @@ pub enum PaneEvent {
     /// binds this pane, and spawns the per-agent scans; no anchor is needed
     /// since the sidebar docks in the root layout rather than floating.
     ToggleAgentSessions,
-    /// Toggle the right-docked git diff on this pane's workspace folder. The
-    /// parent resolves the folder from the pane's workspace id.
-    ToggleDiffDock,
     /// Right-click on the pane header: open the pane context menu at
     /// `position` (EP-002 US-007). This replaces the former tab context menu,
     /// which the removed tab strip used to anchor; it carries no index, and it
@@ -1433,23 +1430,6 @@ impl Pane {
     // Pane header rendering - identity + action cluster, no tab strip
     // -----------------------------------------------------------------------
 
-    /// Whether `focus` belongs to this pane (#508): its surface, anything the
-    /// last frame rendered inside the surface (a find bar), or one of the two
-    /// editors mounted beside the surface on the pane card - the header's
-    /// rename field and the Composer's prompt editor. Those two are matched by
-    /// identity, not through `contains`: a caller running behind a maximized
-    /// dock has no frame that rendered them.
-    pub(crate) fn owns_focus(&self, focus: &FocusHandle, window: &Window, cx: &App) -> bool {
-        let surface = self.focus_handle(cx);
-        surface == *focus
-            || surface.contains(focus, window)
-            || self.rename_focus == *focus
-            || self
-                .composer_slot
-                .as_ref()
-                .is_some_and(|slot| slot.input.read(cx).focus_handle == *focus)
-    }
-
     /// Start the header editor. The context menu is the gesture; double-click
     /// on the name still only focuses, so a word-select in the header cannot
     /// drop the pane into edit mode.
@@ -1860,9 +1840,8 @@ impl Pane {
     }
 
     /// Trailing action-button cluster of the pane header (US-051: code-motion
-    /// out of the former tab bar). Zoom badge + the five header actions: the
-    /// two splits, the files tree, the agent-sessions sidebar and the diff
-    /// dock. Deliberately fixed - the agent launchers live in the pane
+    /// out of the former tab bar). Zoom badge + the header actions: the two
+    /// splits and the agent-sessions sidebar. Deliberately fixed - the agent launchers live in the pane
     /// palette, not this header, so the cluster needs neither a fold toggle
     /// nor a computed width.
     /// Self-contained - recomputes the palette it needs.
@@ -2005,21 +1984,6 @@ impl Pane {
                     "icons/sessions.svg",
                     cx.listener(|_this, _e: &ClickEvent, _window, cx| {
                         cx.emit(PaneEvent::ToggleAgentSessions);
-                        cx.stop_propagation();
-                    }),
-                    cx,
-                ))
-            })
-            // Right side dock for this pane's workspace folder: the git diff, a
-            // shell, or an open file, picked on the dock's first open. Trails
-            // the cluster so the two splits keep their leading slots.
-            .when(!is_diff, |cluster| {
-                cluster.child(self.action_button(
-                    "pane-btn-diff-dock",
-                    "Toggle dock",
-                    "icons/layout-sidebar-right.svg",
-                    cx.listener(|_this, _e: &ClickEvent, _window, cx| {
-                        cx.emit(PaneEvent::ToggleDiffDock);
                         cx.stop_propagation();
                     }),
                     cx,

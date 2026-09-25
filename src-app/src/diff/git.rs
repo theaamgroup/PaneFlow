@@ -23,9 +23,6 @@ use super::engine::{DiffHunk, compute_hunks};
 thread_local! {
     static GIT_COMMANDS: std::cell::RefCell<Vec<String>> =
         const { std::cell::RefCell::new(Vec::new()) };
-    /// When set, `rev-parse --verify HEAD` fails as a deadline without spawning.
-    static INJECT_HEAD_REV_PARSE_TIMEOUT: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
     /// Paths appended to an untracked listing. Git never emits FIFOs; the
     /// read-budget tests push one through the listing the loops already walk.
     static EXTRA_UNTRACKED_PATHS: std::cell::RefCell<Vec<String>> =
@@ -35,26 +32,6 @@ thread_local! {
 #[cfg(test)]
 fn take_git_commands() -> Vec<String> {
     GIT_COMMANDS.with(|cmds| std::mem::take(&mut *cmds.borrow_mut()))
-}
-
-/// Arms [`INJECT_HEAD_REV_PARSE_TIMEOUT`] until dropped, including on panic,
-/// so a later test on this thread sees real `rev-parse`.
-#[cfg(test)]
-struct HeadRevParseTimeoutGuard;
-
-#[cfg(test)]
-impl HeadRevParseTimeoutGuard {
-    fn arm() -> Self {
-        INJECT_HEAD_REV_PARSE_TIMEOUT.with(|flag| flag.set(true));
-        Self
-    }
-}
-
-#[cfg(test)]
-impl Drop for HeadRevParseTimeoutGuard {
-    fn drop(&mut self) {
-        INJECT_HEAD_REV_PARSE_TIMEOUT.with(|flag| flag.set(false));
-    }
 }
 
 /// Arms [`EXTRA_UNTRACKED_PATHS`] until dropped.
@@ -127,14 +104,6 @@ impl FileDiff {
 pub struct WorktreeDiff {
     pub files: Vec<FileDiff>,
     pub error: Option<String>,
-    /// Working-tree root this diff was computed from. Set by
-    /// [`compute_head_diff`] so the Changes-tab revert path can join
-    /// relative file paths without re-probing git.
-    pub toplevel: Option<PathBuf>,
-    /// `HEAD`'s object name when the worktree has a commit. `None` for an
-    /// unborn HEAD. The dock uses this to re-probe open file tabs when the
-    /// revision moves.
-    pub head_sha: Option<String>,
 }
 
 /// Git-native per-file diffstat for one file.
@@ -178,7 +147,7 @@ fn record_git_args(_args: &[&str]) {}
 
 fn run_git_timed(dir: &Path, args: &[&str], deadline: Duration) -> Result<Vec<u8>, String> {
     record_git_args(args);
-    if deadline.is_zero() || injected_head_rev_parse_timeout(args) {
+    if deadline.is_zero() {
         return Err("git diff exceeded its deadline".to_string());
     }
     let mut cmd = crate::workspace::worktree::git_command();
@@ -222,21 +191,6 @@ fn run_git_stdin_timed(
     git_stdout(args, output)
 }
 
-/// Test-only stand-in for a `rev-parse --verify HEAD` that hits its deadline.
-/// Other commands, including `rev-parse --show-toplevel`, still spawn.
-#[cfg(test)]
-fn injected_head_rev_parse_timeout(args: &[&str]) -> bool {
-    INJECT_HEAD_REV_PARSE_TIMEOUT.with(|flag| flag.get())
-        && args.contains(&"rev-parse")
-        && args.contains(&"--verify")
-        && args.contains(&"HEAD")
-}
-
-#[cfg(not(test))]
-fn injected_head_rev_parse_timeout(_args: &[&str]) -> bool {
-    false
-}
-
 fn git_stdout(args: &[&str], output: paneflow_process::BoundedOutput) -> Result<Vec<u8>, String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -250,7 +204,7 @@ fn git_stdout(args: &[&str], output: paneflow_process::BoundedOutput) -> Result<
     Ok(output.stdout)
 }
 
-/// Wall-clock budget for one [`compute_diff_against`] column build. Every git
+/// Wall-clock budget for one [`load_column`] build. Every git
 /// subprocess inside that build consumes remaining time from this budget
 /// instead of a fresh [`GIT_DEADLINE`], so 200 files cannot stack 200 timeouts.
 struct GitBudget {
@@ -315,61 +269,6 @@ fn fs_within<T: Send + 'static>(
         std::sync::mpsc::RecvTimeoutError::Timeout => "git diff exceeded its deadline".to_string(),
         std::sync::mpsc::RecvTimeoutError::Disconnected => format!("{what} failed"),
     })
-}
-
-/// Let Git discover the worktree so filesystem boundaries, ceiling directories,
-/// symlinks, and discovery overrides match the subsequent diff commands exactly.
-/// Only Git's ordinary "not a repository" result means an empty dock; malformed
-/// gitfiles, missing paths, and other failures remain errors.
-pub(crate) fn is_git_worktree(worktree_dir: &Path) -> Result<bool, String> {
-    repository_discovery_within(
-        &GitBudget::for_column(),
-        repository_discovery_command(worktree_dir),
-    )
-}
-
-fn repository_discovery_command(worktree_dir: &Path) -> std::process::Command {
-    let mut cmd = crate::workspace::worktree::git_command();
-    crate::workspace::worktree::git_subcommand(&mut cmd, &["rev-parse", "--is-inside-work-tree"]);
-    cmd.current_dir(worktree_dir)
-        // Keep the two expected non-repository diagnostics locale-independent.
-        .env("LC_ALL", "C")
-        .env("LANGUAGE", "C");
-    cmd
-}
-
-fn repository_discovery_within(
-    budget: &GitBudget,
-    cmd: std::process::Command,
-) -> Result<bool, String> {
-    let deadline = budget.remaining()?;
-    // Include process setup in the filesystem budget: entering an unavailable
-    // mount must not strand the caller even before Git begins executing.
-    fs_within(budget, "repository discovery", move || {
-        let output = paneflow_process::run_with_timeout(cmd, deadline, GIT_STDOUT_CAP)
-            .map_err(|err| format!("repository discovery failed: {err}"))?;
-        if output.status.code() == Some(128)
-            && is_non_repository_diagnostic(String::from_utf8_lossy(&output.stderr).trim())
-        {
-            return Ok(false);
-        }
-        let out = git_stdout(&["rev-parse"], output)?;
-        match out.as_slice().trim_ascii() {
-            b"true" => Ok(true),
-            b"false" => Ok(false),
-            _ => Err("unexpected Git repository discovery output".to_string()),
-        }
-    })?
-}
-
-fn is_non_repository_diagnostic(stderr: &str) -> bool {
-    // GIT_TRACE can precede the diagnostic with trace lines. Inspect the first
-    // fatal diagnostic so tracing does not turn an ordinary folder into an error.
-    let Some(fatal) = stderr.lines().find(|line| line.starts_with("fatal: ")) else {
-        return false;
-    };
-    fatal == "fatal: not a git repository (or any of the parent directories): .git"
-        || fatal.starts_with("fatal: not a git repository (or any parent up to mount point ")
 }
 
 /// [`is_too_large`] charged against `budget` instead of blocking unbounded.
@@ -694,12 +593,8 @@ pub fn list_base_ref_candidates(worktree_dir: &Path) -> Vec<String> {
 /// worktree's own root - never the shared repo root (that would diff the main
 /// checkout for every column). All file reads + git calls then key off this so
 /// `worktree_dir.join(repo_root_relative_path)` lands on the right file.
-/// Falls back to `dir` when git can't resolve (non-repo, error).
-fn worktree_toplevel(dir: &Path) -> PathBuf {
-    worktree_toplevel_within(&GitBudget::for_column(), dir)
-}
-
-/// [`worktree_toplevel`] charged against `budget` instead of a fresh deadline.
+/// Falls back to `dir` when git can't resolve (non-repo, error). Charged
+/// against `budget` instead of a fresh deadline.
 fn worktree_toplevel_within(budget: &GitBudget, dir: &Path) -> PathBuf {
     match budget.run(dir, &["rev-parse", "--show-toplevel"]) {
         Ok(out) => {
@@ -712,68 +607,6 @@ fn worktree_toplevel_within(budget: &GitBudget, dir: &Path) -> PathBuf {
         }
         Err(_) => dir.to_path_buf(),
     }
-}
-
-/// `HEAD`'s object name, or `None` when the ref is unborn or unreadable.
-#[cfg(test)]
-pub(crate) fn head_sha(worktree_dir: &Path) -> Option<String> {
-    GitBudget::for_column()
-        .run(worktree_dir, &["rev-parse", "--verify", "HEAD"])
-        .ok()
-        .map(|out| String::from_utf8_lossy(&out).trim().to_string())
-        .filter(|sha| !sha.is_empty())
-}
-
-pub(crate) enum HeadFile {
-    Content(Vec<u8>),
-    Symlink(Vec<u8>),
-    Missing,
-}
-
-/// Load `rel_path` at a pinned revision, retaining its Git file type.
-/// A path that is simply not in the
-/// tree is [`HeadFile::Missing`]; a blob that exists but cannot be shown stays
-/// `Err`.
-pub(crate) fn show_revision_file(
-    worktree_dir: &Path,
-    revision: &str,
-    rel_path: &str,
-) -> Result<HeadFile, String> {
-    let budget = GitBudget::for_column();
-    let tree = budget.run(
-        worktree_dir,
-        &[
-            "--literal-pathspecs",
-            "ls-tree",
-            "-z",
-            revision,
-            "--",
-            rel_path,
-        ],
-    )?;
-    for entry in tree.split(|byte| *byte == 0) {
-        let Some(tab) = entry.iter().position(|byte| *byte == b'\t') else {
-            continue;
-        };
-        if &entry[tab + 1..] != rel_path.as_bytes() {
-            continue;
-        }
-        let header = std::str::from_utf8(&entry[..tab]).map_err(|err| err.to_string())?;
-        let mut parts = header.split_whitespace();
-        let mode = parts.next().unwrap_or_default();
-        let kind = parts.next().unwrap_or_default();
-        let oid = parts.next().unwrap_or_default();
-        if kind != "blob" || !matches!(mode, "100644" | "100755" | "120000") {
-            return Err("The revision path is not a file".into());
-        }
-        let bytes = budget.run(worktree_dir, &["cat-file", "blob", oid])?;
-        return Ok(if mode == "120000" {
-            HeadFile::Symlink(bytes)
-        } else {
-            HeadFile::Content(bytes)
-        });
-    }
-    Ok(HeadFile::Missing)
 }
 
 fn list_untracked_limited_timed(
@@ -1359,7 +1192,6 @@ fn load_column_within(budget: &GitBudget, worktree_dir: &Path, base_ref: &str) -
         Err(e) => WorktreeDiff {
             files: Vec::new(),
             error: Some(e.clone()),
-            ..Default::default()
         },
     };
     let file_stats = merge_base
@@ -1373,92 +1205,10 @@ fn load_column_within(budget: &GitBudget, worktree_dir: &Path, base_ref: &str) -
     }
 }
 
-/// Git's well-known empty-tree object hash. Diffing against it (used when `HEAD`
-/// is unborn - a repo with no commits yet) shows every tracked file as a pure
-/// addition, so a first changeset still renders in the Agents dock.
-const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-
-/// Compute the diff of `worktree_dir` against `HEAD`: the working tree vs the
-/// last commit (staged + unstaged tracked changes) plus untracked files - the
-/// "what did the agent just touch" semantic used by the diff dock
-/// ([`crate::app::diff_dock`]). When `HEAD` is unborn, everything is diffed
-/// against the empty tree. Any other `rev-parse` failure, including a
-/// deadline, sets [`WorktreeDiff::error`] and does not diff. Reuses
-/// [`compute_diff_against`], so the lockfile / size / count / binary guards
-/// are identical to [`load_column`].
-///
-/// Runs entirely via subprocess; safe to call off the main thread.
-pub fn compute_head_diff(worktree_dir: &Path) -> WorktreeDiff {
-    let toplevel = worktree_toplevel(worktree_dir);
-    let worktree_dir = toplevel.as_path();
-    log::debug!("git: compute_head_diff dir={}", worktree_dir.display());
-    let base = match run_git(worktree_dir, &["rev-parse", "--verify", "HEAD"]) {
-        Ok(out) => String::from_utf8_lossy(&out).trim().to_string(),
-        Err(error) => match empty_tree_if_unborn_head(worktree_dir, error) {
-            Ok(base) => base,
-            Err(error) => {
-                log::warn!("git: HEAD lookup failed: {error}");
-                return WorktreeDiff {
-                    error: Some(error),
-                    toplevel: Some(toplevel),
-                    ..Default::default()
-                };
-            }
-        },
-    };
-    let mut diff = compute_diff_against(worktree_dir, &base);
-    diff.toplevel = Some(toplevel);
-    if base != EMPTY_TREE_SHA {
-        diff.head_sha = Some(base);
-    }
-    diff
-}
-
-/// `Ok(empty tree)` only when `HEAD` is a symbolic ref whose target does not
-/// exist yet. A deadline stops the probe immediately: a timed-out git must not
-/// be followed by another git command. Anything else keeps `rev_parse_error`.
-fn empty_tree_if_unborn_head(
-    worktree_dir: &Path,
-    rev_parse_error: String,
-) -> Result<String, String> {
-    if rev_parse_error.contains("exceeded its deadline") {
-        return Err(rev_parse_error);
-    }
-    let reference = match run_git(worktree_dir, &["symbolic-ref", "--quiet", "HEAD"]) {
-        Ok(out) => String::from_utf8_lossy(&out).trim().to_string(),
-        Err(error) if error.contains("exceeded its deadline") => return Err(error),
-        Err(_) => return Err(rev_parse_error),
-    };
-    if reference.is_empty() {
-        return Err(rev_parse_error);
-    }
-    match run_git(
-        worktree_dir,
-        &["for-each-ref", "--format=%(refname)", &reference],
-    ) {
-        Ok(out) => {
-            let listed = String::from_utf8_lossy(&out);
-            if listed.lines().any(|line| line == reference) {
-                Err(rev_parse_error)
-            } else {
-                Ok(EMPTY_TREE_SHA.to_string())
-            }
-        }
-        Err(error) if error.contains("exceeded its deadline") => Err(error),
-        Err(_) => Err(rev_parse_error),
-    }
-}
-
-/// Shared core of [`load_column`] and [`compute_head_diff`]: diff the
-/// working tree against the already-resolved commit-ish `base`. `worktree_dir`
-/// must already be the worktree toplevel (both callers resolve it first).
-/// Oversized / lockfile / over-count files are shown as stubs rather than
-/// loaded, bounding peak RAM.
-fn compute_diff_against(worktree_dir: &Path, base: &str) -> WorktreeDiff {
-    compute_diff_against_within(&GitBudget::for_column(), worktree_dir, base)
-}
-
-/// [`compute_diff_against`] charged against `budget`; an exhausted budget fails
+/// [`load_column`]'s core: diff the working tree against the already-resolved
+/// commit-ish `base`, charged against `budget`. `worktree_dir` must already be
+/// the worktree toplevel. Oversized / lockfile / over-count files are shown as
+/// stubs rather than loaded, bounding peak RAM. An exhausted budget fails
 /// closed with `WorktreeDiff::error` set before any git subprocess spawns.
 fn compute_diff_against_within(
     budget: &GitBudget,
@@ -1477,7 +1227,6 @@ fn compute_diff_against_within(
             return WorktreeDiff {
                 files: Vec::new(),
                 error: Some(e),
-                ..Default::default()
             };
         }
     };
@@ -1498,7 +1247,6 @@ fn compute_diff_against_within(
                 return WorktreeDiff {
                     files: Vec::new(),
                     error: Some(e),
-                    ..Default::default()
                 };
             }
         };
@@ -1510,7 +1258,6 @@ fn compute_diff_against_within(
                     return WorktreeDiff {
                         files: Vec::new(),
                         error: Some(e),
-                        ..Default::default()
                     };
                 }
             };
@@ -1533,7 +1280,6 @@ fn compute_diff_against_within(
                 return WorktreeDiff {
                     files: Vec::new(),
                     error: Some(e),
-                    ..Default::default()
                 };
             }
         }
@@ -1555,7 +1301,6 @@ fn compute_diff_against_within(
             return WorktreeDiff {
                 files: Vec::new(),
                 error: Some(e),
-                ..Default::default()
             };
         }
     };
@@ -1570,7 +1315,6 @@ fn compute_diff_against_within(
             return WorktreeDiff {
                 files: Vec::new(),
                 error: Some("git diff exceeded its deadline".to_string()),
-                ..Default::default()
             };
         }
         // Skip lockfiles and oversized files: emit a stub, never load/diff/
@@ -1584,7 +1328,6 @@ fn compute_diff_against_within(
                     return WorktreeDiff {
                         files: Vec::new(),
                         error: Some(e),
-                        ..Default::default()
                     };
                 }
             }
@@ -1620,7 +1363,6 @@ fn compute_diff_against_within(
                     return WorktreeDiff {
                         files: Vec::new(),
                         error: Some(e),
-                        ..Default::default()
                     };
                 }
             },
@@ -1660,11 +1402,7 @@ fn compute_diff_against_within(
         ));
     }
 
-    WorktreeDiff {
-        files,
-        error: None,
-        ..Default::default()
-    }
+    WorktreeDiff { files, error: None }
 }
 
 /// Per-file diffstat of the working tree against `base`, charged against
@@ -1720,103 +1458,6 @@ fn compute_file_stats_against_within(
 pub(crate) mod tests {
     use super::*;
     use std::sync::{Mutex, Once};
-
-    /// Issue #681: discovery must run real `rev-parse`, not a repo
-    /// `alias.rev-parse` shell command.
-    #[test]
-    fn repository_discovery_ignores_a_shell_alias_for_rev_parse() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        let marker = tmp.path().join("ALIAS_RAN");
-        let script = tmp.path().join("alias.sh");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nprintf ran >> '{}'\necho false\n",
-                marker.display()
-            ),
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
-        std::fs::set_permissions(&script, permissions).unwrap();
-
-        let init = crate::workspace::worktree::git_command();
-        let mut init = init;
-        crate::workspace::worktree::git_subcommand(&mut init, &["init"]);
-        init.current_dir(&repo);
-        assert!(init.output().unwrap().status.success(), "git init");
-
-        let alias = format!("!{}", script.display());
-        let mut config = crate::workspace::worktree::git_command();
-        crate::workspace::worktree::git_subcommand(
-            &mut config,
-            &["config", "alias.rev-parse", &alias],
-        );
-        config.current_dir(&repo);
-        assert!(
-            config.output().unwrap().status.success(),
-            "config alias.rev-parse"
-        );
-
-        assert!(is_git_worktree(&repo).unwrap());
-        assert!(
-            !marker.exists(),
-            "alias.rev-parse ran during repository discovery"
-        );
-    }
-
-    #[test]
-    fn repository_discovery_fails_closed_on_exhausted_budget() {
-        let dir = tempfile::tempdir().unwrap();
-        let budget = GitBudget {
-            deadline_at: Instant::now(),
-        };
-        let err = repository_discovery_within(&budget, repository_discovery_command(dir.path()))
-            .unwrap_err();
-        assert!(err.contains("deadline"), "got {err}");
-    }
-
-    #[test]
-    fn repository_discovery_honors_git_ceiling_directories() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("repo");
-        let nested = root.join("nested");
-        std::fs::create_dir_all(&nested).unwrap();
-        assert!(test_git(&root, &["init", "-q"]));
-        for (cwd, ceiling, expected) in [
-            (nested.as_path(), root.as_path(), false),
-            (root.as_path(), root.as_path(), true),
-            (nested.as_path(), dir.path(), true),
-        ] {
-            let mut cmd = repository_discovery_command(cwd);
-            cmd.env("GIT_CEILING_DIRECTORIES", ceiling)
-                .env("GIT_TRACE", "1");
-            assert_eq!(
-                repository_discovery_within(&GitBudget::for_column(), cmd).unwrap(),
-                expected,
-            );
-        }
-    }
-
-    #[test]
-    fn repository_discovery_recognizes_only_expected_non_repository_diagnostics() {
-        assert!(is_non_repository_diagnostic(
-            "fatal: not a git repository (or any of the parent directories): .git"
-        ));
-        assert!(is_non_repository_diagnostic(
-            "fatal: not a git repository (or any parent up to mount point /Volumes/data)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set)."
-        ));
-        for error in [
-            "fatal: invalid gitfile format: /repo/.git",
-            "fatal: not a git repository: /missing-metadata",
-            "fatal: detected dubious ownership in repository at /repo",
-            "git diff exceeded its deadline",
-        ] {
-            assert!(!is_non_repository_diagnostic(error), "{error}");
-        }
-    }
 
     #[test]
     fn filesystem_probe_returns_before_a_blocked_operation_finishes() {
@@ -2292,10 +1933,10 @@ pub(crate) mod tests {
     fn compute_diff_against_surfaces_untracked_scan_timeout() {
         let src = include_str!("git.rs");
         let body = src
-            .split("fn compute_diff_against(")
+            .split("fn compute_diff_against_within(")
             .nth(1)
             .and_then(|rest| rest.split("fn compute_file_stats_against_within(").next())
-            .expect("compute_diff_against body");
+            .expect("compute_diff_against_within body");
         assert!(
             body.contains("list_untracked_limited_timed")
                 && body.contains("untracked listing failed")
@@ -2423,52 +2064,6 @@ pub(crate) mod tests {
             ..complete.clone()
         };
         assert_ne!(complete, timed_out);
-    }
-
-    #[test]
-    fn head_rev_parse_timeout_is_not_an_empty_tree_diff() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        assert!(test_git(root, &["init"]), "git init is required");
-        std::fs::write(root.join("tracked.txt"), "original\n").unwrap();
-        assert!(test_git(root, &["add", "tracked.txt"]));
-        assert!(test_git(
-            root,
-            &[
-                "-c",
-                "user.email=paneflow@example.com",
-                "-c",
-                "user.name=Paneflow",
-                "commit",
-                "-m",
-                "init",
-            ],
-        ));
-        std::fs::write(root.join("tracked.txt"), "modified\n").unwrap();
-
-        let _guard = HeadRevParseTimeoutGuard::arm();
-        let _ = take_git_commands();
-        let diff = compute_head_diff(root);
-        let cmds = take_git_commands();
-        let err = diff
-            .error
-            .expect("a HEAD lookup timeout is an error, not an empty tree");
-        assert!(err.contains("deadline"), "got {err}");
-        assert!(
-            diff.files.is_empty(),
-            "timeout must not produce an empty-tree diff, files={:?}",
-            diff.files.iter().map(|file| &file.path).collect::<Vec<_>>()
-        );
-        assert!(
-            cmds.iter().all(|cmd| {
-                let name = git_subcommand_name(cmd);
-                name != Some("diff")
-                    && name != Some("symbolic-ref")
-                    && name != Some("for-each-ref")
-                    && !cmd.contains(EMPTY_TREE_SHA)
-            }),
-            "timed-out HEAD lookup must not diff the empty tree, commands={cmds:?}"
-        );
     }
 
     #[test]

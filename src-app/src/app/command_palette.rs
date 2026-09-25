@@ -277,8 +277,8 @@ impl PaneFlowApp {
     /// resolves that pane through the exact-match `focused_pane` lookup;
     /// without it the element that held focus gets it back unchanged. Either
     /// way a pane that left the tree while the palette was open is skipped,
-    /// then the fallback is the non-pane element that held focus (dock
-    /// editor, sidebar, placeholder), the active workspace's first pane, and
+    /// then the fallback is the non-pane element that held focus
+    /// (sidebar, placeholder), the active workspace's first pane, and
     /// last the empty-workspace placeholder (issue #108: an overlay that
     /// closes with nothing focused leaves every global chord without a
     /// handler).

@@ -5,7 +5,7 @@
 ### 1.1 Purpose
 
 `DESIGN.md` is the design contract for the native PaneFlow application: the
-GPUI shell, its rails, the pane grid, the diff dock, Review, Settings, menus,
+GPUI shell, its rails, the pane grid, Review, Settings, menus,
 dialogs, overlays, and toasts. It records the visual thesis, the tokens, the
 geometry, the motion rules, the accessibility floors, and the component
 contracts that the code implements, so a UI contributor can change a surface
@@ -57,7 +57,7 @@ PaneFlow is a cockpit for coding agents, not an IDE and not a terminal
 emulator with tabs. The dominant idea of the screen is the grid of live pane
 cards, each one a real terminal running a real agent. Everything else is
 instrumentation around that grid: a rail of workspaces and tabs on the left, a
-title bar that is almost empty, docks and rails that appear only when review
+title bar that is almost empty, rails that appear only when review
 or sessions are needed, and a footer switch between the two modes that matter,
 **Agents** and **Review**.
 
@@ -75,7 +75,7 @@ history names them:
 | Influence | What PaneFlow took from it | Evidence |
 | --- | --- | --- |
 | Codex app (OpenAI) | The material language of the shell: one slightly brighter translucent highlight for hover and selection, inline Settings that replace the main panel, the select, toggle, and card primitives, the sectioned rail | `ee35d86e` `refactor(ui): unify chrome on the Codex material language`, `433b9e09` `feat(settings): shared Codex-style select, toggle, and card primitives`, `70d84e3e` `feat(settings): embed Codex-style inline settings`, `33fb6193` `feat(theme): restore PaneFlow Light with a Codex-style light shell` |
-| Cursor | The diff dock chrome: file tabs as chips, the toolbar rail skin, the Changes rail hierarchy, the compact graphite sidebar and pale blue accent of the Cursor preset | `8d084ab3` `feat(diff-dock): Cursor-style chrome and retire the Agents environment card`, `docs/user/themes.md` |
+| Cursor | Chip-style tabs, the toolbar rail skin, the Changes rail hierarchy, the compact graphite sidebar and pale blue accent of the Cursor preset | `8d084ab3` `feat(diff-dock): Cursor-style chrome and retire the Agents environment card`, `docs/user/themes.md` |
 | Zed | The syntax highlight queries Changes and Review share | `src-app/src/diff/highlighter.rs`, issue #433 |
 | AppKit | Client-side decorations with the macOS traffic lights, the `NSVisualEffectMaterial::Sidebar` material behind the shell | `4d85f1ce` `feat(macos): add sidebar material setting`, `801a68ee` `feat(chrome): native compositor blur backdrop` |
 
@@ -140,9 +140,9 @@ fonts come from the user's system, with a bundled Nerd Font as the default.
 │ primary      │ main panel: inset card, 4px inset, 10px radius,   │ right rail       │
 │ sidebar      │ corner masks painted in the shell color           │ sessions or      │
 │ 300px        │ ┌ pane card, 20px squircle ─┐ ┌ pane card ─────┐  │ files, 300px     │
-│ (520 in      │ │ header 34px: title, tools │ │                │  │ ── or ──         │
-│  Review)     │ │ terminal, inset 3 / 0     │ │                │  │ diff dock        │
-│              │ └───────────────────────────┘ └────────────────┘  │ min(880, room)   │
+│ (520 in      │ │ header 34px: title, tools │ │                │  │                  │
+│  Review)     │ │ terminal, inset 3 / 0     │ │                │  │                  │
+│              │ └───────────────────────────┘ └────────────────┘  │                  │
 │ Workspaces   │              8px gutter, 80px min pane            │                  │
 │ folder rows  │                                                   │                  │
 │ tab rows     │                                                   │                  │
@@ -159,11 +159,10 @@ fonts come from the user's system, with a bundled Nerd Font as the default.
 | Main panel | The inset card that holds the pane grid (Agents or Review) or a Settings page | Inset 4 on right and bottom, and on the left only when the sidebar is hidden; radius 10; four corner masks painted in the shell color. There is no top inset — a spacer the height of the title bar reserves the strip | `app/constants.rs:25-27`, `main.rs:872,1983,2425,2435-2438,2471-2506` |
 | Pane grid | **N-ary** `LayoutTree { Leaf, Container }` of pane cards; one grid per workspace tab in Agents, one global grid of diff panes in Review | Gutter 8, divider hit area 7, minimum pane 80; `MAX_PANES` 32, `MAX_WORKSPACES` 32, `MAX_TABS_PER_WORKSPACE` 32, Review caps at `MAX_REVIEW_PANES` 6 | `layout/tree.rs:62-67`, `layout/mod.rs:34,39`, `workspace/mod.rs:53,59`, `app/review/mod.rs:21` |
 | Right rail | Sessions rail | Width 300 | `app/sessions_sidebar.rs:37` |
-| Diff dock | Side dock attached to a workspace tab, holding Changes, terminal, and Agent setup tabs. A clicked file path opens in the external editor | Preferred width 880, minimum 360, maximum 1400, fitted to the live remainder and hidden below the floor (5.4) | `app/diff_dock/model.rs`, `app/cli_diff_dock.rs:38-64` |
 | Footer | IPC offline banner, MCP bridge callout, then the Agents / Review mode strip | Persistent primary navigation. **No Settings gear** (issue #105) and **no update banner** | `app/sidebar_actions_menu.rs:21-60,62-178,254-299` |
 
 The window is 800 by 500 at minimum, and a surface MUST hold there with the
-primary sidebar hidden and a right rail or the dock open at the same time.
+primary sidebar hidden and a right rail open at the same time.
 
 Branch metadata polling runs only while the primary sidebar is visible and
 `sidebar_show.branch` is enabled. Hiding either pauses pane-CWD collection and
@@ -195,8 +194,8 @@ is not rendered at all — one reachable mode is not a choice — and
 
 Every overlay is deferred at an explicit priority, and that ladder is itself
 part of the contract: **1** settings selects · **2** toasts · **3** menus
-(branch, new tab, dock options, Customize Sidebar, palette branch) · **4**
-Composer, the dock layout submenu, the diff feedback flash
+(branch, Customize Sidebar, palette branch) · **4**
+Composer, the diff feedback flash
 (`diff/view/interaction.rs`) · **6** full-surface overlays · **8**
 the Review-with-agent popover · **10** dialogs ·
 **11** close confirm. A new overlay picks the rung that matches its kind rather
@@ -210,7 +209,6 @@ explicit priority.
 | Overlay | Placement | Shell | Source |
 | --- | --- | --- | --- |
 | Pane palette | Fills an empty tab, titled `New pane` | A centered 260 px column on a 20 px squircle of the terminal background: 13 px Semibold title, an optional branch row 28 tall, preset rows 34 tall with a 14 px agent mark, gap 2, list capped at 420 tall, inline error at 11 px | `app/pane_palette.rs:36-40,654-782,1021-1059` |
-| Diff dock surface picker | Fills a fresh dock, under a 40 px header band carrying only the dock close button | **Three** cards 122 by 98, gap 12, radius 10, grid padding 16, icon gap 8; the grid wraps rather than fixing a column count | `app/diff_dock/surface_picker.rs:29-39,62-69,99-126` |
 | Composer | Scrim over the whole pane, panel docked at its bottom | Black scrim at 0.25 on the 20 px squircle; panel on `overlay` with margin 8, padding 8, gap 6, 1 px border, radius 8, `shadow_lg`; header chips 10 px; input max height 180 | `pane.rs:690-732` |
 | Pane Overview | Horizontally centered, top-anchored at 24 (`OVERVIEW_MARGIN`) | Radius 12, 1 px border, `shadow_lg` on a black 0.4 scrim; 312.5 by 192.5 cards, gap 10, radius 8, grid padding 16 | `app/pane_overview/mod.rs:36-41,486-559` |
 | Broadcast groups | Horizontally centered, top-anchored at 96 | 420 wide, radius 8, black 0.4 scrim | `app/broadcast.rs:432-439` |
@@ -253,7 +251,7 @@ Cursor. The PaneFlow Dark and PaneFlow Light `UiColors` are computed in
 `theme/model.rs:458-461`. Cite both files when changing a role.
 
 `UiColors::diff_colors()` (`theme/model.rs:600-620`) is the single source the
-diff dock, the Review view, and the Changes rail read; `UiColors::group_color(i)`
+Review view and the Changes rail read; `UiColors::group_color(i)`
 (`:622-636`) wraps modulo 8 so no render site indexes the broadcast slots by
 hand.
 
@@ -335,7 +333,6 @@ to the surfaces named:
 | `#83c3ff` | Sidebar dot when an agent finished | Light blue completion signal, identical in every preset |
 | `hsl(40 85% 55%)`, `hsl(0 62% 56%)` | Callout warning and error | Severity hues independent of preset |
 | `#232323` / `#ffffff` | Settings card fill, keyed on `background.l > 0.5` | Card sits one step above `base` in either lightness |
-| `0x2c2c2c` / `0x8b8b8b` / `0xb9b9b9` | Surface picker ink on dark themes | **Contextual**, `app/diff_dock/surface_picker.rs:49-59` |
 | `0x2d8c4a` / `0x5cff8a` / `0x021608` (and its inset shadow pair) | About dialog CRT credit plate | **Contextual** period piece, `app/about_dialog.rs:187-258` |
 | `0x89b4facc` on `0x1e1e2e` | Terminal copy-mode `COPY` badge | **Migration**: a leftover Catppuccin pair, `terminal/view.rs:1902-1903` |
 | `0x383838` | Dark terminal panel ground (`codex_panel_background_for_terminal`) | **Migration**: the light arm already uses `subtle`, `terminal/element/mod.rs:230-236` |
@@ -353,16 +350,16 @@ neutral `text` tints.
 | Window | Native macOS decorations and traffic lights | Default 1200 by 800, minimum 800 by 500; no client inset, synthetic border, shadow, or resize handles. Restored size is clamped to 3840 by 2160 when no display size is known | `window_state.rs`, `window_chrome/shell.rs`, `main.rs` |
 | Main panel | 10 | round, masked | none |
 | Pane card | 20 | squircle | 1 px `border`, or `vc_conflict` at 0.7 with attention |
-| Settings card, pane palette ground, diff dock card | 20 | squircle | none |
+| Settings card, pane palette ground | 20 | squircle | none |
 | System Info dialog | 20 | squircle | 1 px `border` at 0.6, plus `shadow_lg` |
 | Menu, select popup | 18 | squircle | 1 px `border` at 0.6 |
-| Sidebar rows, tab icon cards, footer mode buttons, row skin, secondary button, select item, dock tab chip, tooltip | 14 (`ROW_RADIUS`) | squircle | tab icon card and tooltip, 1 px `border` |
+| Sidebar rows, tab icon cards, footer mode buttons, row skin, secondary button, select item, tooltip | 14 (`ROW_RADIUS`) | squircle | tab icon card and tooltip, 1 px `border` |
 | Pane Overview panel | 12 | round | 1 px `border`, plus `shadow_lg` |
 | Theme tile | 10 | round | 2 px `text` at 0.12, 0.32 on hover, 0.85 when selected |
 | About dialog | 10 | round | 1 px, plus `shadow_lg`; **Migration** |
 | Filter field, settings control, select trigger, toast, composer, drop overlay, drop placeholder, theme mockup inner frame | 8 | round | drop overlay 2 px blue |
 | About close button | 7 | round | none |
-| Toolbar pill, sidebar IPC banner, sidebar hover action button, sidebar branch chip, title bar menu trigger, dock tab close slot | 6 | round | IPC banner 1 px `border` |
+| Toolbar pill, sidebar IPC banner, sidebar hover action button, sidebar branch chip, title bar menu trigger | 6 | round | IPC banner 1 px `border` |
 | Title bar sidebar toggle | 5 | round | none |
 | Icon button, composer chip, sidebar context menu row | 4 | round | none |
 | Scrollbar thumb, header chip, filter clear | 3 | round | none |
@@ -402,8 +399,7 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | Filter field | padding 10 by 6, gap 6, 13 px search icon; the clear control is a **24 by 24 hit target** carrying a 10 px glyph, pulled in by −4 so it keeps a 16 px layout footprint (WCAG 2.5.8) |
 | Toast | right 18, bottom **20** (the animation owns the vertical axis - see 3.3), padding 12 / 14 by 11, minimum width 220, max width 340 (440 for an error), single line. **Sticky toast** (5.8): padding 12 / 8 by 8, max width 440, gap 9; action button 24 high, padding 9, radius 6, 12 Medium; close glyph is `icon_button_sm` (20 / 12, radius 4) |
 | Scrollbar | width 6, gutter 10, minimum thumb 24 |
-| Diff | row 18, file header 32, fold row 32, sticky header 24, gutter 36 (a floor, widened per digit count), change bar 4, split divider 3, minimum split column 360, revert chip 56 by 16 inset 10, horizontal track 6 |
-| Dock | preferred 880, minimum 360, maximum 1400; maximized: panel width minus two 8 px gutters, floor 360; tab strip 40 with 26 px chips, gap 4 |
+| Diff | row 18, file header 32, fold row 32, sticky header 24, gutter 36 (a floor, widened per digit count), change bar 4, split divider 3, minimum split column 360, horizontal track 6 |
 | Pane Overview | cards 312.5 by 192.5, gap 10, radius 8, grid padding 16, panel margin 24 |
 
 ### 4.6 Typography
@@ -418,7 +414,7 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | Page heading | Geist | 26 Semibold | Settings page title |
 | Dialog title | Geist | 16 | About only — System Info uses `TITLE` (14) |
 | Terminal | User choice among fixed-pitch families; default the bundled JetBrainsMono Nerd Font | 13 pt default (range 8–32); `line_height` and `cell_width` are multipliers of the measured cell, both defaulting to 1.0 (ranges 0.8–2.5 and 0.8–2.0). At 13 pt the cell measures 10 by 23 px | Panes |
-| Code and diff | `resolve_font_family(None)`, the terminal default | 12 | Diff dock, theme preview |
+| Code and diff | `resolve_font_family(None)`, the terminal default | 12 | Review diffs, theme preview |
 
 The named constants live in `ui_primitives.rs:425-433`: `LABEL_XS` 10,
 `LABEL_SM` 11, `BODY` 12, `BODY_EMPHASIS` 13, `TITLE` 14. New interface text
@@ -449,8 +445,7 @@ NFM`, `.PaneflowMono`, `.PaneflowSans`, `.ZedMono`, and Zed's `.ZedSans` to
 Geist.
 
 Sentence case everywhere. Titles truncate with a tooltip past 13 characters
-and cap at 24 in the pane header; dock tab labels cap at 22 and file headers
-at 64.
+and cap at 24 in the pane header; file headers cap at 64.
 
 ### 4.7 Iconography
 
@@ -466,10 +461,10 @@ chrome only.
 | 10 | Filter clear glyph, sidebar diff-header glyphs |
 | 11 | Sidebar agent state glyphs (bell, error, stalled) and the comet-trail loader |
 | 12 | Small icon button, select chevron, drag ghost |
-| 13 | Medium icon button, filter search, menu check mark, dock tab icon, diff file-header file-type icon |
+| 13 | Medium icon button, filter search, menu check mark, diff file-header file-type icon |
 | 14 | Title bar sidebar toggle, editor and preset logos, sidebar folder, sidebar footer banner |
 | 15 | Toast icon |
-| 16 | Sidebar tab icon, callout icon, dock options trigger |
+| 16 | Sidebar tab icon, callout icon |
 | 18 | Empty-state glyph |
 
 The pane card's close chip is the one glyph below the table: `CLOSE_GLYPH_SIZE`
@@ -497,7 +492,6 @@ text color. Do not invent a brand tint for a mark that returns `None`.
 | Unfocused pane dim, drop overlay glide | 130 ms, scaled by distance | ease-out quint | Cross-fade dropped below 0.002; the overlay lerps its absolute rect between regions |
 | Primary sidebar slide | 280 ms | cubic ease-out `1 − (1 − p)³` | Panel inset and gutter follow the width |
 | Menu reveal | 140 ms | cubic ease-out `1 − (1 − p)³` (`ui_primitives::ease_out_cubic`, shared with the sidebar slide) | `menu_reveal`: every menu, select popup, context menu, and submenu fades in from 0 while dropping 4 px into place. No exit animation: GPUI drops the element when its state flips |
-| Diff dock open and maximize slides | 280 ms | cubic ease-out `1 − (1 − p)³` | `SidebarWidthAnimation` reused: the dock column grows from the right edge on open; on maximize the pane grid is clipped from its measured width to 0 (never resized) while the dock's left gutter grows with it. A session-switch restore skips the open slide |
 | Toast | 180 ms in, **1440 ms default** hold, 180 ms out | ease-in-out | 8 px lift on entry, 8 px drop on exit. `hold_ms` is carried per `Toast`: the Composer recap and queued-prompt toasts hold 4000 ms, and a session-save failure holds `TOAST_HOLD_MS * 2` (2880 ms). Longer holds are deliberate, not drift. The **sticky** toast (5.8) plays the 180 ms entry only: it has no hold timer and no exit, and leaves on the frame it is dismissed |
 | Status spinner | 1 s loop | linear rotate | Empty states while scanning |
 | Sidebar comet-trail loader | 720 ms cycle | stepped | 3 by 3 perimeter of 3 px dots, gap 1, trailing opacities 0.81, 0.49, 0.26 over a 0.06 base |
@@ -508,11 +502,9 @@ facility: the pinned GPUI predates `App::set_reduce_motion`. It is written at
 startup, from the Settings toggle, and on config hot-reload, so it needs no
 restart, and it defaults to `false`.
 
-**Five animations honor it today**: `animated_hover` settles instantly
+**Four animations honor it today**: `animated_hover` settles instantly
 (`ui_primitives.rs:322-336`), the primary sidebar toggles without the slide
-(`main.rs:1726`), the diff dock opens and maximizes without its slides
-(`app/diff_dock/mod.rs::open_diff_dock_panel`,
-`app/cli_diff_dock.rs::toggle_diff_dock_maximize`), `panel_empty_state`'s
+(`main.rs:1726`), `panel_empty_state`'s
 scanning spinner does not start (`ui_primitives.rs:859`), and `menu_reveal`
 mounts every menu at rest (`ui_primitives.rs::menu_reveal`). Still ignoring it: the pane header button hover, the
 drop-overlay glide, toasts, and the comet-trail loader.
@@ -620,7 +612,7 @@ close group. These use the existing 28 px select rows and a 9 px divider;
 the menu position accounts for the conditional row. Mark as read clears
 completion marks in every tab; the tab menu action still clears session
 attention badges. Mute persists across restarts, suppresses desktop notices
-(including Stalled and dock terminal notices) and new unread completions,
+(including Stalled notices) and new unread completions,
 and leaves agent lifecycle transitions intact. Toggling mute itself keeps
 existing completion marks; it adds no sidebar adornment.
 
@@ -644,8 +636,7 @@ A 20 px squircle filled with the terminal background, 1 px `border`.
 
 **A pane holds exactly one surface.** The surface-chip tab bar upstream
 documents does not exist here; closing a pane removes it from the layout tree,
-and there is no intermediate empty-pane state. The only tab strip in the app
-is the diff dock's (5.4).
+and there is no intermediate empty-pane state. The app has no tab strip.
 
 The header is **34 px** (28 content plus the 3 px inset twice), gap 7, padding
 3. The surface title sits at 14 px on an 18 px line, centered by three flex
@@ -659,8 +650,8 @@ the sidebar owns identity.
 
 On the right, 22 px action buttons at radius 4 stay visible at rest, `muted`
 into `text` on hover with 14 px glyphs. A terminal pane shows split-vertical,
-split-horizontal, the Agent sessions rail (hidden when no AI agent is enabled),
-and the diff dock toggle. A diff pane shows refresh, view mode, collapse, and
+split-horizontal, and the Agent sessions rail (hidden when no AI agent is
+enabled). A diff pane shows refresh, view mode, collapse, and
 Review with agent instead. A zoomed pane gains an 18 px `Z` chip on `accent`.
 
 **The close control is a 15 px round chip in the *leading* corner**, opposite
@@ -685,90 +676,24 @@ edge band is 0.20 of the shorter dimension. The swap variant is neutral `text`.
 Attention reuses the border slot — 1 px `vc_conflict` at 0.7, no width change,
 so the glow paints without reflow. There is no blue focus ring anywhere.
 
-### 5.4 Diff dock and Review view
+### 5.4 Review view
 
-**The dock** attaches to a workspace tab and opens on a surface picker of
-**three** cards — Changes, Terminal, Agent setup — 122 by 98 on a wrapping
-grid. The choice is parked on the **tab**, not the workspace: dock slots are
-keyed by `Tab::id` (`app/cli_diff_dock.rs:18`), so a sibling tab of the same
-folder is a new session and shows the picker again.
-
-Its width is a **preference, not a measurement**. `DiffDockState::width`
-defaults to 880 and is bounded 360 to 1400, but the rendered width is
-`min(stored, available − 104)`, where 104 reserves one minimum pane plus two
-gutters for the grid. When that ceiling drops below 360 the dock is **not
-rendered at all**: the grid wins, the dock's state (open, tabs, snapshot)
-survives, and any in-flight resize or scrollbar drag is cancelled — so a
-closing rail or a growing window brings it straight back. The render clamp
-never writes back; the resize drag is the only writer, and a drag pinned at
-the ceiling leaves a wider stored preference alone
-(`app/cli_diff_dock.rs:38-64`, `app/diff_dock/mod.rs:68-86`).
-
-**Maximized**, the dock takes the whole cockpit: `secondary-shift-f` or the
-maximize button at the right of the tab strip (`diff-dock-maximize`, labelled
-"Maximize dock" / "Restore dock", a `minimize` glyph while maximized) hides
-the pane grid so Changes, Agent setup, or a dock terminal gets the full
-window width. The grid is **clipped, never resized**: it stays mounted at its
-last measured width inside an `overflow_hidden` column that slides to 0, so an
-agent running behind the dock never sees a PTY resize. The dock bypasses the
-fit (it renders even in a panel too narrow for dock plus grid), flexes to the
-container with no resize handle, and paints the grid's left gutter itself as
-the grid goes. Maximizing records the focus that was active and moves it onto
-the active dock tab's own handle (a Terminal tab), or blurs the pane
-when the tab has none (Changes or Agent setup), so keystrokes never reach the hidden grid;
-restoring, or closing the maximized dock from its strip or a pane header's
-dock toggle, hands it back. What comes back is checked against the model, not
-against the frame: a maximized dock renders no grid, so maximize records the
-pane that owns the focus while the grid is still painted - its surface, an
-input the frame rendered inside it (a find bar), or one of the two editors
-mounted beside the surface on the pane card (the header rename field, the
-Composer prompt). On the way back that input returns when its pane is still a
-pane of the visible tab, the pane itself when its surface was swapped
-meanwhile, and a handle with no owning pane returns only while the last frame
-rendered it under the app root or it belongs to an open pane palette. Anything
-else - the handle of a pane closed while the dock was maximized, as with
-nothing recorded at all - focuses the workspace's first pane rather than
-leaving the keyboard parked on the window with no pane focused. One limit
-stands: an input dismissed by another route while the dock was maximized still
-gets its handle back and so lands on the window, because a pane does not
-publish whether its find bar is still open. A restore that slides hands the
-focus back only once the slide settles, so keys typed while the grid is still
-clipped away stay off it. Panes behind a maximized dock are not under the
-user's eye: their agents' completions and notifications go out as for a
-zoomed-away split. The state is per-app: a tab switch parks the dock through
-the closer, and a trip through Review or Settings drops it as the dock
-unmounts, so the incoming tab, and the user coming back, always see the grid. Both the open slide and the
-maximize slide reuse the primary sidebar's 280 ms curve (4.8) and settle
-instantly under `reduce_motion`.
-
-The tab strip is 40 px with a bottom hairline, gap 4, px 8. Chips are 26 tall
-on a `ROW_RADIUS` squircle, gap 6, px 8, with a 13 px kind icon, the title at
-body size Medium, and a 16 px close slot at radius 6 carrying an 11 px glyph.
-**No tab is permanent**: the dock starts with no content tabs, Changes
-is created only when its picker card or `+` menu row is chosen (and reused
-when it already exists), and every tab carries the close control, Changes and
-the first tab included. Closing the last tab returns the dock to the picker
-so the next open asks again. A Changes tab explicitly opened against a non-git
-or clean-diff workspace keeps the blank Changes body (#393). The `+` trigger
-is a 28 px `ROW_RADIUS` square opening a 236 px menu of Changes, Terminal
-(`secondary-j`), and Agent setup. There is no File row.
-
-There is no in-app file tree and no in-app editor. A clicked file path,
-including an Agent setup row, opens in the configured external editor
+There is no in-app file tree, no in-app editor, and no diff dock. A clicked
+file path opens in the configured external editor
 (`editor::open_at_location`). The right rail is the Sessions sidebar only
 (300 px). `files_tree_placement` and the `editor` config block are not
 settings; an old `paneflow.json` that still carries them loads, and those
 keys are ignored.
 
-**Review** puts the same `DiffElement` inside ordinary pane cards. One pane
+**Review** puts the `DiffElement` inside ordinary pane cards. One pane
 shows one worktree against one base branch, and the grid caps at six. The pane
 header is the standard 34 px: a 13 px branch icon, the project name in `text`
 at medium weight, `· branch` in `muted`, and a tooltip carrying the full label
 and the agent attribution. No diffstat — the counts live on the file rows.
-Both split buttons are present; what a diff pane suppresses is the dock button
-and the sessions button. Its right cluster is **four explicit icon buttons** —
-refresh, unified/split, expand/collapse all, and Review with agent — not a
-shared options menu. `render_diff_options_menu` is private to the dock.
+Both split buttons are present; what a diff pane suppresses is the sessions
+button. Its right cluster is **four explicit icon buttons** — refresh,
+unified/split, expand/collapse all, and Review with agent — not a shared
+options menu.
 
 **Review with agent is a fork feature and stays.** The sparkles button opens a
 256 px popover headed `Review in a new agent tab` with one row per **supported**
@@ -805,12 +730,8 @@ the role itself carries; do not "restore" it.
 **Word-level diff was deliberately removed** (`diff/engine.rs:12-16`): on
 rewritten lines it painted a second, louder wash over the row tint and read as
 noise rather than precision; its theme slots are gone too. There is no
-whitespace comparison mode and no Highlight or Whitespace menu row; the
-dock's `Dock options` menu is Layout, Collapse/Expand all, and Refresh
-Changes only.
+whitespace comparison mode and no Highlight or Whitespace menu row.
 
-In the Changes tab, hovering a modified file's block shows a `Revert` pill,
-56 by 16 on the sidebar hover tint, inset 10 from the right. Changes and
 Review diffs keep a vertical scrollbar track permanently enabled in its own
 gutter. There is no minimap.
 
@@ -1044,8 +965,6 @@ a chord or a menu item, and MUST NOT rely on a surface that has neither.
 | Pane overview | `secondary-shift-p` |
 | Work review | `secondary-shift-u` |
 | Primary sidebar | `secondary-alt-b` |
-| Maximize / restore the Changes dock | `secondary-shift-f` |
-| New terminal tab (dock) | `secondary-j` |
 | Composer | `secondary-shift-space` |
 | Command palette | `secondary-shift-o` |
 | Jump to next waiting agent | `secondary-shift-j` |
@@ -1101,8 +1020,8 @@ gets the `vc_conflict` border at 0.7 and a sidebar bell; clicking anywhere in
 the panel acknowledges visible completions. `secondary-shift-j` jumps through waiting agents across all workspace tabs. A native notification is
 dropped when its workspace is muted or its pane is under the user's eye: the window is focused and
 the pane's workspace and tab are on screen (the same test as the completion
-dot, #408 / #422). A pane in another workspace, a background tab, a zoomed-away
-split, or an unmounted dock in an unmuted workspace notifies even while the window is focused.
+dot, #408 / #422). A pane in another workspace, a background tab, or a zoomed-away
+split in an unmuted workspace notifies even while the window is focused.
 
 ## 7. Accessibility
 
@@ -1272,9 +1191,7 @@ review would raise anywhere.
   `shadow_lg` (`pane.rs:1285-1312`, 5.3) because it floats over live terminal
   output. No other chip takes one.
 - Separators between tabs, chips, or toolbar buttons. The floating chip
-  language replaced full-height bordered tabs. The dock tab strip's bottom
-  hairline is the one deliberate rule, and it separates the strip from the
-  content, not the chips from each other.
+  language replaced full-height bordered tabs.
 - Identity pills, badges, or logos in the pane header. The sidebar owns
   identity.
 - Accent fills on anything larger than a button.
@@ -1309,9 +1226,7 @@ review would raise anywhere.
    that still ignore the flag (menus fade in through `menu_reveal` and snap
    under the flag), so "nothing moves" is not yet true of the app.
 4. The 800 by 500 minimum window, with the primary sidebar hidden and a right
-   rail or the diff dock open at the same time. Check that the dock's render
-   floor behaves — below roughly 464 px of remainder it MUST disappear cleanly
-   rather than squeeze the grid.
+   rail open at the same time.
 5. Long titles, long paths, and missing optional data: truncation follows 4.6
    and rows never wrap.
 6. Hover, active, selected, disabled, loading, empty, error, and attention
