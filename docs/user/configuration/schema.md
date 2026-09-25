@@ -25,9 +25,10 @@ absolute path, the config root becomes `<home>/config`, the data root
 `<home>/data` (the stable `bin/` helper copies), and the cache root
 `<home>/cache` (the versioned helper cache), each still namespaced by the
 build profile, so a release build reads
-`<home>/config/paneflow/paneflow.json` with `session.json`,
-`window-state.json`, and `recents.json` beside it. Unset and empty values
-are ignored; a relative value is ignored with a warning. The variable exists
+`<home>/config/paneflow/paneflow.json` with `session.json` and
+`window-state.json` beside it. Builds up to v0.7.2 also wrote
+`recents.json` there; current builds ignore it and leave it in place. Unset
+and empty values are ignored; a relative value is ignored with a warning. The variable exists
 for isolated runs
 (the startup benchmark, a scratch instance); it does not move the IPC
 socket, which `PANEFLOW_SOCKET_PATH` controls (see

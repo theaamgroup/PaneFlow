@@ -49,7 +49,6 @@ mod opencode_sessions;
 mod pane;
 mod pane_drag;
 mod pi_sessions;
-mod recents;
 mod release_notes;
 mod runtime_paths;
 mod search;
@@ -1520,10 +1519,6 @@ struct PaneFlowApp {
     /// `Window` - and consumed by `drain_pending_window_actions`, the
     /// window-bearing notify observer (issue #211). One-shot.
     pending_pane_focus: Option<Entity<Pane>>,
-    /// Recent folders whose click-time existence probe is outstanding
-    /// (issue #521): a repeat click or held `Cmd+N` on a mount that is not
-    /// responding coalesces instead of spawning another probe thread.
-    recent_probes: crate::app::workspace_ops::RecentProbes,
     /// US-053: agent-sessions sidebar state (see `AgentSessionsState`).
     agent_sessions: AgentSessionsState,
     /// Ephemeral bottom-right toast.

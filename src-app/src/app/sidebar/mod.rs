@@ -1321,7 +1321,7 @@ impl PaneFlowApp {
                         div()
                             .id("empty-command-palette")
                             // Issue #340: a clickable row is a button to
-                            // AccessKit, like the `empty-recent-<i>` rows.
+                            // AccessKit.
                             .role(Role::Button)
                             .aria_label("Command palette")
                             .flex()
@@ -1350,8 +1350,7 @@ impl PaneFlowApp {
                                         .child(key),
                                 )
                             })
-                    })
-                    .children(self.render_empty_state_recents(ui, cx)),
+                    }),
             );
         }
 
@@ -1359,97 +1358,6 @@ impl PaneFlowApp {
         sidebar = sidebar.child(self.sidebar_list_wrapper(list, cx));
         sidebar = sidebar.child(self.render_sidebar_settings_footer(cx));
         sidebar
-    }
-
-    /// Issue #521: the `Open recent` list under the empty state's `Open
-    /// folder` button. Up to `MAX_RECENT_WORKSPACES` rows (`empty-recent-<i>`),
-    /// each the folder's basename with the full path as tooltip; a click files
-    /// that folder through `open_recent_workspace`, the same path `Cmd+1..5`
-    /// take while no workspace is open. Nothing is rendered when the list is
-    /// empty, so a first launch shows only the button.
-    fn render_empty_state_recents(
-        &self,
-        ui: crate::theme::UiColors,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let recents = crate::recents::current(cx);
-        if recents.is_empty() {
-            return None;
-        }
-        let hover_bg = crate::app::constants::sidebar_tab_active_background();
-        let mut block = div()
-            .flex()
-            .flex_col()
-            .w_full()
-            .mt(px(6.))
-            .gap(px(2.))
-            .child(
-                div()
-                    .px(px(10.))
-                    .pb(px(2.))
-                    .text_size(px(11.))
-                    .text_color(ui.muted)
-                    .child("Open recent"),
-            );
-        for (idx, entry) in recents.into_iter().enumerate() {
-            let full_path: SharedString = entry.path.display().to_string().into();
-            let tooltip_label = full_path.clone();
-            let shortcut = (idx < crate::recents::MAX_RECENT_SHORTCUTS)
-                .then(|| SharedString::from(format!("⌘{}", idx + 1)));
-            block = block.child(
-                div()
-                    .id(SharedString::from(format!("empty-recent-{idx}")))
-                    // The #340 contract: AccessKit only exposes activation for
-                    // a named button role, so a VoiceOver user can reach the
-                    // row; the full path is the name, the basename the label.
-                    .role(Role::Button)
-                    .aria_label(full_path.clone())
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.))
-                    .w_full()
-                    .px(px(10.))
-                    .py(px(4.))
-                    .rounded(px(6.))
-                    .text_color(ui.text)
-                    .text_size(px(11.))
-                    .hover(move |style| style.bg(hover_bg))
-                    .delayed_tooltip(move |_w, cx| {
-                        cx.new(|_| SidebarTooltip {
-                            label: tooltip_label.clone(),
-                        })
-                        .into()
-                    })
-                    .on_click(cx.listener(move |this, _: &ClickEvent, w, cx| {
-                        this.open_recent_workspace(idx, w, cx);
-                    }))
-                    .child(
-                        svg()
-                            .size(px(12.))
-                            .flex_none()
-                            .path("icons/folder_open.svg")
-                            .text_color(ui.muted),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_x_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(SharedString::from(entry.title)),
-                    )
-                    .children(shortcut.map(|key| {
-                        div()
-                            .flex_none()
-                            .text_size(px(10.))
-                            .text_color(ui.muted)
-                            .child(key)
-                    })),
-            );
-        }
-        Some(block.into_any_element())
     }
 
     /// Flatten the rail into the rows it renders. Built once per frame because
@@ -4360,16 +4268,16 @@ mod tests {
         );
     }
 
-    /// Issue #521: the empty state lists recent folders beneath `Open folder`.
-    /// Source-text assertion for the same reason as the #105 guard above:
-    /// `PaneFlowApp` cannot be built in a unit test, so the element tree is
-    /// unreachable; the block's ids and its click target are pinned instead.
+    /// Issue #813: the recent-folders list (#521) is gone. The empty state
+    /// keeps its `Open folder` button, and nothing in the production sidebar
+    /// or the crate root may bring back the `Open recent` rows or the
+    /// `recents` module behind them.
     #[test]
-    fn the_empty_state_lists_recent_folders_beneath_open_folder() {
-        let production = include_str!("mod.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production half of the module");
+    fn the_empty_state_has_no_recent_folders_list() {
+        let full = include_str!("mod.rs");
+        let production = &full[..full
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("sidebar test module")];
         let empty_state = source_slice(
             production,
             "if self.workspaces.is_empty() {",
@@ -4379,34 +4287,19 @@ mod tests {
             empty_state.contains("\"empty-new-ws\""),
             "the empty state must keep its Open folder button"
         );
+        for gone in [
+            "render_empty_state_recents",
+            "crate::recents",
+            "Open recent",
+        ] {
+            assert!(
+                !production.contains(gone),
+                "the recent-folders list must stay removed: found {gone}"
+            );
+        }
         assert!(
-            empty_state.contains("render_empty_state_recents("),
-            "the empty state must mount the Open recent list under the button"
-        );
-        let recents = source_slice(
-            production,
-            "fn render_empty_state_recents(",
-            "fn sidebar_rows(",
-        );
-        assert!(
-            recents.contains("crate::recents::current(cx)"),
-            "the rows must come from the recents module, not a second list"
-        );
-        assert!(
-            recents.contains("if recents.is_empty() {\n            return None;"),
-            "an empty list must render nothing"
-        );
-        assert!(
-            recents.contains("\"empty-recent-{idx}\""),
-            "rows need stable empty-recent-<index> ids"
-        );
-        assert!(
-            recents.contains("this.open_recent_workspace(idx, w, cx)"),
-            "a click must open the folder through open_recent_workspace"
-        );
-        assert!(
-            recents.contains(".child(\"Open recent\")"),
-            "the list carries its Open recent heading"
+            !include_str!("../../main.rs").contains("mod recents;"),
+            "the recents module must stay removed"
         );
     }
 
@@ -4789,35 +4682,6 @@ mod tests {
             .advance_clock(std::time::Duration::from_millis(1));
         cx.run_until_parked();
         assert!(cx.debug_bounds("paneflow-text-tooltip").is_some());
-    }
-
-    /// Issue #521: the empty state's `Open recent` rows are activated with
-    /// `on_click`, which AccessKit exposes only for a named button role, so
-    /// each row carries `Role::Button` and its full path as the accessible
-    /// name (rows six through eight have no `Cmd+N` fallback at all).
-    #[test]
-    fn empty_state_recent_rows_are_accessible_named_buttons() {
-        let source = include_str!("mod.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production sidebar source");
-        let body = source_slice(source, "fn render_empty_state_recents(", "\n    }\n");
-        let id_at = body
-            .find("format!(\"empty-recent-{idx}\")")
-            .expect("the empty state builds the `empty-recent-` rows");
-        let row = &body[id_at..];
-        let click_at = row
-            .find(".on_click(")
-            .expect("a recent row activates on click");
-        let head = &row[..click_at];
-        assert!(
-            head.contains(".role(Role::Button)"),
-            "a recent row must carry the button role before its click handler: {head}"
-        );
-        assert!(
-            head.contains(".aria_label(full_path.clone())"),
-            "a recent row's accessible name is its full path: {head}"
-        );
     }
 
     /// Issue #340: the rail's hover actions (new pane, close workspace, close
