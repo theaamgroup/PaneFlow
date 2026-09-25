@@ -41,11 +41,6 @@ pub(super) const FIXED: &[(&str, &str)] = &[
     ("enter", "Pane overview · open selected pane"),
     ("escape", "Pane overview · close"),
     ("backspace", "Pane overview · delete filter character"),
-    ("up", "Theme picker · previous result"),
-    ("down", "Theme picker · next result"),
-    ("enter", "Theme picker · activate selection"),
-    ("escape", "Theme picker · close"),
-    ("backspace", "Theme picker · delete filter character"),
     ("up", "Sessions sidebar · previous row"),
     ("down", "Sessions sidebar · next row"),
     ("home", "Sessions sidebar · first row"),
@@ -166,6 +161,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn fixed_rows_do_not_document_the_removed_theme_picker() {
+        // Themes are chosen in Settings → Appearance; there is no modal
+        // theme picker, so the fixed-key reference must not list its keys.
+        let stale: Vec<_> = FIXED
+            .iter()
+            .filter(|(_, description)| description.starts_with("Theme picker"))
+            .collect();
+        assert!(stale.is_empty(), "stale Theme picker rows: {stale:?}");
     }
 
     #[test]

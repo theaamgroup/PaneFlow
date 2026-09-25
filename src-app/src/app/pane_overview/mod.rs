@@ -309,7 +309,7 @@ impl PaneFlowApp {
                 return;
             }
             _ => {
-                // Type-to-filter, the theme-picker idiom: printable keys
+                // Type-to-filter: printable keys
                 // without a command/control/alt modifier extend the query.
                 if let Some(ch) = &event.keystroke.key_char
                     && !ch.is_empty()
