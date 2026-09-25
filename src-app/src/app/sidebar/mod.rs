@@ -1786,6 +1786,12 @@ impl PaneFlowApp {
         });
         let tone =
             sidebar_workspace_tone(i == self.active_idx, ws.is_idle(cx), is_waiting_for_input);
+        // The whole workspace, whatever the fold: the number answers "how
+        // many agents are working here", which no tab row repeats.
+        let running = ai_types::running_session_count(ws.agent_sessions.values());
+        let running_count = (self.renaming_idx != Some(i))
+            .then(|| running_agent_count_badge(running, ws.running_subagents.total(), ws_id, ui))
+            .flatten();
         let title_el = if self.renaming_idx == Some(i) {
             let (editor_bg, editor_body) =
                 rename_editor_skin(&self.rename_text, self.rename_seeded, ui);
@@ -1802,8 +1808,10 @@ impl PaneFlowApp {
                 .rounded_sm()
                 .child(editor_body)
         } else {
-            div()
-                .flex_1()
+            // The name shrinks but never grows, so the running count sits
+            // right after it and a long name truncates before the count does.
+            let name = div()
+                .flex_initial()
                 .min_w_0()
                 .overflow_x_hidden()
                 .whitespace_nowrap()
@@ -1812,7 +1820,16 @@ impl PaneFlowApp {
                 .text_sm()
                 .line_height(px(SIDEBAR_ROW_LINE_HEIGHT))
                 .font_weight(FontWeight::MEDIUM)
-                .child(title)
+                .child(title);
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(SIDEBAR_RUNNING_COUNT_GAP))
+                .child(name)
+                .children(running_count)
         };
 
         // US-008: the open/closed folder glyph reports the disclosure state -
@@ -2829,6 +2846,67 @@ fn tab_pane_icon_lane(
         .into_any_element()
 }
 
+/// Gap between a workspace name and its running-agent count.
+const SIDEBAR_RUNNING_COUNT_GAP: f32 = 5.;
+
+/// Accessible name and tooltip for the running-agent count: "2 agents
+/// running, 3 subagents". `None` when nothing is running.
+fn running_agent_count_label(sessions: usize, subagents: usize) -> Option<String> {
+    let total = sessions + subagents;
+    if total == 0 {
+        return None;
+    }
+    let noun = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    Some(match (sessions, subagents) {
+        (_, 0) => format!("{} running", noun(sessions, "agent", "agents")),
+        (0, _) => format!("{} running", noun(subagents, "subagent", "subagents")),
+        _ => format!(
+            "{} running, {}",
+            noun(sessions, "agent", "agents"),
+            noun(subagents, "subagent", "subagents")
+        ),
+    })
+}
+
+/// The number beside a workspace name: its running agents, subagents
+/// included. A 16 px pill in the row's quiet tint, so it reads as a count
+/// and not as a state; the trailing badge still owns state.
+fn running_agent_count_badge(
+    sessions: usize,
+    subagents: usize,
+    ws_id: u64,
+    ui: crate::theme::UiColors,
+) -> Option<AnyElement> {
+    let label: SharedString = running_agent_count_label(sessions, subagents)?.into();
+    let tooltip = label.clone();
+    Some(
+        div()
+            .id(SharedString::from(format!("ws-running-{ws_id}")))
+            .role(Role::Status)
+            .aria_label(label)
+            .flex_none()
+            .h(px(16.))
+            .min_w(px(16.))
+            .px(px(5.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(ui.text.opacity(0.08))
+            .text_size(px(10.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(ui.muted)
+            .delayed_tooltip(move |_w, cx| {
+                cx.new(|_| SidebarTooltip {
+                    label: tooltip.clone(),
+                })
+                .into()
+            })
+            .child((sessions + subagents).to_string())
+            .into_any_element(),
+    )
+}
+
 /// `row_key` scopes the element and animation ids to one sidebar row. It is a
 /// string, not an id: workspace ids and tab ids come from independent counters,
 /// so a folder row and a tab row could otherwise collide on the same numeric
@@ -3061,11 +3139,11 @@ mod tests {
         SIDEBAR_WORKSPACE_ROW_CONTENT_WIDTH, SidebarAgentState, SidebarAgentSummary,
         SidebarDropSlot, SidebarRow, SidebarServiceSummary, WorkspaceOrderKey, compute_auto_order,
         diffstat_visible, fold_all_target, folder_row_sessions, rename_editor_skin,
-        rename_key_action, reorder_target, sidebar_agent_summary, sidebar_drop_slots,
-        sidebar_row_shell, sidebar_service_summary, sidebar_tab_branch_row, sidebar_tab_row_shell,
-        sidebar_tab_title_opacity, sidebar_tab_title_row, sidebar_workspace_tone,
-        tab_display_title, tab_icon_cluster_split, tab_row_sessions, tab_row_title,
-        take_rename_selection, visible_service_ports,
+        rename_key_action, reorder_target, running_agent_count_label, sidebar_agent_summary,
+        sidebar_drop_slots, sidebar_row_shell, sidebar_service_summary, sidebar_tab_branch_row,
+        sidebar_tab_row_shell, sidebar_tab_title_opacity, sidebar_tab_title_row,
+        sidebar_workspace_tone, tab_display_title, tab_icon_cluster_split, tab_row_sessions,
+        tab_row_title, take_rename_selection, visible_service_ports,
     };
     use crate::agent_launcher::TerminalAgent;
     use crate::ai_types::{AgentSession, AgentState};
@@ -3606,6 +3684,27 @@ mod tests {
                 primary: 3000,
                 overflow: 1,
             })
+        );
+    }
+
+    #[test]
+    fn running_agent_count_label_names_agents_and_subagents() {
+        assert_eq!(running_agent_count_label(0, 0), None);
+        assert_eq!(
+            running_agent_count_label(1, 0).as_deref(),
+            Some("1 agent running")
+        );
+        assert_eq!(
+            running_agent_count_label(2, 0).as_deref(),
+            Some("2 agents running")
+        );
+        assert_eq!(
+            running_agent_count_label(0, 1).as_deref(),
+            Some("1 subagent running")
+        );
+        assert_eq!(
+            running_agent_count_label(1, 3).as_deref(),
+            Some("1 agent running, 3 subagents")
         );
     }
 

@@ -160,6 +160,8 @@ printf '%s\\n' '{"jsonrpc":"2.0","method":"system.capabilities","params":{},"id"
 | `ai.stop`                  | hook payload                                                                                    | Agent lifecycle event                                   |
 | `ai.exit`                  | hook payload                                                                                    | Agent lifecycle event                                   |
 | `ai.session_end`           | hook payload                                                                                    | Agent lifecycle event                                   |
+| `ai.subagent_start`        | `pid`, hook payload with `subagent_id`                                                          | Subagent started; raises the sidebar running count      |
+| `ai.subagent_stop`         | `pid`, hook payload with `subagent_id`                                                          | Subagent finished; never ends the parent's turn         |
 
 Structured failures use JSON-RPC `error` envelopes: `-32602` invalid
 params, `-32601` gated or unknown method, `-32001` permission,
