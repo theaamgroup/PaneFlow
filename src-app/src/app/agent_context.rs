@@ -3,7 +3,7 @@
 //! boundary, not credentials or proof of an agent's process identity.
 
 use gpui::{App, Context, Entity};
-use paneflow_config::schema::{AgentContext, AgentTask, TaskAssignment, TaskReport};
+use paneflow_config::schema::{AgentContext, AgentTask, TaskAssignment, TaskReport, TaskStatus};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -16,13 +16,66 @@ struct ContextRequest {
     surface_id: u64,
     workspace_id: u64,
     #[serde(default)]
-    assignment: Option<TaskAssignment>,
+    assignment: Option<WireTaskAssignment>,
     #[serde(default)]
     task_id: Option<String>,
     #[serde(default)]
     revision: Option<u64>,
     #[serde(default)]
-    report: Option<TaskReport>,
+    report: Option<WireTaskReport>,
+}
+
+/// Strict IPC mirror of [`TaskAssignment`]. The persisted schema type ignores
+/// unknown keys so `session.json` stays forward compatible (issue #726); a
+/// typo'd field in a `task.assign` request must still be rejected.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireTaskAssignment {
+    objective: String,
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    owned_files: Vec<String>,
+}
+
+impl From<WireTaskAssignment> for TaskAssignment {
+    fn from(wire: WireTaskAssignment) -> Self {
+        Self {
+            objective: wire.objective,
+            acceptance_criteria: wire.acceptance_criteria,
+            owned_files: wire.owned_files,
+        }
+    }
+}
+
+/// Strict IPC mirror of [`TaskReport`], for the same reason as
+/// [`WireTaskAssignment`].
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireTaskReport {
+    status: TaskStatus,
+    summary: String,
+    #[serde(default)]
+    changed_files: Vec<String>,
+    #[serde(default)]
+    commits: Vec<String>,
+    #[serde(default)]
+    tests: Vec<String>,
+    #[serde(default)]
+    unresolved_questions: Vec<String>,
+}
+
+impl From<WireTaskReport> for TaskReport {
+    fn from(wire: WireTaskReport) -> Self {
+        Self {
+            status: wire.status,
+            summary: wire.summary,
+            changed_files: wire.changed_files,
+            commits: wire.commits,
+            tests: wire.tests,
+            unresolved_questions: wire.unresolved_questions,
+        }
+    }
 }
 
 fn context_workspace(
@@ -149,9 +202,10 @@ impl PaneFlowApp {
                         "task.assign accepts assignment only",
                     ));
                 }
-                let assignment = request
+                let assignment: TaskAssignment = request
                     .assignment
-                    .ok_or_else(|| JsonRpcError::invalid_params("assignment required"))?;
+                    .ok_or_else(|| JsonRpcError::invalid_params("assignment required"))?
+                    .into();
                 assignment
                     .validate()
                     .map_err(JsonRpcError::invalid_params)?;
@@ -178,9 +232,10 @@ impl PaneFlowApp {
                 let revision = request
                     .revision
                     .ok_or_else(|| JsonRpcError::invalid_params("revision required"))?;
-                let report = request
+                let report: TaskReport = request
                     .report
-                    .ok_or_else(|| JsonRpcError::invalid_params("report required"))?;
+                    .ok_or_else(|| JsonRpcError::invalid_params("report required"))?
+                    .into();
                 terminal
                     .update(cx, |view, _| {
                         view.agent_context
@@ -384,6 +439,42 @@ mod tests {
             json!({"surface_id": "1", "workspace_id": 2}),
         ] {
             assert!(serde_json::from_value::<ContextRequest>(value).is_err());
+        }
+    }
+
+    /// Issue #726: the persisted task types ignore unknown keys, so the IPC
+    /// wire mirrors must keep rejecting a typo'd field in a request.
+    #[test]
+    fn task_requests_reject_unknown_fields_inside_assignment_and_report() {
+        let assign = |assignment: Value| json!({"surface_id": 1, "workspace_id": 2, "assignment": assignment});
+        let report = |report: Value| {
+            json!({"surface_id": 1, "workspace_id": 2, "task_id": "t", "revision": 1,
+                "report": report})
+        };
+        // Well-formed requests still decode and convert to the schema types.
+        let request: ContextRequest = serde_json::from_value(assign(
+            json!({"objective": "Fix search", "owned_files": ["a.rs"]}),
+        ))
+        .expect("assign");
+        let assignment: TaskAssignment = request.assignment.expect("assignment").into();
+        assert_eq!(assignment.objective, "Fix search");
+        assert_eq!(assignment.owned_files, vec!["a.rs".to_string()]);
+        let request: ContextRequest = serde_json::from_value(report(
+            json!({"status": "working", "summary": "Reproduced"}),
+        ))
+        .expect("report");
+        let converted: TaskReport = request.report.expect("report").into();
+        assert_eq!(converted.status, TaskStatus::Working);
+        assert_eq!(converted.summary, "Reproduced");
+
+        for value in [
+            assign(json!({"objective": "Fix search", "owned_file": ["b.rs"]})),
+            report(json!({"status": "working", "summary": "Reproduced", "test": ["cargo test"]})),
+        ] {
+            let error = serde_json::from_value::<ContextRequest>(value)
+                .err()
+                .expect("unknown nested field must be rejected");
+            assert!(error.to_string().contains("unknown field"), "{error}");
         }
     }
 

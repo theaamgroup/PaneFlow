@@ -46,6 +46,7 @@ impl PiExtensionGuard {
                 &mut lease,
                 &|existing| existing == PI_EXTENSION_SOURCE,
                 &pi_extension_owned_by_marker,
+                &|_| false,
             )?;
             Ok(())
         })?;
@@ -65,7 +66,20 @@ const GROK_HOOK_EVENTS: &[&str] = &[
     "PostToolUse",
     "PermissionRequest",
     "Stop",
+    "SubagentStart",
+    "SubagentStop",
 ];
+
+/// Event sets earlier PaneFlow versions rendered into the Grok hook file.
+/// Their files are still PaneFlow's: an older instance that is running Grok
+/// shares one with this session, and a crashed one leaves one to repair.
+const GROK_LEGACY_HOOK_EVENTS: &[&[&str]] = &[&[
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PermissionRequest",
+    "Stop",
+]];
 
 pub(crate) struct GrokHookFileGuard {
     path: PathBuf,
@@ -80,8 +94,10 @@ impl GrokHookFileGuard {
         let path = directory.join("paneflow.json");
         if !paneflow_ipc_reachable() {
             let source = grok_source()?;
+            let legacy = grok_legacy_sources()?;
             sweep_accepted_owned_file(&path, &|existing| {
                 is_own_or_sibling_rendering(existing, &source)
+                    || is_legacy_rendering(existing, &legacy)
             });
             return Ok(HookInstall::Skipped(HookInstallSkip::IpcUnavailable));
         }
@@ -94,13 +110,32 @@ impl GrokHookFileGuard {
         let path = directory.join("paneflow.json");
         let mut lease = HookLease::acquire(&path)?;
         let source = grok_source()?;
+        let legacy = grok_legacy_sources()?;
         // The file embeds this instance's hook path; another PaneFlow
         // instance (a different `PANEFLOW_BIN_DIR`) renders different bytes
         // for the same hooks, and that file serves this session as well.
+        //
+        // An older version's file is repaired to the current events when
+        // this session is its last holder and PaneFlow created it. While an
+        // older instance still holds it, it serves this session unchanged,
+        // under the same runnable-program rule as a sibling's file: Grok
+        // then reports no subagents until that instance's session ends.
         with_config_lock(&path, || {
-            install_accepted_owned_file(&path, &source, &mut lease, &|existing| {
-                is_own_or_sibling_rendering(existing, &source)
-            })
+            install_owned_file_repairing(
+                &path,
+                &source,
+                &mut lease,
+                &|existing| is_own_or_sibling_rendering(existing, &source),
+                &|existing| {
+                    is_paneflow_rendering_shape(existing, &source, &|_| true)
+                        || is_legacy_rendering(existing, &legacy)
+                },
+                &|existing| {
+                    legacy
+                        .iter()
+                        .any(|older| is_sibling_instance_rendering(existing, older))
+                },
+            )
         })?;
         Ok(Self {
             path,
@@ -113,16 +148,39 @@ impl GrokHookFileGuard {
 impl Drop for GrokHookFileGuard {
     fn drop(&mut self) {
         let source = std::mem::take(&mut self.source);
+        // An older version's file this session outlived its creator on is
+        // PaneFlow's too, and the last holder removes it.
+        let legacy = grok_legacy_sources().unwrap_or_default();
         cleanup_accepted_owned_file(&self.path, &mut self.lease, &|existing| {
-            is_own_or_sibling_rendering(existing, &source)
+            is_own_or_sibling_rendering(existing, &source) || is_legacy_rendering(existing, &legacy)
         });
     }
 }
 
 fn grok_source() -> std::io::Result<String> {
+    grok_source_for(GROK_HOOK_EVENTS)
+}
+
+fn grok_legacy_sources() -> std::io::Result<Vec<String>> {
+    GROK_LEGACY_HOOK_EVENTS
+        .iter()
+        .map(|events| grok_source_for(events))
+        .collect()
+}
+
+fn grok_source_for(events: &[&str]) -> std::io::Result<String> {
     let mut root = serde_json::json!({});
-    merge_strict_matcher_hooks_for_events(&mut root, GROK_HOOK_EVENTS)?;
+    merge_strict_matcher_hooks_for_events(&mut root, events)?;
     Ok(serde_json::to_string_pretty(&root).map_err(std::io::Error::other)? + "\n")
+}
+
+/// True when `existing` is a PaneFlow rendering of one of the `legacy`
+/// sources, whatever hook program it names: stale by definition, so only
+/// its shape is proof of ownership.
+fn is_legacy_rendering(existing: &str, legacy: &[String]) -> bool {
+    legacy
+        .iter()
+        .any(|older| is_paneflow_rendering_shape(existing, older, &|_| true))
 }
 
 /// True when `existing` is `source` byte for byte, or the same hooks as
@@ -280,23 +338,36 @@ pub(super) fn install_accepted_owned_file(
     lease: &mut HookLease,
     accepts: &dyn Fn(&str) -> bool,
 ) -> std::io::Result<()> {
-    install_owned_file_repairing(path, source, lease, accepts, &|existing| {
-        is_paneflow_rendering_shape(existing, source, &|_| true)
-    })
+    install_owned_file_repairing(
+        path,
+        source,
+        lease,
+        accepts,
+        &|existing| is_paneflow_rendering_shape(existing, source, &|_| true),
+        &|_| false,
+    )
 }
 
+/// [`install_accepted_owned_file`] with explicit proofs: `proves_owned`
+/// gates the repair of a stale file, and `tolerates` accepts, unchanged, an
+/// existing file that could not be repaired because another session holds
+/// it or PaneFlow did not create it.
 fn install_owned_file_repairing(
     path: &Path,
     source: &str,
     lease: &mut HookLease,
     accepts: &dyn Fn(&str) -> bool,
     proves_owned: &dyn Fn(&str) -> bool,
+    tolerates: &dyn Fn(&str) -> bool,
 ) -> std::io::Result<()> {
     refuse_symlink(path, "managed hook")?;
     match read_optional_text(path)? {
         Some(existing) if accepts(&existing) => Ok(()),
         Some(existing) => {
             if repair_stale_owned_file(path, &existing, source, lease, proves_owned)? {
+                return Ok(());
+            }
+            if tolerates(&existing) {
                 return Ok(());
             }
             Err(std::io::Error::new(
@@ -774,6 +845,86 @@ mod tests {
         ));
         // Not JSON at all.
         assert!(!is_sibling_instance_rendering("- insert:", &source));
+    }
+
+    #[test]
+    fn an_older_versions_grok_hook_file_is_shared_while_held_and_upgraded_after() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join("hooks");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("paneflow.json");
+        let source = grok_source().unwrap();
+        let program = sibling_hook_program(&temp.path().join("elsewhere"));
+        let older = render_as_sibling_instance(
+            &grok_source_for(GROK_LEGACY_HOOK_EVENTS[0]).unwrap(),
+            &program,
+        );
+        assert_ne!(older, render_as_sibling_instance(&source, &program));
+        std::fs::write(&path, &older).unwrap();
+        // The older instance created the file and its Grok session holds it.
+        let mut older_session = HookLease::acquire(&path).unwrap();
+        older_session.mark_created().unwrap();
+
+        let guard = GrokHookFileGuard::install_at(&directory)
+            .expect("an older instance's live hook file must serve this session");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), older);
+        drop(guard);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            older,
+            "the older instance's file is not this session's to delete"
+        );
+
+        // The older session exits first: this session, now the last holder,
+        // removes the older file when it ends.
+        let guard = GrokHookFileGuard::install_at(&directory).expect("shared again");
+        drop(older_session);
+        drop(guard);
+        assert!(
+            !path.exists(),
+            "the last holder removes a PaneFlow-created older file"
+        );
+
+        // A crash left it behind instead: the next launch upgrades it.
+        std::fs::write(&path, &older).unwrap();
+        let mut crashed = HookLease::acquire(&path).unwrap();
+        crashed.mark_created().unwrap();
+        drop(crashed);
+        let guard = GrokHookFileGuard::install_at(&directory)
+            .expect("an older PaneFlow-created file must be upgraded by its last holder");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        drop(guard);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_crashed_older_versions_grok_hook_file_is_repaired() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join("hooks");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("paneflow.json");
+        let older = render_as_sibling_instance(
+            &grok_source_for(GROK_LEGACY_HOOK_EVENTS[0]).unwrap(),
+            Path::new("/gone/paneflow-ai-hook"),
+        );
+        std::fs::write(&path, &older).unwrap();
+        let mut crashed = HookLease::acquire(&path).unwrap();
+        crashed.mark_created().unwrap();
+        drop(crashed);
+
+        let guard = GrokHookFileGuard::install_at(&directory)
+            .expect("a crashed older session's file must be repaired");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            grok_source().unwrap()
+        );
+        drop(guard);
+
+        // Unowned, and naming a program that is gone: a user's file.
+        std::fs::write(&path, &older).unwrap();
+        let error = GrokHookFileGuard::install_at(&directory).err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), older);
     }
 
     #[test]

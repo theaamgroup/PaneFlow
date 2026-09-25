@@ -13,6 +13,15 @@ pub const METHOD_NOTIFICATION: &str = "ai.notification";
 pub const METHOD_STOP: &str = "ai.stop";
 pub const METHOD_TOOL_USE: &str = "ai.tool_use";
 pub const METHOD_EXIT: &str = "ai.exit";
+/// A subagent spawned by the session's agent started. `hook_payload` carries
+/// the agent's own pairing id as `subagent_id`.
+pub const METHOD_SUBAGENT_START: &str = "ai.subagent_start";
+/// The subagent named by `hook_payload.subagent_id` finished. Never a turn
+/// end for the parent session: that is `ai.stop`.
+pub const METHOD_SUBAGENT_STOP: &str = "ai.subagent_stop";
+/// Longest `subagent_id` the server keeps. Agent ids are 16-40 byte hex or
+/// UUID strings; anything longer is not an id.
+pub const MAX_SUBAGENT_ID_BYTES: usize = 128;
 
 pub const METHODS: &[&str] = &[
     METHOD_SESSION_START,
@@ -22,6 +31,8 @@ pub const METHODS: &[&str] = &[
     METHOD_STOP,
     METHOD_EXIT,
     METHOD_SESSION_END,
+    METHOD_SUBAGENT_START,
+    METHOD_SUBAGENT_STOP,
 ];
 
 pub const DEFAULT_TOOL: &str = "claude";
@@ -45,6 +56,8 @@ pub enum AiHookMethod {
     Stop,
     ToolUse,
     Exit,
+    SubagentStart,
+    SubagentStop,
 }
 
 impl AiHookMethod {
@@ -57,6 +70,8 @@ impl AiHookMethod {
             Self::Stop => METHOD_STOP,
             Self::ToolUse => METHOD_TOOL_USE,
             Self::Exit => METHOD_EXIT,
+            Self::SubagentStart => METHOD_SUBAGENT_START,
+            Self::SubagentStop => METHOD_SUBAGENT_STOP,
         }
     }
 }

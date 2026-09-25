@@ -14,6 +14,8 @@ pub const CLAUDE_HOOK_EVENTS: &[&str] = &[
     "Stop",
     "PreToolUse",
     "PostToolUse",
+    "SubagentStart",
+    "SubagentStop",
 ];
 pub const MANAGED_MARKER: &str = "_paneflow_managed";
 

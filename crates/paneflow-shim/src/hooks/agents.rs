@@ -24,6 +24,8 @@ const CURSOR_HOOK_EVENTS: &[(&str, &str)] = &[
     ("stop", "Stop"),
     ("preToolUse", "PreToolUse"),
     ("postToolUse", "PostToolUse"),
+    ("subagentStart", "SubagentStart"),
+    ("subagentStop", "SubagentStop"),
 ];
 
 pub(crate) fn merge_qoder_hooks(root: &mut serde_json::Value) -> std::io::Result<()> {
