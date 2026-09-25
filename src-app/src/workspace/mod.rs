@@ -662,9 +662,6 @@ impl Workspace {
                 unread: self
                     .agent_completion_notification
                     .is_unread_for(&tab.surface_ids(cx)),
-                // Older session.json files may still carry this. Current saves
-                // leave it unset so the key is omitted.
-                pull_request: None,
             })
             .collect()
     }

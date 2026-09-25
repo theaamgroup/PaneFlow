@@ -130,8 +130,6 @@ impl LayoutTree {
                                 agent_context: Some(tv_ref.agent_context.clone()),
                                 name,
                                 custom_name: tv_ref.terminal.custom_name.clone(),
-                                command: None,
-                                prompt: None,
                                 cwd,
                                 path: None,
                                 env: None,

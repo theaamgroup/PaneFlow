@@ -2,28 +2,28 @@ use super::super::*;
 use crate::schema::*;
 use tempfile::NamedTempFile;
 
+/// Parse one layout node and run it through `validate_layout`, the same
+/// fixups session restore applies.
+fn validated(layout: &str) -> LayoutNode {
+    let mut node: LayoutNode = serde_json::from_str(layout).unwrap();
+    validate_layout(&mut node);
+    node
+}
+
 #[test]
 fn test_split_ratio_clamped_low() {
-    let json = r#"{
-        "commands": [{
-            "name": "test",
-            "keywords": [],
-            "workspace": {
-                "layout": {
-                    "type": "split",
-                    "direction": "vertical",
-                    "ratio": 0.01,
-                    "children": [
-                        {"type": "pane", "surfaces": [{"surface_type": "terminal"}]},
-                        {"type": "pane", "surfaces": [{"surface_type": "terminal"}]}
-                    ]
-                }
-            }
-        }]
-    }"#;
-    let config = parse_and_validate(json);
-    let ws = config.commands[0].workspace.as_ref().unwrap();
-    match ws.layout.as_ref().unwrap() {
+    let node = validated(
+        r#"{
+        "type": "split",
+        "direction": "vertical",
+        "ratio": 0.01,
+        "children": [
+            {"type": "pane", "surfaces": [{"surface_type": "terminal"}]},
+            {"type": "pane", "surfaces": [{"surface_type": "terminal"}]}
+        ]
+    }"#,
+    );
+    match &node {
         LayoutNode::Split { ratio, .. } => {
             assert!((ratio.unwrap() - 0.1).abs() < f64::EPSILON);
         }
@@ -33,26 +33,18 @@ fn test_split_ratio_clamped_low() {
 
 #[test]
 fn test_split_ratio_clamped_high() {
-    let json = r#"{
-        "commands": [{
-            "name": "test",
-            "keywords": [],
-            "workspace": {
-                "layout": {
-                    "type": "split",
-                    "direction": "vertical",
-                    "ratio": 0.99,
-                    "children": [
-                        {"type": "pane", "surfaces": [{"surface_type": "terminal"}]},
-                        {"type": "pane", "surfaces": [{"surface_type": "terminal"}]}
-                    ]
-                }
-            }
-        }]
-    }"#;
-    let config = parse_and_validate(json);
-    let ws = config.commands[0].workspace.as_ref().unwrap();
-    match ws.layout.as_ref().unwrap() {
+    let node = validated(
+        r#"{
+        "type": "split",
+        "direction": "vertical",
+        "ratio": 0.99,
+        "children": [
+            {"type": "pane", "surfaces": [{"surface_type": "terminal"}]},
+            {"type": "pane", "surfaces": [{"surface_type": "terminal"}]}
+        ]
+    }"#,
+    );
+    match &node {
         LayoutNode::Split { ratio, .. } => {
             assert!((ratio.unwrap() - 0.9).abs() < f64::EPSILON);
         }
@@ -94,27 +86,19 @@ fn test_per_child_ratios_floor_respected_after_normalize() {
 #[test]
 fn test_split_nary_children_accepted() {
     // 3+ children are valid in N-ary layout.
-    let json = r#"{
-        "commands": [{
-            "name": "test",
-            "keywords": [],
-            "workspace": {
-                "layout": {
-                    "type": "split",
-                    "direction": "horizontal",
-                    "ratios": [0.33, 0.33, 0.34],
-                    "children": [
-                        {"type": "pane", "surfaces": [{"surface_type": "terminal"}]},
-                        {"type": "pane", "surfaces": [{"surface_type": "terminal"}]},
-                        {"type": "pane", "surfaces": [{"surface_type": "terminal"}]}
-                    ]
-                }
-            }
-        }]
-    }"#;
-    let config = parse_and_validate(json);
-    let ws = config.commands[0].workspace.as_ref().unwrap();
-    match ws.layout.as_ref().unwrap() {
+    let node = validated(
+        r#"{
+        "type": "split",
+        "direction": "horizontal",
+        "ratios": [0.33, 0.33, 0.34],
+        "children": [
+            {"type": "pane", "surfaces": [{"surface_type": "terminal"}]},
+            {"type": "pane", "surfaces": [{"surface_type": "terminal"}]},
+            {"type": "pane", "surfaces": [{"surface_type": "terminal"}]}
+        ]
+    }"#,
+    );
+    match &node {
         LayoutNode::Split {
             children, ratios, ..
         } => {
@@ -129,22 +113,14 @@ fn test_split_nary_children_accepted() {
 
 #[test]
 fn test_split_zero_children_padded() {
-    let json = r#"{
-        "commands": [{
-            "name": "test",
-            "keywords": [],
-            "workspace": {
-                "layout": {
-                    "type": "split",
-                    "direction": "horizontal",
-                    "children": []
-                }
-            }
-        }]
-    }"#;
-    let config = parse_and_validate(json);
-    let ws = config.commands[0].workspace.as_ref().unwrap();
-    match ws.layout.as_ref().unwrap() {
+    let node = validated(
+        r#"{
+        "type": "split",
+        "direction": "horizontal",
+        "children": []
+    }"#,
+    );
+    match &node {
         LayoutNode::Split { children, .. } => {
             assert_eq!(children.len(), 2);
         }
@@ -154,21 +130,13 @@ fn test_split_zero_children_padded() {
 
 #[test]
 fn test_pane_no_surfaces_gets_default() {
-    let json = r#"{
-        "commands": [{
-            "name": "test",
-            "keywords": [],
-            "workspace": {
-                "layout": {
-                    "type": "pane",
-                    "surfaces": []
-                }
-            }
-        }]
-    }"#;
-    let config = parse_and_validate(json);
-    let ws = config.commands[0].workspace.as_ref().unwrap();
-    match ws.layout.as_ref().unwrap() {
+    let node = validated(
+        r#"{
+        "type": "pane",
+        "surfaces": []
+    }"#,
+    );
+    match &node {
         LayoutNode::Pane { surfaces } => {
             assert_eq!(surfaces.len(), 1);
             assert_eq!(surfaces[0].surface_type.as_deref(), Some("terminal"));
@@ -183,14 +151,13 @@ fn test_load_from_file() {
     let mut tmp = NamedTempFile::new().unwrap();
     write!(
         tmp,
-        r#"{{"default_shell": "/bin/bash", "commands": [{{"name": "ls", "keywords": [], "command": "ls -la"}}]}}"#
+        r#"{{"default_shell": "/bin/bash", "font_size": 15.0}}"#
     )
     .unwrap();
 
     let config = load_config_from_path(tmp.path());
     assert_eq!(config.default_shell, Some("/bin/bash".to_string()));
-    assert_eq!(config.commands.len(), 1);
-    assert_eq!(config.commands[0].name, "ls");
+    assert_eq!(config.font_size, Some(15.0));
 }
 
 #[test]
@@ -205,34 +172,26 @@ fn test_load_from_file_invalid_json() {
 
 #[test]
 fn test_nested_split_validation() {
-    let json = r#"{
-        "commands": [{
-            "name": "nested",
-            "keywords": [],
-            "workspace": {
-                "layout": {
-                    "type": "split",
-                    "direction": "horizontal",
-                    "ratio": 0.5,
-                    "children": [
-                        {
-                            "type": "split",
-                            "direction": "vertical",
-                            "ratio": 0.05,
-                            "children": [
-                                {"type": "pane", "surfaces": [{"surface_type": "terminal"}]},
-                                {"type": "pane", "surfaces": [{"surface_type": "terminal"}]}
-                            ]
-                        },
-                        {"type": "pane", "surfaces": [{"surface_type": "terminal"}]}
-                    ]
-                }
-            }
-        }]
-    }"#;
-    let config = parse_and_validate(json);
-    let ws = config.commands[0].workspace.as_ref().unwrap();
-    match ws.layout.as_ref().unwrap() {
+    let node = validated(
+        r#"{
+        "type": "split",
+        "direction": "horizontal",
+        "ratio": 0.5,
+        "children": [
+            {
+                "type": "split",
+                "direction": "vertical",
+                "ratio": 0.05,
+                "children": [
+                    {"type": "pane", "surfaces": [{"surface_type": "terminal"}]},
+                    {"type": "pane", "surfaces": [{"surface_type": "terminal"}]}
+                ]
+            },
+            {"type": "pane", "surfaces": [{"surface_type": "terminal"}]}
+        ]
+    }"#,
+    );
+    match &node {
         LayoutNode::Split { children, .. } => {
             // Inner split should have ratio clamped to 0.1.
             match &children[0] {
@@ -248,33 +207,24 @@ fn test_nested_split_validation() {
 
 #[test]
 fn test_surface_with_env_and_focus() {
-    let json = r#"{
-        "commands": [{
-            "name": "envtest",
-            "keywords": [],
-            "workspace": {
-                "layout": {
-                    "type": "pane",
-                    "surfaces": [{
-                        "surface_type": "terminal",
-                        "name": "main",
-                        "command": "cargo run",
-                        "cwd": "/tmp",
-                        "env": {"RUST_LOG": "debug"},
-                        "focus": true
-                    }]
-                }
-            }
+    let node = validated(
+        r#"{
+        "type": "pane",
+        "surfaces": [{
+            "surface_type": "terminal",
+            "name": "main",
+            "command": "cargo run",
+            "cwd": "/tmp",
+            "env": {"RUST_LOG": "debug"},
+            "focus": true
         }]
-    }"#;
-    let config = parse_and_validate(json);
-    let ws = config.commands[0].workspace.as_ref().unwrap();
-    match ws.layout.as_ref().unwrap() {
+    }"#,
+    );
+    match &node {
         LayoutNode::Pane { surfaces } => {
             assert_eq!(surfaces.len(), 1);
             let s = &surfaces[0];
             assert_eq!(s.name.as_deref(), Some("main"));
-            assert_eq!(s.command.as_deref(), Some("cargo run"));
             assert_eq!(s.cwd.as_deref(), Some("/tmp"));
             assert_eq!(s.focus, Some(true));
             let env = s.env.as_ref().unwrap();

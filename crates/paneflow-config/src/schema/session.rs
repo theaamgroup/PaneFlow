@@ -169,24 +169,10 @@ pub struct TabSession {
     /// Whether an agent turn finished in this tab while the user was not
     /// looking and has not been acknowledged yet (issue #489, upstream
     /// `9da2e4be`). Additive on v2 like `worktree`: absent reads as `false`
-    /// and `false` is skipped on write.
+    /// and `false` is skipped on write. An older file may also carry a tab
+    /// `pull_request` object (issue #606); it is ignored like any unknown key.
     #[serde(default, skip_serializing_if = "is_false")]
     pub unread: bool,
-    /// Older `session.json` files may still record the tab's last known pull
-    /// request. Current saves leave it unset. Additive on v2, so
-    /// [`SESSION_SCHEMA_VERSION`] does not move; skipped while `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pull_request: Option<PullRequestSession>,
-}
-
-/// A tab's pull request as an older `session.json` stored it: the branch it
-/// was looked up for, the number, and the state word (`open`, `draft`,
-/// `merged`, `closed`). Decode still accepts it. Current saves omit the key.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PullRequestSession {
-    pub branch: String,
-    pub number: u64,
-    pub state: String,
 }
 
 impl TabSession {
@@ -203,12 +189,14 @@ impl TabSession {
             layout: Some(layout),
             worktree: None,
             unread: false,
-            pull_request: None,
         }
     }
 }
 
 /// Snapshot of a single workspace for session persistence.
+///
+/// An older file may still carry per-workspace `custom_buttons` (issue #608);
+/// the key is ignored like any unknown key.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkspaceSession {
     /// Workspace display title.
@@ -236,12 +224,6 @@ pub struct WorkspaceSession {
     /// once the migration has run, so v2 never writes the key.
     #[serde(rename = "empty", default, skip_serializing_if = "is_false")]
     pub legacy_empty: bool,
-    /// Leftover per-workspace command buttons (issue #608). Older
-    /// `session.json` files still decode this key. The app does not render
-    /// or edit the vec, and an empty one is omitted on write. Additive on
-    /// v2: [`SESSION_SCHEMA_VERSION`] must not move for it.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub custom_buttons: Vec<ButtonCommand>,
     /// Git worktrees Paneflow created for this workspace
     /// (EP-002, prd-orchestration-v2). Persisted so a crash/restart keeps the
     /// ownership record (teardown at close, `git worktree prune` at startup).
@@ -362,7 +344,6 @@ fn demote_panes_to_focused_surface(node: &mut LayoutNode, promoted: &mut Vec<Tab
                     // A v1 file predates tab worktrees by definition.
                     worktree: None,
                     unread: false,
-                    pull_request: None,
                 });
             }
         }
@@ -403,21 +384,4 @@ pub struct ManagedWorktreeDef {
     /// a replacement directory at the same path cannot inherit ownership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory_identity: Option<String>,
-}
-
-/// Leftover shape of a per-workspace command button (issue #608).
-/// Still decoded from older `session.json` files. The app does not render
-/// or write these.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct ButtonCommand {
-    /// Stable identifier (opaque string) - survives reorderings and renames.
-    pub id: String,
-    /// Display name (also used as hover tooltip).
-    pub name: String,
-    /// Icon asset path relative to the `assets/` folder (e.g. `"icons/rocket.svg"`).
-    pub icon: String,
-    /// Shell command string, executed verbatim in the active terminal
-    /// with a trailing `\r` appended (no bracketed-paste wrapping).
-    pub command: String,
 }

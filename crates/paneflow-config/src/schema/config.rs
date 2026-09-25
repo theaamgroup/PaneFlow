@@ -1,11 +1,15 @@
 use super::{
-    AgentPanelConfig, CommandDefinition, CursorBlinkConfig, CursorShapeConfig,
-    Osc52ClipboardConfig, TerminalConfig,
+    AgentPanelConfig, CursorBlinkConfig, CursorShapeConfig, Osc52ClipboardConfig, TerminalConfig,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Top-level PaneFlow configuration.
+///
+/// Unknown keys are ignored. Retired keys such as `commands` (issue #607) and
+/// `custom_buttons` (issue #608) therefore still load from an older file
+/// without a field here; the published schema keeps a stub for `commands` so
+/// editors do not flag it (issue #817).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PaneFlowConfig {
@@ -24,13 +28,6 @@ pub struct PaneFlowConfig {
     /// stores the currently resolved concrete bundled theme for compatibility.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub theme_mode: Option<String>,
-    /// Legacy command palette entries and workspace templates (issue #607).
-    /// Accepted and ignored: an older `paneflow.json` still loads, and the
-    /// app does not launch or edit this array. Session restore owns
-    /// repeatable layouts. The key stays on the struct because the published
-    /// schema sets `additionalProperties` to false.
-    #[serde(default, deserialize_with = "lenient_commands")]
-    pub commands: Vec<CommandDefinition>,
     /// Native window backdrop: `"auto"` (default), `"blurred"`,
     /// `"transparent"`, or `"opaque"` / `"off"`. Read at startup;
     /// `PANEFLOW_WINDOW_BACKDROP` overrides it for one launch. Legacy
@@ -335,10 +332,11 @@ pub struct PaneFlowConfig {
 /// Customize Sidebar menu (issue #349) or by hand.
 ///
 /// The defaults are the rail as it shipped before the menu existed (issue
-/// #349): the branch painted, no diffstat, no indent guide. `pr` is a
-/// leftover key, accepted and ignored (issue #606). So a `paneflow.json`
-/// without this key renders exactly as it did, and only `branch` reads an
-/// absent value as `true`.
+/// #349): the branch painted, no diffstat, no indent guide. So a
+/// `paneflow.json` without this key renders exactly as it did, and only
+/// `branch` reads an absent value as `true`. A leftover `pr` key (issue #606)
+/// is ignored like any unknown key; the published schema keeps a stub for it
+/// (issue #817).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SidebarShow {
@@ -353,12 +351,6 @@ pub struct SidebarShow {
     /// before the switch existed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub diffstat: Option<bool>,
-    /// Accepted and ignored (issue #606). Older files set this to replace the
-    /// branch icon with a pull-request glyph. The published schema sets
-    /// `additionalProperties: false` on this object, so dropping the key would
-    /// reject those files. The sidebar does not read it.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub pr: Option<bool>,
     /// Draw a hairline under a workspace's folder icon, running down its tab
     /// rows, the way a tree view ties children to their parent. `None` is
     /// `false` (issue #349).
@@ -541,12 +533,6 @@ impl PaneFlowConfig {
     /// Agent sessions sidebar. Absent means off.
     pub fn new_pane_shows_sessions(&self) -> bool {
         self.new_pane_shows_sessions.unwrap_or(false)
-    }
-
-    /// Whether the sidebar's "Install MCP bridge" callout was dismissed for
-    /// the agent with this MCP-install id (issue #443).
-    pub fn mcp_bridge_prompt_dismissed_for(&self, id: &str) -> bool {
-        self.mcp_bridge_prompt_dismissed.iter().any(|d| d == id)
     }
 
     /// EP-003 US-011: resolve `review_prefill_delay_ms`: default 2000, clamped to
@@ -750,32 +736,4 @@ where
             T::default()
         }
     })
-}
-
-/// Commands are lenient per entry rather than per vector: one malformed
-/// command must not discard its valid siblings or the rest of the file.
-/// The loaded array is accepted and ignored by the app (issue #607).
-fn lenient_commands<'de, D>(d: D) -> Result<Vec<CommandDefinition>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = serde_json::Value::deserialize(d)?;
-    let Some(items) = value.as_array() else {
-        tracing::warn!("ignoring config field `commands`: expected an array");
-        return Ok(Vec::new());
-    };
-
-    Ok(items
-        .iter()
-        .enumerate()
-        .filter_map(
-            |(index, raw)| match serde_json::from_value::<CommandDefinition>(raw.clone()) {
-                Ok(command) => Some(command),
-                Err(error) => {
-                    tracing::warn!("skipping invalid command entry at index {index}: {error}");
-                    None
-                }
-            },
-        )
-        .collect())
 }

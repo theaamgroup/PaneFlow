@@ -83,7 +83,6 @@ mod tests {
             default_shell: Some("sh".to_string()),
             theme: Some("One Dark".to_string()),
             theme_mode: Some("dark".to_string()),
-            commands: Vec::new(),
             window_backdrop: Some("auto".to_string()),
             macos_chrome_material: Some(true),
             unfocused_pane_opacity: Some(0.7),
@@ -91,7 +90,6 @@ mod tests {
             sidebar_show: SidebarShow {
                 branch: Some(true),
                 diffstat: Some(true),
-                pr: Some(true),
                 indent_guide: Some(true),
             },
             workspace_auto_sort: Some(false),
@@ -167,13 +165,39 @@ mod tests {
         schema_top_level.remove("$schema");
         schema_top_level.remove("$schemaVersion");
 
+        // Retired keys the schema keeps as stubs so editors do not flag an
+        // older file (issue #817). No Rust field backs them: serde ignores
+        // unknown keys. Every other schema key must still match a live field.
+        let retired_top_level = key_set(&["commands"]);
+        let retired_sidebar_show = key_set(&["pr"]);
+        for key in &retired_top_level {
+            assert!(
+                serialized.get(key).is_none(),
+                "`{key}` is a live PaneFlowConfig field again; drop it from the retired list"
+            );
+            assert_eq!(
+                schema["properties"][key]["deprecated"],
+                serde_json::Value::Bool(true),
+                "retired schema stub `{key}` must stay deprecated"
+            );
+        }
+        for key in &retired_sidebar_show {
+            assert!(
+                serialized["sidebar_show"].get(key).is_none(),
+                "`sidebar_show.{key}` is a live SidebarShow field again; drop it from the retired list"
+            );
+        }
+
+        let mut rust_top_level = object_keys(&serialized);
+        rust_top_level.extend(retired_top_level);
         assert_eq!(
-            object_keys(&serialized),
-            schema_top_level,
+            rust_top_level, schema_top_level,
             "top-level PaneFlowConfig and public JSON Schema drifted"
         );
+        let mut rust_sidebar_show = object_keys(&serialized["sidebar_show"]);
+        rust_sidebar_show.extend(retired_sidebar_show);
         assert_eq!(
-            object_keys(&serialized["sidebar_show"]),
+            rust_sidebar_show,
             object_keys(&schema["properties"]["sidebar_show"]["properties"]),
             "SidebarShow and public JSON Schema drifted"
         );
@@ -186,65 +210,6 @@ mod tests {
             object_keys(&serialized["agent_panel"]),
             object_keys(&schema["properties"]["agent_panel"]["properties"]),
             "AgentPanelConfig and public JSON Schema drifted"
-        );
-
-        let command = CommandDefinition {
-            name: "Dev".to_string(),
-            description: Some("Open dev workspace".to_string()),
-            keywords: vec!["dev".to_string()],
-            workspace: Some(WorkspaceDefinition {
-                name: Some("Dev".to_string()),
-                cwd: Some("~/dev".to_string()),
-                layout_preset: Some("even_h".to_string()),
-                color: Some("007aff".to_string()),
-                layout: Some(LayoutNode::Pane {
-                    surfaces: vec![SurfaceDefinition {
-                        agent_context: Some(AgentContext {
-                            pane_id: "example".into(),
-                            task: None,
-                        }),
-                        surface_type: Some("terminal".to_string()),
-                        name: Some("Claude".to_string()),
-                        custom_name: Some("Agent".to_string()),
-                        command: Some("claude".to_string()),
-                        prompt: Some("Review this".to_string()),
-                        cwd: Some("~/dev/app".to_string()),
-                        path: Some("README.md".to_string()),
-                        env: Some(HashMap::new()),
-                        focus: Some(true),
-                        scrollback: Some("previous output".to_string()),
-                        agent: Some("claude_code".to_string()),
-                        font_size: Some(13.0),
-                    }],
-                }),
-            }),
-            command: None,
-        };
-        let serialized_command = serde_json::to_value(command).unwrap();
-        assert_eq!(
-            object_keys(&serialized_command),
-            object_keys(&schema["definitions"]["commandDefinition"]["properties"]),
-            "CommandDefinition and public JSON Schema drifted"
-        );
-        assert_eq!(
-            object_keys(&serialized_command["workspace"]),
-            object_keys(&schema["definitions"]["workspaceDefinition"]["properties"]),
-            "WorkspaceDefinition and public JSON Schema drifted"
-        );
-        assert_eq!(
-            key_set(&["type", "surfaces"]),
-            object_keys(&schema["definitions"]["layoutNode"]["oneOf"][0]["properties"]),
-            "Pane layout node and public JSON Schema drifted"
-        );
-        assert_eq!(
-            key_set(&["type", "direction", "ratio", "ratios", "children"]),
-            object_keys(&schema["definitions"]["layoutNode"]["oneOf"][1]["properties"]),
-            "Split layout node and public JSON Schema drifted"
-        );
-        assert_eq!(
-            object_keys(&serialized_command["workspace"]["layout"]["surfaces"][0]),
-            object_keys(&schema["definitions"]["surface"]["properties"]),
-            "SurfaceDefinition and public JSON Schema drifted"
         );
     }
 
@@ -267,31 +232,6 @@ mod tests {
             &doc,
             &schema["properties"]["agent_panel"]["properties"],
             "agent_panel",
-        );
-        assert_doc_mentions_property_keys(
-            &doc,
-            &schema["definitions"]["commandDefinition"]["properties"],
-            "commandDefinition",
-        );
-        assert_doc_mentions_property_keys(
-            &doc,
-            &schema["definitions"]["workspaceDefinition"]["properties"],
-            "workspaceDefinition",
-        );
-        assert_doc_mentions_property_keys(
-            &doc,
-            &schema["definitions"]["layoutNode"]["oneOf"][0]["properties"],
-            "paneLayoutNode",
-        );
-        assert_doc_mentions_property_keys(
-            &doc,
-            &schema["definitions"]["layoutNode"]["oneOf"][1]["properties"],
-            "splitLayoutNode",
-        );
-        assert_doc_mentions_property_keys(
-            &doc,
-            &schema["definitions"]["surface"]["properties"],
-            "surface",
         );
 
         assert!(
@@ -609,71 +549,50 @@ mod tests {
 
     #[test]
     fn sidebar_show_pr_is_accepted_and_ignored() {
-        // Issue #606: the key stays so an older paneflow.json still loads
-        // (`sidebar_show` has additionalProperties: false in the published
-        // schema). It does not turn any rail line on.
-        let cfg: PaneFlowConfig = serde_json::from_str(r#"{}"#).unwrap();
-        assert!(cfg.sidebar_show.pr.is_none());
-        assert_eq!(cfg.sidebar_show, SidebarShow::default());
-        assert!(cfg.sidebar_show.branch_enabled());
-        assert!(!cfg.sidebar_show.diffstat_enabled());
-        assert!(!cfg.sidebar_show.indent_guide_enabled());
+        // Issue #606 / #817: an older paneflow.json may still carry
+        // `sidebar_show.pr`. No field backs it; serde ignores the key, so the
+        // file loads and no rail line turns on.
+        for raw in [
+            r#"{"theme": "One Dark", "sidebar_show": {"pr": true}}"#,
+            r#"{"theme": "One Dark", "sidebar_show": {"pr": null}}"#,
+            r#"{"theme": "One Dark", "sidebar_show": {"pr": "yes"}}"#,
+        ] {
+            let cfg: PaneFlowConfig = serde_json::from_str(raw).unwrap();
+            assert_eq!(cfg.sidebar_show, SidebarShow::default(), "{raw}");
+            assert!(cfg.sidebar_show.branch_enabled());
+            assert!(!cfg.sidebar_show.diffstat_enabled());
+            assert!(!cfg.sidebar_show.indent_guide_enabled());
+            assert_eq!(cfg.theme.as_deref(), Some("One Dark"));
+        }
 
+        // Siblings next to the leftover key still apply.
         let cfg: PaneFlowConfig =
-            serde_json::from_str(r#"{"sidebar_show": {"pr": true}}"#).unwrap();
-        assert_eq!(cfg.sidebar_show.pr, Some(true));
-        assert!(cfg.sidebar_show.branch_enabled());
-        assert!(!cfg.sidebar_show.diffstat_enabled());
-        assert!(!cfg.sidebar_show.indent_guide_enabled());
-
-        // An explicit null is the default, not an error.
-        let cfg: PaneFlowConfig =
-            serde_json::from_str(r#"{"sidebar_show": {"pr": null}}"#).unwrap();
-        assert!(cfg.sidebar_show.pr.is_none());
-
-        // A malformed field costs that field, never the rest of the file.
-        let cfg: PaneFlowConfig =
-            serde_json::from_str(r#"{"theme": "One Dark", "sidebar_show": {"pr": "yes"}}"#)
-                .unwrap();
-        assert!(cfg.sidebar_show.pr.is_none());
-        assert_eq!(cfg.theme.as_deref(), Some("One Dark"));
+            serde_json::from_str(r#"{"sidebar_show": {"pr": true, "diffstat": true}}"#).unwrap();
+        assert!(cfg.sidebar_show.diffstat_enabled());
 
         // A wholly malformed object costs the setting, not the file.
         let cfg: PaneFlowConfig =
             serde_json::from_str(r#"{"theme": "One Dark", "sidebar_show": "detailed"}"#).unwrap();
-        assert!(cfg.sidebar_show.pr.is_none());
+        assert_eq!(cfg.sidebar_show, SidebarShow::default());
         assert_eq!(cfg.theme.as_deref(), Some("One Dark"));
 
-        // Round trip: the leftover key survives serialization under its own name.
+        // The retired key does not round-trip back out.
         let json = serde_json::to_value(&cfg).unwrap();
         assert_eq!(
             json["sidebar_show"],
-            serde_json::json!({ "branch": null, "diffstat": null, "pr": null, "indent_guide": null })
+            serde_json::json!({ "branch": null, "diffstat": null, "indent_guide": null })
         );
-        let on = PaneFlowConfig {
-            sidebar_show: SidebarShow {
-                pr: Some(true),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let back: PaneFlowConfig =
-            serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
-        assert_eq!(back.sidebar_show.pr, Some(true));
-        assert!(back.sidebar_show.branch_enabled());
-        assert!(!back.sidebar_show.diffstat_enabled());
     }
 
     #[test]
     fn sidebar_show_branch_stays_on_and_the_other_lines_stay_off_by_default() {
         // Issue #349: a 0.2.1 paneflow.json with no `sidebar_show` must render
         // the rail exactly as before - the branch painted, no diffstat, no
-        // indent guide. `pr` is not a live line. Absent means `true` for
+        // indent guide. Absent means `true` for
         // `branch` alone and `false` for diffstat and the indent guide.
         let cfg: PaneFlowConfig = serde_json::from_str(r#"{}"#).unwrap();
         assert!(cfg.sidebar_show.branch_enabled());
         assert!(!cfg.sidebar_show.diffstat_enabled());
-        assert!(cfg.sidebar_show.pr.is_none());
         assert!(!cfg.sidebar_show.indent_guide_enabled());
 
         // An explicit null is the default, not an error, and the defaults of
@@ -721,7 +640,6 @@ mod tests {
             sidebar_show: SidebarShow {
                 branch: Some(false),
                 diffstat: Some(true),
-                pr: Some(false),
                 indent_guide: Some(true),
             },
             ..Default::default()
@@ -816,18 +734,21 @@ mod tests {
 
     #[test]
     fn cursor_color_hex_normalizes_and_defaults_to_theme_when_absent() {
-        let cfg: TerminalConfig = serde_json::from_str(r##"{"cursor_color": "#0a84ff"}"##).unwrap();
-        assert_eq!(cfg.normalized_cursor_color().as_deref(), Some("#0A84FF"));
-
-        let cfg: TerminalConfig = serde_json::from_str(r#"{"cursor_color": "abc"}"#).unwrap();
-        assert_eq!(cfg.normalized_cursor_color().as_deref(), Some("#AABBCC"));
-
-        let cfg: TerminalConfig =
-            serde_json::from_str(r#"{"cursor_color": "not-a-color"}"#).unwrap();
-        assert!(cfg.normalized_cursor_color().is_none());
-
-        let cfg: TerminalConfig = serde_json::from_str(r#"{}"#).unwrap();
-        assert!(cfg.cursor_color.is_none());
-        assert!(cfg.normalized_cursor_color().is_none());
+        // The terminal view feeds `terminal.cursor_color` through
+        // `normalize_hex_color`; an absent value leaves the theme cursor.
+        let normalized = |raw: &str| {
+            let cfg: TerminalConfig = serde_json::from_str(raw).unwrap();
+            cfg.cursor_color.as_deref().and_then(normalize_hex_color)
+        };
+        assert_eq!(
+            normalized(r##"{"cursor_color": "#0a84ff"}"##).as_deref(),
+            Some("#0A84FF")
+        );
+        assert_eq!(
+            normalized(r#"{"cursor_color": "abc"}"#).as_deref(),
+            Some("#AABBCC")
+        );
+        assert!(normalized(r#"{"cursor_color": "not-a-color"}"#).is_none());
+        assert!(normalized(r#"{}"#).is_none());
     }
 }

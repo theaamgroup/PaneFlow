@@ -3086,7 +3086,6 @@ mod tests {
         paneflow_config::schema::SidebarShow {
             branch: Some(true),
             diffstat: Some(diffstat),
-            pr: Some(false),
             indent_guide: Some(false),
         }
     }

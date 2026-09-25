@@ -322,10 +322,6 @@ impl TerminalConfig {
         raw.clamp(0.0, Self::MAX_MINIMUM_CONTRAST)
     }
 
-    pub fn normalized_cursor_color(&self) -> Option<String> {
-        self.cursor_color.as_deref().and_then(normalize_hex_color)
-    }
-
     /// Resolve `osc52_clipboard` to a usable value: default `CopyOnly`.
     pub fn resolved_osc52_clipboard(&self) -> Osc52ClipboardConfig {
         self.osc52_clipboard.unwrap_or_default()

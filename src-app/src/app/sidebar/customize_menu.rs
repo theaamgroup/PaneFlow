@@ -10,8 +10,8 @@
 //! detailed" pair, because that is what the menu is: one switch per thing a
 //! row shows. The defaults are the rail before the menu existed - the branch
 //! on, diffstat and indent guide off - which is what a fresh install and a
-//! `paneflow.json` without `sidebar_show` get. `sidebar_show.pr` still loads
-//! and is not a switch here.
+//! `paneflow.json` without `sidebar_show` get. A leftover `sidebar_show.pr`
+//! is ignored on load and is not a switch here.
 //!
 //! Not a Settings entry point: issue #105 keeps every Settings affordance out
 //! of the sidebar, and this menu only writes the `sidebar_show` object and

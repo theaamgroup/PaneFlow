@@ -10,7 +10,6 @@ fn make_workspace(title: &str, cwd: &str, tabs: Vec<TabSession>) -> WorkspaceSes
         active_tab: 0,
         legacy_layout: None,
         legacy_empty: false,
-        custom_buttons: vec![],
         managed_worktrees: vec![],
         pinned: false,
         sidebar_collapsed: false,
@@ -23,18 +22,12 @@ fn an_unread_tab_and_a_muted_workspace_survive_a_restart() {
     let mut ws = make_workspace("main", "/home/user/project", vec![TabSession::empty()]);
     ws.muted = true;
     ws.tabs[0].unread = true;
-    ws.tabs[0].pull_request = Some(PullRequestSession {
-        branch: "feat/parser".to_string(),
-        number: 46,
-        state: "open".to_string(),
-    });
     let json = serde_json::to_string(&ws).unwrap();
     assert!(json.contains("\"muted\":true"));
     assert!(json.contains("\"unread\":true"));
     let back: WorkspaceSession = serde_json::from_str(&json).unwrap();
     assert!(back.muted);
     assert!(back.tabs[0].unread);
-    assert_eq!(back.tabs[0].pull_request, ws.tabs[0].pull_request);
 
     let quiet = make_workspace("main", "/home/user/project", vec![TabSession::empty()]);
     let json = serde_json::to_string(&quiet).unwrap();
@@ -44,7 +37,6 @@ fn an_unread_tab_and_a_muted_workspace_survive_a_restart() {
         serde_json::from_str(r#"{"title":"main","cwd":"/home/user/project","tabs":[{}]}"#).unwrap();
     assert!(!older.muted);
     assert!(!older.tabs[0].unread);
-    assert!(older.tabs[0].pull_request.is_none());
 }
 
 #[test]
@@ -689,9 +681,9 @@ fn leftover_expanded_paths_still_load() {
     );
 }
 
-/// Issue #608: a session.json that still lists per-workspace custom buttons
-/// must load. The vec is decoded, siblings survive, and a save that clears
-/// the vec omits the key. `SESSION_SCHEMA_VERSION` stays at 2.
+/// Issue #608 / #817: a session.json that still lists per-workspace custom
+/// buttons must load. No field backs the key, so serde ignores it: siblings
+/// survive and a re-save omits the key. `SESSION_SCHEMA_VERSION` stays at 2.
 #[test]
 fn session_custom_buttons_still_load() {
     let json = r#"{
@@ -715,22 +707,57 @@ fn session_custom_buttons_still_load() {
     assert_eq!(state.workspaces[0].title, "paneflow");
     assert_eq!(state.workspaces[0].cwd, "/home/user/dev/paneflow");
     assert!(state.workspaces[0].pinned);
-    assert_eq!(state.workspaces[0].custom_buttons.len(), 1);
-    assert_eq!(state.workspaces[0].custom_buttons[0].id, "serve");
-    assert_eq!(state.workspaces[0].custom_buttons[0].name, "Serve");
-    assert_eq!(
-        state.workspaces[0].custom_buttons[0].icon,
-        "icons/rocket.svg"
-    );
-    assert_eq!(state.workspaces[0].custom_buttons[0].command, "npm run dev");
 
-    let mut cleared = state;
-    cleared.workspaces[0].custom_buttons.clear();
-    let written = serde_json::to_value(&cleared).unwrap();
+    let written = serde_json::to_value(&state).unwrap();
     assert!(
         written["workspaces"][0].get("custom_buttons").is_none(),
         "{written}"
     );
+}
+
+/// Issue #817: an older session.json surface may still carry a `command` or
+/// `prompt`. Restore never read either; the keys are ignored, the surface's
+/// other fields load, and a re-save omits both.
+#[test]
+fn session_surface_command_and_prompt_still_load() {
+    let json = r#"{
+        "version": 2,
+        "active_workspace": 0,
+        "workspaces": [{
+            "title": "paneflow",
+            "cwd": "/home/user/dev/paneflow",
+            "tabs": [{
+                "title": "agent",
+                "layout": {
+                    "type": "pane",
+                    "surfaces": [{
+                        "surface_type": "terminal",
+                        "name": "claude",
+                        "command": "claude",
+                        "prompt": "Review this",
+                        "cwd": "/home/user/dev/paneflow",
+                        "focus": true
+                    }]
+                }
+            }]
+        }]
+    }"#;
+    let state: SessionState = serde_json::from_str(json).unwrap();
+    assert_eq!(state.version, SESSION_SCHEMA_VERSION);
+    let Some(LayoutNode::Pane { surfaces }) = &state.workspaces[0].tabs[0].layout else {
+        panic!("expected a pane layout");
+    };
+    assert_eq!(surfaces.len(), 1);
+    let surface = &surfaces[0];
+    assert_eq!(surface.surface_type.as_deref(), Some("terminal"));
+    assert_eq!(surface.name.as_deref(), Some("claude"));
+    assert_eq!(surface.cwd.as_deref(), Some("/home/user/dev/paneflow"));
+    assert_eq!(surface.focus, Some(true));
+
+    let written = serde_json::to_value(&state).unwrap();
+    let written_surface = &written["workspaces"][0]["tabs"][0]["layout"]["surfaces"][0];
+    assert!(written_surface.get("command").is_none(), "{written}");
+    assert!(written_surface.get("prompt").is_none(), "{written}");
 }
 
 #[test]
