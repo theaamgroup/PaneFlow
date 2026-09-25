@@ -62,6 +62,11 @@ pub(crate) fn normalize_prompt_text(text: &str) -> (String, bool) {
             cut -= 1;
         }
         t.truncate(cut);
+        // The cut can expose interior newlines; keep the no-trailing-LF
+        // contract.
+        while t.ends_with('\n') {
+            t.pop();
+        }
     }
     (t, truncated)
 }
@@ -97,5 +102,16 @@ mod tests {
         let (ok, truncated) = normalize_prompt_text("short prompt");
         assert_eq!(ok, "short prompt");
         assert!(!truncated);
+    }
+
+    #[test]
+    fn normalize_trims_newlines_exposed_by_truncation() {
+        // The cut lands right after interior LFs: the truncated text must
+        // still end without a newline.
+        let head = "a".repeat(MAX_PROMPT_TEXT - 2);
+        let big = format!("{head}\n\ntail");
+        let (out, truncated) = normalize_prompt_text(&big);
+        assert!(truncated);
+        assert_eq!(out, head);
     }
 }
