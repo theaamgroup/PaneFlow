@@ -264,14 +264,6 @@ mod tests {
             cfg.resolved_scrollback_lines_for_profile(TerminalSurfaceProfile::Agent),
             10_000
         );
-        assert_eq!(
-            cfg.resolved_scrollback_lines_for_profile(TerminalSurfaceProfile::Review),
-            2_000
-        );
-        assert_eq!(
-            cfg.resolved_scrollback_lines_for_profile(TerminalSurfaceProfile::Cached),
-            1_000
-        );
 
         let cfg = TerminalConfig {
             scrollback_lines: Some(50_000),
@@ -284,10 +276,6 @@ mod tests {
         assert_eq!(
             cfg.resolved_scrollback_lines_for_profile(TerminalSurfaceProfile::Agent),
             10_000
-        );
-        assert_eq!(
-            cfg.resolved_scrollback_lines_for_profile(TerminalSurfaceProfile::Review),
-            2_000
         );
 
         let cfg = TerminalConfig {

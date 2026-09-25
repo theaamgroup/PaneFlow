@@ -769,7 +769,6 @@ impl PaneFlowApp {
             about_dialog_focus: cx.focus_handle(),
             system_info_dialog: None,
             system_info_dialog_focus: cx.focus_handle(),
-            // Issue #524: Clone repository modal closed.
             // Issue #523: command palette closed.
             command_palette_open: false,
             command_palette_query: String::new(),

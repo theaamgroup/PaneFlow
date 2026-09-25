@@ -221,10 +221,10 @@ pub(crate) enum GeneralDropdown {
     Shell,
 }
 
-/// Which Workspaces-page select is open. New-tab branch menus share it so
-/// only one popover is open at a time.
+/// Which New Tabs settings-page branch menu is open, keyed by workspace id
+/// (`None` = the default-branch row), so only one popover is open at a time.
 #[derive(Clone, Copy, PartialEq)]
-pub(crate) enum WorkspaceTemplateDropdown {
+pub(crate) enum NewTabBranchDropdown {
     NewTabBranch(Option<u64>),
 }
 
@@ -1550,7 +1550,7 @@ struct PaneFlowApp {
     /// Codex settings: which General-page select is open (`None` = closed).
     general_dropdown: Option<GeneralDropdown>,
     /// Which new-tab branch select is open (`None` = closed).
-    new_tab_branch_dropdown: Option<WorkspaceTemplateDropdown>,
+    new_tab_branch_dropdown: Option<NewTabBranchDropdown>,
     /// Codex settings: cached MCP-bridge status snapshot, refreshed off-thread
     /// so the MCP page never does config I/O during a frame.
     mcp_status: Option<Vec<paneflow_mcp_install::StatusReport>>,
@@ -2427,7 +2427,6 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_toggle_primary_sidebar))
             // Issue #523: the command palette (every context-free action).
             .on_action(cx.listener(Self::handle_open_command_palette))
-            // Issue #524: the Clone repository modal.
             // EP-001 (cli-cockpit): Composer + broadcast groups.
             .on_action(cx.listener(Self::handle_open_composer))
             .on_action(cx.listener(Self::handle_toggle_broadcast_member))

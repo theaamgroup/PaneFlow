@@ -33,8 +33,8 @@ use crate::terminal::TerminalView;
 use crate::workspace::Workspace;
 use crate::{PaneFlowApp, ai_types, keybindings};
 
-/// Prompt-prefill readiness window for workspace templates (US-010,
-/// prd-cli-agent-orchestration).
+/// Prompt-prefill readiness window for [`PaneFlowApp::schedule_prompt_prefill`],
+/// whose only caller is the session handoff.
 ///
 /// The agent CLI's input box is not ready the instant its launch command is
 /// written, so a too-early `send_text` is lost into a not-ready buffer. A
@@ -45,12 +45,11 @@ use crate::{PaneFlowApp, ai_types, keybindings};
 /// EXTENDS while the pane is still actively producing output (its
 /// `output_generation` keeps advancing - the agent is still painting), firing
 /// once that output goes idle ("settled") or `MAX` is hit. On `MAX` without a
-/// settle the prompt is injected best-effort with a warning (AC4). The wait is
-/// bounded and runs concurrently per pane (one detached task each), so an
-/// N-pane `up` still prefills in ~one window, not N.
-const UP_PREFILL_FLOOR: Duration = Duration::from_millis(1800);
-const UP_PREFILL_MAX: Duration = Duration::from_millis(8000);
-const UP_PREFILL_POLL: Duration = Duration::from_millis(200);
+/// settle the prompt is injected best-effort with a warning. The wait is
+/// bounded and runs as one detached task per pane.
+const PROMPT_PREFILL_FLOOR: Duration = Duration::from_millis(1800);
+const PROMPT_PREFILL_MAX: Duration = Duration::from_millis(8000);
+const PROMPT_PREFILL_POLL: Duration = Duration::from_millis(200);
 
 struct TranscriptTurnEndNotification {
     agent: TerminalAgent,
@@ -1597,9 +1596,9 @@ impl PaneFlowApp {
         cx.spawn(async move |_, cx: &mut gpui::AsyncApp| {
             let Some(settled) = Self::wait_for_terminal_settle(
                 &weak,
-                UP_PREFILL_FLOOR,
-                UP_PREFILL_MAX,
-                UP_PREFILL_POLL,
+                PROMPT_PREFILL_FLOOR,
+                PROMPT_PREFILL_MAX,
+                PROMPT_PREFILL_POLL,
                 cx,
             )
             .await
@@ -1611,7 +1610,7 @@ impl PaneFlowApp {
                     if !settled {
                         log::warn!(
                             "prompt prefill: pane {pane_label} still producing output after \
-                             {UP_PREFILL_MAX:?}; prompt prefilled best-effort"
+                             {PROMPT_PREFILL_MAX:?}; prompt prefilled best-effort"
                         );
                     }
                     // Issue #334: `inject_text`, not the raw `send_text`. A

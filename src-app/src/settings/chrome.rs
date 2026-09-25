@@ -73,7 +73,6 @@ const NAV_GROUPS: &[NavGroup] = &[
                 icon: "icons/settings.svg",
                 keywords: &[
                     "window",
-                    "decorations",
                     "mode",
                     "shell",
                     "default shell",

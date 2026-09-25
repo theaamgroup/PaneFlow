@@ -55,7 +55,7 @@ pub const INHERITED_AGENT_SESSION_ENV: &[&str] = &[
 ///
 /// Must run before any other thread, async runtime, or foreign library can
 /// concurrently read environment variables. Prefer
-/// [`scrub_claudecode_from_command`] for per-child scrubbing after startup.
+/// `Command::env_remove` for per-child scrubbing after startup.
 pub(crate) unsafe fn scrub_claudecode_env_before_threads() {
     // SAFETY: delegated to the caller by this function's contract.
     unsafe {
@@ -67,7 +67,7 @@ pub(crate) unsafe fn scrub_claudecode_env_before_threads() {
 
 /// Remove inherited agent-session markers from one child command without
 /// mutating global process environment.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn scrub_claudecode_from_command(command: &mut std::process::Command) {
     for key in INHERITED_AGENT_SESSION_ENV {
         command.env_remove(key);

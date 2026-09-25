@@ -122,12 +122,13 @@ impl AssistantUsage {
 /// filesystem fingerprint observed at scan time. A subsequent scan
 /// with an unchanged fingerprint returns the cached vector directly.
 ///
-/// Readers with simple directory contracts can use `lookup` /
-/// `store_result` directly. Readers whose root directory mtime does
-/// not reflect leaf-file appends should compute a stronger snapshot
-/// and call `lookup_with_mtime` / `store_result_with_mtime`.
+/// Readers compute a filesystem snapshot (a root directory mtime does
+/// not reflect leaf-file appends) and call `lookup_with_mtime` /
+/// `store_result_with_mtime`. The directory-mtime `lookup` /
+/// `store_result` wrappers are test-only fixtures.
 pub mod cache {
     use std::collections::HashMap;
+    #[cfg(test)]
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
@@ -182,7 +183,7 @@ pub mod cache {
     /// not exist or its metadata is unreadable. Both cases skip the
     /// cache (caller falls through to the scan and does not store the
     /// result).
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn dir_mtime(dir: &Path) -> Option<SystemTime> {
         std::fs::metadata(dir).ok().and_then(|m| m.modified().ok())
     }
@@ -203,7 +204,7 @@ pub mod cache {
     /// only when the dir's mtime is within `MTIME_FUZZ` of the cached
     /// snapshot's mtime -- catches real writes (seconds apart) without
     /// spurious invalidation on filesystem-internal jitter.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn lookup(
         agent: SessionAgent,
         cwd: &str,
@@ -261,7 +262,7 @@ pub mod cache {
     /// lookup (within the 1 ms fuzz) returns the stale list. Callers
     /// that sample a fingerprint themselves must pass the *pre-scan*
     /// value to [`store_result_with_mtime`].
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn store_result(
         agent: SessionAgent,
         cwd: &str,
