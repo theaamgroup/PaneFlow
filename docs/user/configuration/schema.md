@@ -275,7 +275,7 @@ flag the key. Repeatable layouts come from session restore.
 }
 ```
 
-`agent_context` on a surface stores the session-owned pane UUID that `paneflow whoami`
+`agent_context` on a surface stores the session-owned pane UUID that `agent.whoami`
 reports; see [Pane identity](../../mcp-bridge.md#pane-identity-whoami) for the contract.
 A `task` key left by older builds is ignored.
 

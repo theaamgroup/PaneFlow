@@ -165,7 +165,8 @@ The shim (`paneflow-shim`) wraps each agent so two reliability gaps are closed
 
 Both guards still need a one-time RUNTIME smoke on real hardware:
 
-- **Orphan smoke**: launch an agent in a pane, note its PID (`paneflow ps`),
+- **Orphan smoke**: launch an agent in a pane, note its PID (the `pid` field of
+  the `fleet.list` JSON-RPC method),
   `kill -9` the PaneFlow process, then confirm the agent PID is gone within
   ~1 s (`ps -p <pid>` returns nothing). PASS = no orphan.
 - **Interrupt smoke**: launch an agent, start a turn so the sidebar shows the

@@ -13,30 +13,30 @@ launching the app.
 
 | Verb                                       | Primary method or engine           | Writes to panes?           | Use                                    |
 | ------------------------------------------ | ---------------------------------- | -------------------------- | -------------------------------------- |
-| `whoami`                                   | `agent.whoami`                     | No                         | Read your own pane identity            |
-| `ls [--human]`                             | `surface.list`                     | No                         | List terminal surfaces                 |
-| `read <target>`                            | `surface.read`                     | No                         | Read pane scrollback + screen          |
-| `search <target> <pattern>`                | `surface.search`                   | No                         | Search pane scrollback                 |
-| `ps [--json]`                              | `fleet.list`                       | No                         | List detected agents across workspaces |
-| `status <target> [--json]`                 | `surface.status`                   | No                         | Read one surface's agent state         |
 | `send <target> <text>`                     | `surface.send_text`                | Gated                      | Stage or submit text                   |
 | `key <target> <keystroke>`                 | `surface.send_keystroke`           | Gated                      | Send one non-submitting keystroke      |
 
-Aliases accepted by the CLI: `list_panes` maps to `ls`,
-`read_pane` maps to `read`, and `search_pane` maps to `search`.
+The CLI has no read verbs. Agents read panes through the
+[MCP bridge](#mcp-bridge) tools; scripts and custom clients call the
+`surface.list`, `surface.read`, `surface.search`, `surface.status`,
+`fleet.list`, and `agent.whoami` [JSON-RPC methods](#json-rpc-methods)
+on the socket directly.
 
 ## Selectors
 
-| Selector           | Example                          | Notes                                                                   |
-| ------------------ | -------------------------------- | ----------------------------------------------------------------------- |
-| Numeric id         | `paneflow read 42`               | Matches `surface_id` exactly                                            |
-| Name               | `paneflow status backend`        | Best selector for durable scripts                                       |
-| `cmdline:<substr>` | `paneflow read cmdline:vite`     | Matches the foreground executable basename only, not the full argv. Prefer a pane name or `cwd:` for a durable selector. |
-| `cwd:<path>`       | `paneflow read cwd:~/dev/api`    | Matches the pane working directory                                      |
+The `<target>` of `send` and `key` is resolved client-side against
+`surface.list`. The JSON-RPC methods take a numeric `surface_id`; the MCP
+tools take a name or `surface_id`.
+
+| Selector           | Example                              | Notes                                                                   |
+| ------------------ | ------------------------------------ | ----------------------------------------------------------------------- |
+| Numeric id         | `paneflow key 42 escape`             | Matches `surface_id` exactly                                            |
+| Name               | `paneflow send backend "go"`         | Best selector for durable scripts                                       |
+| `cmdline:<substr>` | `paneflow key cmdline:vite ctrl-c`   | Matches the foreground executable basename only, not the full argv. Prefer a pane name or `cwd:` for a durable selector. |
+| `cwd:<path>`       | `paneflow send cwd:~/dev/api "go"`   | Matches the pane working directory                                      |
 
 A selector that matches nothing or several panes exits with code `3`,
-except commands that explicitly accept multiple matches such as
-`send --broadcast`.
+except `send --broadcast`, which accepts multiple matches.
 
 ## Exit codes
 
@@ -72,7 +72,7 @@ Relevant config keys:
 
 ## Read fields
 
-`paneflow read <target> --json` and raw `surface.read` return:
+`surface.read` returns:
 
 | Field               | Meaning                                           |
 | ------------------- | ------------------------------------------------- |
@@ -92,12 +92,12 @@ offset is an invalid-params error. If a requested window exceeds the IPC byte
 cap, the response preserves its newest complete rows, reports their count in
 `lines`, sets `eof: false`, and sets `truncated: true`.
 
-The `fenced` JSON-RPC param defaults to `ai_injection_fence`. The CLI
-flag `--raw` passes `fenced: false`.
+The `fenced` JSON-RPC param defaults to `ai_injection_fence`; pass
+`fenced: false` only from a trusted script.
 
 ## Agent state fields
 
-`paneflow ps --json` returns `{"agents":[...]}`. `paneflow status <target> --json` returns one status object.
+`fleet.list` returns `{"agents":[...]}`. `surface.status` returns one status object.
 
 | Field               | Meaning                                                                                         |
 | ------------------- | ----------------------------------------------------------------------------------------------- |
@@ -114,7 +114,7 @@ flag `--raw` passes `fenced: false`.
 | `last_result`       | Last turn summary, when available                                                               |
 | `waiting_ms`        | Time spent waiting for input                                                                    |
 | `idle_ms`           | Time since observed activity                                                                    |
-| `output_generation` | Pane output counter, on `status`                                                                |
+| `output_generation` | Pane output counter, on `surface.status`                                                        |
 
 An empty fleet is `{"agents":[]}` with exit code `0`. A pane with no
 tracked agent returns idle state, not an error.
@@ -136,8 +136,8 @@ tracked agent returns idle state, not an error.
 Probe capabilities at runtime:
 
 ```bash
-printf '%s\\n' '{"jsonrpc":"2.0","method":"system.capabilities","params":{},"id":1}' \\
-| nc -U "$PANEFLOW_SOCKET_PATH"
+printf '%s\n' '{"jsonrpc":"2.0","method":"system.capabilities","params":{},"id":1}' \
+  | nc -U "$PANEFLOW_SOCKET_PATH"
 ```
 
 ## JSON-RPC methods
@@ -189,8 +189,8 @@ Returned terminal output is fenced as untrusted data.
 
 `paneflow-ai-hook` reads event JSON on stdin, posts one JSON-RPC `ai.*`
 frame, and exits `0` so a stopped PaneFlow instance does not break the
-agent. The hook surface powers sidebar status, notifications, `ps`,
-and `status`.
+agent. The hook surface powers sidebar status, notifications, `fleet.list`,
+and `surface.status`.
 
 Persistent `paneflow hooks setup` is Claude Code scoped. Codex uses
 per-launch shim hooks. Agents with no hook surface still run, but their

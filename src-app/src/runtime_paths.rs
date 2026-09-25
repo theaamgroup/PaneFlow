@@ -99,7 +99,7 @@ impl IpcSocketPath {
 /// `$XDG_RUNTIME_DIR` and `dirs::runtime_dir()` are **not** consulted. Finder
 /// and Dock launches inherit only PATH from the login shell, so a GUI process
 /// typically has no XDG while a terminal CLI that sourced a profile does.
-/// Preferring XDG would bind the GUI under `$TMPDIR` and send `paneflow ls`
+/// Preferring XDG would bind the GUI under `$TMPDIR` and send `paneflow send`
 /// to a different socket. `PANEFLOW_SOCKET_PATH` is the explicit override.
 ///
 /// Returns `None` only if every layer fails (neither TMPDIR nor a cache dir).

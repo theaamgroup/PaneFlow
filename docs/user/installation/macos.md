@@ -47,7 +47,7 @@ dist/PaneFlow.app/Contents/MacOS/paneflow --version
 
 Inside a PaneFlow pane, `paneflow` is already on `PATH`: every pane's
 `PANEFLOW_BIN_DIR` carries a `paneflow` symlink to the running app's
-executable next to the agent shims, so `paneflow ls`, `paneflow whoami`, and
+executable next to the agent shims, so `paneflow send`, `paneflow key`, and
 `paneflow mcp install` work in a pane with no setup. The link is re-pointed
 on launch if the bundle moves.
 

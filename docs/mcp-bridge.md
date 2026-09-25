@@ -52,12 +52,8 @@ MCP resources use stable `surface_id` URIs:
 
 ## Pane identity (`whoami`)
 
-An agent can ask which pane it is running in. The same call is available three
-ways:
-
-| CLI | MCP tool | IPC method |
-| --- | --- | --- |
-| `paneflow whoami` | `whoami` | `agent.whoami` |
+An agent can ask which pane it is running in with the MCP `whoami` tool, which
+calls the `agent.whoami` IPC method.
 
 `whoami` returns a persisted `pane_id`, the current runtime `surface_id`, a
 `terminal_session_id` for this terminal lifetime, workspace ID/title/cwd, current
@@ -67,8 +63,8 @@ carry a process-map key, tool, state, source, and observation age. An empty list
 means no agent has been mapped to this pane; it does not mean no agent is running.
 PaneFlow does not pick one when several agents share a terminal.
 
-The CLI and MCP inherit `PANEFLOW_SURFACE_ID` and `PANEFLOW_WORKSPACE_ID` from the
-pane's environment. Both are required; neither client guesses from focus.
+The bridge inherits `PANEFLOW_SURFACE_ID` and `PANEFLOW_WORKSPACE_ID` from the
+pane's environment. Both are required; it never guesses from focus.
 `agent.whoami` requires numeric `surface_id` and `workspace_id`, rejects any
 other parameter, and resolves the surface's live workspace; the response carries
 that current `workspace_id`. A moved pane keeps its PTY and the old workspace ID

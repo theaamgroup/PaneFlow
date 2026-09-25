@@ -13,8 +13,6 @@ use clap::{Parser, Subcommand};
 use paneflow_ipc_client::IpcClient;
 use serde_json::Value;
 
-mod context_cmds;
-mod read_cmds;
 mod selector;
 mod send_cmd;
 
@@ -28,34 +26,13 @@ pub const EXIT_TARGET: i32 = 3;
 /// manual `--help`/`--version` scans) on membership here so the GUI launch
 /// path stays byte-for-byte unchanged for any other `argv[1]`.
 ///
-/// EP-005 US-011: the trailing `list_panes`/`read_pane`/`search_pane` are the
-/// `paneflow` MCP tool names, accepted as CLI aliases (clap maps each to its
-/// canonical subcommand via `#[command(alias = ...)]`) so an orchestrator that types
-/// the tool name reaches the matching verb instead of tripping the GUI
-/// single-instance guard. This list only gates the `main.rs` intercept.
-pub(crate) const VERBS: &[&str] = &[
-    "whoami",
-    "ls",
-    "read",
-    "search",
-    "ps",
-    "status",
-    "send",
-    "key",
-    "list_panes",
-    "read_pane",
-    "search_pane",
-];
+/// Pane reads are not CLI verbs (issue #811): agents read panes through the
+/// MCP bridge, and scripts call the `surface.*` / `fleet.list` / `agent.whoami`
+/// JSON-RPC methods on the socket directly.
+pub(crate) const VERBS: &[&str] = &["send", "key"];
 
-/// Canonical verbs shown in `paneflow --help`. MCP-tool aliases stay in
-/// [`VERBS`] (so they still intercept) but off this index to keep help short.
+/// Verbs shown in `paneflow --help`, one row per [`VERBS`] entry.
 pub(crate) const HELP_VERBS: &[(&str, &str)] = &[
-    ("whoami", "Read your pane and agent context"),
-    ("ls", "List terminal surfaces"),
-    ("read", "Print a pane's scrollback"),
-    ("search", "Search a pane's scrollback"),
-    ("ps", "List running agents"),
-    ("status", "Read one surface's agent state"),
     ("send", "Inject text into a pane"),
     ("key", "Send a named keystroke to a pane"),
 ];
@@ -83,8 +60,7 @@ pub(crate) fn format_help_commands() -> String {
     out
 }
 
-/// True when `argv[1]` names one of our subcommands (including the MCP-tool
-/// aliases above).
+/// True when `argv[1]` names one of our subcommands.
 pub fn is_cli_verb(arg: Option<&str>) -> bool {
     matches!(arg, Some(v) if VERBS.contains(&v))
 }
@@ -121,65 +97,6 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Read the identity inherited from the pane running this command.
-    Whoami,
-    /// List terminal surfaces.
-    // EP-005 US-011: `list_panes` is the MCP tool name; accept it as a hidden
-    // alias so an orchestrator can type either.
-    #[command(alias = "list_panes")]
-    Ls {
-        /// Human-readable table instead of the default JSON.
-        #[arg(long)]
-        human: bool,
-    },
-    /// Print a pane's scrollback (raw text by default).
-    #[command(alias = "read_pane")]
-    Read {
-        /// Target: surface id, name, `cmdline:<substr>`, or `cwd:<path>`.
-        target: String,
-        /// Number of trailing lines (server clamps to 1..4000).
-        #[arg(long)]
-        lines: Option<u64>,
-        /// Offset from the end of the buffer.
-        #[arg(long)]
-        offset: Option<u64>,
-        /// Emit the `{text, lines, total_lines, eof}` envelope as JSON.
-        #[arg(long)]
-        json: bool,
-        /// Return raw scrollback, bypassing the anti-injection fence that
-        /// otherwise wraps the output as `<untrusted_terminal_output>` (the
-        /// fence is on by default; see the ai_injection_fence setting).
-        #[arg(long)]
-        raw: bool,
-    },
-    /// Search a pane's scrollback for a substring/pattern.
-    #[command(alias = "search_pane")]
-    Search {
-        /// Target: surface id, name, `cmdline:<substr>`, or `cwd:<path>`.
-        target: String,
-        /// Pattern to search for.
-        pattern: String,
-        /// Cap the number of matches (server clamps to 1..1000).
-        #[arg(long)]
-        max: Option<u64>,
-        /// Human-readable lines instead of the default JSON.
-        #[arg(long)]
-        human: bool,
-    },
-    /// List running agents across the fleet (pid, tool, state, pane).
-    Ps {
-        /// Emit the `{agents:[…]}` envelope as JSON instead of a table.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Read one surface's agent state (thinking / waiting / idle / errored / …).
-    Status {
-        /// Target: surface id, name, `cmdline:<substr>`, or `cwd:<path>`.
-        target: String,
-        /// Emit the status envelope as JSON instead of a one-line summary.
-        #[arg(long)]
-        json: bool,
-    },
     /// Inject text into a pane WITHOUT submitting it (human-in-loop).
     ///
     /// Requires `PANEFLOW_IPC_SCRIPTING=1` on the running instance; the text is
@@ -303,23 +220,6 @@ fn connect() -> Result<IpcClient, String> {
 /// Route a parsed subcommand to its handler.
 fn dispatch(command: Commands, client: &IpcClient) -> Result<i32, CliError> {
     match command {
-        Commands::Ls { human } => read_cmds::ls(client, human),
-        Commands::Read {
-            target,
-            lines,
-            offset,
-            json,
-            raw,
-        } => read_cmds::read(client, &target, lines, offset, json, raw),
-        Commands::Search {
-            target,
-            pattern,
-            max,
-            human,
-        } => read_cmds::search(client, &target, &pattern, max, human),
-        Commands::Whoami => context_cmds::whoami(client),
-        Commands::Ps { json } => read_cmds::ps(client, json),
-        Commands::Status { target, json } => read_cmds::status(client, &target, json),
         Commands::Send {
             target,
             text,
@@ -340,9 +240,8 @@ fn dispatch(command: Commands, client: &IpcClient) -> Result<i32, CliError> {
     }
 }
 
-/// Render a JSON-RPC `result` value as pretty JSON to stdout. Shared by the
-/// read and context command modules so every machine-readable output uses one
-/// renderer.
+/// Render a JSON-RPC `result` value as pretty JSON to stdout, so every
+/// machine-readable `send` / `key` output uses one renderer.
 pub(super) fn print_json(value: &Value) -> Result<(), CliError> {
     let rendered = serde_json::to_string_pretty(value)
         .map_err(|e| CliError::runtime(format!("failed to render JSON: {e}")))?;
@@ -361,9 +260,8 @@ pub(super) fn print_json(value: &Value) -> Result<(), CliError> {
 /// contract (US-005 AC4 "code non-zéro", US-006 AC3). Calling this on every
 /// `result` before printing maps that legacy shape to a non-zero `CliError`.
 ///
-/// No success envelope on these verbs carries a top-level `error` string
-/// (`{index,…}`, `{selected}`, `{split,…}`, `{sent,…}`, `{surfaces,…}`,
-/// `{text,…}`, `{matches,…}`), so the check can't false-positive on real data.
+/// No `send` / `key` success envelope carries a top-level `error` string
+/// (`{sent,…}`), so the check can't false-positive on real data.
 pub(super) fn reject_legacy_error(result: Value) -> Result<Value, CliError> {
     if let Some(message) = result.get("error").and_then(Value::as_str) {
         return Err(CliError::runtime(message.to_string()));
@@ -476,10 +374,40 @@ mod tests {
     }
 
     #[test]
+    fn removed_read_verbs_are_unknown_and_absent_from_help() {
+        for args in [
+            vec!["paneflow", "ls"],
+            vec!["paneflow", "read", "backend"],
+            vec!["paneflow", "search", "backend", "needle"],
+            vec!["paneflow", "ps"],
+            vec!["paneflow", "status", "backend"],
+            vec!["paneflow", "whoami"],
+            vec!["paneflow", "list_panes"],
+            vec!["paneflow", "read_pane", "backend"],
+            vec!["paneflow", "search_pane", "backend", "needle"],
+        ] {
+            let verb = args[1];
+            assert!(!VERBS.contains(&verb));
+            assert!(!is_cli_verb(Some(verb)));
+            assert!(looks_like_unknown_verb(Some(verb)));
+            assert_eq!(
+                Cli::try_parse_from(&args)
+                    .expect_err("removed verb")
+                    .exit_code(),
+                2
+            );
+            assert!(!HELP_VERBS.iter().any(|(name, _)| *name == verb));
+            assert!(
+                !format_help_commands()
+                    .lines()
+                    .any(|line| line.trim_start().starts_with(&format!("{verb} ")))
+            );
+        }
+    }
+
+    #[test]
     fn is_cli_verb_matches_known_verbs() {
-        assert!(is_cli_verb(Some("ls")));
         assert!(is_cli_verb(Some("send")));
-        assert!(is_cli_verb(Some("status")));
         assert!(is_cli_verb(Some("key")));
         assert!(!is_cli_verb(Some("mcp")));
         assert!(!is_cli_verb(Some("hooks")));
@@ -489,11 +417,7 @@ mod tests {
 
     #[test]
     fn cli_help_index_covers_canonical_verbs() {
-        const MCP_ALIASES: &[&str] = &["list_panes", "read_pane", "search_pane"];
         for verb in VERBS {
-            if MCP_ALIASES.contains(verb) {
-                continue;
-            }
             assert!(
                 HELP_VERBS.iter().any(|(name, _)| name == verb),
                 "canonical verb {verb} missing from HELP_VERBS"
@@ -503,10 +427,6 @@ mod tests {
             assert!(
                 VERBS.contains(name),
                 "HELP_VERBS entry {name} is not in VERBS"
-            );
-            assert!(
-                !MCP_ALIASES.contains(name),
-                "MCP alias {name} should not be a HELP_VERBS row"
             );
         }
         for (name, _) in HELP_OFFLINE_COMMANDS {
@@ -530,33 +450,14 @@ mod tests {
     }
 
     #[test]
-    fn mcp_tool_names_alias_to_their_verbs() {
-        // EP-005 US-011: the MCP tool names gate the CLI dispatch in main.rs...
-        assert!(is_cli_verb(Some("search_pane")));
-        assert!(is_cli_verb(Some("read_pane")));
-        assert!(is_cli_verb(Some("list_panes")));
-        // ...and clap routes each alias to its canonical subcommand, so a
-        // orchestrator that types the MCP name never lands on the GUI launch path.
-        let cli = Cli::try_parse_from(["paneflow", "search_pane", "backend", "needle"])
-            .expect("parse search_pane");
-        assert!(matches!(cli.command, Some(Commands::Search { .. })));
-        let cli =
-            Cli::try_parse_from(["paneflow", "read_pane", "backend"]).expect("parse read_pane");
-        assert!(matches!(cli.command, Some(Commands::Read { .. })));
-        let cli = Cli::try_parse_from(["paneflow", "list_panes"]).expect("parse list_panes");
-        assert!(matches!(cli.command, Some(Commands::Ls { .. })));
-    }
-
-    #[test]
     fn unknown_verb_detected_but_bare_and_flags_are_not() {
         // EP-005 US-011: a verb-shaped typo is flagged so main.rs errors
         // actionably instead of launching the GUI / tripping the singleton.
         assert!(looks_like_unknown_verb(Some("blah")));
         assert!(looks_like_unknown_verb(Some("searh")));
-        // Known verbs and MCP aliases are NOT unknown.
-        assert!(!looks_like_unknown_verb(Some("search")));
-        assert!(!looks_like_unknown_verb(Some("search_pane")));
-        assert!(!looks_like_unknown_verb(Some("ls")));
+        // Known verbs are NOT unknown.
+        assert!(!looks_like_unknown_verb(Some("send")));
+        assert!(!looks_like_unknown_verb(Some("key")));
         // A bare `paneflow` (None) and an empty token still launch the GUI.
         assert!(!looks_like_unknown_verb(None));
         assert!(!looks_like_unknown_verb(Some("")));
@@ -564,23 +465,6 @@ mod tests {
         assert!(!looks_like_unknown_verb(Some("--help")));
         assert!(!looks_like_unknown_verb(Some("-v")));
         assert!(!looks_like_unknown_verb(Some("--update-and-exit")));
-    }
-
-    #[test]
-    fn ps_parses_with_optional_json_flag() {
-        let cli = Cli::try_parse_from(["paneflow", "ps", "--json"]).expect("parse");
-        assert!(matches!(cli.command, Some(Commands::Ps { json: true })));
-        // Default is the human table (like Unix `ps`), JSON is opt-in.
-        let cli = Cli::try_parse_from(["paneflow", "ps"]).expect("parse");
-        assert!(matches!(cli.command, Some(Commands::Ps { json: false })));
-    }
-
-    #[test]
-    fn status_requires_a_target() {
-        let err = Cli::try_parse_from(["paneflow", "status"]).expect_err("usage");
-        assert_eq!(err.exit_code(), 2);
-        let cli = Cli::try_parse_from(["paneflow", "status", "backend"]).expect("parse");
-        assert!(matches!(cli.command, Some(Commands::Status { .. })));
     }
 
     #[test]
@@ -635,19 +519,6 @@ mod tests {
         assert_eq!(err.exit_code(), 2);
         let cli = Cli::try_parse_from(["paneflow", "key", "backend", "escape"]).expect("parse");
         assert!(matches!(cli.command, Some(Commands::Key { .. })));
-    }
-
-    #[test]
-    fn cli_parses_a_verb_with_flags() {
-        let cli = Cli::try_parse_from(["paneflow", "ls", "--human"]).expect("parse");
-        assert!(matches!(cli.command, Some(Commands::Ls { human: true })));
-    }
-
-    #[test]
-    fn read_requires_a_target() {
-        // Missing the required positional `target` is a clap usage error (2).
-        let err = Cli::try_parse_from(["paneflow", "read"]).expect_err("usage");
-        assert_eq!(err.exit_code(), 2);
     }
 
     #[test]
