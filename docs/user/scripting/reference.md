@@ -13,6 +13,7 @@ launching the app.
 
 | Verb                                       | Primary method or engine           | Writes to panes?           | Use                                    |
 | ------------------------------------------ | ---------------------------------- | -------------------------- | -------------------------------------- |
+| `whoami`                                   | `agent.whoami`                     | No                         | Read your own pane identity            |
 | `ls [--human]`                             | `surface.list`                     | No                         | List terminal surfaces                 |
 | `read <target>`                            | `surface.read`                     | No                         | Read pane scrollback + screen          |
 | `search <target> <pattern>`                | `surface.search`                   | No                         | Search pane scrollback                 |
@@ -153,6 +154,7 @@ printf '%s\\n' '{"jsonrpc":"2.0","method":"system.capabilities","params":{},"id"
 | `surface.send_text`        | `surface_id`, `text`, `submit?`, `paste?`                                                       | Gated PTY text write                                     |
 | `surface.send_keystroke`   | `surface_id`, `keystroke`                                                                       | Env-gated non-submitting keystroke                       |
 | `fleet.list`               | -                                                                                               | Read-only fleet snapshot                                 |
+| `agent.whoami`             | `surface_id`, `workspace_id` (both required, from the caller's pane environment)                | Caller's pane identity; see the [MCP bridge](../../mcp-bridge.md#pane-identity-whoami) |
 | `ai.session_start`         | hook payload                                                                                    | Agent lifecycle event                                   |
 | `ai.prompt_submit`         | hook payload                                                                                    | Agent lifecycle event                                   |
 | `ai.tool_use`              | hook payload                                                                                    | Agent lifecycle event                                   |
@@ -178,6 +180,7 @@ socket.
 | `list_panes`  | -                                   | Panes with `surface_id`, `name`, `title`, `cwd`, `cmd`, `workspace`, `scope` |
 | `read_pane`   | `target`, `lines?`, `offset?`       | Scrollback text                                                     |
 | `search_pane` | `target`, `pattern`, `max_matches?` | Matching lines                                                      |
+| `whoami`      | -                                   | The calling pane's own identity (`pane_id`, `surface_id`, workspace, tab, observed agents) |
 
 It has no tool for typing, submitting, focusing, or splitting panes.
 Returned terminal output is fenced as untrusted data.

@@ -3039,43 +3039,21 @@ mod tests {
         assert!(serialize_session_capped(&state, expected.len() - 1).is_err());
     }
 
+    /// Individually capped scrollbacks can exceed the session cap in
+    /// aggregate. The writer must refuse, and keep the readable file, on both
+    /// the direct and the deferred save path.
     #[test]
-    fn aggregate_task_data_cannot_replace_a_readable_session_with_an_oversized_one() {
+    fn aggregate_scrollback_cannot_replace_a_readable_session_with_an_oversized_one() {
         use paneflow_config::schema::{
-            AgentContext, AgentTask, LayoutNode, SurfaceDefinition, TabSession, TaskAssignment,
-            TaskReport, TaskStatus, WorkspaceSession,
+            LayoutNode, SurfaceDefinition, TabSession, WorkspaceSession,
         };
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("session.json");
         let mut state = empty_session_state();
         assert!(write_session_json(&path, &state));
         let original = std::fs::read(&path).expect("original session");
-        let assignment = TaskAssignment {
-            objective: "a".repeat(4096),
-            acceptance_criteria: vec!["a".repeat(512); 32],
-            owned_files: vec!["a".repeat(512); 32],
-        };
-        let report = TaskReport {
-            status: TaskStatus::Working,
-            summary: "a".repeat(4096),
-            changed_files: vec!["a".repeat(512); 32],
-            commits: vec!["a".repeat(512); 32],
-            tests: vec!["a".repeat(512); 32],
-            unresolved_questions: vec!["a".repeat(512); 32],
-        };
-        assignment.validate().expect("valid assignment");
-        report.validate().expect("valid report");
         let surface = SurfaceDefinition {
-            agent_context: Some(AgentContext {
-                pane_id: uuid::Uuid::new_v4().to_string(),
-                task: Some(AgentTask {
-                    task_id: uuid::Uuid::new_v4().to_string(),
-                    revision: 1,
-                    assignment,
-                    report: Some(report),
-                    updated_at_ms: 1,
-                }),
-            }),
+            scrollback: Some("a".repeat(crate::limits::MAX_CHARS)),
             ..Default::default()
         };
         let layout = LayoutNode::Split {
@@ -3093,7 +3071,8 @@ mod tests {
             serde_json::json!({"title": "large", "cwd": "/tmp", "tabs": []}),
         )
         .expect("workspace");
-        workspace.tabs = vec![TabSession::with_layout(layout); 20];
+        // 6 tabs x 32 panes x MAX_CHARS is past the 64 MiB cap.
+        workspace.tabs = vec![TabSession::with_layout(layout); 6];
         state.workspaces.push(workspace);
         assert!(
             !write_session_json(&path, &state),
@@ -3106,6 +3085,85 @@ mod tests {
             std::fs::read(&path).expect("preserved after deferred save"),
             original
         );
+    }
+
+    /// Issue #810: every surface saved before task assignment was removed
+    /// carries `"task": null`, and an assigned pane a full task object. The
+    /// real load path must restore both, never back the file up and start
+    /// the user on an empty session.
+    #[test]
+    fn legacy_agent_task_keys_load_without_a_corruption_backup() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_path = tmp.path().join("session.json");
+        let contents = r#"{
+            "version": 2,
+            "active_workspace": 0,
+            "workspaces": [{
+                "title": "paneflow",
+                "cwd": "/tmp",
+                "tabs": [{
+                    "title": "agents",
+                    "layout": {
+                        "type": "pane",
+                        "surfaces": [{
+                            "surface_type": "terminal",
+                            "agent_context": {
+                                "pane_id": "5d0f4b8a-9c3e-4f21-8a6b-1e2d3c4b5a69",
+                                "task": null
+                            }
+                        }, {
+                            "surface_type": "terminal",
+                            "agent_context": {
+                                "pane_id": "7a1c9e2e-5b1f-4a37-9c43-0f2b8f0e7d11",
+                                "task": {
+                                    "task_id": "3e0c7c55-2a4f-4d0e-8f7e-2b9d5f6c1a20",
+                                    "revision": 2,
+                                    "updated_at_ms": 1700000000000,
+                                    "assignment": {
+                                        "objective": "Fix search",
+                                        "acceptance_criteria": [],
+                                        "owned_files": ["src/search.rs"]
+                                    },
+                                    "report": null
+                                }
+                            }
+                        }]
+                    }
+                }]
+            }]
+        }"#;
+        std::fs::write(&session_path, contents).expect("seed legacy session");
+
+        let (state, info) = PaneFlowApp::load_session_at(&session_path);
+
+        assert!(info.is_none(), "a legacy task key is not corruption");
+        let state = state.expect("legacy session restores");
+        let Some(LayoutNode::Pane { surfaces }) = &state.workspaces[0].tabs[0].layout else {
+            panic!("expected a pane layout");
+        };
+        let pane_ids: Vec<_> = surfaces
+            .iter()
+            .map(|surface| {
+                surface
+                    .agent_context
+                    .as_ref()
+                    .expect("context")
+                    .pane_id
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(
+            pane_ids,
+            [
+                "5d0f4b8a-9c3e-4f21-8a6b-1e2d3c4b5a69",
+                "7a1c9e2e-5b1f-4a37-9c43-0f2b8f0e7d11"
+            ]
+        );
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .expect("session dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(entries, ["session.json"], "no corruption backup written");
     }
 
     #[test]

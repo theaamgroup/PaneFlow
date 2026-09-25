@@ -213,7 +213,7 @@ The contract lives in `TerminalState::Drop` (`terminal/pty_session.rs`): pin eve
 
 ## MCP and crash reporting
 
-Keep the MCP bridge GPU-free and read-only (`list_panes`, `read_pane`, `search_pane`).
+Keep the MCP bridge GPU-free and read-only (`list_panes`, `read_pane`, `search_pane`, `whoami`).
 The embedded bridge installs through `paneflow mcp install` or **Settings → MCP Servers**,
 with status/repair handled off the render thread. Preserve idempotent, no-clobber,
 backup-and-atomic-write behavior. See `docs/mcp-bridge.md`.

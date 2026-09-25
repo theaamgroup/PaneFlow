@@ -3,7 +3,7 @@
 //! boundary, not credentials or proof of an agent's process identity.
 
 use gpui::{App, Context, Entity};
-use paneflow_config::schema::{AgentContext, AgentTask, TaskAssignment, TaskReport, TaskStatus};
+use paneflow_config::schema::AgentContext;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -14,100 +14,29 @@ use crate::{PaneFlowApp, terminal::TerminalView, workspace::Workspace};
 #[serde(deny_unknown_fields)]
 struct ContextRequest {
     surface_id: u64,
-    workspace_id: u64,
-    #[serde(default)]
-    assignment: Option<WireTaskAssignment>,
-    #[serde(default)]
-    task_id: Option<String>,
-    #[serde(default)]
-    revision: Option<u64>,
-    #[serde(default)]
-    report: Option<WireTaskReport>,
+    /// Required so a caller outside a pane cannot omit it, but never used for
+    /// routing: the surface's live workspace wins (a dragged pane keeps the
+    /// inherited ID in its environment).
+    #[serde(rename = "workspace_id")]
+    _workspace_id: u64,
 }
 
-/// Strict IPC mirror of [`TaskAssignment`]. The persisted schema type ignores
-/// unknown keys so `session.json` stays forward compatible (issue #726); a
-/// typo'd field in a `task.assign` request must still be rejected.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WireTaskAssignment {
-    objective: String,
-    #[serde(default)]
-    acceptance_criteria: Vec<String>,
-    #[serde(default)]
-    owned_files: Vec<String>,
-}
-
-impl From<WireTaskAssignment> for TaskAssignment {
-    fn from(wire: WireTaskAssignment) -> Self {
-        Self {
-            objective: wire.objective,
-            acceptance_criteria: wire.acceptance_criteria,
-            owned_files: wire.owned_files,
-        }
-    }
-}
-
-/// Strict IPC mirror of [`TaskReport`], for the same reason as
-/// [`WireTaskAssignment`].
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WireTaskReport {
-    status: TaskStatus,
-    summary: String,
-    #[serde(default)]
-    changed_files: Vec<String>,
-    #[serde(default)]
-    commits: Vec<String>,
-    #[serde(default)]
-    tests: Vec<String>,
-    #[serde(default)]
-    unresolved_questions: Vec<String>,
-}
-
-impl From<WireTaskReport> for TaskReport {
-    fn from(wire: WireTaskReport) -> Self {
-        Self {
-            status: wire.status,
-            summary: wire.summary,
-            changed_files: wire.changed_files,
-            commits: wire.commits,
-            tests: wire.tests,
-            unresolved_questions: wire.unresolved_questions,
-        }
-    }
-}
-
+/// The surface's live workspace. A drag keeps the PTY and its inherited
+/// workspace ID alive, so identity follows the surface, not the inherited ID.
 fn context_workspace(
     workspaces: &[Workspace],
     request: &ContextRequest,
-    method: &str,
     cx: &App,
 ) -> Result<u64, JsonRpcError> {
     let location = super::ipc_handler::find_pane_by_surface_id(workspaces, request.surface_id, cx)
         .ok_or_else(|| JsonRpcError::invalid_params("surface not found"))?;
-    let workspace_id = workspaces[location.workspace_idx].id;
-    // A drag keeps the PTY and its inherited workspace ID alive. Own-pane
-    // operations follow the surface; explicit assignment stays scoped.
-    if method == "task.assign" && workspace_id != request.workspace_id {
-        return Err(JsonRpcError::invalid_params(
-            "surface is outside the requested workspace",
-        ));
-    }
-    Ok(workspace_id)
+    Ok(workspaces[location.workspace_idx].id)
 }
 
+/// Only the pane identity is validated. A legacy `task` key (issue #810) is
+/// ignored at parse time and can never discard the context.
 pub(super) fn valid_context(context: &AgentContext) -> bool {
     uuid::Uuid::parse_str(&context.pane_id).is_ok()
-        && context.task.as_ref().is_none_or(|task| {
-            uuid::Uuid::parse_str(&task.task_id).is_ok()
-                && task.revision > 0
-                && task.assignment.validate().is_ok()
-                && task
-                    .report
-                    .as_ref()
-                    .is_none_or(|report| report.validate().is_ok())
-        })
 }
 
 fn mapped_agent_sessions(workspaces: &[Workspace], sid: u64, cx: &App) -> Vec<Value> {
@@ -129,14 +58,6 @@ fn mapped_agent_sessions(workspaces: &[Workspace], sid: u64, cx: &App) -> Vec<Va
                 }, "last_activity_age_ms": session.last_activity.elapsed().as_millis()})
         })
         .collect()
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64
 }
 
 /// Session and undo reconstruction share the same validated restore path.
@@ -165,98 +86,20 @@ impl PaneFlowApp {
         params: &Value,
         cx: &mut Context<Self>,
     ) -> Result<Value, JsonRpcError> {
-        if !matches!(
-            method,
-            "agent.whoami" | "task.get" | "task.assign" | "task.report"
-        ) {
+        if method != "agent.whoami" {
             return Err(JsonRpcError::method_not_found(format!(
                 "Method not found: {method}"
             )));
         }
         let request: ContextRequest = serde_json::from_value(params.clone())
             .map_err(|error| JsonRpcError::invalid_params(error.to_string()))?;
-        let workspace_id = context_workspace(&self.workspaces, &request, method, cx)?;
+        let workspace_id = context_workspace(&self.workspaces, &request, cx)?;
         // Unlike surface.read, omission must never fall back to the active pane.
         let terminal = self.resolve_readable_surface(
             &json!({"surface_id": request.surface_id, "workspace_id": workspace_id}),
             cx,
         )?;
-        match method {
-            "agent.whoami" | "task.get" => {
-                if request.assignment.is_some()
-                    || request.report.is_some()
-                    || request.task_id.is_some()
-                    || request.revision.is_some()
-                {
-                    return Err(JsonRpcError::invalid_params(
-                        "read operations accept identity only",
-                    ));
-                }
-            }
-            "task.assign" => {
-                if request.report.is_some()
-                    || request.task_id.is_some()
-                    || request.revision.is_some()
-                {
-                    return Err(JsonRpcError::invalid_params(
-                        "task.assign accepts assignment only",
-                    ));
-                }
-                let assignment: TaskAssignment = request
-                    .assignment
-                    .ok_or_else(|| JsonRpcError::invalid_params("assignment required"))?
-                    .into();
-                assignment
-                    .validate()
-                    .map_err(JsonRpcError::invalid_params)?;
-                terminal.update(cx, |view, _| {
-                    view.agent_context.task = Some(AgentTask {
-                        task_id: uuid::Uuid::new_v4().to_string(),
-                        revision: 1,
-                        assignment,
-                        report: None,
-                        updated_at_ms: now_ms(),
-                    });
-                });
-                self.save_session(cx);
-            }
-            "task.report" => {
-                if request.assignment.is_some() {
-                    return Err(JsonRpcError::invalid_params(
-                        "a report cannot change the assignment",
-                    ));
-                }
-                let task_id = request
-                    .task_id
-                    .ok_or_else(|| JsonRpcError::invalid_params("task_id required"))?;
-                let revision = request
-                    .revision
-                    .ok_or_else(|| JsonRpcError::invalid_params("revision required"))?;
-                let report: TaskReport = request
-                    .report
-                    .ok_or_else(|| JsonRpcError::invalid_params("report required"))?
-                    .into();
-                terminal
-                    .update(cx, |view, _| {
-                        view.agent_context
-                            .task
-                            .as_mut()
-                            .ok_or("no task assigned")?
-                            .apply_report(&task_id, revision, report, now_ms())
-                    })
-                    .map_err(JsonRpcError::invalid_params)?;
-                self.save_session(cx);
-            }
-            _ => unreachable!(),
-        }
-        if method == "agent.whoami" {
-            self.agent_identity(&terminal, workspace_id, cx)
-        } else {
-            Ok(
-                json!({"pane_id": terminal.read(cx).agent_context.pane_id, "workspace_id": workspace_id,
-                "task": terminal.read(cx).agent_context.task}),
-            )
-        }
+        self.agent_identity(&terminal, workspace_id, cx)
     }
 
     fn agent_identity(
@@ -289,7 +132,6 @@ impl PaneFlowApp {
             "tab_id": meta.tab_id,
             "worktree": tab.and_then(|tab| tab.worktree.as_ref()),
             "agent_sessions": sessions,
-            "task_id": view.agent_context.task.as_ref().map(|task| &task.task_id),
         }))
     }
 }
@@ -397,7 +239,7 @@ mod tests {
         .expect("inherited identity");
         cx.update(|_, cx| {
             assert_eq!(
-                context_workspace(&workspaces, &request, "agent.whoami", cx).expect("before move"),
+                context_workspace(&workspaces, &request, cx).expect("before move"),
                 1
             )
         });
@@ -408,13 +250,10 @@ mod tests {
         // Also cover a source workspace being closed after the move.
         workspaces.remove(0);
         cx.update(|_, cx| {
-            for method in ["agent.whoami", "task.get", "task.report"] {
-                assert_eq!(
-                    context_workspace(&workspaces, &request, method, cx).expect("moved context"),
-                    2
-                );
-            }
-            assert!(context_workspace(&workspaces, &request, "task.assign", cx).is_err());
+            assert_eq!(
+                context_workspace(&workspaces, &request, cx).expect("moved context"),
+                2
+            );
             assert_eq!(
                 super::super::ipc_handler::find_terminal_by_surface_id(
                     &workspaces,
@@ -425,9 +264,7 @@ mod tests {
             );
         });
         workspaces[0].close_tab(0).expect("close moved tab");
-        cx.update(|_, cx| {
-            assert!(context_workspace(&workspaces, &request, "agent.whoami", cx).is_err())
-        });
+        cx.update(|_, cx| assert!(context_workspace(&workspaces, &request, cx).is_err()));
     }
 
     #[test]
@@ -437,44 +274,9 @@ mod tests {
             json!({"surface_id": 1}),
             json!({"surface_id": 1, "workspace_id": 2, "target": 3}),
             json!({"surface_id": "1", "workspace_id": 2}),
+            json!({"surface_id": 1, "workspace_id": 2, "task_id": "t", "revision": 1}),
         ] {
             assert!(serde_json::from_value::<ContextRequest>(value).is_err());
-        }
-    }
-
-    /// Issue #726: the persisted task types ignore unknown keys, so the IPC
-    /// wire mirrors must keep rejecting a typo'd field in a request.
-    #[test]
-    fn task_requests_reject_unknown_fields_inside_assignment_and_report() {
-        let assign = |assignment: Value| json!({"surface_id": 1, "workspace_id": 2, "assignment": assignment});
-        let report = |report: Value| {
-            json!({"surface_id": 1, "workspace_id": 2, "task_id": "t", "revision": 1,
-                "report": report})
-        };
-        // Well-formed requests still decode and convert to the schema types.
-        let request: ContextRequest = serde_json::from_value(assign(
-            json!({"objective": "Fix search", "owned_files": ["a.rs"]}),
-        ))
-        .expect("assign");
-        let assignment: TaskAssignment = request.assignment.expect("assignment").into();
-        assert_eq!(assignment.objective, "Fix search");
-        assert_eq!(assignment.owned_files, vec!["a.rs".to_string()]);
-        let request: ContextRequest = serde_json::from_value(report(
-            json!({"status": "working", "summary": "Reproduced"}),
-        ))
-        .expect("report");
-        let converted: TaskReport = request.report.expect("report").into();
-        assert_eq!(converted.status, TaskStatus::Working);
-        assert_eq!(converted.summary, "Reproduced");
-
-        for value in [
-            assign(json!({"objective": "Fix search", "owned_file": ["b.rs"]})),
-            report(json!({"status": "working", "summary": "Reproduced", "test": ["cargo test"]})),
-        ] {
-            let error = serde_json::from_value::<ContextRequest>(value)
-                .err()
-                .expect("unknown nested field must be rejected");
-            assert!(error.to_string().contains("unknown field"), "{error}");
         }
     }
 
@@ -484,20 +286,7 @@ mod tests {
     ) {
         let cx = cx.add_empty_window();
         let terminal = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
-        let context = terminal.update(cx, |view, _| {
-            view.agent_context.task = Some(AgentTask {
-                task_id: uuid::Uuid::new_v4().to_string(),
-                revision: 1,
-                assignment: TaskAssignment {
-                    objective: "Keep context".into(),
-                    acceptance_criteria: vec![],
-                    owned_files: vec![],
-                },
-                report: None,
-                updated_at_ms: 1,
-            });
-            view.agent_context.clone()
-        });
+        let context = cx.update(|_, cx| terminal.read(cx).agent_context.clone());
         let old_session = cx.update(|_, cx| terminal.read(cx).terminal_session_id.clone());
         let pane = cx.new(|cx| crate::pane::Pane::new(terminal.clone(), 1, cx));
         let layout = cx
@@ -517,5 +306,39 @@ mod tests {
             assert_eq!(restored.read(cx).agent_context, context);
             assert_ne!(restored.read(cx).terminal_session_id, old_session);
         });
+    }
+
+    /// Issue #810: every surface saved before task assignment was removed
+    /// carries `"task": null`, and an assigned pane carries a full task
+    /// object, even one the old validator would have rejected. Both must
+    /// restore with their `pane_id`.
+    #[gpui::test]
+    fn legacy_task_keys_restore_with_their_pane_id(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let null_task = json!({"pane_id": "5d0f4b8a-9c3e-4f21-8a6b-1e2d3c4b5a69", "task": null});
+        let full_task = json!({
+            "pane_id": "7a1c9e2e-5b1f-4a37-9c43-0f2b8f0e7d11",
+            "task": {
+                "task_id": "not-a-uuid",
+                "revision": 0,
+                "updated_at_ms": 1,
+                "assignment": {"objective": "", "acceptance_criteria": [], "owned_files": []},
+                "report": {"status": "completed", "summary": "Fixed", "changed_files": [],
+                    "commits": [], "tests": [], "unresolved_questions": []}
+            }
+        });
+        for legacy in [null_task, full_task] {
+            let pane_id = legacy["pane_id"].as_str().expect("pane_id").to_string();
+            let context: AgentContext =
+                serde_json::from_value(legacy).expect("legacy agent_context loads");
+            assert_eq!(context.pane_id, pane_id);
+            assert!(
+                valid_context(&context),
+                "a legacy task must not discard the context"
+            );
+            let restored = cx.new(|cx| TerminalView::display_only_for_test(1, cx));
+            restored.update(cx, |view, _| restore_context(view, Some(&context)));
+            cx.update(|_, cx| assert_eq!(restored.read(cx).agent_context.pane_id, pane_id));
+        }
     }
 }
