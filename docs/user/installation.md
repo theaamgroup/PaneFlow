@@ -14,6 +14,7 @@ Building and packaging from source remain available:
 - Symptom-first fixes: [troubleshooting.md](troubleshooting.md)
 
 The app bundles its helper binaries. To package a local release build, run
+`cargo build --release --target aarch64-apple-darwin -p paneflow-app`, then
 `scripts/bundle-macos.sh --version 0.7.2 --arch aarch64` to produce
 `dist/PaneFlow.app`.
 

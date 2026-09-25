@@ -496,8 +496,15 @@ grep -q "error: bundle not found: $TMP/does-not-exist.app" "$TMP/main-noapp.out"
 
 run_main "$TMP/main-badarch.out" --version 9.9.9 --arch armv7 --app "$FAKE_APP"
 [ "$rc" -ne 0 ] || fail "bad --arch exited 0"
-grep -q "error: --arch must be 'aarch64' or 'x86_64' (got 'armv7')" "$TMP/main-badarch.out" \
+grep -q "error: --arch must be 'aarch64' (got 'armv7'); this fork is Apple Silicon only" "$TMP/main-badarch.out" \
     || fail "bad --arch not reported: $(cat "$TMP/main-badarch.out")"
+
+# Apple Silicon only: x86_64 is rejected like any other arch, before any tool.
+run_main "$TMP/main-x86.out" --version 9.9.9 --arch x86_64 --app "$FAKE_APP"
+[ "$rc" -ne 0 ] || fail "--arch x86_64 exited 0"
+grep -q "error: --arch must be 'aarch64' (got 'x86_64')" "$TMP/main-x86.out" \
+    || fail "--arch x86_64 not reported: $(cat "$TMP/main-x86.out")"
+[ ! -s "$TOOL_LOG" ] || fail "--arch x86_64 still invoked a tool: $(cat "$TOOL_LOG")"
 
 run_main "$TMP/main-dangling.out" --version
 [ "$rc" -ne 0 ] || fail "dangling --version exited 0"
@@ -513,7 +520,7 @@ run_main "$TMP/main-help.out" --help
 [ "$rc" -eq 0 ] || fail "--help exited $rc"
 grep -q "^Usage: " "$TMP/main-help.out" || fail "--help did not print usage"
 [ ! -s "$TOOL_LOG" ] || fail "--help invoked a tool: $(cat "$TOOL_LOG")"
-pass "argv parsing rejects missing --version/--arch/--app, bad arch, dangling and unknown flags; --help exits 0"
+pass "argv parsing rejects missing --version/--arch/--app, bad arch (incl. x86_64), dangling and unknown flags; --help exits 0"
 
 # --- happy path: tool order, temp mountpoint, advertised output ------------
 # The script resolves its repo root with `pwd -P`, so the advertised path is

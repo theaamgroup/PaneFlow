@@ -7,7 +7,7 @@
 #
 # Outputs:
 #   assets/PaneFlow.icns                                     consumed by scripts/bundle-macos.sh
-#   src-app/assets/icons/paneflow.png                        runtime-embedded GPUI window icon (rust-embed)
+#   src-app/assets/icons/paneflow.png                        runtime-embedded About dialog image (rust-embed)
 #   assets/icons/paneflowTemplate{,@2x}.png                  macOS menubar templates (only if template master exists)
 #
 # This fork is macOS only. Do not emit Linux hicolor PNGs, a Windows .ico,
@@ -148,7 +148,7 @@ trap 'rm -rf "$TMP_ASSETS"' EXIT
 
 # --- macOS .icns ---------------------------------------------------------
 # Generate a dedicated plated iconset, then delegate packing to the existing
-# iconutil/png2icns/icnsutil/python3 fallback chain in generate-icns.sh.
+# `iconutil` in generate-icns.sh.
 TMP_MACOS="$TMP_ASSETS/macos"
 mkdir -p "$TMP_MACOS"
 for size in 16 32 64 128 256 512 1024; do
@@ -157,9 +157,10 @@ done
 log "  $OUT_ICNS  (via generate-icns.sh)"
 PANEFLOW_ICNS_SOURCE_DIR="$TMP_MACOS" bash "$SCRIPT_DIR/generate-icns.sh" >&2
 
-# Runtime-embedded GPUI window icon -- rust-embed picks this up at compile
-# time for the title-bar / about pane uses. 128px is enough today. Sourced
-# from the macOS master; the old portable Linux/Windows mark is gone.
+# Runtime-embedded About dialog image -- rust-embed picks this up at compile
+# time; `app/about_dialog.rs` is its only user (nothing sets a window icon).
+# 128px is enough today. Sourced from the macOS master; the old portable
+# Linux/Windows mark is gone.
 mkdir -p "$(dirname "$OUT_RUNTIME_ICON")"
 log "  $OUT_RUNTIME_ICON"
 resize_macos_png "$MASTER_MACOS" "$OUT_RUNTIME_ICON" 128

@@ -94,8 +94,7 @@ paneflow read <pane-id> --lines 100    # Read recent terminal output
 Replace `<pane-id>` with an ID from `paneflow ps`. You can also target panes
 by name.
 
-Create repeatable workspaces in Settings → Workspaces. The
-[scripting guide](docs/user/scripting.md) explains prompt delivery,
+The [scripting guide](docs/user/scripting.md) explains prompt delivery,
 submission controls, and pane reads.
 
 From an external terminal, use the installed binary's full path or

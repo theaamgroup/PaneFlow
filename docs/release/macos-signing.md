@@ -157,7 +157,8 @@ CI log rendering. It still runs fine locally, the annotations are just noise.
 ## 4. The DMG
 
 `scripts/create-dmg.sh` needs no credentials. It requires `--version` and
-`--arch` (`aarch64` or `x86_64`), takes an optional `--app`, and writes:
+`--arch aarch64` (the only accepted value; this fork is Apple Silicon only),
+takes an optional `--app`, and writes:
 
 ```
 dist/paneflow-<version>-<arch>-apple-darwin.dmg
