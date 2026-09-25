@@ -1,55 +1,87 @@
 use super::*;
-use crate::pricing;
-
-fn session_cost(s: &SessionMeta) -> Option<f64> {
-    let usage = s.usage.as_ref()?;
-    let model = s.model.as_deref()?;
-    pricing::estimate_cost(model, usage)
-}
 
 impl DiffView {
+    /// Tooltip lines for the Review pane header: a count line, then one
+    /// `Agent · <when>` row per attributed session. Empty when nothing is
+    /// attributed.
     pub fn attribution_lines(&self) -> Vec<SharedString> {
-        let sessions = &self.column.attribution;
-        if sessions.is_empty() {
-            return Vec::new();
+        attribution_lines_for(&self.column.attribution)
+    }
+}
+
+fn attribution_lines_for(sessions: &[SessionMeta]) -> Vec<SharedString> {
+    if sessions.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<SharedString> = Vec::with_capacity(sessions.len() + 1);
+    lines.push(
+        format!(
+            "Attributed to {} session{}",
+            sessions.len(),
+            if sessions.len() == 1 { "" } else { "s" }
+        )
+        .into(),
+    );
+    for s in sessions {
+        let when = crate::agent_sessions::format_relative_time(&s.timestamp);
+        lines.push(format!("{} · {when}", s.agent.label()).into());
+    }
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_sessions::SessionAgent;
+
+    fn session(agent: SessionAgent, ts: &str) -> SessionMeta {
+        SessionMeta {
+            agent,
+            session_id: "s".into(),
+            timestamp: ts.into(),
+            cwd: "/repo".into(),
+            git_branch: "main".into(),
+            summary: None,
         }
-        let mut lines: Vec<SharedString> = Vec::new();
-        lines.push(
-            format!(
-                "Attributed to {} session{}",
-                sessions.len(),
-                if sessions.len() == 1 { "" } else { "s" }
-            )
-            .into(),
-        );
-        for s in sessions {
-            let when = crate::agent_sessions::format_relative_time(&s.timestamp);
-            let model = s.model.as_deref().unwrap_or("unknown model");
-            let cost_str = match session_cost(s) {
-                Some(c) => pricing::format_cost(c),
-                None if s.usage.is_some() => "unpriced model".to_string(),
-                None => "no usage".to_string(),
-            };
-            lines.push(format!("{} · {model} · {when} · {cost_str}", s.agent.label()).into());
-        }
-        let mut agg = crate::agent_sessions::AssistantUsage::default();
-        for s in sessions {
-            if let Some(u) = s.usage.as_ref() {
-                agg.add(u);
-            }
-        }
-        if !agg.is_empty() {
-            lines.push(
+    }
+
+    #[test]
+    fn attribution_lines_are_a_count_line_plus_agent_and_when_rows() {
+        assert!(attribution_lines_for(&[]).is_empty());
+
+        let sessions = [
+            session(SessionAgent::Claude, "2026-06-01T10:00:00Z"),
+            session(SessionAgent::Codex, "2026-05-01T10:00:00Z"),
+        ];
+        let lines: Vec<String> = attribution_lines_for(&sessions)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        let when = |ts: &str| crate::agent_sessions::format_relative_time(ts);
+        assert_eq!(
+            lines,
+            vec![
+                "Attributed to 2 sessions".to_string(),
                 format!(
-                    "tokens: {} in · {} out · {} cache",
-                    agg.input,
-                    agg.output,
-                    agg.cache_read.saturating_add(agg.cache_creation)
-                )
-                .into(),
-            );
+                    "{} · {}",
+                    SessionAgent::Claude.label(),
+                    when("2026-06-01T10:00:00Z")
+                ),
+                format!(
+                    "{} · {}",
+                    SessionAgent::Codex.label(),
+                    when("2026-05-01T10:00:00Z")
+                ),
+            ]
+        );
+        for line in &lines {
+            assert!(!line.contains('$'), "no cost figure: {line}");
+            assert!(!line.contains("tokens:"), "no token total: {line}");
+            assert!(!line.contains("prices v"), "no price-table footer: {line}");
         }
-        lines.push(format!("estimated · prices v{}", pricing::PRICING_TABLE_VERSION).into());
-        lines
+
+        let single = attribution_lines_for(&sessions[..1]);
+        assert_eq!(single.len(), 2);
+        assert_eq!(single[0].as_ref(), "Attributed to 1 session");
     }
 }

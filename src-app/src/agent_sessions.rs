@@ -78,42 +78,6 @@ impl SessionAgent {
 pub(crate) const SESSION_AGENT_COUNT: usize = SessionAgent::ALL.len();
 pub(crate) const MAX_SESSION_ID_CHARS: usize = 128;
 
-/// EP-004 US-016: token usage aggregated across a session's assistant turns.
-/// Additive on [`SessionMeta`]; `None` when the agent records no usage
-/// (OpenCode) or the deeper scan was not run (the title-only popover path).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct AssistantUsage {
-    pub input: u64,
-    pub output: u64,
-    pub cache_read: u64,
-    pub cache_creation: u64,
-}
-
-impl AssistantUsage {
-    /// Sum across all tiers - the headline token count for a tooltip.
-    pub fn total(&self) -> u64 {
-        self.input
-            .saturating_add(self.output)
-            .saturating_add(self.cache_read)
-            .saturating_add(self.cache_creation)
-    }
-
-    /// Fold another turn's usage in (saturating). Used by the scanners to
-    /// aggregate `message.usage` across assistant turns.
-    pub fn add(&mut self, other: &AssistantUsage) {
-        self.input = self.input.saturating_add(other.input);
-        self.output = self.output.saturating_add(other.output);
-        self.cache_read = self.cache_read.saturating_add(other.cache_read);
-        self.cache_creation = self.cache_creation.saturating_add(other.cache_creation);
-    }
-
-    /// True when no tier carries a count - a parsed-but-empty usage block,
-    /// treated as "no usage data" by the attribution UI.
-    pub fn is_empty(&self) -> bool {
-        self.total() == 0
-    }
-}
-
 /// US-017 (audit P2-5): module-level mtime-keyed cache for the
 /// session readers. The popover scan currently re-walks the on-disk
 /// JSONL store on every workspace switch, so a 100-session project
@@ -566,8 +530,6 @@ pub mod cache {
                 cwd: "/repo".into(),
                 git_branch: "main".into(),
                 summary: Some("old".into()),
-                model: None,
-                usage: None,
             }];
 
             super::store_result_with_mtime(SessionAgent::Claude, "/repo", cached, &sessions, 0);
@@ -766,15 +728,6 @@ pub struct SessionMeta {
     /// when available, falling back to the cleaned first user message
     /// otherwise. `None` if neither could be extracted.
     pub summary: Option<String>,
-    /// EP-004 US-016: model name from the session transcript (e.g.
-    /// `claude-opus-4-...`, `gpt-5`). `None` on the title-only popover scan or
-    /// when the agent doesn't record one. Drives the attribution badge label +
-    /// pricing lookup.
-    pub model: Option<String>,
-    /// EP-004 US-016: aggregated token usage across assistant turns. `None` on
-    /// the title-only popover scan, when the agent records no usage (OpenCode),
-    /// or when the deeper scan found none. Drives the estimated-cost figure.
-    pub usage: Option<AssistantUsage>,
 }
 
 /// Collect only the newest `cap` sessions by ISO timestamp while counting the
@@ -865,8 +818,8 @@ fn attribution_ordering(a: &SessionMeta, b: &SessionMeta, col_branch: &str) -> s
 }
 
 /// EP-003 review: keep the attribution candidate set bounded while preserving
-/// the final `branch > recency` ranking. Claude/Codex use this before usage
-/// enrichment so only the retained candidates pay the deep JSONL scan cost.
+/// the final `branch > recency` ranking, inserting in order so the retained
+/// set never grows past `cap`.
 pub(crate) fn push_ranked_attribution<T>(
     retained: &mut Vec<(SessionMeta, T)>,
     session: SessionMeta,
@@ -922,8 +875,9 @@ pub fn match_sessions_to_column(
 }
 
 /// EP-004 US-014: gather every enabled agent's sessions for a worktree `cwd`
-/// (usage-enriched where the agent supports it - US-016) and rank them against
-/// the column's `(cwd, branch)`. **Blocking I/O** - call from inside
+/// and rank them against the column's `(cwd, branch)`. Every reader is the
+/// title-only one the Sessions sidebar shares, so the file-backed agents are
+/// usually an mtime-cache hit. **Blocking I/O** - call from inside
 /// `smol::unblock` (it is folded into the off-thread diff-load task so
 /// attribution never blocks first paint and is re-fetched only on re-diff).
 pub fn attribution_for_column(cwd: &str, branch: &str) -> Vec<SessionMeta> {
@@ -954,21 +908,12 @@ pub(crate) fn attribution_for_column_within(
     let mut all = Vec::new();
     for &agent in agents {
         match agent {
-            SessionAgent::Claude => all.extend(
-                crate::claude_sessions::read_sessions_with_usage_for_attribution(cwd, branch),
-            ),
-            SessionAgent::Codex => all.extend(
-                crate::codex_sessions::read_sessions_with_usage_for_attribution(cwd, branch),
-            ),
-            // OpenCode's CLI contract carries no token usage; agent + recency
-            // only (graceful degradation), so the title-only scan is enough.
-            SessionAgent::OpenCode => {
-                all.extend(crate::opencode_sessions::read_sessions_for_cwd(cwd))
-            }
-            // These readers expose title-only metadata through documented
-            // local contracts. They have no token usage in PaneFlow today, so
-            // attribution degrades to agent + recency like OpenCode.
-            SessionAgent::Pi => all.extend(read_sessions_for_cwd(agent, cwd)),
+            // File-backed readers: title-only, mtime-cached, no clock.
+            SessionAgent::Claude
+            | SessionAgent::Codex
+            | SessionAgent::OpenCode
+            | SessionAgent::Pi => all.extend(read_sessions_for_cwd(agent, cwd)),
+            // Command-backed readers spawn a CLI, so they share one budget.
             SessionAgent::Hermes
             | SessionAgent::Grok
             | SessionAgent::Cursor
@@ -1326,8 +1271,6 @@ mod tests {
             cwd: "/repo".into(),
             git_branch: branch.into(),
             summary: None,
-            model: None,
-            usage: None,
         }
     }
 
@@ -1400,7 +1343,7 @@ mod tests {
     }
 
     #[test]
-    fn ranked_attribution_push_caps_before_usage_enrichment() {
+    fn ranked_attribution_push_keeps_the_top_ranked_within_the_cap() {
         let mut retained = Vec::new();
         push_ranked_attribution(
             &mut retained,
@@ -1431,24 +1374,6 @@ mod tests {
         assert_eq!(order, vec!["old-branch", "newer-other"]);
         let payloads: Vec<&str> = retained.iter().map(|(_, payload)| *payload).collect();
         assert_eq!(payloads, vec!["old-branch", "newer-other"]);
-    }
-
-    #[test]
-    fn assistant_usage_total_and_add_saturate() {
-        let mut u = AssistantUsage {
-            input: 10,
-            output: 5,
-            cache_read: 2,
-            cache_creation: 1,
-        };
-        assert_eq!(u.total(), 18);
-        u.add(&AssistantUsage {
-            input: u64::MAX,
-            ..Default::default()
-        });
-        assert_eq!(u.input, u64::MAX, "add must saturate, not overflow-panic");
-        assert!(!u.is_empty());
-        assert!(AssistantUsage::default().is_empty());
     }
 
     #[test]

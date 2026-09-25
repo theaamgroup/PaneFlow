@@ -49,7 +49,6 @@ mod opencode_sessions;
 mod pane;
 mod pane_drag;
 mod pi_sessions;
-mod pricing;
 mod recents;
 mod release_notes;
 mod runtime_paths;
