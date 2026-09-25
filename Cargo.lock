@@ -4597,16 +4597,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "paneflow-agent-setup"
-version = "0.7.2"
-dependencies = [
- "paneflow-agent-config",
- "serde_json",
- "tempfile",
- "toml_edit 0.25.9+spec-1.1.0",
-]
-
-[[package]]
 name = "paneflow-ai-hook"
 version = "0.7.2"
 dependencies = [
@@ -4642,7 +4632,6 @@ dependencies = [
  "objc2-metal 0.3.2",
  "open",
  "paneflow-agent-config",
- "paneflow-agent-setup",
  "paneflow-config",
  "paneflow-ipc-client",
  "paneflow-mcp-install",

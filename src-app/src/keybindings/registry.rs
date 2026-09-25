@@ -468,13 +468,6 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         description: "Toggle Git Diff view",
         group: ShortcutGroup::Diff,
     },
-    ActionMeta {
-        name: "toggle_diff_dock_maximize",
-        factory: || Box::new(crate::ToggleDiffDockMaximize),
-        context: "",
-        description: "Maximize or restore the Changes dock",
-        group: ShortcutGroup::Diff,
-    },
     // Issue #106: the primary left rail (CLI / Agents / Diff). Global context
     // on purpose - a terminal holds focus nearly all the time, so a scoped
     // binding would be dead exactly when it is wanted.
@@ -523,15 +516,6 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         factory: || Box::new(crate::DiffToggleView),
         context: "DiffView && !Terminal && !TextInput && !PaneflowTextArea",
         description: "Diff: toggle unified / split",
-        group: ShortcutGroup::Diff,
-    },
-    // The diff dock's new-terminal chord. Kept off terminals and text
-    // widgets: Ctrl+J is LF in a shell, so a global binding would eat it.
-    ActionMeta {
-        name: "diff_new_terminal_tab",
-        factory: || Box::new(crate::DiffNewTerminalTab),
-        context: "!Terminal && !TextInput && !PaneflowTextArea",
-        description: "Diff dock: open a terminal tab",
         group: ShortcutGroup::Diff,
     },
     ActionMeta {

@@ -135,11 +135,6 @@ actions!(
         OpenComposer,
         ToggleBroadcastMember,
         OpenBroadcastGroups,
-        ToggleDiffDockMaximize,
-        // The diff dock's `+` menu advertises Ctrl+J on its Terminal row.
-        // No-op unless the dock is open, and scoped away from terminals and
-        // text widgets so a shell keeps its own Ctrl+J (LF).
-        DiffNewTerminalTab,
         // Issue #106: collapse/expand the primary left rail from the keyboard.
         // Until this existed the rail was mouse-only - the title-bar button
         // was the single way to reach it.
@@ -162,7 +157,7 @@ mod tests {
     #[test]
     fn claude_md_action_count_matches_the_actions_macro() {
         let declared = actions_macro_entries(include_str!("actions.rs"));
-        assert_eq!(declared, 81, "review action surface is pinned");
+        assert_eq!(declared, 79, "review action surface is pinned");
 
         let claude_md = include_str!("../../../CLAUDE.md");
         for phrase in ["GPUI action types", "actions total"] {

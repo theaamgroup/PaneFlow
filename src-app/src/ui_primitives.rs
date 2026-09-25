@@ -1293,9 +1293,6 @@ mod tests {
     fn every_menu_mount_fades_in_through_menu_reveal_with_a_unique_id() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let menu_files = [
-            "app/diff_dock/branch.rs",
-            "app/diff_dock/new_tab_menu.rs",
-            "app/diff_dock/options_menu.rs",
             "app/diff_sidebar/header.rs",
             "app/review/menu.rs",
             "app/sidebar/context_menu.rs",
@@ -1398,9 +1395,10 @@ mod tests {
                 }
             }
         }
+        // Issue #808 removed the diff dock's four menus (20 -> 16).
         assert!(
-            ids.len() >= 20,
-            "expected at least 20 literal reveal ids under src-app/src, found {}",
+            ids.len() >= 16,
+            "expected at least 16 literal reveal ids under src-app/src, found {}",
             ids.len()
         );
         let dupes: Vec<_> = ids.iter().filter(|(_, sites)| sites.len() > 1).collect();

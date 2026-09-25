@@ -850,6 +850,49 @@ pub fn branch_exists(repo_root: &Path, branch: &str) -> bool {
     .is_ok()
 }
 
+/// Wall-clock ceiling and stdout/stderr cap for [`list_branches`]. `branch
+/// --format` is fast; the bounds only exist so a wedged git (a hook prompting
+/// for input, a stale lock) cannot pin a thread.
+const BRANCH_GIT_DEADLINE: Duration = Duration::from_secs(30);
+const BRANCH_GIT_OUTPUT_CAP: u64 = 512 * 1024;
+
+/// Local branches of the repository at `cwd`, sorted and deduplicated. The
+/// tab worktree picker's branch reader (issue #347).
+pub(crate) fn list_branches(cwd: &str) -> Result<Vec<String>, String> {
+    let mut command = git_command();
+    git_subcommand(&mut command, &["branch", "--format=%(refname:short)"]);
+    command.current_dir(cwd).env("GIT_TERMINAL_PROMPT", "0");
+
+    let output =
+        paneflow_process::run_with_timeout(command, BRANCH_GIT_DEADLINE, BRANCH_GIT_OUTPUT_CAP)
+            .map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        return Err(git_output_error(&output));
+    }
+
+    let mut branches = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    branches.sort();
+    branches.dedup();
+    Ok(branches)
+}
+
+/// The first line of a failed git call's stderr, or its exit status when
+/// stderr is empty.
+fn git_output_error(output: &paneflow_process::BoundedOutput) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let message = stderr.trim();
+    if message.is_empty() {
+        format!("git exited with {}", output.status)
+    } else {
+        message.lines().next().unwrap_or(message).to_string()
+    }
+}
+
 /// Where a chosen branch's checkout is, or has to be made (issue #347).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BranchCheckout {
@@ -1789,14 +1832,7 @@ mod tests {
             "fn run_git_stdin_timed(",
         );
         assert_production_git_command_isolated(include_str!("git.rs"), "fn git_stdout(");
-        assert_production_git_command_isolated(
-            include_str!("../app/diff_dock/branch.rs"),
-            "fn list_branches(",
-        );
-        assert_production_git_command_isolated(
-            include_str!("../app/diff_dock/branch.rs"),
-            "fn switch_branch(",
-        );
+        assert_production_git_command_isolated(include_str!("worktree.rs"), "fn list_branches(");
 
         // `git_subcommand` puts `-c alias.<name>=` on the Command before the
         // subcommand token. Git applies `-c` after the repo config and after
@@ -1872,18 +1908,8 @@ mod tests {
             "alias.ls-tree= must sit between --literal-pathspecs and ls-tree: {literal}"
         );
         for (file, marker) in [
-            (
-                include_str!("../diff/git.rs"),
-                "fn repository_discovery_command(",
-            ),
-            (
-                include_str!("../app/diff_dock/branch.rs"),
-                "fn list_branches(",
-            ),
-            (
-                include_str!("../app/diff_dock/branch.rs"),
-                "fn switch_branch(",
-            ),
+            (include_str!("../diff/git.rs"), "fn run_git_timed("),
+            (include_str!("worktree.rs"), "fn list_branches("),
             (include_str!("../app/work_review/model.rs"), "fn git("),
         ] {
             let body = git_fn_source(file, marker);
@@ -1982,7 +2008,7 @@ mod tests {
             "alias.status must not run: {}",
             std::fs::read_to_string(&marker).unwrap_or_default()
         );
-        let diff = crate::diff::compute_head_diff(&repo_root);
+        let diff = crate::diff::load_column(&repo_root, "HEAD").diff;
         assert!(
             diff.error.is_none(),
             "git diff against hostile diff.external: {:?}",

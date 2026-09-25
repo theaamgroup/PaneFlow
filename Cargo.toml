@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/paneflow-agent-config",
-    "crates/paneflow-agent-setup",
     "crates/paneflow-ai-hook",
     "crates/paneflow-config",
     "crates/paneflow-ghostty-smoke",

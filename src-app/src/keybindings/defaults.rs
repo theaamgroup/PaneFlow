@@ -306,13 +306,6 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "open_diff_view",
         context: None,
     },
-    // Maximize / restore the Changes dock (upstream e0ff7e21): the dock takes
-    // the whole cockpit and the pane grid is clipped away, never resized.
-    DefaultBinding {
-        key: "secondary-shift-f",
-        action_name: "toggle_diff_dock_maximize",
-        context: None,
-    },
     // Issue #106: primary left-rail toggle. `secondary-alt-b`: `b` for the
     // sidebar, kept off
     // `secondary-shift-b`, which is already `toggle_broadcast_member`. Alt
@@ -354,13 +347,6 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         key: "escape",
         action_name: "diff_dismiss",
         context: Some("DiffView && !Terminal && !TextInput && !PaneflowTextArea"),
-    },
-    // The chord the diff dock's `+` menu advertises on its Terminal row.
-    // The context keeps it off shells, where bare Ctrl+J is LF.
-    DefaultBinding {
-        key: "secondary-j",
-        action_name: "diff_new_terminal_tab",
-        context: Some("!Terminal && !TextInput && !PaneflowTextArea"),
     },
     // EP-001 (CLI Cockpit): Composer + broadcast
     // groups. All three are unclaimed `secondary-shift-…` slots (taken set

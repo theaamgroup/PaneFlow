@@ -413,8 +413,7 @@ impl PaneFlowApp {
         // Issue #347: a tab bound to a worktree reviews that checkout, so
         // switching tab inside the active workspace can change what Diff mode
         // is looking at - which the workspace-switch reconcile below never
-        // covers, because the workspace did not change. The dock needs no help:
-        // it already parks and restores per tab id.
+        // covers, because the workspace did not change.
         let checkout_before = self.active_checkout();
         if let Some(ws) = self.workspaces.get_mut(ws_idx) {
             ws.set_active_tab(tab_idx);
@@ -455,21 +454,12 @@ impl PaneFlowApp {
             .tabs()
             .get(tab_idx)
             .and_then(|tab| capture_closed_tab_record(tab, tab_idx, ws.id, cx));
-        let closed_tab_id = ws.tabs().get(tab_idx).map(|tab| tab.id);
 
         let Some(ws) = self.workspaces.get_mut(ws_idx) else {
             return;
         };
         if ws.close_tab(tab_idx).is_none() {
             return;
-        }
-        // The dock is parked per tab (#184 Phase 4) and its slot is not on the
-        // undo record: a restored tab gets a fresh id. Tear it down here, not
-        // at render - a background tab closes without moving the visible
-        // session, so the dock's own reconcile never runs and the slot (and
-        // the terminals in it) would outlive the session it belonged to.
-        if let Some(tab_id) = closed_tab_id {
-            self.drop_diff_dock_for_tab(tab_id, cx);
         }
         // The closed tab may have been the last reader of a worktree's git
         // state (issue #347). The checkout itself is left alone: tearing it
@@ -763,10 +753,6 @@ impl PaneFlowApp {
             }
             return;
         }
-        // The id of the tab the pane vacates, when it was the whole tab: the
-        // tab's dock (#184 Phase 4: parked per tab) follows the pane into the
-        // tab it lands in, below.
-        let mut vacated_tab_id = None;
         match pruned {
             Some(rest) => {
                 if let Some(tab) = self.workspaces[src_ws_idx].tab_mut(src_tab_idx) {
@@ -778,10 +764,6 @@ impl PaneFlowApp {
             // (FR-01), which `open_tab` fills in place when the destination is
             // this same workspace.
             None => {
-                vacated_tab_id = self.workspaces[src_ws_idx]
-                    .tabs()
-                    .get(src_tab_idx)
-                    .map(|tab| tab.id);
                 self.workspaces[src_ws_idx].close_tab(src_tab_idx);
                 // Every tab after the closed one slid up by one, and so did the
                 // gap the line pointed at.
@@ -828,23 +810,8 @@ impl PaneFlowApp {
             if !reattached {
                 log::error!("pane move: dropped pane could not be re-attached");
             }
-            // The vacated tab is gone for good and there is no tab to hand its
-            // dock to: tear it down explicitly rather than leave it for the
-            // render-time prune.
-            if let Some(tab_id) = vacated_tab_id {
-                self.drop_diff_dock_for_tab(tab_id, cx);
-            }
             cx.notify();
             return;
-        }
-
-        // The pane *was* the tab's content, so the dock that followed that
-        // tab follows the pane into its new one - re-keyed before the next
-        // paint, or the reconcile would prune the slot (terminals and all)
-        // the moment the vacated id stopped resolving.
-        if let Some(from) = vacated_tab_id {
-            let to = self.workspaces[dest_ws_idx].active_tab().id;
-            self.rehome_diff_dock_for_tab(from, to);
         }
 
         // `open_tab` appends; slide the newcomer to the gap the line marked.
@@ -1078,7 +1045,7 @@ mod tests {
         // Issue #334 / #347: the lifted helper gates on teardown before
         // spawning, opens a NEW workspace tab (never the active one), returns
         // `None` at the tab cap without focusing anything, and binds the tab
-        // through `set_tab_worktree` so the dock and git probe follow.
+        // through `set_tab_worktree` so the git probe follows.
         let src = include_str!("tab.rs");
         let body = src
             .split("pub(crate) fn open_agent_tab_at_cwd(")
@@ -1196,8 +1163,5 @@ mod tests {
         assert!(events.contains("self.hosted_surface_is_seen(surface_id,cx)||muted"));
         assert!(events.contains("surface_id,)||self.workspace_is_muted(ws_id);super::ipc_handler::fire_stalled_notification("));
         assert!(events.contains("session.state=ai_types::AgentState::Stalled;"));
-        let dock = compact(include_str!("../diff_dock/tabs.rs"));
-        assert!(dock.contains("this.workspace_is_muted(ws.id)&&this.diff_dock_terminals_for_workspace(ws.id).contains(&terminal)"));
-        assert!(dock.contains("this.dock_terminal_is_seen(&terminal)||muted"));
     }
 }
