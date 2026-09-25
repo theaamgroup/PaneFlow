@@ -1222,7 +1222,7 @@ review would raise anywhere.
    both variants.
 2. `macos_chrome_material` on and off.
 3. `reduce_motion` on: every animation **you touched** settles without
-   interpolation. Do not attest more than that — 4.8 lists five animations
+   interpolation. Do not attest more than that — 4.8 lists four animations
    that still ignore the flag (menus fade in through `menu_reveal` and snap
    under the flag), so "nothing moves" is not yet true of the app.
 4. The 800 by 500 minimum window, with the primary sidebar hidden and a right
