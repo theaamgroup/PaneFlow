@@ -677,7 +677,7 @@ impl PaneFlowApp {
 
     /// Drop every trace of a checkout that is gone: unbind the tabs that
     /// worked in it, forget its cached git state, refresh what the picker
-    /// offers, and make the Worktree-scope diff recount its columns.
+    /// offers, and close any Review pane still showing that checkout.
     ///
     /// Every workspace is walked, not only the one whose menu was clicked: a
     /// picker checkout is marker-less, so two workspaces on the same
