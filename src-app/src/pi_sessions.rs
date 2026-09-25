@@ -134,8 +134,6 @@ fn read_session_meta(path: &Path) -> Option<SessionMeta> {
         cwd: header.cwd,
         git_branch: String::new(),
         summary,
-        model: None,
-        usage: None,
     })
 }
 

@@ -21,7 +21,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use crate::agent_sessions::{AssistantUsage, SessionAgent, SessionMeta, clean_session_label};
+use crate::agent_sessions::{SessionAgent, SessionMeta, clean_session_label};
 
 /// Maximum number of leading lines to scan for envelope + title. The
 /// first lines of a Claude Code session file are typically
@@ -42,17 +42,7 @@ const MAX_WALK_ENTRIES: usize = 4_096;
 /// session file and the line cap alone would allow 2048 x [`MAX_LINE_BYTES`]
 /// = 128 MiB. 1 MiB covers the common `ai-title` position (63-220 KB
 /// measured) plus one late outlier, and caps a file the scan can't satisfy.
-/// Applies to the title path only - the attribution path (`scan_usage`) is
-/// bounded by [`MODEL_USAGE_SCAN_LIMIT`] and runs once per diff column.
 const TITLE_SCAN_BYTES: u64 = 1024 * 1024;
-
-/// EP-004 US-016: deeper line cap for the attribution scan, which walks PAST
-/// the title break to aggregate `message.usage` across assistant turns. A
-/// session's turns are spread through the file, so this is much larger than
-/// [`TITLE_SCAN_LIMIT`] - but still bounded, and it runs ONLY on the attribution
-/// path (the diff column load), never on the popover title scan. 20k lines
-/// covers very long sessions while keeping a pathological file bounded.
-const MODEL_USAGE_SCAN_LIMIT: usize = 20_000;
 
 // US-013: per-line JSONL read cap, centralized (see `crate::limits`).
 use crate::limits::MAX_LINE_BYTES;
@@ -319,65 +309,6 @@ pub fn read_sessions_for_cwd_with_omitted(cwd: &str) -> (Vec<SessionMeta>, usize
     (sessions, omitted)
 }
 
-/// EP-004 US-014/US-016: like [`read_sessions_for_cwd`] but the retained
-/// attribution candidates are scanned deeper to populate `model` + aggregated
-/// `usage`. Deliberately bypasses the title-scan mtime cache - that cache
-/// stores usage-less rows for the popover, and the attribution result is
-/// instead cached on the diff `Column` keyed to its diff fingerprint
-/// (re-fetched only on re-diff). **Blocking I/O** - call from inside
-/// `smol::unblock`.
-pub fn read_sessions_with_usage_for_attribution(cwd: &str, branch: &str) -> Vec<SessionMeta> {
-    let Some(project_dir) = project_dir_for_cwd(cwd) else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(&project_dir) else {
-        return Vec::new();
-    };
-
-    let mut candidates: Vec<(SessionMeta, PathBuf)> = Vec::new();
-    for (index, entry) in entries.flatten().enumerate() {
-        if index >= MAX_WALK_ENTRIES {
-            break;
-        }
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_file()
-            || entry
-                .path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_none_or(|ext| !ext.eq_ignore_ascii_case("jsonl"))
-        {
-            continue;
-        }
-        let path = entry.path();
-        if let Some(meta) = read_session_meta(&path)
-            && crate::agent_sessions::cwd_matches(&meta.cwd, cwd)
-        {
-            crate::agent_sessions::push_ranked_attribution(
-                &mut candidates,
-                meta,
-                path,
-                branch,
-                crate::agent_sessions::DIFF_ATTRIBUTION_MATCH_CAP,
-            );
-        }
-    }
-
-    let enriched: Vec<SessionMeta> = candidates
-        .into_iter()
-        .filter_map(
-            |(fallback, path)| match read_session_meta_inner(&path, true) {
-                Some(meta) if crate::agent_sessions::cwd_matches(&meta.cwd, cwd) => Some(meta),
-                Some(_) => None,
-                None => Some(fallback),
-            },
-        )
-        .collect();
-    crate::agent_sessions::match_sessions_to_column(enriched, cwd, branch)
-}
-
 /// Read the head of a `.jsonl` and collect everything we need for a UI
 /// row in a single pass: the first envelope carrying `cwd`, the
 /// LLM-generated `ai-title` (when present), and the cleaned first
@@ -389,16 +320,10 @@ pub fn read_sessions_with_usage_for_attribution(cwd: &str, branch: &str) -> Vec<
 ///    `claude --resume` picker shows for newer sessions.
 /// 2. First `type:"user"` message, with `<command-*>` boilerplate
 ///    collapsed into `/<name> <args>` when present.
+///
+/// The scan is bounded by [`TITLE_SCAN_LIMIT`] lines and [`TITLE_SCAN_BYTES`]
+/// bytes, and stops as soon as the envelope + title are known.
 fn read_session_meta(path: &Path) -> Option<SessionMeta> {
-    read_session_meta_inner(path, false)
-}
-
-/// Shared session-head scan. `scan_usage = false` is the title-only popover
-/// path: bounded by [`TITLE_SCAN_LIMIT`], it stops as soon as the envelope +
-/// title are known. `scan_usage = true` is the EP-004 attribution path: it
-/// walks past the title (bounded by [`MODEL_USAGE_SCAN_LIMIT`]) aggregating
-/// `message.usage` across assistant turns and capturing `message.model`.
-fn read_session_meta_inner(path: &Path, scan_usage: bool) -> Option<SessionMeta> {
     let file = fs::File::open(path).ok()?;
     let mut reader = BufReader::new(file);
     let mut buf = String::new();
@@ -406,23 +331,14 @@ fn read_session_meta_inner(path: &Path, scan_usage: bool) -> Option<SessionMeta>
     let mut envelope: Option<FirstLineEnvelope> = None;
     let mut ai_title: Option<String> = None;
     let mut user_fallback: Option<String> = None;
-    // US-016: model + aggregated usage (attribution path only).
-    let mut model: Option<String> = None;
-    let mut usage = AssistantUsage::default();
-    let mut saw_usage = false;
 
-    let scan_limit = if scan_usage {
-        MODEL_USAGE_SCAN_LIMIT
-    } else {
-        TITLE_SCAN_LIMIT
-    };
     let mut title_budget = TITLE_SCAN_BYTES;
-    for _ in 0..scan_limit {
+    for _ in 0..TITLE_SCAN_LIMIT {
         // Stop once the remaining budget can no longer hold a full line. The
         // threshold is MAX_LINE_BYTES rather than zero so the oversized-line
         // detection below stays exact: it compares the read length against
         // that constant, which only holds while the whole cap is available.
-        if !scan_usage && title_budget < MAX_LINE_BYTES {
+        if title_budget < MAX_LINE_BYTES {
             break;
         }
         buf.clear();
@@ -539,54 +455,20 @@ fn read_session_meta_inner(path: &Path, scan_usage: bool) -> Option<SessionMeta>
                     && let Some(cleaned) = clean_session_label(title, LABEL_MAX_CHARS)
                 {
                     ai_title = Some(cleaned);
-                    // Title-only path: stop as soon as we have envelope + title.
-                    // Attribution path: keep walking to aggregate usage/model.
-                    if envelope.is_some() && !scan_usage {
+                    // Stop as soon as we have envelope + title.
+                    if envelope.is_some() {
                         break;
                     }
                 }
             }
             // Sub-agent traffic is inline in the same transcript, flagged
             // `isSidechain`. A sidechain turn is the orchestrator talking to a
-            // sub-agent, never the human, so it must not win the title race -
-            // the assistant arm below deliberately does NOT skip it, since
-            // those tokens are billed and belong in the attribution total.
+            // sub-agent, never the human, so it must not win the title race.
             Some("user") if user_fallback.is_none() && !json_flag(&value, "isSidechain") => {
                 if let Some(text) = extract_user_content(&value)
                     && let Some(cleaned) = clean_user_message(&text, json_flag(&value, "isMeta"))
                 {
                     user_fallback = Some(cleaned);
-                }
-            }
-            // US-016: assistant turns carry `message.model` + `message.usage`.
-            // Aggregate usage across turns; keep the most recent non-empty model
-            // (overwrite - a session that switched models reports the last one,
-            // which is the most representative for a single-figure estimate).
-            Some("assistant") if scan_usage => {
-                if let Some(message) = value.get("message") {
-                    if let Some(m) = message.get("model").and_then(|v| v.as_str())
-                        && !m.is_empty()
-                    {
-                        model = Some(m.to_string());
-                    }
-                    if let Some(u) = message.get("usage") {
-                        let turn = AssistantUsage {
-                            input: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                            output: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                            cache_read: u
-                                .get("cache_read_input_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0),
-                            cache_creation: u
-                                .get("cache_creation_input_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0),
-                        };
-                        if !turn.is_empty() {
-                            usage.add(&turn);
-                            saw_usage = true;
-                        }
-                    }
                 }
             }
             _ => {}
@@ -603,8 +485,6 @@ fn read_session_meta_inner(path: &Path, scan_usage: bool) -> Option<SessionMeta>
         cwd: envelope.cwd,
         git_branch: envelope.git_branch,
         summary,
-        model,
-        usage: saw_usage.then_some(usage),
     })
 }
 
@@ -848,47 +728,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn usage_scan_aggregates_across_assistant_turns_and_captures_model() {
-        // EP-004 US-016: the deeper scan (scan_usage=true) walks past the title
-        // break, sums `message.usage` across assistant turns, and captures the
-        // model. The title-only scan (false) leaves both None.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("usage.jsonl");
-        std::fs::write(
-            &path,
-            concat!(
-                r#"{"parentUuid":null,"type":"user","message":{"role":"user","content":"hi"},"uuid":"u","timestamp":"2026-04-26T13:38:41.095Z","cwd":"/tmp/proj","sessionId":"550e8400-e29b-41d4-a716-446655440000","gitBranch":"main"}"#,
-                "\n",
-                r#"{"type":"assistant","message":{"model":"claude-opus-4-8-20260101","usage":{"input_tokens":100,"output_tokens":40,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}}}"#,
-                "\n",
-                r#"{"type":"ai-title","aiTitle":"Some title"}"#,
-                "\n",
-                r#"{"type":"assistant","message":{"model":"claude-opus-4-8-20260101","usage":{"input_tokens":200,"output_tokens":60,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
-                "\n",
-            ),
-        )
-        .expect("write fixture");
-
-        // Title-only path: no model/usage.
-        let title_only = read_session_meta_inner(&path, false).expect("meta");
-        assert!(title_only.model.is_none());
-        assert!(title_only.usage.is_none());
-        assert_eq!(title_only.summary.as_deref(), Some("Some title"));
-
-        // Attribution path: aggregated usage + model.
-        let with_usage = read_session_meta_inner(&path, true).expect("meta");
-        assert_eq!(
-            with_usage.model.as_deref(),
-            Some("claude-opus-4-8-20260101")
-        );
-        let usage = with_usage.usage.expect("usage aggregated");
-        assert_eq!(usage.input, 300);
-        assert_eq!(usage.output, 100);
-        assert_eq!(usage.cache_read, 10);
-        assert_eq!(usage.cache_creation, 5);
-    }
-
     /// The line-3 caveat record Claude Code writes into nearly every recent
     /// session: `isMeta`, `<local-command-caveat>` prefixed, and the first
     /// `type:"user"` line in the file. It must never become the row label.
@@ -1093,8 +932,6 @@ mod tests {
             cwd: cwd.into(),
             git_branch: String::new(),
             summary: None,
-            model: None,
-            usage: None,
         }];
         cache::store_result(SessionAgent::Claude, cwd, project_dir, &fixture, 7);
 

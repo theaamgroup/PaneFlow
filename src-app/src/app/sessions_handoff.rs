@@ -210,8 +210,6 @@ mod tests {
             cwd: "/Users/x/proj".to_string(),
             git_branch: branch.to_string(),
             summary: summary.map(str::to_string),
-            model: None,
-            usage: None,
         }
     }
 
