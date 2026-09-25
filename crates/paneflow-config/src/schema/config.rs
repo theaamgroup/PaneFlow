@@ -447,15 +447,6 @@ impl PaneFlowConfig {
             && self.macos_chrome_material.unwrap_or(true)
     }
 
-    /// Resolve the desktop chrome material switch for the current platform.
-    pub fn cockpit_chrome_material_enabled(&self) -> bool {
-        if self.window_backdrop_disables_chrome_material() {
-            return false;
-        }
-
-        self.macos_chrome_material_enabled()
-    }
-
     /// Resolve the reduce-motion switch. Absent means full motion.
     pub fn reduce_motion_enabled(&self) -> bool {
         self.reduce_motion.unwrap_or(false)

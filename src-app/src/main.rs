@@ -630,12 +630,20 @@ mod native_material_tests {
         // unbounded, it ran through every test module after the impl).
         let anchor = format!("impl Render for {} {{", "PaneFlowApp");
         let render = source_slice(include_str!("main.rs"), &anchor, "\n}\n");
-        for prefix in ["macos", "cockpit"] {
-            let getter = format!("{prefix}_chrome_material_enabled()");
-            let before = render
-                .split_once(getter.as_str())
-                .map(|(before, _)| before)
-                .unwrap();
+        // Issue #815 merged the two getters into one, so every read of it is
+        // checked, and both sites must still exist.
+        let getter = format!("{}_chrome_material_enabled()", "macos");
+        let sites: Vec<usize> = render
+            .match_indices(getter.as_str())
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            sites.len(),
+            2,
+            "expected the material view and shell tint reads"
+        );
+        for at in sites {
+            let before = &render[..at];
             let call = before.rfind("chrome_material_for_frame(").unwrap_or(0);
             assert!(
                 call > 0 && !before[call..].contains(';'),
@@ -2079,7 +2087,7 @@ impl Render for PaneFlowApp {
         // The Cli pane grid keeps the terminal background on each pane card.
         // Diff and Settings use the opaque application surface.
         let chrome_material_active = chrome_material_for_frame(
-            self.cached_config.cockpit_chrome_material_enabled(),
+            self.cached_config.macos_chrome_material_enabled(),
             window.is_fullscreen(),
         );
         let native_material_active = chrome_material_active;

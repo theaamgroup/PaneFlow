@@ -386,33 +386,21 @@ mod tests {
     }
 
     #[test]
-    fn cockpit_chrome_material_respects_current_platform_switch() {
-        let cfg = PaneFlowConfig::default();
-        assert!(cfg.cockpit_chrome_material_enabled());
-
-        let cfg = PaneFlowConfig {
-            macos_chrome_material: Some(true),
-            ..Default::default()
-        };
-        assert!(cfg.cockpit_chrome_material_enabled());
-
-        let cfg = PaneFlowConfig {
-            macos_chrome_material: Some(false),
-            ..Default::default()
-        };
-        assert!(!cfg.cockpit_chrome_material_enabled());
-
-        let cfg = PaneFlowConfig {
-            window_backdrop: Some("opaque".to_string()),
-            macos_chrome_material: Some(true),
-            ..Default::default()
-        };
-        assert!(!cfg.cockpit_chrome_material_enabled());
-    }
-
-    #[test]
     fn macos_chrome_material_defaults_on_and_respects_switches() {
         assert!(PaneFlowConfig::default().macos_chrome_material_enabled());
+
+        let enabled = PaneFlowConfig {
+            macos_chrome_material: Some(true),
+            ..Default::default()
+        };
+        assert!(enabled.macos_chrome_material_enabled());
+
+        let globally_off = PaneFlowConfig {
+            window_backdrop: Some("off".to_string()),
+            macos_chrome_material: Some(true),
+            ..Default::default()
+        };
+        assert!(!globally_off.macos_chrome_material_enabled());
 
         let disabled = PaneFlowConfig {
             macos_chrome_material: Some(false),

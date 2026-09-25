@@ -15,12 +15,6 @@ pub struct ThemeSignal {
     generation: u64,
 }
 
-impl ThemeSignal {
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-}
-
 pub struct ThemeSignalGlobal(pub Entity<ThemeSignal>);
 
 impl Global for ThemeSignalGlobal {}
