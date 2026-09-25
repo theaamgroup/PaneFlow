@@ -862,3 +862,86 @@ fn tab_title_provenance_round_trips_and_old_titles_remain_manual() {
         assert_eq!(restored, tab);
     }
 }
+
+/// Issue #726: every terminal surface persists `agent_context`, so a key a
+/// newer build adds to any task type must not fail an older build's parse
+/// (which would move the whole session.json to a corruption backup).
+#[test]
+fn session_with_unknown_agent_task_field_still_parses() {
+    let json = r#"{
+        "version": 2,
+        "active_workspace": 0,
+        "workspaces": [{
+            "title": "paneflow",
+            "cwd": "/home/user/dev/paneflow",
+            "tabs": [{
+                "title": "agents",
+                "layout": {
+                    "type": "pane",
+                    "surfaces": [{
+                        "surface_type": "terminal",
+                        "agent_context": {
+                            "pane_id": "7a1c9e2e-5b1f-4a37-9c43-0f2b8f0e7d11",
+                            "future_context_key": true,
+                            "task": {
+                                "task_id": "3e0c7c55-2a4f-4d0e-8f7e-2b9d5f6c1a20",
+                                "revision": 2,
+                                "updated_at_ms": 1700000000000,
+                                "future_task_key": {"nested": [1, 2]},
+                                "assignment": {
+                                    "objective": "Fix search",
+                                    "acceptance_criteria": ["search finds it"],
+                                    "owned_files": ["src/search.rs"],
+                                    "future_assignment_key": "x"
+                                },
+                                "report": {
+                                    "status": "completed",
+                                    "summary": "Fixed",
+                                    "changed_files": ["src/search.rs"],
+                                    "commits": ["abc123"],
+                                    "tests": ["cargo test"],
+                                    "unresolved_questions": [],
+                                    "future_report_key": 42
+                                }
+                            }
+                        }
+                    }]
+                }
+            }]
+        }]
+    }"#;
+    let state: SessionState = serde_json::from_str(json).expect("unknown task keys are ignored");
+    assert_eq!(state.workspaces.len(), 1);
+    let Some(LayoutNode::Pane { surfaces }) = &state.workspaces[0].tabs[0].layout else {
+        panic!("expected a pane layout");
+    };
+    let context = surfaces[0].agent_context.as_ref().expect("agent_context");
+    let expected = AgentContext {
+        pane_id: "7a1c9e2e-5b1f-4a37-9c43-0f2b8f0e7d11".into(),
+        task: Some(AgentTask {
+            task_id: "3e0c7c55-2a4f-4d0e-8f7e-2b9d5f6c1a20".into(),
+            revision: 2,
+            assignment: TaskAssignment {
+                objective: "Fix search".into(),
+                acceptance_criteria: vec!["search finds it".into()],
+                owned_files: vec!["src/search.rs".into()],
+            },
+            report: Some(TaskReport {
+                status: TaskStatus::Completed,
+                summary: "Fixed".into(),
+                changed_files: vec!["src/search.rs".into()],
+                commits: vec!["abc123".into()],
+                tests: vec!["cargo test".into()],
+                unresolved_questions: vec![],
+            }),
+            updated_at_ms: 1_700_000_000_000,
+        }),
+    };
+    assert_eq!(context, &expected);
+
+    // The known fields round-trip; the unknown keys are dropped on write.
+    let written = serde_json::to_string(&state).unwrap();
+    assert!(!written.contains("future_"), "{written}");
+    let back: SessionState = serde_json::from_str(&written).unwrap();
+    assert_eq!(back, state);
+}

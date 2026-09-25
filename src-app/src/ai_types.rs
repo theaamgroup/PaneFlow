@@ -564,9 +564,382 @@ where
     rows
 }
 
+/// Subagents a workspace's agents are running right now, from the
+/// `ai.subagent_start` / `ai.subagent_stop` frames.
+///
+/// Keyed by the parent agent's PID, then by the agent's own pairing id. This
+/// is kept beside `agent_sessions` rather than inside it because the two die
+/// on different clocks: a `Finished` session row is dropped seconds after the
+/// turn ends, while a background subagent it spawned keeps working. The ids
+/// leave when their stop arrives or when the parent process is gone.
+///
+/// Both halves are idempotent: Grok also runs the Claude and Cursor hook
+/// files, so one start can arrive twice, and a Codex child woken again can
+/// report a second stop with no start in between.
+#[derive(Debug, Clone, Default)]
+pub struct RunningSubagents {
+    by_pid: HashMap<u32, SubagentParent>,
+}
+
+/// One agent process's subagents, with what identifies that process.
+#[derive(Debug, Clone, Default)]
+pub struct SubagentParent {
+    ids: HashSet<String>,
+    /// When each recently stopped id stopped, by the frame's own stamp. Each
+    /// hook frame travels on its own connection, so a start can arrive after
+    /// the stop that followed it; a start stamped no later than the id's stop
+    /// is that stale start and must not hold the count up.
+    stopped_at_ms: HashMap<String, u64>,
+    /// The parent's process start time, pinned by its first start frame. It
+    /// tells a recycled PID from the agent that registered these ids, since
+    /// the parent's session row may be gone or replaced by then.
+    proc_start: Option<u64>,
+    /// The pane the parent runs in, so the ids follow it to another
+    /// workspace and leave with it when it closes.
+    surface_id: Option<u64>,
+}
+
+impl SubagentParent {
+    fn merge(&mut self, other: SubagentParent) {
+        if let (Some(mine), Some(theirs)) = (self.proc_start, other.proc_start)
+            && mine != theirs
+        {
+            // Different processes on one PID: the newer registration wins.
+            *self = other;
+            return;
+        }
+        for id in other.ids {
+            if self.ids.len() >= RunningSubagents::MAX_PER_SESSION {
+                break;
+            }
+            self.ids.insert(id);
+        }
+        for (id, at) in other.stopped_at_ms {
+            let slot = self.stopped_at_ms.entry(id).or_insert(at);
+            *slot = (*slot).max(at);
+        }
+        self.proc_start = self.proc_start.or(other.proc_start);
+        self.surface_id = self.surface_id.or(other.surface_id);
+    }
+}
+
+impl RunningSubagents {
+    /// Ceiling per agent process. A stop that never arrives can only hold the
+    /// count up until the parent exits; the cap keeps a misbehaving producer
+    /// from growing the set without bound in the meantime. It also bounds the
+    /// remembered stops.
+    pub const MAX_PER_SESSION: usize = 64;
+
+    /// Record a started subagent. `proc_start` is the parent PID's current
+    /// start time and `surface_id` its pane, when known. Returns whether the
+    /// count changed.
+    pub fn start(
+        &mut self,
+        pid: u32,
+        id: &str,
+        emitted_at_ms: Option<u64>,
+        proc_start: Option<u64>,
+        surface_id: Option<u64>,
+    ) -> bool {
+        let parent = self.by_pid.entry(pid).or_default();
+        let mut changed = false;
+        if let (Some(pinned), Some(current)) = (parent.proc_start, proc_start)
+            && pinned != current
+        {
+            // The PID was recycled: the old agent's subagents died with it.
+            changed = !parent.ids.is_empty();
+            *parent = SubagentParent::default();
+        }
+        parent.proc_start = parent.proc_start.or(proc_start);
+        if surface_id.is_some() {
+            parent.surface_id = surface_id;
+        }
+        let stale = parent
+            .stopped_at_ms
+            .get(id)
+            .is_some_and(|stopped| emitted_at_ms.is_none_or(|at| at <= *stopped));
+        if stale || parent.ids.len() >= Self::MAX_PER_SESSION || parent.ids.contains(id) {
+            return changed;
+        }
+        parent.stopped_at_ms.remove(id);
+        parent.ids.insert(id.to_owned()) || changed
+    }
+
+    /// Record a finished subagent. Returns whether the count changed.
+    pub fn stop(&mut self, pid: u32, id: &str, emitted_at_ms: Option<u64>) -> bool {
+        let Some(parent) = self.by_pid.get_mut(&pid) else {
+            return false;
+        };
+        let removed = parent.ids.remove(id);
+        if let Some(at) = emitted_at_ms {
+            if parent.stopped_at_ms.len() >= Self::MAX_PER_SESSION
+                && !parent.stopped_at_ms.contains_key(id)
+                && let Some(oldest) = parent
+                    .stopped_at_ms
+                    .iter()
+                    .min_by_key(|(_, at)| **at)
+                    .map(|(id, _)| id.clone())
+            {
+                parent.stopped_at_ms.remove(&oldest);
+            }
+            let slot = parent.stopped_at_ms.entry(id.to_owned()).or_insert(at);
+            *slot = (*slot).max(at);
+        }
+        removed
+    }
+
+    /// Record a stop for a parent this tracker has not seen, so a start that
+    /// arrives after it is recognised as stale. Only the tracker that will
+    /// receive that start should hold it.
+    pub fn remember_stop(&mut self, pid: u32, id: &str, emitted_at_ms: Option<u64>) {
+        if emitted_at_ms.is_some() {
+            self.by_pid.entry(pid).or_default();
+            self.stop(pid, id, emitted_at_ms);
+        }
+    }
+
+    pub fn contains_pid(&self, pid: u32) -> bool {
+        self.by_pid.contains_key(&pid)
+    }
+
+    /// Drop every subagent of one agent process: it exited or ended.
+    pub fn forget(&mut self, pid: u32) -> bool {
+        self.by_pid
+            .remove(&pid)
+            .is_some_and(|parent| !parent.ids.is_empty())
+    }
+
+    /// Keep only the agent processes `keep` accepts, given the PID, the
+    /// pinned start time, and the pane. Returns whether the count changed.
+    pub fn retain(&mut self, mut keep: impl FnMut(u32, Option<u64>, Option<u64>) -> bool) -> bool {
+        let before = self.total();
+        self.by_pid
+            .retain(|pid, parent| keep(*pid, parent.proc_start, parent.surface_id));
+        self.total() != before
+    }
+
+    /// Remove and return the agent processes `take` selects, given the PID
+    /// and the pane: the half of a pane move that leaves this workspace.
+    pub fn take(
+        &mut self,
+        mut take: impl FnMut(u32, Option<u64>) -> bool,
+    ) -> Vec<(u32, SubagentParent)> {
+        let pids: Vec<u32> = self
+            .by_pid
+            .iter()
+            .filter(|(pid, parent)| take(**pid, parent.surface_id))
+            .map(|(pid, _)| *pid)
+            .collect();
+        pids.into_iter()
+            .filter_map(|pid| self.by_pid.remove(&pid).map(|parent| (pid, parent)))
+            .collect()
+    }
+
+    /// Add a parent another workspace handed over, merging with any entry
+    /// already held for that PID.
+    pub fn absorb(&mut self, pid: u32, parent: SubagentParent) {
+        match self.by_pid.entry(pid) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(parent);
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => slot.get_mut().merge(parent),
+        }
+    }
+
+    pub fn total(&self) -> usize {
+        self.by_pid.values().map(|parent| parent.ids.len()).sum()
+    }
+}
+
+/// Whether a session counts as a running agent: working, blocked on the user,
+/// or silent mid-turn. `Finished` and `Errored` are not running. The raw
+/// `state` is read, not the presented one: marking a tab read hides its badge,
+/// it does not stop the agent.
+pub fn session_is_running(session: &AgentSession) -> bool {
+    matches!(
+        session.state,
+        AgentState::Thinking | AgentState::WaitingForInput | AgentState::Stalled
+    )
+}
+
+/// How many of a workspace's sessions are running agents. The number beside
+/// the workspace's name adds [`RunningSubagents::total`] to this; a subagent
+/// still counts after its parent's turn ended, because a background subagent
+/// outlives it.
+pub fn running_session_count<'a, I>(sessions: I) -> usize
+where
+    I: IntoIterator<Item = &'a AgentSession>,
+{
+    sessions
+        .into_iter()
+        .filter(|session| session_is_running(session))
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_count_is_busy_sessions_and_scoped_subagents() {
+        let sessions = [
+            s(TerminalAgent::ClaudeCode, AgentState::Thinking),
+            s(TerminalAgent::Codex, AgentState::WaitingForInput),
+            s(TerminalAgent::ClaudeCode, AgentState::Stalled),
+            s(TerminalAgent::ClaudeCode, AgentState::Finished),
+            s(TerminalAgent::Codex, AgentState::Errored),
+        ];
+        assert_eq!(running_session_count(&sessions), 3);
+
+        let mut subagents = RunningSubagents::default();
+        assert!(start(&mut subagents, 10, "a"));
+        assert!(start(&mut subagents, 10, "b"));
+        assert!(
+            start(&mut subagents, 20, "a"),
+            "ids are scoped to their parent"
+        );
+        assert_eq!(subagents.total(), 3);
+    }
+
+    #[test]
+    fn a_session_marked_read_still_counts_as_running() {
+        let mut waiting = s(TerminalAgent::ClaudeCode, AgentState::WaitingForInput);
+        waiting.read = true;
+        assert_eq!(running_session_count([&waiting]), 1);
+    }
+
+    #[test]
+    fn subagent_starts_and_stops_are_idempotent() {
+        let mut subagents = RunningSubagents::default();
+        assert!(start(&mut subagents, 10, "a"));
+        assert!(
+            !start(&mut subagents, 10, "a"),
+            "a duplicate start counts once"
+        );
+        assert_eq!(subagents.total(), 1);
+
+        assert!(subagents.stop(10, "a", None));
+        assert!(!subagents.stop(10, "a", None), "a repeated stop is a no-op");
+        assert!(
+            !subagents.stop(99, "a", None),
+            "an unknown parent is a no-op"
+        );
+        assert_eq!(subagents.total(), 0);
+        assert!(!subagents.forget(10), "an emptied parent changes no count");
+    }
+
+    #[test]
+    fn a_start_that_raced_past_its_stop_is_ignored() {
+        let mut subagents = RunningSubagents::default();
+        assert!(subagents.start(10, "a", Some(1_000), None, None));
+        assert!(subagents.stop(10, "a", Some(2_000)));
+        assert!(
+            !subagents.start(10, "a", Some(1_500), None, None),
+            "a start stamped before the stop is the late half of a finished pair"
+        );
+        assert!(
+            !subagents.start(10, "a", None, None, None),
+            "an unstamped start cannot be ordered after a stamped stop"
+        );
+        assert!(
+            subagents.start(10, "a", Some(3_000), None, None),
+            "a later start wakes the subagent again"
+        );
+
+        let mut unseen = RunningSubagents::default();
+        unseen.remember_stop(20, "b", Some(2_000));
+        assert!(!unseen.start(20, "b", Some(1_000), None, None));
+        assert_eq!(unseen.total(), 0);
+        unseen.remember_stop(30, "c", None);
+        assert!(!unseen.contains_pid(30), "an unstamped stop orders nothing");
+    }
+
+    #[test]
+    fn a_recycled_parent_pid_drops_the_dead_parents_subagents() {
+        let mut subagents = RunningSubagents::default();
+        subagents.start(10, "a", None, Some(1_000), Some(7));
+        subagents.start(10, "b", None, Some(1_000), None);
+        assert_eq!(subagents.total(), 2);
+        assert!(subagents.start(10, "c", None, Some(2_000), None));
+        assert_eq!(
+            subagents.total(),
+            1,
+            "only the new process's subagent remains"
+        );
+
+        let mut pins = Vec::new();
+        subagents.retain(|pid, proc_start, surface| {
+            pins.push((pid, proc_start, surface));
+            true
+        });
+        assert_eq!(pins, [(10, Some(2_000), None)], "the new process is pinned");
+    }
+
+    #[test]
+    fn subagents_leave_with_their_parent_process() {
+        let mut subagents = RunningSubagents::default();
+        start(&mut subagents, 10, "a");
+        start(&mut subagents, 10, "b");
+        start(&mut subagents, 20, "c");
+
+        assert!(subagents.forget(10));
+        assert!(!subagents.forget(10));
+        assert_eq!(subagents.total(), 1);
+
+        assert!(subagents.retain(|pid, _, _| pid != 20));
+        assert!(!subagents.retain(|_, _, _| true));
+        assert_eq!(subagents.total(), 0);
+    }
+
+    #[test]
+    fn subagents_move_with_their_parents_pane() {
+        let mut source = RunningSubagents::default();
+        source.start(10, "a", None, Some(1_000), Some(7));
+        source.start(20, "b", None, None, Some(8));
+        let mut destination = RunningSubagents::default();
+        destination.start(10, "z", None, Some(1_000), None);
+
+        for (pid, parent) in source.take(|_, surface| surface == Some(7)) {
+            destination.absorb(pid, parent);
+        }
+        assert_eq!(source.total(), 1);
+        assert_eq!(destination.total(), 2, "one process's ids merge");
+
+        let mut recycled = RunningSubagents::default();
+        recycled.start(10, "new", None, Some(3_000), None);
+        for (pid, parent) in recycled.take(|_, _| true) {
+            destination.absorb(pid, parent);
+        }
+        assert_eq!(
+            destination.total(),
+            1,
+            "another process on the PID replaces the entry instead of merging"
+        );
+    }
+
+    #[test]
+    fn subagents_per_parent_are_capped() {
+        let mut subagents = RunningSubagents::default();
+        for i in 0..RunningSubagents::MAX_PER_SESSION + 10 {
+            start(&mut subagents, 10, &i.to_string());
+        }
+        assert_eq!(subagents.total(), RunningSubagents::MAX_PER_SESSION);
+        assert!(start(&mut subagents, 11, "other"), "the cap is per parent");
+
+        for i in 0..RunningSubagents::MAX_PER_SESSION + 10 {
+            subagents.stop(11, &format!("gone-{i}"), Some(i as u64));
+        }
+        let mut remembered = RunningSubagents::default();
+        remembered.absorb(11, subagents.take(|pid, _| pid == 11).remove(0).1);
+        assert!(
+            remembered.start(11, "gone-0", Some(0), None, None),
+            "the oldest remembered stops are evicted at the cap"
+        );
+    }
+
+    fn start(subagents: &mut RunningSubagents, pid: u32, id: &str) -> bool {
+        subagents.start(pid, id, None, None, None)
+    }
 
     fn s(tool: TerminalAgent, state: AgentState) -> AgentSession {
         AgentSession::new(tool, state)

@@ -22,6 +22,8 @@ pub(crate) const CODEX_HOOK_EVENTS: &[&str] = &[
     "PostToolUse",
     "PermissionRequest",
     "Stop",
+    "SubagentStart",
+    "SubagentStop",
 ];
 
 pub(crate) const CODEX_TOML_MARKER: &str = "# _paneflow_managed: true";

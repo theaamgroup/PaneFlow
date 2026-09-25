@@ -210,6 +210,11 @@ pub struct Workspace {
     /// `ai_types::aggregate_by_tool`. Cleaned up by the stale-PID sweep
     /// in `event_handlers::sweep_stale_pids`.
     pub agent_sessions: std::collections::HashMap<u32, AgentSession>,
+    /// Subagents those sessions' agents are running, keyed by parent PID.
+    /// Separate from `agent_sessions` because a background subagent outlives
+    /// its parent's `Finished` row; pruned with the parent's process by
+    /// `event_handlers::sweep_stale_pids`.
+    pub running_subagents: crate::ai_types::RunningSubagents,
     /// Persistent-in-session completion notification shown as a blue dot in
     /// the Workspaces sidebar until the user interacts with this workspace.
     pub(crate) agent_completion_notification: AgentCompletionNotification,
@@ -311,6 +316,7 @@ impl Workspace {
             port_scan_pending: false,
             service_labels: std::collections::HashMap::new(),
             agent_sessions: std::collections::HashMap::new(),
+            running_subagents: Default::default(),
             agent_completion_notification: AgentCompletionNotification::default(),
             detected_agents: std::collections::HashSet::new(),
             managed_worktrees: Vec::new(),

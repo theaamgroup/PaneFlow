@@ -12,7 +12,8 @@
 
 import net from "node:net";
 
-export const PaneflowStatus = async () => {
+export const PaneflowStatus = async (input) => {
+  const client = input?.client;
   const send = (method, params) => {
     const sock = process.env["PANEFLOW_SOCKET_PATH"];
     const wsId = process.env["PANEFLOW_WORKSPACE_ID"];
@@ -40,6 +41,36 @@ export const PaneflowStatus = async () => {
       // Status reporting must never break the session.
     }
   };
+  // Child sessions are OpenCode's subagents. Their busy/idle events are the
+  // subagent's, not the turn's, so they must not reach `ai.stop`. Status and
+  // idle events carry no parent id: a session this process did not see
+  // created (a task resuming an earlier child) is looked up once. A failed
+  // lookup is answered as the root, which is what every idle meant before
+  // subagents were counted, and is asked again next time.
+  const children = new Set();
+  const roots = new Set();
+  const isChild = async (id) => {
+    if (!id) return false;
+    if (children.has(id)) return true;
+    if (roots.has(id)) return false;
+    try {
+      const info = (await client?.session?.get?.({ path: { id } }))?.data;
+      if (info?.id === id) {
+        (info.parentID ? children : roots).add(id);
+        return Boolean(info.parentID);
+      }
+    } catch {
+      // Treated as the root below.
+    }
+    return false;
+  };
+  // Stamped so the app can tell a stop from a start that raced past it: each
+  // frame is its own connection, so arrival order is not emission order.
+  const subagent = (method, id) =>
+    send(method, {
+      emitted_at_ms: Date.now(),
+      hook_payload: { subagent_id: String(id) },
+    });
   return {
     "chat.message": async () => send("ai.prompt_submit", { hook_payload: {} }),
     "tool.execute.before": async (input) =>
@@ -53,8 +84,31 @@ export const PaneflowStatus = async () => {
         hook_payload: { tool_name: input?.tool },
       }),
     event: async ({ event }) => {
-      if (event?.type === "session.idle") {
-        send("ai.stop", { hook_payload: {} });
+      const props = event?.properties;
+      if (event?.type === "session.created") {
+        const info = props?.info;
+        if (info?.parentID && info?.id) {
+          children.add(info.id);
+          subagent("ai.subagent_start", info.id);
+        } else if (info?.id) {
+          roots.add(info.id);
+        }
+      } else if (event?.type === "session.status") {
+        if (props?.status?.type === "busy" && (await isChild(props?.sessionID))) {
+          subagent("ai.subagent_start", props.sessionID);
+        }
+      } else if (event?.type === "session.idle") {
+        if (await isChild(props?.sessionID)) {
+          subagent("ai.subagent_stop", props.sessionID);
+        } else {
+          send("ai.stop", { hook_payload: {} });
+        }
+      } else if (event?.type === "session.deleted") {
+        // A child deleted mid-run never goes idle.
+        const id = props?.info?.id;
+        if (id && children.delete(id)) {
+          subagent("ai.subagent_stop", id);
+        }
       } else if (event?.type === "permission.asked") {
         send("ai.notification", {
           hook_payload: {

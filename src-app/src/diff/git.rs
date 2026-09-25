@@ -76,23 +76,6 @@ impl Drop for ExtraUntrackedGuard {
     }
 }
 
-/// A git worktree as reported by `git worktree list --porcelain`.
-///
-/// On the live Worktree-scope discovery path (US-013): the porcelain parser
-/// feeds [`list_repo_worktrees`], which the GUI invokes to enumerate worktrees
-/// not open as workspaces. `is_main` / `is_bare` are parsed for completeness but
-/// only exercised by the unit tests today, hence the field-level `allow`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Worktree {
-    pub path: PathBuf,
-    pub ref_name: Option<String>,
-    pub sha: String,
-    #[allow(dead_code)]
-    pub is_main: bool,
-    #[allow(dead_code)]
-    pub is_bare: bool,
-}
-
 /// How a file changed between the merge-base and the working tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FileChange {
@@ -159,32 +142,6 @@ pub struct WorktreeDiff {
 pub struct FileDiffStat {
     pub added: u32,
     pub removed: u32,
-}
-
-/// Map the shared `git worktree list --porcelain` parser into Review
-/// [`Worktree`]s. HEAD-less and bare entries are kept (a `worktree ` line is
-/// enough) so this listing matches managed teardown.
-pub fn parse_worktrees_from_str(raw: &str, main_worktree_path: Option<&Path>) -> Vec<Worktree> {
-    crate::workspace::worktree::parse_worktree_porcelain(raw)
-        .into_iter()
-        .map(|entry| {
-            let ref_name = entry.branch.as_ref().map(|branch| {
-                if branch.starts_with("refs/") {
-                    branch.clone()
-                } else {
-                    format!("refs/heads/{branch}")
-                }
-            });
-            let is_main = main_worktree_path.is_some_and(|main| entry.path == main);
-            Worktree {
-                path: entry.path,
-                ref_name,
-                sha: entry.sha.unwrap_or_default(),
-                is_main,
-                is_bare: entry.is_bare,
-            }
-        })
-        .collect()
 }
 
 /// Wall-clock deadline for every diff-viewer git call (U-035). Generous enough
@@ -439,56 +396,6 @@ fn load_working_text_within(
     fs_within(budget, "working-tree read", move || {
         load_working_text(&dir, &rel)
     })
-}
-
-/// List all worktrees of the repository containing `repo_dir`. Live path:
-/// [`list_repo_worktrees`] calls this for the US-013 Worktree-scope "include
-/// worktrees not open as workspaces" enumeration.
-pub fn list_worktrees(repo_dir: &Path) -> Result<Vec<Worktree>, String> {
-    let out = run_git(repo_dir, &["worktree", "list", "--porcelain"])?;
-    let text = String::from_utf8_lossy(&out);
-    Ok(parse_worktrees_from_str(&text, Some(repo_dir)))
-}
-
-/// US-013 (prd-git-diff-mode-2026-Q3.md): every worktree of the repo as
-/// `(path, short-branch)`, for the Worktree scope's "include worktrees not open
-/// as workspaces" enumeration. Reuses the tested porcelain parser; returns an
-/// empty vec on error (the caller falls back to the open-workspace set). Runs a
-/// git subprocess, so callers invoke it off the GPUI main thread.
-pub fn list_repo_worktrees(repo_dir: &Path) -> Vec<(PathBuf, String)> {
-    let worktrees = match list_worktrees(repo_dir) {
-        Ok(w) => w,
-        Err(e) => {
-            log::warn!("git: failed to list repository worktrees: {e}");
-            return Vec::new();
-        }
-    };
-    review_worktree_entries(worktrees)
-}
-
-/// Review columns are checkout trees. A porcelain `bare` entry is the
-/// administrative repository, not a work tree; `git diff` there exits 128.
-fn review_worktree_entries(worktrees: Vec<Worktree>) -> Vec<(PathBuf, String)> {
-    worktrees
-        .into_iter()
-        .filter(|w| !w.is_bare)
-        .map(|w| {
-            let branch = w
-                .ref_name
-                .as_deref()
-                .map(short_ref)
-                .unwrap_or_else(|| w.sha.chars().take(7).collect());
-            (w.path, branch)
-        })
-        .collect()
-}
-
-/// Short branch name from a full ref (`refs/heads/develop` → `develop`).
-fn short_ref(ref_name: &str) -> String {
-    ref_name
-        .strip_prefix("refs/heads/")
-        .unwrap_or(ref_name)
-        .to_string()
 }
 
 /// Whether `ref_name` resolves to a commit in `worktree_dir`. Public so the
@@ -808,6 +715,7 @@ fn worktree_toplevel_within(budget: &GitBudget, dir: &Path) -> PathBuf {
 }
 
 /// `HEAD`'s object name, or `None` when the ref is unborn or unreadable.
+#[cfg(test)]
 pub(crate) fn head_sha(worktree_dir: &Path) -> Option<String> {
     GitBudget::for_column()
         .run(worktree_dir, &["rev-parse", "--verify", "HEAD"])
@@ -866,21 +774,6 @@ pub(crate) fn show_revision_file(
         });
     }
     Ok(HeadFile::Missing)
-}
-
-fn base_path_exists_within(
-    budget: &GitBudget,
-    worktree_dir: &Path,
-    merge_base: &str,
-    rel_path: &str,
-) -> Result<bool, String> {
-    let out = budget.run(
-        worktree_dir,
-        &["ls-tree", "-z", "--name-only", merge_base, "--", rel_path],
-    )?;
-    Ok(out
-        .split(|&b| b == 0)
-        .any(|path| path == rel_path.as_bytes()))
 }
 
 fn list_untracked_limited_timed(
@@ -1980,98 +1873,6 @@ pub(crate) mod tests {
             .expect("test logger lock poisoned")
             .iter()
             .any(|(_, message)| message.contains(needle))
-    }
-
-    #[test]
-    fn list_repo_worktrees_warns_when_git_fails() {
-        capture_logs();
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing");
-
-        assert!(list_repo_worktrees(&missing).is_empty());
-
-        let records = TEST_LOGGER
-            .records
-            .lock()
-            .expect("test logger lock poisoned");
-        assert!(records.iter().any(|(level, message)| {
-            *level == log::Level::Warn
-                && message.contains("git: failed to list repository worktrees")
-                && message.contains("git worktree failed")
-        }));
-    }
-
-    #[test]
-    fn parse_worktrees_basic() {
-        let raw = "worktree /repo/main\nHEAD abc123\nbranch refs/heads/develop\n\n\
-                   worktree /repo/wt-a\nHEAD def456\nbranch refs/heads/feature-a\n";
-        let wts = parse_worktrees_from_str(raw, Some(Path::new("/repo/main")));
-        assert_eq!(wts.len(), 2);
-        assert!(wts[0].is_main);
-        assert_eq!(wts[0].ref_name.as_deref(), Some("refs/heads/develop"));
-        assert_eq!(wts[0].sha, "abc123");
-        assert!(!wts[1].is_main);
-        assert_eq!(wts[1].path, PathBuf::from("/repo/wt-a"));
-    }
-
-    #[test]
-    fn parse_worktrees_detached_and_bare() {
-        let raw = "worktree /repo/bare\nbare\n\n\
-                   worktree /repo/det\nHEAD aaa111\ndetached\n";
-        let wts = parse_worktrees_from_str(raw, None);
-        // A `worktree ` line is enough: HEAD-less/bare entries stay so Launch
-        // Pad and Review list the same checkout set.
-        assert_eq!(wts.len(), 2);
-        assert_eq!(wts[0].path, PathBuf::from("/repo/bare"));
-        assert!(wts[0].is_bare);
-        assert_eq!(wts[0].sha, "");
-        assert_eq!(wts[0].ref_name, None);
-        assert_eq!(wts[1].path, PathBuf::from("/repo/det"));
-        assert!(!wts[1].is_bare);
-        assert_eq!(wts[1].ref_name, None);
-        assert_eq!(wts[1].sha, "aaa111");
-    }
-
-    #[test]
-    fn porcelain_parsers_agree_on_headless_and_detached() {
-        let raw = "worktree /repo/bare\nbare\n\n\
-                   worktree /repo/det\nHEAD aaa111\ndetached\n\n\
-                   worktree /repo/main\nHEAD abc123\nbranch refs/heads/main\n";
-        let workspace_paths: Vec<_> = crate::workspace::worktree::parse_worktree_porcelain(raw)
-            .into_iter()
-            .map(|entry| entry.path)
-            .collect();
-        let diff_paths: Vec<_> = parse_worktrees_from_str(raw, None)
-            .into_iter()
-            .map(|worktree| worktree.path)
-            .collect();
-        assert_eq!(
-            workspace_paths, diff_paths,
-            "Review and managed teardown must list the same worktrees"
-        );
-        assert_eq!(
-            workspace_paths,
-            vec![
-                PathBuf::from("/repo/bare"),
-                PathBuf::from("/repo/det"),
-                PathBuf::from("/repo/main"),
-            ]
-        );
-    }
-
-    #[test]
-    fn review_worktree_entries_drop_bare_admin_repos() {
-        let raw = "worktree /repo/bare\nbare\n\n\
-                   worktree /repo/det\nHEAD aaa111\ndetached\n\n\
-                   worktree /repo/main\nHEAD abc123\nbranch refs/heads/main\n";
-        let columns = review_worktree_entries(parse_worktrees_from_str(raw, None));
-        assert_eq!(
-            columns
-                .iter()
-                .map(|(path, _)| path.clone())
-                .collect::<Vec<_>>(),
-            vec![PathBuf::from("/repo/det"), PathBuf::from("/repo/main")]
-        );
     }
 
     #[test]

@@ -28,7 +28,8 @@ use super::capture_closed_tab_record;
 /// many rows moved. Unread completions follow their surfaces independently of
 /// session rows, which may already have expired (#515). A key already present
 /// in the destination (a synthetic band key, or a recycled PID) keeps its row
-/// and drops the mover, which the next hook frame recreates in place.
+/// and drops the mover, which the next hook frame recreates in place. The
+/// movers' running subagents go with them.
 pub(crate) fn migrate_agent_sessions(
     workspaces: &mut [crate::workspace::Workspace],
     src_ws_idx: usize,
@@ -48,6 +49,30 @@ pub(crate) fn migrate_agent_sessions(
     workspaces[dest_ws_idx]
         .agent_completion_notification
         .extend(completions);
+    // Subagents follow their parent's pane, including once the parent's
+    // session row has expired: a background subagent outlives it.
+    let moved_parents: std::collections::HashSet<u32> = workspaces[src_ws_idx]
+        .agent_sessions
+        .iter()
+        .filter(|(_, session)| {
+            session
+                .surface_id
+                .is_some_and(|sid| surface_ids.contains(&sid))
+        })
+        .map(|(key, _)| *key)
+        .collect();
+    for (pid, parent) in workspaces[src_ws_idx]
+        .running_subagents
+        .take(|pid, surface| {
+            surface.map_or(moved_parents.contains(&pid), |sid| {
+                surface_ids.contains(&sid)
+            })
+        })
+    {
+        workspaces[dest_ws_idx]
+            .running_subagents
+            .absorb(pid, parent);
+    }
     let source = &mut workspaces[src_ws_idx].agent_sessions;
     let keys: Vec<u32> = source
         .iter()
@@ -937,6 +962,31 @@ mod tests {
                 .is_unread_for(&[9].into_iter().collect())
         );
         assert!(workspaces.iter().all(|ws| ws.agent_sessions.is_empty()));
+    }
+
+    #[test]
+    fn a_pane_move_carries_running_subagents_even_after_the_parent_row_expired() {
+        use crate::agent_launcher::TerminalAgent;
+        use crate::ai_types::{AgentSession, AgentState};
+        use crate::workspace::Workspace;
+        let mut source = Workspace::empty_with_cwd_and_id(1, "source", PathBuf::new());
+        let destination = Workspace::empty_with_cwd_and_id(2, "destination", PathBuf::new());
+        // Pinned to the moving pane, with no session row left.
+        source.running_subagents.start(42, "a", None, None, Some(7));
+        // No pane recorded, but its parent's row is on the moving pane.
+        let mut row = AgentSession::new(TerminalAgent::ClaudeCode, AgentState::Thinking);
+        row.surface_id = Some(7);
+        source.agent_sessions.insert(43, row);
+        source.running_subagents.start(43, "b", None, None, None);
+        // Another pane's subagent stays.
+        source.running_subagents.start(44, "c", None, None, Some(8));
+        let mut workspaces = vec![source, destination];
+
+        migrate_agent_sessions(&mut workspaces, 0, 1, &[7].into_iter().collect());
+        assert_eq!(workspaces[0].running_subagents.total(), 1);
+        assert_eq!(workspaces[1].running_subagents.total(), 2);
+        assert!(workspaces[1].running_subagents.stop(42, "a", None));
+        assert!(workspaces[1].running_subagents.stop(43, "b", None));
     }
 
     #[test]
