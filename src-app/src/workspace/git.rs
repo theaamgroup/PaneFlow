@@ -41,7 +41,7 @@ const GIT_DIFF_STAT_FILE_BYTES_CAP: u64 = 512 * 1024;
 
 impl GitDiffStats {
     /// Run a HEAD-relative diff stat in the given directory and parse the result.
-    /// This matches the diff dock semantics: staged + unstaged tracked
+    /// The scope is staged + unstaged tracked
     /// changes against `HEAD`, plus untracked files. On spawn failure, timeout, or
     /// nonzero git exit this returns the empty (`is_empty()`) default - the
     /// "stats unavailable" state the badge renders.
@@ -126,6 +126,7 @@ impl GitDiffStats {
         }
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.files_changed == 0 && self.insertions == 0 && self.deletions == 0
     }
@@ -225,7 +226,7 @@ fn git_stdout(cwd: &str, args: &[&str], deadline_at: std::time::Instant) -> Opti
         // blocking-pool task. With no terminal git fails fast instead.
         .env("GIT_TERMINAL_PROMPT", "0")
         // `parse_shortstat` matches English `file` / `insertion` / `deletion`.
-        // Same pin as `repository_discovery_command` (issue #689).
+        // Pinned to the C locale for that reason (issue #689).
         .env("LC_ALL", "C")
         .env("LANGUAGE", "C");
     let output =

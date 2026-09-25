@@ -108,11 +108,9 @@ impl PaneFlowApp {
     ///
     /// Being the active workspace is not enough: a turn can finish in one of
     /// its other tabs, which the user has not seen, or in a split the active
-    /// tab has zoomed away (only the rendered root counts, #422). The four
+    /// tab has zoomed away (only the rendered root counts, #422). The three
     /// conditions below are what "on screen" means for a workspace - no
-    /// settings overlay, CLI mode, a focused window, and a pane grid the
-    /// Changes dock has not maximized over (#490: a pane the dock hides is no
-    /// more seen than a zoomed-away split).
+    /// settings overlay, CLI mode, and a focused window.
     pub(crate) fn surfaces_under_user_eye(
         &self,
         workspace_id: u64,
@@ -121,7 +119,6 @@ impl PaneFlowApp {
         if self.settings_section.is_some()
             || !matches!(self.mode, paneflow_config::schema::AppMode::Cli)
             || !crate::agents::notifications::window_active()
-            || self.pane_grid_hidden_by_dock()
         {
             return None;
         }
@@ -150,8 +147,7 @@ impl PaneFlowApp {
 
     /// Whether a terminal that lives in a pane is the one under the user's
     /// eye: its workspace and tab are on screen in the active window and it is
-    /// one of that tab's surfaces. A terminal no pane hosts (the Changes-dock
-    /// terminal) is never found here; the dock answers for its own.
+    /// one of that tab's surfaces.
     pub(super) fn hosted_surface_is_seen(&self, surface_id: u64, cx: &gpui::App) -> bool {
         self.workspace_id_for_surface(surface_id, cx)
             .and_then(|ws_id| self.surfaces_under_user_eye(ws_id, cx))

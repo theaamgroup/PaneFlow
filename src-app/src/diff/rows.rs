@@ -142,7 +142,7 @@ pub fn split_max_line_no(rows: &[SplitRow]) -> u32 {
 /// and the width (in monospace cells) of its widest code line. The widest-line
 /// width drives the file's horizontal-scroll bound; split rows additionally
 /// store the right-side width. These spans are precomputed off the render path
-/// (in `recompute_display` / `DiffDockData::recompute`) and shared with
+/// (in `recompute_display`) and shared with
 /// `DiffElement`, which offsets each file side's code by its own scroll
 /// position instead of re-measuring every row per frame. Widths count `char`s
 /// (not bytes), matching the monospace-cell estimate the element scrolls by;
@@ -276,8 +276,7 @@ pub struct FoldBlock<T> {
 /// (off the render path) so [`super::element::DiffElement`] paints a structured
 /// header - file-type icon, muted directory prefix, emphasized basename,
 /// right-aligned green/red diffstat, and trailing actions - instead of one
-/// undifferentiated mono string. Shared by the Review view and the diff
-/// dock.
+/// undifferentiated mono string. Used by the Review view.
 #[derive(Clone)]
 pub struct HeaderParts {
     /// Directory portion including the trailing `/`, or `""` at the repo root.
@@ -342,8 +341,6 @@ pub struct RowPalette {
     pub gutter_bg: Hsla,
     pub add_gutter_bg: Hsla,
     pub del_gutter_bg: Hsla,
-    pub chip_bg: Hsla,
-    pub chip_fg: Hsla,
 }
 
 fn content_row(
@@ -520,9 +517,9 @@ pub fn build_file_row_caches(files: &[FileDiff], syntax: Option<&DiffSyntax>) ->
 }
 
 /// Resolve a [`RowPalette`] from the active theme's UI colors. The single color
-/// source for [`super::element::DiffElement`], shared by the Review view
-/// ([`super::view`]) and the diff dock ([`crate::app::diff_dock`]) so
-/// both render with identical washes.
+/// source for [`super::element::DiffElement`] in the Review view
+/// ([`super::view`]) and the Settings appearance preview, so both render with
+/// identical washes.
 pub fn palette(ui: crate::theme::UiColors) -> RowPalette {
     let diff = ui.diff_colors();
     RowPalette {
@@ -560,8 +557,6 @@ pub fn palette(ui: crate::theme::UiColors) -> RowPalette {
         gutter_bg: ui.base,
         add_gutter_bg: diff.added_gutter_background,
         del_gutter_bg: diff.deleted_gutter_background,
-        chip_bg: crate::app::constants::sidebar_tab_hover_background(),
-        chip_fg: ui.text,
     }
 }
 
@@ -1124,8 +1119,8 @@ pub fn build_split_rows_with_caches(
 /// Filter a unified row set by a per-file collapse set: a collapsed file keeps
 /// only its header row, an expanded file keeps its full segment. `anchors` maps
 /// each file path to its header row index (file order). Returns the filtered
-/// rows plus rebuilt anchors (header index in the output). Shared by the Review
-/// view ([`super::view`]) and the diff dock ([`crate::app::diff_dock`]).
+/// rows plus rebuilt anchors (header index in the output). Used by the Review
+/// view ([`super::view`]).
 pub fn apply_collapse_unified(
     rows: &[DisplayRow],
     anchors: &[(String, usize)],

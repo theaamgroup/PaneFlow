@@ -25,21 +25,12 @@ without Electron.
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 81 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 79 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
 │   ├── session.rs                     ← persist/restore workspaces to session.json
 │   ├── settings.rs                    ← settings lifecycle: open/close, persist_setting, key handlers
-│   ├── diff_dock/                     ← git diff dock (Changes, terminal, and Agent setup tabs; a clicked
-│   │                                     file path opens in the external editor); parked per TAB
-│   │                                     (`cli_diff_dock.rs` keys slots by `Tab::id`, never by workspace);
-│   │                                     rendered width = min(stored, main-panel remainder), and the dock is
-│   │                                     not rendered at all below the floor (remainder < 360 px dock +
-│   │                                     one minimum pane); stored width only written by the resize drag,
-│   │                                     and a drag pinned at the render ceiling leaves a wider preference alone;
-│   │                                     `Cmd+Shift+F` maximizes the dock over a clipped (never resized) pane grid,
-│   │                                     with the sidebar slide on open and maximize (`reduce_motion` makes both instant)
 │   ├── review/                        ← Review mode: Workspaces rail (220 px), Changes rail (300 px),
 │   │                                     independent single-subject diff panes in LayoutTree (MAX_REVIEW_PANES = 6);
 │   │                                     mode.rs gates entry, grid.rs handles opening/split/move/zoom,
@@ -154,7 +145,6 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 | `paneflow-ipc-client` | `crates/paneflow-ipc-client/` | Library | Blocking JSON-RPC client for the local socket |
 | `paneflow-mcp` | `crates/paneflow-mcp/` | Binary | Read-only stdio MCP server (see below) |
 | `paneflow-mcp-install` | `crates/paneflow-mcp-install/` | Library | GPU-free per-agent MCP config merge engine |
-| `paneflow-agent-setup` | `crates/paneflow-agent-setup/` | Library | GPU-free rulebook inventory (instruction files, skills, rules, hooks, MCP) behind the dock's Agent setup tab (#331) |
 | `paneflow-shim` | `crates/paneflow-shim/` | Binary | PATH shim wrapping 18 agent CLIs |
 | `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | Binary | Hook binary agents invoke to report lifecycle events |
 | `paneflow-process` | `crates/paneflow-process/` | Library | Bounded subprocess execution (deadline + stdout cap) |
@@ -199,14 +189,14 @@ Blocking git, filesystem walks, recursive watcher registration, and fleet-wide s
 ## Opening a file
 
 There is no in-app file tree, no in-app editor, and no in-app Markdown
-viewer. A clicked file path, including `.md` and an Agent setup row, opens
-in the configured external editor (`editor::open_at_location`). The right
-rail is the Sessions sidebar only. Git diff viewing (the Changes dock) and
-Review mode stay. Tree-sitter still highlights Markdown in those diffs.
+viewer. A clicked file path, including `.md`, opens in the configured
+external editor (`editor::open_at_location`). The right rail is the Sessions
+sidebar only. Git diff viewing lives in Review mode and Work Review; there is
+no diff dock. Tree-sitter still highlights Markdown in those diffs.
 
 ## Diff syntax highlighting
 
-Changes and Review share `diff/highlighter.rs`: grammar selection and capture
+Review diffs use `diff/highlighter.rs`: grammar selection and capture
 resolution use one path.
 Fifteen Zed highlighting queries are compiled with `include_str!` from
 `diff/queries/` (issue #433). TOML, HTML, Java and Ruby keep their grammar's

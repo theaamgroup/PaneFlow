@@ -460,13 +460,6 @@ impl Workspace {
         self.tabs.iter().position(|tab| tab.contains_pane(pane))
     }
 
-    /// The tab holding `pane`, or `None` when no tab of this workspace does.
-    /// Used to resolve which checkout a pane belongs to: with a tab bound to a
-    /// worktree (issue #347), that is the tab's, not the workspace's.
-    pub fn tab_for_pane(&self, pane: &Entity<Pane>) -> Option<&Tab> {
-        self.tabs.iter().find(|tab| tab.contains_pane(pane))
-    }
-
     /// The worktree of every tab bound to one, as absolute path strings.
     /// Feeds the git probe set: a bound tab needs its own branch and diffstat,
     /// which the workspace's own fields cannot answer.

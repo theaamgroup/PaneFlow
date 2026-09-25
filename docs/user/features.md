@@ -129,20 +129,8 @@ pane. Stop retyping your build, test, or lint invocation on every loop.
 
 ## Opening a file
 
-There is no in-app file tree and no in-app editor. Clicking a file path,
-including a row in the dock's Agent setup tab, opens that file in the
-configured external editor.
-
-The Changes dock itself is per tab. Two tabs of the same folder each get their
-own dock - open a shell or a diff in one and the other stays as it was - and
-switching tabs brings each tab's dock back the way you left it. Closing a tab
-closes its dock; the dock never follows a tab into a session restore. When a
-right-hand rail is open or the window is narrow, the dock shrinks to fit the
-space the panes can spare and returns to the width you chose as soon as the
-room comes back; dragging its edge while it is squeezed never narrows that
-choice unless you drag it narrower than the room allows. When there is no room
-for a readable dock beside a pane at all, the panes win and the dock steps
-aside until there is.
+There is no in-app file tree and no in-app editor. Clicking a file path
+opens that file in the configured external editor.
 
 ## Projects
 
@@ -153,7 +141,7 @@ It's the working context every session, split, and action runs inside.
 ## Workspace notifications
 
 Right-click a workspace and choose **Mute notifications** to silence its
-macOS notices, including stalled agents and dock terminals, and stop new
+macOS notices, including stalled agents, and stop new
 unread completion marks. Agent activity and attention states continue to
 update. **Unmute notifications** restores notices for future events. The
 setting survives a restart; toggling it does not clear existing marks.
@@ -182,8 +170,8 @@ the repository's local branches: pick one that already has a worktree
 and the tab reuses it; pick one that has none and PaneFlow checks it out
 under `<workspace>.worktrees/<branch>` next to the repository, then
 starts the pane there. Picking the branch the repository itself is on
-unbinds the tab. The sidebar shows a bound tab's branch under its title,
-and the diff dock follows the active tab's checkout. Review starts from that
+unbinds the tab. The sidebar shows a bound tab's branch under its title.
+Review starts from that
 checkout when its grid is empty; its Workspaces rail lets you open other
 checkouts in independent diff panes (see [Review](review.md)).
 

@@ -1334,128 +1334,6 @@ struct AgentSessionsState {
     sessions_menu_open: Option<crate::app::sessions_context_menu::SessionContextMenu>,
 }
 
-/// State of the CLI cockpit's right-docked git diff panel: what it shows,
-/// how it is laid out, and which workspace currently owns it.
-///
-/// Extracted from the `PaneFlowApp` god-struct (US-053).
-struct DiffDockState {
-    /// Whether the Codex-style git diff dock is open on the right of the CLI
-    /// pane grid (toggled from a pane header, closed from its own
-    /// header).
-    pub(crate) open: bool,
-    /// The diff snapshot rendered by the dock, computed off-thread for the
-    /// active thread's cwd. Retained while hidden so same-cwd reopen is warm.
-    pub(crate) data: Option<crate::app::diff_dock::DiffDockData>,
-    /// Paths of files folded shut in the diff dock, so a fold survives re-renders.
-    pub(crate) collapsed: std::collections::HashSet<String>,
-    /// Stable fold keys for collapsed unchanged regions opened in the dock.
-    /// Mirrors Review's fold-marker interaction without re-shelling git.
-    pub(crate) expanded_folds: std::collections::HashSet<String>,
-    /// Diff dock view mode: `false` = unified (inline), `true` = split (old left,
-    /// new right). Defaults to split; toggled from the header.
-    pub(crate) split: bool,
-    /// Monotonic token for same-cwd diff builds. Completion must match this
-    /// generation so an older refresh cannot overwrite a newer snapshot.
-    pub(crate) generation: u64,
-    /// Vertical scroll handle for the diff dock's [`crate::diff::DiffElement`]
-    /// (hosted in an `overflow_y_scroll` div, the same render path as the Review
-    /// view's columns). Survives ordinary repaints so scroll position is kept.
-    pub(crate) scroll: gpui::ScrollHandle,
-    /// Whether the diff dock's `...` overflow menu (layout, expand-all, refresh)
-    /// is open, and whether its "Layout" side submenu is unfolded inside it.
-    pub(crate) diff_options_menu_open: bool,
-    pub(crate) diff_layout_submenu_open: bool,
-    /// Whether the tab strip's `+` menu (which surface a new tab opens) is up.
-    pub(crate) diff_new_tab_menu_open: bool,
-    /// Whether the dock is currently showing its surface picker instead of a
-    /// tab (see `diff_dock::surface_picker`). Set by the pane-header toggle on
-    /// the session's first open of the dock.
-    pub(crate) picker: bool,
-    /// Whether the picker has been answered at least once *for the session
-    /// (workspace tab) that owns the live dock*. Once it has, opening the dock
-    /// there restores the last active tab rather than asking again.
-    pub(crate) picked: bool,
-    /// Which session (a `Tab::id`, unique across workspaces) the live dock
-    /// fields above describe. `None` until the dock is first opened.
-    /// `PaneFlowApp::sync_diff_dock_session` parks and swaps them whenever this
-    /// drifts from the visible tab.
-    pub(crate) owner: Option<u64>,
-    /// Dock state parked per tab id, for every session that is not
-    /// [`Self::owner`]. The dock is detached per tab (#184 Phase 4): opening it
-    /// in one tab leaves a sibling tab of the same folder untouched. Never
-    /// persisted; a restored tab starts with the dock closed.
-    pub(crate) parked: std::collections::HashMap<u64, crate::app::cli_diff_dock::DiffDockSlot>,
-    /// The dock's tabs. Index 0 is always the permanent `Changes` diff; the
-    /// rest are terminals opened from the `+` menu, closable from their tab.
-    pub(crate) diff_tabs: Vec<crate::app::diff_dock::DiffDockTab>,
-    /// Index into `diff_tabs` of the tab whose body the dock renders.
-    pub(crate) diff_active_tab: usize,
-    /// Open branch picker anchored to the diff dock's toolbar chip; `None` when
-    /// closed. Holds the branch list, the search field and the focus to restore.
-    pub(crate) diff_branch_menu: Option<crate::app::diff_dock::DiffBranchMenuState>,
-    /// Preferred width in px of the diff dock; user-resizable by dragging its
-    /// left edge. Clamped to `[DIFF_DOCK_PANEL_MIN_WIDTH, DIFF_DOCK_PANEL_MAX_WIDTH]`.
-    /// The *rendered* width is `min(this, main-panel remainder)` computed at
-    /// render (`cli_diff_dock::diff_dock_fit`) and never written back here, so
-    /// a rail closing or the window growing restores the chosen width; below
-    /// the floor (a remainder that cannot hold `DIFF_DOCK_PANEL_MIN_WIDTH`
-    /// beside a minimum pane) the dock is not rendered at all. The resize drag
-    /// is the only writer, and a drag pinned at the render ceiling leaves a
-    /// wider preference alone (`diff_dock::diff_dock_drag_preference`).
-    pub(crate) width: f32,
-    /// Whether the last frame actually painted the dock: `open` in CLI mode
-    /// with Settings closed *and* a main panel wide enough to hold the floor
-    /// beside a minimum pane. Written only by `wrap_cli_diff_dock`, read by
-    /// the notification gate (#422): a dock the panel squeezed out is not
-    /// under the user's eye even though it is logically open.
-    pub(crate) rendered: bool,
-    /// `Some` while the dock fills the cockpit and the pane grid is hidden
-    /// (upstream e0ff7e21); the payload is the focus that was active before
-    /// maximizing and the pane that owned it (#508), handed back on restore.
-    /// Per-app, so a tab switch parks the dock through
-    /// `close_diff_dock_panel`, which resets it.
-    pub(crate) maximized: Option<Option<crate::app::cli_diff_dock::PreMaximizeFocus>>,
-    /// The pane grid's visible width sliding between its full width and 0
-    /// while maximize toggles; `None` once settled.
-    pub(crate) maximize_animation: Option<SidebarWidthAnimation>,
-    /// The focus a sliding restore hands back once the pane grid is on screen
-    /// again (#506), beside the focus the dock held when the slide started;
-    /// `None` when no restore slide is waiting to settle.
-    pub(crate) restore_focus_after_slide: Option<(
-        Option<crate::app::cli_diff_dock::PreMaximizeFocus>,
-        Option<gpui::FocusHandle>,
-    )>,
-    /// The saved focus a pane header's dock toggle closed a maximized or
-    /// still-restoring dock over (#506). That handler has no `Window`, so
-    /// `drain_pending_window_actions` hands it back; `None` when nothing waits.
-    pub(crate) pending_focus_restore: Option<Option<crate::app::cli_diff_dock::PreMaximizeFocus>>,
-    /// The dock column's reveal progress (0 to 1) while it slides in on open;
-    /// `None` once settled, and never set by a session-switch restore.
-    pub(crate) reveal_animation: Option<SidebarWidthAnimation>,
-    /// The pane grid's last measured width, the `full` extent the maximize
-    /// slide starts from.
-    pub(crate) pane_grid_width: std::rc::Rc<std::cell::Cell<f32>>,
-    /// Live drag anchor `(cursor_x, rendered_width_at_grab)` while the dock's
-    /// left edge is being dragged to resize; `None` when not resizing. The
-    /// ceiling is not part of the anchor: the dock host re-reads it from the
-    /// live fit on every move, so the drag cannot store a width the panel
-    /// could not show even if the panel changed under it.
-    pub(crate) resize: Option<(f32, f32)>,
-    /// Live horizontal-scrollbar drag inside the dock's shared diff body.
-    pub(crate) h_scroll_drag: Option<crate::app::diff_dock::DiffDockHScrollDrag>,
-    /// The permanent editor-style vertical scrollbar beside the Changes body
-    /// (#434). Shares `scroll` with the host; holds only hover/drag state.
-    pub(crate) vertical_scrollbar: crate::widgets::editor_scrollbar::EditorScrollbar,
-    /// Per-file horizontal scroll offsets (px) for the diff dock, indexed by
-    /// stable file position. Driven by Shift+wheel / trackpad horizontal gestures
-    /// (`apply_diff_dock_hwheel`) and applied per file by `DiffElement`; lazily
-    /// resized to the file count at render (collapse/split never change the
-    /// count, so offsets stay aligned).
-    pub(crate) h_offsets: std::rc::Rc<Vec<f32>>,
-    /// Hovered revert-chip target on the Changes tab, if any.
-    pub(crate) hover: Option<crate::app::diff_dock::DiffHover>,
-}
-
 struct PaneFlowApp {
     workspaces: Vec<Workspace>,
     active_idx: usize,
@@ -1714,8 +1592,8 @@ struct PaneFlowApp {
     /// when nothing in the pane tree was focused.
     command_palette_return_pane: Option<WeakEntity<pane::Pane>>,
     /// Whatever held focus when the palette opened (the pane palette's
-    /// `restore_focus` precedent), restored when no pane did: the dock's code
-    /// editor, the sidebar, the empty-workspace placeholder.
+    /// `restore_focus` precedent), restored when no pane did: the sidebar,
+    /// the empty-workspace placeholder.
     command_palette_return_focus: Option<FocusHandle>,
     /// The pane each open overlay was opened from, keyed by overlay (#584:
     /// broadcast picker, Pane Overview, pane palette). An
@@ -1790,9 +1668,6 @@ struct PaneFlowApp {
     /// full-screen Review surface. Toggled from the sidebar footer and
     /// persisted to / restored from `session.json`.
     pub(crate) mode: paneflow_config::schema::AppMode,
-    /// US-053: right-docked git diff panel state, extracted from the
-    /// god-struct.
-    pub(crate) diff_dock: DiffDockState,
     /// US-048: memoized sidebar display order (worktree grouping). Recomputed
     /// only when the workspace set / order / repo roots change, keyed by a
     /// cheap content signature - `render_sidebar` runs on every app `notify()`,
@@ -2034,9 +1909,6 @@ impl PaneFlowApp {
         if let Some(preset) = self.pending_palette_launch.take() {
             self.pane_palette_launch(preset, window, cx);
         }
-        // The pane header's dock toggle closed a maximized or still-restoring
-        // dock over a saved focus (#506).
-        self.hand_back_pending_dock_focus(window, cx);
         self.prune_stale_split_palette(cx);
         self.ensure_empty_tab_palette(cx);
     }
@@ -2136,20 +2008,6 @@ impl Render for PaneFlowApp {
         let main_panel_left_inset = crate::app::constants::PANEL_INSET * panel_edge_share;
         let pane_grid_left_gutter = crate::layout::PANE_GUTTER_PX * panel_edge_share;
         let main_panel_corner_mask_bg = panel_corner_mask_bg;
-        let right_rail_width = if sessions_sidebar_mounted {
-            sessions_sidebar_width
-        } else {
-            0.
-        };
-        // Room the main panel actually has between the rails, for children
-        // sized in absolute px (the CLI diff dock). The window shell's own
-        // client-side inset is not subtracted here: the dock's reserve for the
-        // pane grid is an order of magnitude larger than it.
-        let main_panel_width = f32::from(window.viewport_size().width)
-            - primary_sidebar_width
-            - right_rail_width
-            - main_panel_left_inset
-            - crate::app::constants::PANEL_INSET;
 
         // Issue #211: the deferred window actions (pending pane/palette
         // focus, palette reconciliation) are NOT drained here. They run in
@@ -2271,9 +2129,6 @@ impl Render for PaneFlowApp {
                 )
                 .into_any_element()
         };
-        // The right diff dock rides beside the CLI pane grid, opened from a
-        // pane header. A no-op in every other mode.
-        let main_content = self.wrap_cli_diff_dock(main_content, main_panel_width, window, cx);
         // Update title bar with current workspace name.
         let ws_name = if self.settings_section.is_some() {
             // Settings open: the title-bar center is left empty (the section
@@ -2421,7 +2276,6 @@ impl Render for PaneFlowApp {
                     }
                 }),
             )
-            .on_action(cx.listener(Self::handle_toggle_diff_dock_maximize))
             // Issue #106: keyboard access to the primary left rail.
             .on_action(cx.listener(Self::handle_toggle_primary_sidebar))
             // Issue #523: the command palette (every context-free action).
@@ -2431,7 +2285,6 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_toggle_broadcast_member))
             .on_action(cx.listener(Self::handle_open_broadcast_groups))
             .on_action(cx.listener(Self::handle_open_pane_overview))
-            .on_action(cx.listener(Self::handle_diff_new_terminal_tab))
             // EP-001 US-003: Escape cancels an in-flight tab drag. Capture
             // phase runs ancestor-before-descendant, so this pre-empts the
             // focused terminal's own Escape->PTY forwarding - but only while a

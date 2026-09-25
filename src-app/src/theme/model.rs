@@ -580,9 +580,8 @@ pub struct UiColors {
 /// On dark themes the foreground plus the line and gutter washes are the
 /// Codex-app-sampled green/red, a deliberate override of the muted `vc_*` theme
 /// slots (which read too desaturated on the dense diff body). On light themes
-/// they fall through to the theme `vc_*` slots. Single source for the Agents
-/// diff dock, the Diff/Review view, and the diff sidebar so the three never
-/// drift.
+/// they fall through to the theme `vc_*` slots. Single source for the
+/// Diff/Review view and the diff sidebar so the two never drift.
 #[derive(Clone, Copy)]
 pub struct DiffColors {
     pub added: Hsla,
