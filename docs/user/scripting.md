@@ -84,8 +84,8 @@ auto-detects the safer paste path for known agent panes.
 
 ## How does MCP fit in?
 
-`paneflow-mcp` is read-only. It exposes `list_panes`, `read_pane`, and
-`search_pane` to supported agents. It cannot type, submit prompts,
+`paneflow-mcp` is read-only. It exposes `list_panes`, `read_pane`,
+`search_pane`, and `whoami` to supported agents. It cannot type, submit prompts,
 send keystrokes, or control another pane.
 
 ```bash

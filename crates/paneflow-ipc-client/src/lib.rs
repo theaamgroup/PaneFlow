@@ -172,7 +172,6 @@ fn method_is_safe_to_retry_after_timeout(method: &str) -> bool {
             | "surface.status"
             | "fleet.list"
             | "agent.whoami"
-            | "task.get"
     )
 }
 

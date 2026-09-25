@@ -827,7 +827,6 @@ impl PaneFlowApp {
             .flat_map(|workspace| workspace.collect_panes())
             .flat_map(|pane| pane.read(cx).terminals().cloned().collect::<Vec<_>>())
             .collect();
-        terminals.extend(self.all_diff_dock_terminals());
         terminals.sort_by_key(|terminal| terminal.entity_id());
         terminals.dedup();
 
@@ -901,31 +900,6 @@ impl PaneFlowApp {
                 stats,
             },
         );
-        changed
-    }
-
-    /// Narrower sibling of [`Self::apply_git_state_for_cwd`]: refresh only the
-    /// diff stats, for probes that never re-read the branch.
-    pub(crate) fn apply_git_stats_for_cwd(
-        &mut self,
-        cwd: &str,
-        stats: crate::workspace::GitDiffStats,
-    ) -> bool {
-        let mut changed = false;
-        for workspace in &mut self.workspaces {
-            if workspace.cwd == cwd && workspace.git_stats != stats {
-                workspace.git_stats = stats.clone();
-                changed = true;
-            }
-        }
-        if let Some(current) = self.worktree_states.checkout(cwd).cloned()
-            && current.stats != stats
-        {
-            changed |= self.worktree_states.set_checkout(
-                cwd,
-                crate::app::tab_worktree::CheckoutGit { stats, ..current },
-            );
-        }
         changed
     }
 
@@ -1187,10 +1161,6 @@ impl PaneFlowApp {
                 .closed_items
                 .iter()
                 .any(|record| closed_record_uses_worktree(record, worktree_path))
-            || self
-                .diff_dock_terminal_cwds(cx)
-                .iter()
-                .any(|cwd| path_is_within_worktree(cwd, worktree_path))
     }
 
     /// Whether a candidate CWD is inside a checkout whose asynchronous
@@ -2138,7 +2108,6 @@ impl PaneFlowApp {
         // workspace itself had been restored.
         let closed_record = capture_closed_workspace_record(&self.workspaces[idx], idx, cx);
         let closed_id = self.workspaces[idx].id;
-        self.drop_diff_dock_for_workspace(closed_id, cx);
         let retired_worktrees =
             drop_closed_records_for_workspace(&mut self.closed_items, closed_id);
         self.retire_worktrees_after_durable_save(retired_worktrees, cx);
@@ -2884,9 +2853,8 @@ mod tests {
             "the second launch leaves the first agent's tab behind the active one"
         );
 
-        // The workspace half of the expression `live_terminal_session_ids`
-        // runs, verbatim; the dock half and the child-PID filter are out of
-        // scope here (these panes hold display-only terminals with no PTY).
+        // The expression `live_terminal_session_ids` runs, verbatim; the
+        // child-PID filter is out of scope here (these panes hold display-only terminals with no PTY).
         // The source guard on that function is what pins this copy to it.
         let workspaces = [ws];
         let terminals: Vec<_> = cx.update(|_, cx| {
@@ -4366,12 +4334,7 @@ mod tests {
         // the ONE call reaching a review agent's tab, and narrowing it to the
         // active tab would put the agent back out of sight with every other
         // guard still green.
-        for required in [
-            "self.workspaces",
-            "workspace.collect_panes()",
-            "all_diff_dock_terminals",
-            "child_pid",
-        ] {
+        for required in ["self.workspaces", "workspace.collect_panes()", "child_pid"] {
             assert!(capture.contains(required), "missing {required}: {capture}");
         }
 
@@ -4389,7 +4352,7 @@ mod tests {
     }
 
     /// Issue #454: the sweeps above reach a terminal through
-    /// `PaneSurface::Terminal` on a tab's layout tree, plus the dock. The
+    /// `PaneSurface::Terminal` on a tab's layout tree. The
     /// modules scanned here are the ones that build the surfaces that route
     /// skips: `DiffView` (`as_terminal()` hands back `None`), the Review
     /// grid, whose panes live in `ReviewState::layout` off
@@ -4615,7 +4578,6 @@ mod tests {
         let src = include_str!("mod.rs");
         let closer = source_slice(src, "fn close_workspace_at_inner", "fn reorder_workspace");
         for helper in [
-            "drop_diff_dock_for_workspace",
             "refresh_composer_slot",
             "sync_broadcast_stripes",
             "flush_pending_prefill",
@@ -4625,20 +4587,9 @@ mod tests {
         ] {
             assert!(closer.contains(helper), "shared closer must call {helper}");
         }
-        // The dock teardown resolves the closing workspace's tab ids from
-        // `self.workspaces`, so it has to run before the workspace is removed
-        // - the ordering `closing_a_workspace_prunes_the_undo_stack_and_stands_
-        // down_its_pending_close` pins for the undo prune.
-        let dock_at = closer
-            .find("drop_diff_dock_for_workspace(")
-            .expect("the close must tear the docks down");
-        let remove_at = closer
-            .find("self.workspaces.remove(idx)")
-            .expect("the close must remove the workspace");
         assert!(
-            dock_at < remove_at,
-            "the dock teardown reads the workspace being destroyed, so it has to run \
-             before it is dropped: {closer}"
+            closer.contains("self.workspaces.remove(idx)"),
+            "the close must remove the workspace: {closer}"
         );
     }
 

@@ -63,9 +63,7 @@ pub(crate) fn close_confirm_title(noun: &str, label: &str) -> String {
 /// Pure so the two facts issue #83 insists on can be asserted without a
 /// window: closing stops the agent and every process still in its PTY session,
 /// and undo brings the surface back but does **not** resume the agent (restore
-/// spawns a brand-new PTY and replays scrollback as inert text). Workspace
-/// closes that also destroy off-tree dock/Review terminals use explicit
-/// narrower Undo copy.
+/// spawns a brand-new PTY and replays scrollback as inert text).
 ///
 /// `undo_shortcut` is `None` when the user has unassigned the undo binding;
 /// the phrase then names the action instead of printing a key that is not
@@ -74,7 +72,6 @@ pub(crate) fn close_confirm_body(
     agent: TerminalAgent,
     extra_agents: usize,
     undo_shortcut: Option<&str>,
-    loses_off_tree_sessions: bool,
 ) -> String {
     let name = agent.display_name();
     let subject = match extra_agents {
@@ -96,44 +93,25 @@ pub(crate) fn close_confirm_body(
         // the user cannot press.
         None => "Undo close".to_string(),
     };
-    if loses_off_tree_sessions {
-        format!(
-            "{subject}. Closing stops {object} and every process still in {their} terminal {sessions}. \
-             {opener} restores only saved workspace panes and their scrollback; dock and Review \
-             sessions are not restored, and no agent is resumed."
-        )
-    } else {
-        format!(
-            "{subject}. Closing stops {object} and every process still in {their} terminal {sessions}. \
-             {opener} brings {back} back with {their} scrollback, but does not resume {agents}."
-        )
-    }
+    format!(
+        "{subject}. Closing stops {object} and every process still in {their} terminal {sessions}. \
+         {opener} brings {back} back with {their} scrollback, but does not resume {agents}."
+    )
 }
 
 /// Body copy for a workspace-folder close that is not killing a live agent.
 ///
 /// Workspace X always asks, even for a shell-only folder. The agent-named
 /// [`close_confirm_body`] would be a lie here: nothing is "still running".
-pub(crate) fn workspace_close_confirm_body(
-    undo_shortcut: Option<&str>,
-    loses_off_tree_sessions: bool,
-) -> String {
+pub(crate) fn workspace_close_confirm_body(undo_shortcut: Option<&str>) -> String {
     let opener = match undo_shortcut {
         Some(key) => key.to_string(),
         None => "Undo close".to_string(),
     };
-    if loses_off_tree_sessions {
-        format!(
-            "This closes the workspace and every terminal in it. {opener} restores only saved \
-             workspace panes and their scrollback; dock and Review sessions are not restored, and \
-             running processes are not resumed."
-        )
-    } else {
-        format!(
-            "This closes the workspace and every terminal in it. {opener} restores the layout \
-             and scrollback; running processes are not resumed."
-        )
-    }
+    format!(
+        "This closes the workspace and every terminal in it. {opener} restores the layout \
+         and scrollback; running processes are not resumed."
+    )
 }
 
 /// Resolve a pending close's stable `(workspace_id, tab_id)` back to live
@@ -308,41 +286,18 @@ impl PaneFlowApp {
         else {
             return Vec::new();
         };
-        let mut states = Self::surface_close_states(&tab.collect_panes(), cx);
-        states.extend(self.tab_off_tree_close_states(tab.id, cx));
-        states
-    }
-
-    /// The diff-dock terminals that die with tab `tab_id` (#184 Phase 4: the
-    /// dock is parked per tab). Review terminals belong to the repo, not the
-    /// tab, so a tab close never reaches them.
-    fn tab_off_tree_close_states(&self, tab_id: u64, cx: &App) -> Vec<SurfaceCloseState> {
-        let off_tree = self.diff_dock_terminals_for_tab(tab_id);
-        Self::terminal_close_states(off_tree, cx)
+        Self::surface_close_states(&tab.collect_panes(), cx)
     }
 
     fn workspace_close_states(&self, ws_idx: usize, cx: &App) -> Vec<SurfaceCloseState> {
         let Some(workspace) = self.workspaces.get(ws_idx) else {
             return Vec::new();
         };
-        let mut states = Self::surface_close_states(&workspace.collect_panes(), cx);
-        states.extend(self.workspace_off_tree_close_states(workspace.id, cx));
-        states
-    }
-
-    /// Issue #438: the dock is the only off-tree terminal host left. Review
-    /// used to embed terminals inside a `DiffView`, invisible to the layout
-    /// walk; "Review with agent" now opens an ordinary workspace tab, so a
-    /// review agent is an on-tree pane the caller has already counted.
-    fn workspace_off_tree_close_states(
-        &self,
-        workspace_id: u64,
-        cx: &App,
-    ) -> Vec<SurfaceCloseState> {
-        let mut off_tree = self.diff_dock_terminals_for_workspace(workspace_id);
-        off_tree.sort_by_key(|terminal| terminal.entity_id());
-        off_tree.dedup();
-        Self::terminal_close_states(off_tree, cx)
+        // Issue #438: every terminal a workspace close kills is on the layout
+        // tree. Review used to embed terminals inside a `DiffView`, invisible
+        // to this walk; "Review with agent" now opens an ordinary workspace
+        // tab, so a review agent is an on-tree pane counted here.
+        Self::surface_close_states(&workspace.collect_panes(), cx)
     }
 
     /// `(workspace id, that workspace's tab ids in order)`, the input
@@ -378,18 +333,12 @@ impl PaneFlowApp {
         } else {
             0
         };
-        // Dock and Review terminals die with the folder and are not on the
-        // workspace undo record, whether or not they host a live agent.
-        let loses_off_tree_sessions = !self
-            .workspace_off_tree_close_states(workspace_id, cx)
-            .is_empty();
         self.set_pending_close(
             Some(PendingClose {
                 target: CloseTarget::Workspace { workspace_id },
                 style,
                 agent,
                 extra_agents,
-                loses_off_tree_sessions,
                 label,
                 armed_at: now,
             }),
@@ -445,9 +394,6 @@ impl PaneFlowApp {
         }) else {
             return;
         };
-        // The tab's dock terminals die with it and are not on the tab undo
-        // record, whether or not they host a live agent.
-        let loses_off_tree_sessions = !self.tab_off_tree_close_states(tab_id, cx).is_empty();
         self.set_pending_close(
             Some(PendingClose {
                 target: CloseTarget::Tab {
@@ -457,7 +403,6 @@ impl PaneFlowApp {
                 style,
                 agent: Some(agent),
                 extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
-                loses_off_tree_sessions,
                 label: confirm_label(&label),
                 armed_at: now,
             }),
@@ -492,7 +437,6 @@ impl PaneFlowApp {
                 style,
                 agent: Some(agent),
                 extra_agents: agents_needing_confirmation_count(&states, now).saturating_sub(1),
-                loses_off_tree_sessions: false,
                 label: confirm_label(&label),
                 armed_at: now,
             }),
@@ -800,13 +744,8 @@ impl PaneFlowApp {
         let title = close_confirm_title(noun, &pending.label);
         let undo = self.shortcut_for_action("undo_close_pane");
         let body = match pending.agent {
-            Some(agent) => close_confirm_body(
-                agent,
-                pending.extra_agents,
-                undo,
-                pending.loses_off_tree_sessions,
-            ),
-            None => workspace_close_confirm_body(undo, pending.loses_off_tree_sessions),
+            Some(agent) => close_confirm_body(agent, pending.extra_agents, undo),
+            None => workspace_close_confirm_body(undo),
         };
         let accept_label = if pending.agent.is_some() {
             "Close anyway"
@@ -1002,7 +941,7 @@ mod tests {
 
     #[test]
     fn close_confirm_body_names_the_agent_and_both_consequences() {
-        let body = close_confirm_body(TerminalAgent::ClaudeCode, 0, Some("Cmd+Shift+T"), false);
+        let body = close_confirm_body(TerminalAgent::ClaudeCode, 0, Some("Cmd+Shift+T"));
         assert!(
             body.contains("Claude Code"),
             "the copy must name the agent it is about to kill: {body}"
@@ -1024,7 +963,7 @@ mod tests {
 
     #[test]
     fn close_confirm_body_counts_the_agents_it_does_not_name() {
-        let one = close_confirm_body(TerminalAgent::Codex, 1, Some("Cmd+Shift+T"), false);
+        let one = close_confirm_body(TerminalAgent::Codex, 1, Some("Cmd+Shift+T"));
         assert!(
             one.contains("1 other agent") && !one.contains("1 other agents"),
             "singular form for exactly one unnamed agent: {one}"
@@ -1038,7 +977,7 @@ mod tests {
             "the undo clause is plural too: {one}"
         );
 
-        let many = close_confirm_body(TerminalAgent::Codex, 3, Some("Cmd+Shift+T"), false);
+        let many = close_confirm_body(TerminalAgent::Codex, 3, Some("Cmd+Shift+T"));
         assert!(
             many.contains("3 other agents"),
             "plural form for more than one unnamed agent: {many}"
@@ -1047,7 +986,7 @@ mod tests {
 
     #[test]
     fn close_confirm_body_omits_an_unbound_undo_shortcut() {
-        let body = close_confirm_body(TerminalAgent::ClaudeCode, 0, None, false);
+        let body = close_confirm_body(TerminalAgent::ClaudeCode, 0, None);
         // Pinned whole, not by absent substrings: `shortcut_for_action`
         // returns Apple HIG glyphs on macOS (`keybindings/display.rs` formats
         // `secondary-shift-t` as `⌘⇧T`), which contains neither "Cmd" nor
@@ -1065,24 +1004,8 @@ mod tests {
     }
 
     #[test]
-    fn workspace_close_copy_does_not_promise_off_tree_undo() {
-        let body = close_confirm_body(TerminalAgent::Codex, 1, Some("Cmd+Shift+T"), true);
-
-        assert!(
-            body.contains("restores only saved workspace panes"),
-            "{body}"
-        );
-        assert!(
-            body.contains("dock and Review sessions are not restored"),
-            "{body}"
-        );
-        assert!(body.contains("no agent is resumed"), "{body}");
-        assert!(!body.contains("brings them back"), "{body}");
-    }
-
-    #[test]
     fn workspace_close_copy_without_an_agent_explains_folder_close() {
-        let bound = workspace_close_confirm_body(Some("Cmd+Shift+T"), false);
+        let bound = workspace_close_confirm_body(Some("Cmd+Shift+T"));
         assert_eq!(
             bound,
             "This closes the workspace and every terminal in it. Cmd+Shift+T restores the layout \
@@ -1093,22 +1016,11 @@ mod tests {
             "empty-folder copy must not pretend an agent is live: {bound}"
         );
 
-        let unbound = workspace_close_confirm_body(None, false);
+        let unbound = workspace_close_confirm_body(None);
         assert_eq!(
             unbound,
             "This closes the workspace and every terminal in it. Undo close restores the layout \
              and scrollback; running processes are not resumed."
-        );
-    }
-
-    #[test]
-    fn workspace_close_copy_without_an_agent_does_not_promise_off_tree_undo() {
-        let body = workspace_close_confirm_body(Some("Cmd+Shift+T"), true);
-        assert_eq!(
-            body,
-            "This closes the workspace and every terminal in it. Cmd+Shift+T restores only saved \
-             workspace panes and their scrollback; dock and Review sessions are not restored, and \
-             running processes are not resumed."
         );
     }
 
@@ -1246,22 +1158,14 @@ mod tests {
     }
 
     #[test]
-    fn workspace_guard_includes_off_tree_terminal_owners() {
+    fn workspace_guard_walks_every_tab_on_the_layout_tree() {
         let src = include_str!("close_confirm.rs");
         let states = source_slice(src, "fn workspace_close_states(", "/// `(workspace id");
-        assert!(
-            states.contains("diff_dock_terminals_for_workspace"),
-            "diff-dock agents die with their workspace and must arm confirmation: {states}"
-        );
         assert!(
             !states.contains("diff_review_terminals_for_workspace"),
             "issue #438: Review no longer embeds terminals, so there is no \
              off-tree Review sweep to fold in - a review agent is an ordinary \
              pane the layout walk already covers: {states}"
-        );
-        assert!(
-            states.contains("terminal_close_states(off_tree"),
-            "off-tree terminals must use the same live-agent predicate: {states}"
         );
         // Issue #454: the on-tree half is the ONLY thing that reaches a review
         // agent, which "Review with agent" opens as a pane on a tab of its
@@ -1270,39 +1174,6 @@ mod tests {
         assert!(
             states.contains("workspace.collect_panes()"),
             "every tab's panes must arm confirmation, not just the active tab's: {states}"
-        );
-    }
-
-    /// #184 Phase 4: the dock is parked per tab, so a tab close kills that
-    /// tab's dock terminals and must arm confirmation for an agent in one -
-    /// and only that tab's: a sibling tab's dock is not on a tab close's kill
-    /// list. (Review terminals used to be named here too; issue #438 removed
-    /// them as a category.)
-    #[test]
-    fn tab_guard_includes_its_own_dock_terminals_only() {
-        let src = include_str!("close_confirm.rs");
-        let states = source_slice(src, "fn tab_close_states(", "fn workspace_close_states(");
-        assert!(
-            states.contains("tab_off_tree_close_states(tab.id"),
-            "the tab guard must fold in the tab's own dock terminals, by tab id: {states}"
-        );
-        assert!(
-            states.contains("diff_dock_terminals_for_tab(tab_id)"),
-            "dock terminals are resolved per tab, never per workspace: {states}"
-        );
-        assert!(
-            !states.contains("diff_dock_terminals_for_workspace"),
-            "a tab close must not count sibling tabs' docks: {states}"
-        );
-
-        let request = source_slice(
-            src,
-            "pub(crate) fn request_close_workspace_tab(",
-            "pub(crate) fn arm_pending_close_pane(",
-        );
-        assert!(
-            request.contains("tab_off_tree_close_states(tab_id, cx).is_empty()"),
-            "the tab modal must stop promising dock sessions back when the tab has some: {request}"
         );
     }
 
@@ -1406,11 +1277,6 @@ mod tests {
         assert!(
             !arm.contains("close_workspace_at_inner"),
             "arming must not close the workspace: {arm}"
-        );
-        assert!(
-            arm.contains("is_empty()"),
-            "dock and Review terminals die with the folder even when they are not agents, so the \
-             undo copy must key off their presence, not off a live-agent scan: {arm}"
         );
 
         let render = source_slice(
@@ -1800,7 +1666,6 @@ mod tests {
             style: ConfirmStyle::Inline,
             agent: Some(TerminalAgent::ClaudeCode),
             extra_agents: 0,
-            loses_off_tree_sessions: false,
             label: String::new(),
             armed_at: std::time::Instant::now(),
         }

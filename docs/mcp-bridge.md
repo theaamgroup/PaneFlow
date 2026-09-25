@@ -7,8 +7,9 @@ pasting by hand.
 
 `paneflow-mcp` is a small stdio [MCP](https://modelcontextprotocol.io) server.
 The agent spawns it as a subprocess; it proxies each call to PaneFlow's local
-JSON-RPC socket (the same one the AI-hook uses). It can list, read, and search surfaces and record progress on the calling pane’s
-assigned task. It cannot type into or control terminals.
+JSON-RPC socket (the same one the AI-hook uses). It can list, read, and search
+surfaces and report the calling pane's own identity. It is read-only: it cannot
+type into or control terminals.
 
 By default the bridge inherits `PANEFLOW_WORKSPACE_ID` from the pane that
 launched the agent and filters discovery, tools, and resources to that
@@ -22,15 +23,14 @@ read access is intentional.
 
 ## Tools
 
-Agent context tools `whoami`, `task_get`, and `task_report` are documented in
-[Agent context](agent-context.md). The report tool is annotated as a write; the
-remaining tools are read-only. Task assignment is available through the CLI.
+Every tool is annotated read-only.
 
 | Tool | Arguments | Returns |
 |------|-----------|---------|
 | `list_panes` | - | Scoped surfaces: `surface_id`, `name`, `title`, `cwd`, `cmd`, `workspace`, `workspace_id`, plus `tab_id` / `tab_title` for the workspace tab holding the surface. Call this first to discover what to read. The result is wrapped as untrusted terminal metadata. |
 | `read_pane` | `target` (name or `surface_id`), `lines?` (default 200, max 4000), `offset?` | The surface's scrollback followed by the screen it is painting, as text, paginated. A full-screen TUI has no scrollback, so the screen is what you get. |
 | `search_pane` | `target`, `pattern`, `max_matches?` (default 50, max 1000) | Matching lines with their line numbers. |
+| `whoami` | - | The calling pane's own identity. See [Pane identity](#pane-identity-whoami). |
 
 `target` resolves by exact name → case-insensitive → unique prefix, or a numeric
 `surface_id`. An ambiguous name returns an error listing the candidates.
@@ -39,7 +39,7 @@ remaining tools are read-only. Task assignment is available through the CLI.
 > marker. A pane may contain attacker-controlled output (a server logging a
 > crafted string), and pane titles can also be terminal-controlled; the agent
 > is instructed to treat bridge output as data, never as instructions to
-> execute. The bridge exposes no keystroke tool. `task_report` only updates the caller’s task record.
+> execute. The bridge exposes no keystroke tool and no write tool.
 
 `tab_id` is a stable identity, never a positional index, and it is omitted for
 surfaces that live outside the CLI tab hierarchy (Agents threads, the bottom
@@ -49,6 +49,50 @@ name or `surface_id`: the tab is context for the agent, not an addressing key.
 MCP resources use stable `surface_id` URIs:
 `pane://surface/{surface_id}/content`. Human names and titles stay in
 `list_panes`; they are display metadata, not URI syntax.
+
+## Pane identity (`whoami`)
+
+An agent can ask which pane it is running in. The same call is available three
+ways:
+
+| CLI | MCP tool | IPC method |
+| --- | --- | --- |
+| `paneflow whoami` | `whoami` | `agent.whoami` |
+
+`whoami` returns a persisted `pane_id`, the current runtime `surface_id`, a
+`terminal_session_id` for this terminal lifetime, workspace ID/title/cwd, current
+cwd, tab ID, bound worktree path, and observed agent sessions.
+`terminal_session_id` is **not** a Claude/Codex conversation ID. Observed agents
+carry a process-map key, tool, state, source, and observation age. An empty list
+means no agent has been mapped to this pane; it does not mean no agent is running.
+PaneFlow does not pick one when several agents share a terminal.
+
+The CLI and MCP inherit `PANEFLOW_SURFACE_ID` and `PANEFLOW_WORKSPACE_ID` from the
+pane's environment. Both are required; neither client guesses from focus.
+`agent.whoami` requires numeric `surface_id` and `workspace_id`, rejects any
+other parameter, and resolves the surface's live workspace; the response carries
+that current `workspace_id`. A moved pane keeps its PTY and the old workspace ID
+in its shell environment, so the call keeps working without restarting the agent,
+even if the original workspace is closed. The agent's sidebar state moves with
+it: a tab or pane drag carries the pane's session rows to the destination
+workspace, and `ai.*` hook frames that still carry the inherited workspace ID are
+routed to the surface's live workspace whenever the frame names a surface that
+exists. Missing or closed surfaces remain errors.
+
+The `whoami` tool accepts no target or workspace argument. Even with
+`PANEFLOW_MCP_SCOPE=all`, it addresses only the inherited caller pane. Raw IPC
+remains a same-user operation; environment IDs are routing metadata, not
+authentication credentials. Peer discovery and terminal reads retain the
+bridge's original workspace scope; following one's own moved pane does not grant
+access to its new workspace's peers.
+
+`pane_id` is saved per terminal surface as `surfaces[].agent_context` in
+`session.json` through the normal debounced save. Session restoration and
+undo-close keep it; `terminal_session_id` changes on reconstruction. Omit
+`agent_context` from reusable templates; it is session-owned metadata. Sessions
+saved by builds that had task assignment still carry an `agent_context.task`
+key. It loads, is ignored, and is dropped on the next save; the pane keeps its
+`pane_id`.
 
 ## Install (one command)
 

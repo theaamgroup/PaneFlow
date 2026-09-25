@@ -63,7 +63,7 @@ pub(crate) const MAX_REQUEST_LEN: u64 = 256 * 1024;
 pub(crate) const MAX_IPC_TEXT_BYTES: usize = 240 * 1024;
 
 /// Shared read/write cap on `session.json` (U-008/U-016, #415). Individually
-/// valid task records can exceed this limit in aggregate. The writer stops
+/// capped scrollbacks can exceed this limit in aggregate. The writer stops
 /// serialization at the same encoded-byte cap and preserves the previous
 /// saved session on failure, rather than publishing a file the reader rejects.
 pub(crate) const MAX_SESSION_SIZE_BYTES: u64 = 64 * 1024 * 1024;

@@ -13,7 +13,7 @@
 //! ```
 //!
 //! The `paneflow` entry is what lets an agent inside a pane run `paneflow
-//! whoami`, `paneflow task get`, or `paneflow mcp install` without the user
+//! whoami` or `paneflow mcp install` without the user
 //! ever symlinking the bundle binary onto their login PATH. It is a symlink,
 //! not a copy: the app executable is tens of megabytes, and a link keeps
 //! following the bundle Sparkle swaps in at quit. It is re-pointed on every

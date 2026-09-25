@@ -1822,9 +1822,6 @@ fn supported_methods() -> Vec<&'static str> {
         "surface.status",
         "fleet.list",
         "agent.whoami",
-        "task.get",
-        "task.assign",
-        "task.report",
     ];
     methods.extend_from_slice(paneflow_ipc_client::ai_hook::METHODS);
     methods
@@ -1849,6 +1846,9 @@ mod removed_method_tests {
             ("workspace", "close"),
             ("workspace", "restore_layout"),
             ("surface", "rename"),
+            ("task", "get"),
+            ("task", "assign"),
+            ("task", "report"),
         ] {
             let method = format!("{namespace}.{verb}");
             assert!(!supported_methods().contains(&method.as_str()));
@@ -1862,7 +1862,6 @@ mod removed_method_tests {
             "surface.read",
             "surface.search",
             "agent.whoami",
-            "task.get",
         ] {
             assert!(supported_methods().contains(&retained));
         }

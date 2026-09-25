@@ -7,7 +7,7 @@
 //! `scrollbar` is the div-overlay thumb floated over popover lists (its own
 //! 24 px minimum, `metrics` / `track_click_offset` / `drag_offset` helpers),
 //! and `editor_scrollbar` is the permanent 15 px canvas-painted gutter beside
-//! the Changes dock and Review diff (#434).
+//! the Review diff (#434).
 
 pub mod callout;
 pub(crate) mod editor_scrollbar;

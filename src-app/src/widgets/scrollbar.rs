@@ -7,7 +7,7 @@
 //! plain divs, plus the math + listener helpers each call site needs.
 //!
 //! `geometry` (the 15 px track / 25 px thumb math) is shared with the
-//! editor-style `widgets::editor_scrollbar` gutter used by the Changes dock.
+//! editor-style `widgets::editor_scrollbar` gutter used by the Review diff.
 //!
 //! ## Usage
 //!

@@ -256,22 +256,6 @@ impl PaneFlowApp {
             .or_else(|| (!ws.cwd.is_empty()).then(|| ws.cwd.clone()))
     }
 
-    /// The checkout a pane belongs to: the worktree of the tab holding it when
-    /// that tab is bound, otherwise its workspace's root.
-    pub(crate) fn checkout_for_pane(
-        &self,
-        pane: &gpui::Entity<crate::pane::Pane>,
-    ) -> Option<String> {
-        let ws = self
-            .workspaces
-            .iter()
-            .find(|ws| ws.tab_for_pane(pane).is_some())?;
-        ws.tab_for_pane(pane)
-            .and_then(|tab| tab.worktree.as_ref())
-            .map(|path| path.to_string_lossy().into_owned())
-            .or_else(|| (!ws.cwd.is_empty()).then(|| ws.cwd.clone()))
-    }
-
     /// What to call a workspace's own checkout in a branch picker.
     ///
     /// Its branch, taken from the worktree listing when it has arrived and
@@ -313,22 +297,12 @@ impl PaneFlowApp {
         };
         let is_active_tab = ws_idx == active_idx && ws.active_tab_idx() == tab_idx;
         let ws_id = ws.id;
-        let ws_cwd = ws.cwd.clone();
         let Some(tab) = ws.tab_mut(tab_idx) else {
             return;
         };
         if tab.worktree == worktree {
             return;
         }
-        let tab_id = tab.id;
-        let checkout = |bound: Option<&std::path::PathBuf>| {
-            bound.map_or_else(
-                || ws_cwd.clone(),
-                |path| path.to_string_lossy().into_owned(),
-            )
-        };
-        let from = checkout(tab.worktree.as_ref());
-        let to = checkout(worktree.as_ref());
         tab.worktree = worktree.clone();
         // Probe the new checkout now rather than waiting up to 30 s for the
         // poll: a row that names a branch only after half a minute reads as
@@ -336,11 +310,9 @@ impl PaneFlowApp {
         if let Some(path) = worktree {
             Self::spawn_initial_git_stats(ws_id, path.to_string_lossy().into_owned(), cx);
         }
-        // The git surfaces follow the tab's checkout: the diff dock this tab
-        // owns moves with it, and Diff mode is rebuilt when the tab is the one
-        // on screen - switching tab already does both, and binding changes
-        // the same fact without a switch.
-        self.retarget_diff_dock_for_tab(tab_id, &from, &to, cx);
+        // The git surfaces follow the tab's checkout: Diff mode is rebuilt
+        // when the tab is the one on screen - switching tab already does
+        // that, and binding changes the same fact without a switch.
         if is_active_tab {
             self.reconcile_diff_after_workspace_change(cx);
         }
@@ -366,9 +338,8 @@ impl PaneFlowApp {
                 let probe = repo_root.clone();
                 let read = smol::unblock(move || {
                     let listing = crate::workspace::worktree::list_worktrees(&probe);
-                    // The diff dock's reader, not a second one: one branch
-                    // list for the whole app.
-                    let branches = crate::app::diff_dock::list_branches(&probe.to_string_lossy());
+                    let branches =
+                        crate::workspace::worktree::list_branches(&probe.to_string_lossy());
                     (listing, branches)
                 })
                 .await;
@@ -1011,17 +982,12 @@ mod tests {
     #[test]
     fn binding_the_active_tab_retargets_the_git_surfaces() {
         // Issue #347 review, finding 11: the bind only saved and repainted,
-        // so Diff mode and an open dock kept showing the checkout the tab
-        // had just left.
+        // so Diff mode kept showing the checkout the tab had just left.
         let src = include_str!("tab_worktree.rs");
         let set = crate::source_probe::source_slice(
             src,
             "pub(crate) fn set_tab_worktree(",
             "/// Refresh what the branch picker offers",
-        );
-        assert!(
-            set.contains("self.retarget_diff_dock_for_tab(tab_id, &from, &to, cx);"),
-            "the tab's dock must follow its checkout: {set}"
         );
         let active_at = set
             .find("if is_active_tab {")

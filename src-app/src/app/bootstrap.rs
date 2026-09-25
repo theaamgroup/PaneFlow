@@ -385,7 +385,6 @@ impl PaneFlowApp {
                         let apply = cx.update(|cx| {
                             this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
                                 let mut changed = false;
-                                let mut refreshed_diff = false;
                                 for (cwd, branch, is_repo, stats) in &results {
                                     if app.apply_git_state_for_cwd(
                                         cwd,
@@ -394,11 +393,9 @@ impl PaneFlowApp {
                                         stats.clone(),
                                     ) {
                                         changed = true;
-                                        refreshed_diff |=
-                                            app.refresh_diff_dock_if_open_for_cwd(cwd, cx);
                                     }
                                 }
-                                if changed && !refreshed_diff {
+                                if changed {
                                     cx.notify();
                                 }
                             })
@@ -533,7 +530,6 @@ impl PaneFlowApp {
                     let apply = cx.update(|cx| {
                         this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
                             let mut changed = false;
-                            let mut refreshed_diff = false;
                             for (cwd, branch, is_repo, stats) in &results {
                                 if app.apply_git_state_for_cwd(
                                     cwd,
@@ -542,11 +538,9 @@ impl PaneFlowApp {
                                     stats.clone(),
                                 ) {
                                     changed = true;
-                                    refreshed_diff |=
-                                        app.refresh_diff_dock_if_open_for_cwd(cwd, cx);
                                 }
                             }
-                            if changed && !refreshed_diff {
+                            if changed {
                                 cx.notify();
                             }
                         })
@@ -807,38 +801,6 @@ impl PaneFlowApp {
             // Start in the mode the user left on quit, unless a staged
             // restore still has to finish (Diff is applied then).
             mode: boot_mode,
-            diff_dock: crate::DiffDockState {
-                open: false,
-                rendered: false,
-                maximized: None,
-                maximize_animation: None,
-                restore_focus_after_slide: None,
-                pending_focus_restore: None,
-                reveal_animation: None,
-                pane_grid_width: std::rc::Rc::default(),
-                data: None,
-                collapsed: std::collections::HashSet::new(),
-                expanded_folds: std::collections::HashSet::new(),
-                split: true,
-                generation: 0,
-                scroll: gpui::ScrollHandle::new(),
-                diff_options_menu_open: false,
-                diff_layout_submenu_open: false,
-                diff_new_tab_menu_open: false,
-                picker: false,
-                picked: false,
-                owner: None,
-                parked: std::collections::HashMap::new(),
-                diff_tabs: Vec::new(),
-                diff_active_tab: 0,
-                diff_branch_menu: None,
-                width: crate::app::diff_dock::DIFF_DOCK_PANEL_WIDTH,
-                resize: None,
-                h_scroll_drag: None,
-                vertical_scrollbar: Default::default(),
-                h_offsets: std::rc::Rc::new(Vec::new()),
-                hover: None,
-            },
             sidebar_order_cache: std::cell::RefCell::new(Default::default()),
             empty_workspace_focus: cx.focus_handle(),
             sidebar_rename_focus: cx.focus_handle(),

@@ -2,7 +2,7 @@
 //!
 //! Runs on the GPUI main thread and owns two pull-based intakes:
 //! - `process_ipc_requests` - drains the Unix-socket IPC receiver and routes
-//!   each request through `handle_ipc` (dispatches over the `surface.*`, `fleet.*`, `task.*`, and `ai.*` namespaces).
+//!   each request through `handle_ipc` (dispatches over the `surface.*`, `fleet.*`, and `ai.*` namespaces, plus `agent.whoami`).
 //! - `process_config_changes` - picks up a hot-reloaded config deposited by
 //!   the `ConfigWatcher` background thread and reapplies keybindings + theme.
 //!
@@ -1339,12 +1339,10 @@ impl PaneFlowApp {
             // 500 ms; resolve the reloaded block now so the repaint the
             // propagation below triggers measures the new font (#429).
             crate::terminal::element::refresh_font_config(&self.cached_config);
-            // US-015: push the refreshed config to every pane's tab-bar cache,
-            // and to the dock terminals the layout walk cannot reach.
+            // US-015: push the refreshed config to every pane's tab-bar cache.
             for ws in &self.workspaces {
                 ws.propagate_config(&self.cached_config, cx);
             }
-            self.propagate_config_to_dock_terminals(cx);
             // The embedded settings page reads `self.cached_config` directly and
             // its shortcut list is refreshed above (`effective_shortcuts`), so an
             // external `paneflow.json` edit reflects without any extra push.
@@ -2042,7 +2040,7 @@ impl PaneFlowApp {
         // moved verbatim into the handlers below; an unknown method inside a
         // known namespace falls into that handler's `_` arm, which produces
         // the same method-not-found envelope as the catch-all here.
-        if method == "agent.whoami" || method.starts_with("task.") {
+        if method == "agent.whoami" {
             self.handle_agent_context_method(method, params, cx)
         } else if method.starts_with("surface.") {
             self.handle_surface_method(method, params, caller_pid, responder, cx)

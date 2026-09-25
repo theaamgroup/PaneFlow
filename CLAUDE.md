@@ -24,7 +24,7 @@ dependency sources, and command examples. Use [keybindings](docs/user/keybinding
 and [configuration runtime behavior](docs/user/configuration/runtime.md) for their
 reference tables. Read [DESIGN.md](DESIGN.md) before UI changes and update it in the same PR.
 
-The registry currently declares **81 GPUI action types**, **81 actions total**.
+The registry currently declares **79 GPUI action types**, **79 actions total**.
 Update both counts when changing `app/actions.rs`; its drift test reads this file.
 
 Settings and About are reached only from the macOS menu bar (**PaneFlow ▸
@@ -157,7 +157,7 @@ For tag-push releases specifically: run `cargo fmt --check` *one last time* on t
 
 ## GPUI scroll & wheel (gotchas)
 
-Hard-won from the diff-dock horizontal-scroll saga (`src-app/src/app/diff_dock/mod.rs`). Verified against the Zed source. Do NOT re-derive these by guessing, it cost three wrong attempts.
+Hard-won from the diff-dock horizontal-scroll saga; the surviving two-axis host is `src-app/src/diff/view/render.rs`. Verified against the Zed source. Do NOT re-derive these by guessing, it cost three wrong attempts.
 
 - **Shift+wheel is axis-swapped to X at the platform layer**, before app code ever sees it. On macOS the NSEvent delivers the horizontal component natively; the other platform backends do the swap explicitly. Either way the value lands in `delta.x` with `delta.y` zeroed. So: read `delta.x` for horizontal, NEVER branch on `modifiers.shift` (reading `delta.y` under Shift reads zero). The `div.rs` `delta_x = delta.y` line is a separate fallback (fires only when `delta.x == 0`), not the Shift mechanism.
 - **`overflow_hidden()` + `track_scroll()` does NOT scroll-translate children.** It only keeps the handle's bookkeeping (`offset()`/`bounds()`/`max_offset()`) live. GPUI only pushes the scroll offset onto the element-offset stack (which bakes into each child's `bounds.origin`) when the host overflow axis is `Overflow::Scroll`. A custom `Element` that positions content off its own `bounds.origin` (e.g. `DiffElement`) therefore only scrolls under `overflow_y_scroll`/`overflow_scroll`; `set_offset()` under `overflow_hidden` is stored but dead. Custom elements get the shift automatically via their passed `bounds` (no `window.element_offset()` call needed).
@@ -213,7 +213,7 @@ The contract lives in `TerminalState::Drop` (`terminal/pty_session.rs`): pin eve
 
 ## MCP and crash reporting
 
-Keep the MCP bridge GPU-free and read-only (`list_panes`, `read_pane`, `search_pane`).
+Keep the MCP bridge GPU-free and read-only (`list_panes`, `read_pane`, `search_pane`, `whoami`).
 The embedded bridge installs through `paneflow mcp install` or **Settings → MCP Servers**,
 with status/repair handled off the render thread. Preserve idempotent, no-clobber,
 backup-and-atomic-write behavior. See `docs/mcp-bridge.md`.

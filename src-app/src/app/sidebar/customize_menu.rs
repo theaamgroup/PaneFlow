@@ -1,9 +1,7 @@
 //! The rail header's "Customize Sidebar" button and the popover it opens
 //! (issue #349).
 //!
-//! Same shape as the diff dock's overflow menu
-//! ([`crate::app::diff_dock::options_menu`]), which is itself modeled on
-//! Cursor's changes-panel menu: a row carrying a side submenu, opened from a
+//! Modeled on Cursor's changes-panel menu: a row carrying a side submenu, opened from a
 //! header button skinned like the rail's other header action.
 //!
 //! The submenu is a set of independent checks rather than a "compact /
@@ -282,7 +280,7 @@ fn render_show_row(
 }
 
 /// The submenu flies out to the right: the rail is the window's left edge, so
-/// the dock's leftward flyout would land off screen here.
+/// a leftward flyout would land off screen here.
 fn render_show_submenu(
     show: SidebarShow,
     ui: crate::theme::UiColors,
