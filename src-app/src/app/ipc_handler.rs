@@ -3059,6 +3059,14 @@ impl PaneFlowApp {
                         emitted_at_ms,
                     )
                 };
+                // Subagent work is the parent still working: keep a thinking
+                // parent's activity clock fresh so a long subagent does not
+                // make it read as stalled. Its state is not touched.
+                if let Some(parent) = self.workspaces[ws_idx].agent_sessions.get_mut(&pid)
+                    && parent.state == ai_types::AgentState::Thinking
+                {
+                    parent.last_activity = Instant::now();
+                }
                 if changed {
                     cx.notify();
                 }

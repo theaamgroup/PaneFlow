@@ -148,8 +148,11 @@ impl GrokHookFileGuard {
 impl Drop for GrokHookFileGuard {
     fn drop(&mut self) {
         let source = std::mem::take(&mut self.source);
+        // An older version's file this session outlived its creator on is
+        // PaneFlow's too, and the last holder removes it.
+        let legacy = grok_legacy_sources().unwrap_or_default();
         cleanup_accepted_owned_file(&self.path, &mut self.lease, &|existing| {
-            is_own_or_sibling_rendering(existing, &source)
+            is_own_or_sibling_rendering(existing, &source) || is_legacy_rendering(existing, &legacy)
         });
     }
 }
@@ -872,8 +875,21 @@ mod tests {
             "the older instance's file is not this session's to delete"
         );
 
-        // Once the older session is gone, the next launch upgrades it.
+        // The older session exits first: this session, now the last holder,
+        // removes the older file when it ends.
+        let guard = GrokHookFileGuard::install_at(&directory).expect("shared again");
         drop(older_session);
+        drop(guard);
+        assert!(
+            !path.exists(),
+            "the last holder removes a PaneFlow-created older file"
+        );
+
+        // A crash left it behind instead: the next launch upgrades it.
+        std::fs::write(&path, &older).unwrap();
+        let mut crashed = HookLease::acquire(&path).unwrap();
+        crashed.mark_created().unwrap();
+        drop(crashed);
         let guard = GrokHookFileGuard::install_at(&directory)
             .expect("an older PaneFlow-created file must be upgraded by its last holder");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), source);

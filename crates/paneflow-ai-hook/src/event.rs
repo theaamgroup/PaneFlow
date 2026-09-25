@@ -95,7 +95,6 @@ pub(crate) enum DropReason {
     InformationalNotification(Option<String>),
     LlmCallContinuesWithToolCalls(u64),
     MissingSubagentId,
-    SubagentToolUse,
 }
 
 impl fmt::Display for DropReason {
@@ -112,9 +111,6 @@ impl fmt::Display for DropReason {
             }
             Self::MissingSubagentId => {
                 formatter.write_str("dropping subagent event without an agent id")
-            }
-            Self::SubagentToolUse => {
-                formatter.write_str("dropping a subagent's tool use: it is not the parent's")
             }
         }
     }
@@ -154,6 +150,13 @@ pub(crate) fn build_frame(
             .and_then(Value::as_u64)
             .and_then(SessionPid::from_u64)
     });
+
+    let subagent_heartbeat = matches!(event, HookEvent::PreToolUse | HookEvent::PostToolUse)
+        && context.tool.as_str() == paneflow_ipc_client::ai_hook::DEFAULT_TOOL
+        && hook_payload
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty());
 
     let method = match event {
         HookEvent::SessionStart => {
@@ -204,24 +207,30 @@ pub(crate) fn build_frame(
         // subagent. That tool call is the subagent's: sent as the parent's,
         // it would mark a parent whose turn already ended as working again,
         // and no later frame would finish it, since a subagent's stop no
-        // longer stops the parent. Other agents' tool payloads are not
-        // documented to carry the id only then, so theirs still go through.
-        HookEvent::PreToolUse | HookEvent::PostToolUse => {
-            if context.tool.as_str() == paneflow_ipc_client::ai_hook::DEFAULT_TOOL
-                && hook_payload
-                    .get("agent_id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| !id.trim().is_empty())
-            {
-                return Ok(BuildOutcome::Drop(DropReason::SubagentToolUse));
+        // longer stops the parent. It goes out as an idempotent subagent
+        // start instead, a heartbeat that keeps a working parent's activity
+        // clock fresh and restores a lost start. Other agents' tool payloads
+        // are not documented to carry the id only then, so theirs go through.
+        HookEvent::PreToolUse | HookEvent::PostToolUse if subagent_heartbeat => {
+            if subagent_id(&hook_payload).is_none() {
+                return Ok(BuildOutcome::Drop(DropReason::MissingSubagentId));
             }
-            AiHookMethod::ToolUse
+            AiHookMethod::SubagentStart
         }
+        HookEvent::PreToolUse | HookEvent::PostToolUse => AiHookMethod::ToolUse,
         HookEvent::PermissionRequest => AiHookMethod::Notification,
         HookEvent::Exit => AiHookMethod::Exit,
     };
 
-    let compact_payload = compact_hook_payload(event, &hook_payload);
+    let compact_payload = if subagent_heartbeat {
+        let mut compact = serde_json::Map::new();
+        if let Some(id) = subagent_id(&hook_payload) {
+            compact.insert("subagent_id".to_owned(), Value::String(id));
+        }
+        Value::Object(compact)
+    } else {
+        compact_hook_payload(event, &hook_payload)
+    };
     let mut params = AiHookParams::new(context.workspace_id, context.tool, compact_payload);
     params.pid = session_pid;
     // Stamped here, in the producing process, not on arrival: the server keeps
@@ -230,7 +239,7 @@ pub(crate) fn build_frame(
     params.emitted_at_ms = paneflow_ipc_client::ai_hook::epoch_millis();
     params.surface_id = context.surface_id;
 
-    if matches!(event, HookEvent::PreToolUse | HookEvent::PostToolUse) {
+    if matches!(event, HookEvent::PreToolUse | HookEvent::PostToolUse) && !subagent_heartbeat {
         params.tool_name = hook_payload
             .get("tool_name")
             .and_then(Value::as_str)
@@ -464,13 +473,17 @@ mod tests {
     }
 
     #[test]
-    fn a_claude_subagents_tool_use_is_not_reported_as_the_parents() {
+    fn a_claude_subagents_tool_use_is_a_subagent_heartbeat_not_the_parents() {
         for event in [HookEvent::PreToolUse, HookEvent::PostToolUse] {
             let payload = json!({"tool_name": "Bash", "agent_id": "a68ad35317fb486f6"});
-            match build_frame(event, test_context(), payload.clone()).expect("not an error") {
-                BuildOutcome::Drop(reason) => assert_eq!(reason, DropReason::SubagentToolUse),
-                BuildOutcome::Send(frame) => panic!("unexpected frame: {:?}", frame.to_value()),
-            }
+            let frame =
+                sent_frame(build_frame(event, test_context(), payload.clone()).expect("frame"));
+            assert_eq!(frame["method"], "ai.subagent_start");
+            assert_eq!(
+                frame["params"]["hook_payload"],
+                json!({"subagent_id": "a68ad35317fb486f6"})
+            );
+            assert!(frame["params"].get("tool_name").is_none());
             // The parent's own tool use, and other agents', still go through.
             let parent = sent_frame(
                 build_frame(event, test_context(), json!({"tool_name": "Bash"})).expect("frame"),
