@@ -124,7 +124,7 @@ tracked agent returns idle state, not an error.
 | Property         | Value                                                                                |
 | ---------------- | ------------------------------------------------------------------------------------ |
 | Endpoint         | Unix domain socket at `<runtime_dir>/paneflow/paneflow.sock`, or `<runtime_dir>/paneflow-dev/paneflow-dev.sock` for a debug build |
-| Runtime dir      | Resolved by `$XDG_RUNTIME_DIR` -> `dirs::runtime_dir()` (`None` on macOS) -> `$TMPDIR` (the usual macOS answer, `/var/folders/.../T/`) -> `dirs::cache_dir()/run` |
+| Runtime dir      | `$TMPDIR` when it names an existing directory (the usual macOS answer, `/var/folders/.../T/`), otherwise `dirs::cache_dir()/run` (`~/Library/Caches/run`). `$XDG_RUNTIME_DIR` is deliberately not consulted, so a Finder-launched GUI and a shell CLI agree; `PANEFLOW_SOCKET_PATH` overrides both |
 | Override         | `PANEFLOW_SOCKET_PATH` wins over the computed path |
 | Path limit       | The composed path is rejected if it would exceed the `sockaddr_un.sun_path` ceiling of 104 bytes, and IPC is disabled with a warning |
 | Permissions      | Mode `0600` after bind, plus a per-connection peer-UID check |
