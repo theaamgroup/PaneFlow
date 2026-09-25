@@ -2925,12 +2925,7 @@ impl PaneFlowApp {
                     }
                     // The binary is gone, and every subagent it ran went
                     // with it, whether or not their stops were delivered.
-                    if let (Some(pid), Some(ws)) = (
-                        pid,
-                        self.workspaces.iter_mut().find(|ws| ws.id == workspace_id),
-                    ) {
-                        ws.running_subagents.forget(pid);
-                    }
+                    forget_subagents_everywhere(&mut self.workspaces, key);
                     // Clean exits intentionally fire no notification here.
                     self.sync_attention(cx);
                     self.agent_sessions_changed(cx);
@@ -2953,11 +2948,10 @@ impl PaneFlowApp {
                 let tool = crate::agent_launcher::TerminalAgent::from_binary(tool_name.as_str());
                 let explicit_surface_id = self.validated_frame_surface_id(params, cx);
 
+                // The session is over, so are its subagents, including when
+                // a legacy no-PID frame falls back to a real-PID row below.
+                let mut subagent_parent = pid;
                 if let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id == workspace_id) {
-                    let subagents_cleared = pid.is_some_and(|pid| ws.running_subagents.forget(pid));
-                    if subagents_cleared {
-                        cx.notify();
-                    }
                     // Prefer exact PID removal. Legacy no-PID frames are only
                     // allowed to clear an unambiguous row: first by explicit
                     // surface_id when present, otherwise by tool only when a
@@ -2993,11 +2987,17 @@ impl PaneFlowApp {
                         );
                         if let Some(k) = pid_to_remove {
                             ws.agent_sessions.remove(&k);
+                            subagent_parent = Some(k);
                             true
                         } else {
                             false
                         }
                     };
+                    if subagent_parent
+                        .is_some_and(|key| forget_subagents_everywhere(&mut self.workspaces, key))
+                    {
+                        cx.notify();
+                    }
                     if removed {
                         self.sync_attention(cx);
                         // EP-001 US-003 (cli-cockpit): a removed session
@@ -3029,22 +3029,116 @@ impl PaneFlowApp {
                 let Some(subagent_id) = read_subagent_id(params) else {
                     return serde_json::json!({"error": "Missing or invalid subagent_id"});
                 };
-                let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id == workspace_id) else {
+                let Some(ws_idx) = self.workspaces.iter().position(|ws| ws.id == workspace_id)
+                else {
                     return serde_json::json!({"error": format!("Unknown workspace_id: {workspace_id}")});
                 };
+                let emitted_at_ms = read_emitted_at(params);
                 let changed = if method == METHOD_SUBAGENT_START {
-                    ws.running_subagents.start(pid, &subagent_id)
+                    let surface_id = self.validated_frame_surface_id(params, cx).or_else(|| {
+                        self.workspaces[ws_idx]
+                            .agent_sessions
+                            .get(&pid)
+                            .and_then(|session| session.surface_id)
+                    });
+                    record_subagent_start(
+                        &mut self.workspaces,
+                        ws_idx,
+                        pid,
+                        &subagent_id,
+                        emitted_at_ms,
+                        super::event_handlers::pid_start_time(pid),
+                        surface_id,
+                    )
                 } else {
-                    ws.running_subagents.stop(pid, &subagent_id)
+                    record_subagent_stop(
+                        &mut self.workspaces,
+                        ws_idx,
+                        pid,
+                        &subagent_id,
+                        emitted_at_ms,
+                    )
                 };
                 if changed {
                     cx.notify();
                 }
-                serde_json::json!({"running_subagents": ws.running_subagents.total()})
+                serde_json::json!({"running_subagents": self.workspaces[ws_idx].running_subagents.total()})
             }
             _ => JsonRpcError::method_not_found(format!("Method not found: {method}")).into_value(),
         }
     }
+}
+
+/// Record a subagent start in the workspace the frame resolved to. A PID is
+/// one process machine-wide, so an entry another workspace still holds for it
+/// was left there by a pane move and comes along first: the start and its
+/// stop then meet in one tracker. Returns whether any count changed.
+fn record_subagent_start(
+    workspaces: &mut [crate::workspace::Workspace],
+    ws_idx: usize,
+    pid: u32,
+    subagent_id: &str,
+    emitted_at_ms: Option<u64>,
+    proc_start: Option<u64>,
+    surface_id: Option<u64>,
+) -> bool {
+    let mut changed = false;
+    for idx in 0..workspaces.len() {
+        if idx == ws_idx || !workspaces[idx].running_subagents.contains_pid(pid) {
+            continue;
+        }
+        for (pid, parent) in workspaces[idx].running_subagents.take(|p, _| p == pid) {
+            workspaces[ws_idx].running_subagents.absorb(pid, parent);
+            changed = true;
+        }
+    }
+    workspaces[ws_idx].running_subagents.start(
+        pid,
+        subagent_id,
+        emitted_at_ms,
+        proc_start,
+        surface_id,
+    ) || changed
+}
+
+/// Record a subagent stop wherever its parent is tracked, which after a pane
+/// move is not necessarily the workspace the frame resolved to. A stop for a
+/// parent nobody tracks yet beat its start here; the resolving workspace
+/// remembers it so that start is recognised as stale.
+fn record_subagent_stop(
+    workspaces: &mut [crate::workspace::Workspace],
+    ws_idx: usize,
+    pid: u32,
+    subagent_id: &str,
+    emitted_at_ms: Option<u64>,
+) -> bool {
+    let mut tracked = false;
+    let mut changed = false;
+    for ws in workspaces.iter_mut() {
+        if ws.running_subagents.contains_pid(pid) {
+            tracked = true;
+            changed |= ws.running_subagents.stop(pid, subagent_id, emitted_at_ms);
+        }
+    }
+    if !tracked && let Some(ws) = workspaces.get_mut(ws_idx) {
+        ws.running_subagents
+            .remember_stop(pid, subagent_id, emitted_at_ms);
+    }
+    changed
+}
+
+/// Drop one agent process's subagents from every workspace. Returns whether
+/// any count changed.
+pub(crate) fn forget_subagents_everywhere(
+    workspaces: &mut [crate::workspace::Workspace],
+    pid: u32,
+) -> bool {
+    // Every workspace, not the first hit: `any` would stop early.
+    let mut changed = false;
+    for ws in workspaces.iter_mut() {
+        changed |= ws.running_subagents.forget(pid);
+    }
+    changed
 }
 
 /// The subagent pairing id from `hook_payload.subagent_id`, trimmed. Empty or
@@ -3739,6 +3833,84 @@ mod tests {
     // rejected - that band is server-reserved (synthetic keys) AND immune to
     // the stale-PID sweep, so accepting it would allow unbounded permanent
     // session accumulation from forged frames on the same-UID socket.
+    #[test]
+    fn subagent_frames_pair_across_a_pane_move() {
+        use crate::workspace::Workspace;
+        let mut workspaces = vec![
+            Workspace::empty_with_cwd_and_id(1, "a", std::path::PathBuf::new()),
+            Workspace::empty_with_cwd_and_id(2, "b", std::path::PathBuf::new()),
+        ];
+        // Started while the pane lived in workspace 1.
+        assert!(record_subagent_start(
+            &mut workspaces,
+            0,
+            42,
+            "x",
+            None,
+            None,
+            None
+        ));
+        assert!(record_subagent_start(
+            &mut workspaces,
+            0,
+            42,
+            "y",
+            None,
+            None,
+            None
+        ));
+        // Its stop now resolves to workspace 2, and still pairs.
+        assert!(record_subagent_stop(&mut workspaces, 1, 42, "x", None));
+        assert_eq!(workspaces[0].running_subagents.total(), 1);
+        // The next start from the moved pane brings the rest along.
+        assert!(record_subagent_start(
+            &mut workspaces,
+            1,
+            42,
+            "z",
+            None,
+            None,
+            None
+        ));
+        assert_eq!(workspaces[0].running_subagents.total(), 0);
+        assert_eq!(workspaces[1].running_subagents.total(), 2);
+
+        assert!(forget_subagents_everywhere(&mut workspaces, 42));
+        assert!(!forget_subagents_everywhere(&mut workspaces, 42));
+        assert!(
+            workspaces
+                .iter()
+                .all(|ws| ws.running_subagents.total() == 0)
+        );
+    }
+
+    #[test]
+    fn a_subagent_stop_that_beats_its_start_keeps_the_count_at_zero() {
+        use crate::workspace::Workspace;
+        let mut workspaces = vec![Workspace::empty_with_cwd_and_id(
+            1,
+            "a",
+            std::path::PathBuf::new(),
+        )];
+        assert!(!record_subagent_stop(
+            &mut workspaces,
+            0,
+            42,
+            "x",
+            Some(2_000)
+        ));
+        assert!(!record_subagent_start(
+            &mut workspaces,
+            0,
+            42,
+            "x",
+            Some(1_000),
+            None,
+            None
+        ));
+        assert_eq!(workspaces[0].running_subagents.total(), 0);
+    }
+
     #[test]
     fn read_subagent_id_takes_the_payload_id_and_refuses_non_ids() {
         let id = |v: serde_json::Value| {

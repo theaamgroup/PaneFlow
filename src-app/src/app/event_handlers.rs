@@ -1130,6 +1130,14 @@ impl PaneFlowApp {
     ) {
         let mut changed = false;
         for ws in &mut self.workspaces {
+            // A parent that is gone from this pane took its subagents with it.
+            // A live one (suspended to the prompt) keeps them.
+            if ws.running_subagents.retain(|pid, proc_start, surface| {
+                surface != Some(surface_id)
+                    || (pid <= i32::MAX as u32 && pid_matches(pid, proc_start))
+            }) {
+                changed = true;
+            }
             if ws.agent_sessions.is_empty() {
                 continue;
             }
@@ -1203,6 +1211,14 @@ impl PaneFlowApp {
     pub(crate) fn purge_sessions_for_surface(&mut self, surface_id: u64, cx: &mut Context<Self>) {
         let mut changed = false;
         for ws in &mut self.workspaces {
+            // The pane is gone and the agent in it with it; its subagents
+            // leave now instead of at the next sweep.
+            if ws
+                .running_subagents
+                .retain(|_, _, surface| surface != Some(surface_id))
+            {
+                changed = true;
+            }
             if ws.agent_sessions.is_empty() {
                 continue;
             }
@@ -1271,14 +1287,13 @@ impl PaneFlowApp {
         for ws in &mut self.workspaces {
             // Subagents die with the agent process that ran them. This is the
             // backstop for a lost `ai.subagent_stop`, `ai.exit`, and
-            // `ai.session_end` all at once (a SIGKILLed agent). A parent
-            // session row, when there is one, pins the process start time
-            // against PID reuse.
-            let sessions = &ws.agent_sessions;
-            if ws.running_subagents.retain_pids(|pid| {
-                pid <= i32::MAX as u32
-                    && pid_matches(pid, sessions.get(&pid).and_then(|s| s.proc_start))
-            }) {
+            // `ai.session_end` all at once (a SIGKILLed agent). The start time
+            // the parent's first start frame pinned guards against PID reuse;
+            // the session row cannot, since it may be gone or replaced.
+            if ws
+                .running_subagents
+                .retain(|pid, proc_start, _| pid <= i32::MAX as u32 && pid_matches(pid, proc_start))
+            {
                 changed = true;
             }
             if ws.agent_sessions.is_empty() {

@@ -56,9 +56,10 @@
 //! - `system.ping` / `system.capabilities` / `system.identify` - stateless
 //!   health checks handled directly on the socket thread.
 //! - `ai.session_start` / `ai.prompt_submit` / `ai.tool_use` /
-//!   `ai.notification` / `ai.stop` / `ai.exit` / `ai.session_end` - AI
-//!   hook lifecycle (`ai.exit` carries the wrapped agent binary's real
-//!   exit status, EP-004 US-010).
+//!   `ai.notification` / `ai.stop` / `ai.exit` / `ai.session_end` /
+//!   `ai.subagent_start` / `ai.subagent_stop` - AI hook lifecycle
+//!   (`ai.exit` carries the wrapped agent binary's real exit status,
+//!   EP-004 US-010).
 //!
 //! Handlers may return a structured JSON-RPC error by emitting the
 //! `_jsonrpc_error` sentinel (see `app::ipc_handler::JsonRpcError`); the

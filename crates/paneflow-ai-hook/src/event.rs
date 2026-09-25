@@ -95,6 +95,7 @@ pub(crate) enum DropReason {
     InformationalNotification(Option<String>),
     LlmCallContinuesWithToolCalls(u64),
     MissingSubagentId,
+    SubagentToolUse,
 }
 
 impl fmt::Display for DropReason {
@@ -111,6 +112,9 @@ impl fmt::Display for DropReason {
             }
             Self::MissingSubagentId => {
                 formatter.write_str("dropping subagent event without an agent id")
+            }
+            Self::SubagentToolUse => {
+                formatter.write_str("dropping a subagent's tool use: it is not the parent's")
             }
         }
     }
@@ -196,7 +200,23 @@ pub(crate) fn build_frame(
                 AiHookMethod::SubagentStop
             }
         }
-        HookEvent::PreToolUse | HookEvent::PostToolUse => AiHookMethod::ToolUse,
+        // Claude Code puts `agent_id` on a hook only when it fires inside a
+        // subagent. That tool call is the subagent's: sent as the parent's,
+        // it would mark a parent whose turn already ended as working again,
+        // and no later frame would finish it, since a subagent's stop no
+        // longer stops the parent. Other agents' tool payloads are not
+        // documented to carry the id only then, so theirs still go through.
+        HookEvent::PreToolUse | HookEvent::PostToolUse => {
+            if context.tool.as_str() == paneflow_ipc_client::ai_hook::DEFAULT_TOOL
+                && hook_payload
+                    .get("agent_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.trim().is_empty())
+            {
+                return Ok(BuildOutcome::Drop(DropReason::SubagentToolUse));
+            }
+            AiHookMethod::ToolUse
+        }
         HookEvent::PermissionRequest => AiHookMethod::Notification,
         HookEvent::Exit => AiHookMethod::Exit,
     };
@@ -440,6 +460,28 @@ mod tests {
                 assert_eq!(frame["params"]["hook_payload"]["subagent_id"], expected);
                 assert!(frame["params"]["hook_payload"].get("summary").is_none());
             }
+        }
+    }
+
+    #[test]
+    fn a_claude_subagents_tool_use_is_not_reported_as_the_parents() {
+        for event in [HookEvent::PreToolUse, HookEvent::PostToolUse] {
+            let payload = json!({"tool_name": "Bash", "agent_id": "a68ad35317fb486f6"});
+            match build_frame(event, test_context(), payload.clone()).expect("not an error") {
+                BuildOutcome::Drop(reason) => assert_eq!(reason, DropReason::SubagentToolUse),
+                BuildOutcome::Send(frame) => panic!("unexpected frame: {:?}", frame.to_value()),
+            }
+            // The parent's own tool use, and other agents', still go through.
+            let parent = sent_frame(
+                build_frame(event, test_context(), json!({"tool_name": "Bash"})).expect("frame"),
+            );
+            assert_eq!(parent["method"], "ai.tool_use");
+            let codex = FrameContext {
+                tool: AiToolName::parse("codex").expect("valid tool"),
+                ..test_context()
+            };
+            let frame = sent_frame(build_frame(event, codex, payload).expect("frame"));
+            assert_eq!(frame["method"], "ai.tool_use");
         }
     }
 

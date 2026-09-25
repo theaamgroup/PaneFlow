@@ -2846,10 +2846,6 @@ fn tab_pane_icon_lane(
         .into_any_element()
 }
 
-/// `row_key` scopes the element and animation ids to one sidebar row. It is a
-/// string, not an id: workspace ids and tab ids come from independent counters,
-/// so a folder row and a tab row could otherwise collide on the same numeric
-/// key inside the same list.
 /// Gap between a workspace name and its running-agent count.
 const SIDEBAR_RUNNING_COUNT_GAP: f32 = 5.;
 
@@ -2911,6 +2907,10 @@ fn running_agent_count_badge(
     )
 }
 
+/// `row_key` scopes the element and animation ids to one sidebar row. It is a
+/// string, not an id: workspace ids and tab ids come from independent counters,
+/// so a folder row and a tab row could otherwise collide on the same numeric
+/// key inside the same list.
 fn render_workspace_agent_summary(
     summary: SidebarAgentSummary,
     row_key: &str,

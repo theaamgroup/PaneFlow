@@ -110,6 +110,20 @@ running count up until the agent exits. The count keys ids per agent PID, so a
 start that arrives twice (Grok also runs the Claude and Cursor hook files) is
 counted once. Grok's id field is read from its binary, not its docs.
 
+Each frame travels on its own connection, so a start can arrive after its
+stop; a start stamped (`emitted_at_ms`) no later than that id's stop is
+ignored. The ids pin the parent's process start time and pane: they follow
+the pane to another workspace, and leave with a stop, the parent's `ai.exit`
+or `ai.session_end`, the pane closing or returning to its prompt without the
+parent, or the stale-PID sweep once the parent is gone or its PID is reused.
+A Claude Code tool hook carrying `agent_id` fires inside a subagent and is
+dropped rather than reported as the parent's tool use. OpenCode looks up a
+child session it did not see created before treating its idle as the root's.
+
+An upgrade that adds hook events leaves an older version's Grok file in
+place while an older instance's session still holds it (Grok reports no
+subagents meanwhile); the last holder's next launch upgrades it.
+
 Safety properties shared by every ephemeral installer: idempotent merge,
 ownership detection by command basename (`paneflow-ai-hook`), orphan sweep on
 the next launch after a SIGKILL, and refusal paths that protect user files -
