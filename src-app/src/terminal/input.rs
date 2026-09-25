@@ -1174,7 +1174,7 @@ impl TerminalView {
     }
 
     pub(super) fn handle_select_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Nested widgets (find bar, composer-adjacent inputs) bind their own
+        // Nested widgets (find bar, text inputs) bind their own
         // SelectAll. Skip when this view's handle is not the focused one.
         if !self.focus_handle(cx).is_focused(window) {
             return;

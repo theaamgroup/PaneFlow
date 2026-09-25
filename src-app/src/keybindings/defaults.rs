@@ -307,10 +307,8 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         context: None,
     },
     // Issue #106: primary left-rail toggle. `secondary-alt-b`: `b` for the
-    // sidebar, kept off
-    // `secondary-shift-b`, which is already `toggle_broadcast_member`. Alt
-    // rather than Shift also keeps it clear of `ctrl-shift-b`-style terminal
-    // chords. Pinned by `primary_sidebar_chord_is_bindable_and_does_not_collide`
+    // sidebar. Alt rather than Shift keeps it clear of `ctrl-shift-b`-style
+    // terminal chords. Pinned by `primary_sidebar_chord_is_bindable_and_does_not_collide`
     // in `apply.rs`.
     DefaultBinding {
         key: "secondary-alt-b",
@@ -331,42 +329,22 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
     DefaultBinding {
         key: "]",
         action_name: "diff_next_hunk",
-        context: Some("DiffView && !Terminal && !TextInput && !PaneflowTextArea"),
+        context: Some("DiffView && !Terminal && !TextInput"),
     },
     DefaultBinding {
         key: "[",
         action_name: "diff_prev_hunk",
-        context: Some("DiffView && !Terminal && !TextInput && !PaneflowTextArea"),
+        context: Some("DiffView && !Terminal && !TextInput"),
     },
     DefaultBinding {
         key: "u",
         action_name: "diff_toggle_view",
-        context: Some("DiffView && !Terminal && !TextInput && !PaneflowTextArea"),
+        context: Some("DiffView && !Terminal && !TextInput"),
     },
     DefaultBinding {
         key: "escape",
         action_name: "diff_dismiss",
-        context: Some("DiffView && !Terminal && !TextInput && !PaneflowTextArea"),
-    },
-    // EP-001 (CLI Cockpit): Composer + broadcast
-    // groups. All three are unclaimed `secondary-shift-…` slots (taken set
-    // before this block: d/e/w/n/q/j/t/z/=/s/a/g) and none shadows a common
-    // shell/readline/TUI chord (FR-12) - Ctrl+Shift+Space/B/M mean nothing to
-    // readline, vim or nano. Remappable like every entry in this table.
-    DefaultBinding {
-        key: "secondary-shift-space",
-        action_name: "open_composer",
-        context: None,
-    },
-    DefaultBinding {
-        key: "secondary-shift-b",
-        action_name: "toggle_broadcast_member",
-        context: None,
-    },
-    DefaultBinding {
-        key: "secondary-shift-m",
-        action_name: "open_broadcast_groups",
-        context: None,
+        context: Some("DiffView && !Terminal && !TextInput"),
     },
     // Pane Overview is global because a terminal usually owns the focus.
     DefaultBinding {

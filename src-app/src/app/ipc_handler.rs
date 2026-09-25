@@ -1698,7 +1698,6 @@ impl PaneFlowApp {
                             false
                         };
                         if filled {
-                            app.agent_sessions_changed(cx);
                             cx.notify();
                         }
                     });
@@ -1956,9 +1955,6 @@ impl PaneFlowApp {
             && bind_session_surface(&mut ws.agent_sessions, key, sid)
         {
             self.sync_attention(cx);
-            // EP-001 US-003 (cli-cockpit): a late surface resolution can flip
-            // a pane's busy verdict - refresh the Composer chip.
-            self.agent_sessions_changed(cx);
             cx.notify();
         }
     }
@@ -2325,8 +2321,8 @@ impl PaneFlowApp {
                 // `--paste` override); absent, it is auto-decided per target.
                 let paste_param = params.get("paste").and_then(|p| p.as_bool());
                 // EP-001 US-003: an empty payload is a no-op EXCEPT as a bare
-                // submit (`send --submit ""` presses Enter on an already-filled
-                // composer). Only then is the historical text-required guard
+                // submit (`send --submit ""` presses Enter on an agent prompt
+                // that is already filled). Only then is the historical text-required guard
                 // lifted; without `--submit` the refusal is unchanged.
                 if text.is_empty() && !submit {
                     return JsonRpcError::invalid_params("Missing 'text' parameter").into_value();
@@ -2394,7 +2390,7 @@ impl PaneFlowApp {
                 }
                 // Submit. The bracketed-paste path defers the `\r` off the render
                 // thread (US-001) so the agent does not swallow it; the verbatim
-                // path (shell command, or empty-composer submit) sends it inline.
+                // path (shell command, or an empty-text submit) sends it inline.
                 if submit {
                     if paste && !text.is_empty() {
                         let floor = std::time::Duration::from_millis(
@@ -2602,9 +2598,6 @@ impl PaneFlowApp {
                         cx,
                     );
                     self.sync_attention(cx);
-                    // EP-001 US-003 (cli-cockpit): the target just turned
-                    // busy - refresh the Composer chip (no flush can apply).
-                    self.agent_sessions_changed(cx);
                     serde_json::json!({"status": "running"})
                 } else {
                     serde_json::json!({"error": format!("Unknown workspace_id: {workspace_id}")})
@@ -2650,8 +2643,6 @@ impl PaneFlowApp {
                         cx,
                     );
                     self.sync_attention(cx);
-                    // EP-001 US-003 (cli-cockpit): see the prompt_submit arm.
-                    self.agent_sessions_changed(cx);
                     serde_json::json!({"status": "running"})
                 } else {
                     serde_json::json!({"error": format!("Unknown workspace_id: {workspace_id}")})
@@ -2706,10 +2697,6 @@ impl PaneFlowApp {
                         cx.background_executor().clone(),
                     );
                     self.sync_attention(cx);
-                    // EP-001 US-003 (cli-cockpit): WaitingForInput is a safe
-                    // prefill target - flush this pane's queued prompt now
-                    // (main thread: transition and flush are serialized).
-                    self.agent_sessions_changed(cx);
                     serde_json::json!({"status": "waiting"})
                 } else {
                     serde_json::json!({"error": format!("Unknown workspace_id: {workspace_id}")})
@@ -2816,9 +2803,6 @@ impl PaneFlowApp {
                         }
                     }
                     self.sync_attention(cx);
-                    // EP-001 US-003 (cli-cockpit): the turn ended - flush any
-                    // queued prompt for this pane (prefill only).
-                    self.agent_sessions_changed(cx);
 
                     // Auto-clear the session 5 s after stop unless something
                     // else (new prompt_submit, tool_use) bumps it back to
@@ -2839,7 +2823,6 @@ impl PaneFlowApp {
                                     {
                                         ws.agent_sessions.remove(&session_key);
                                         app.sync_attention(cx);
-                                        app.agent_sessions_changed(cx);
                                         cx.notify();
                                     }
                                 });
@@ -2925,7 +2908,6 @@ impl PaneFlowApp {
                     forget_subagents_everywhere(&mut self.workspaces, key);
                     // Clean exits intentionally fire no notification here.
                     self.sync_attention(cx);
-                    self.agent_sessions_changed(cx);
                     serde_json::json!({"status": if errored { "errored" } else { "finished" }})
                 } else {
                     serde_json::json!({"error": format!("Unknown workspace_id: {workspace_id}")})
@@ -2959,9 +2941,6 @@ impl PaneFlowApp {
                     let removed = outcome.removed;
                     if removed {
                         self.sync_attention(cx);
-                        // EP-001 US-003 (cli-cockpit): a removed session
-                        // leaves a bare shell - always a safe prefill target.
-                        self.agent_sessions_changed(cx);
                         cx.notify();
                     }
                     serde_json::json!({"cleared": removed})

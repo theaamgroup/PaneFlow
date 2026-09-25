@@ -493,60 +493,37 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
     ActionMeta {
         name: "diff_next_hunk",
         factory: || Box::new(crate::DiffNextHunk),
-        context: "DiffView && !Terminal && !TextInput && !PaneflowTextArea",
+        context: "DiffView && !Terminal && !TextInput",
         description: "Diff: next hunk",
         group: ShortcutGroup::Diff,
     },
     ActionMeta {
         name: "diff_prev_hunk",
         factory: || Box::new(crate::DiffPrevHunk),
-        context: "DiffView && !Terminal && !TextInput && !PaneflowTextArea",
+        context: "DiffView && !Terminal && !TextInput",
         description: "Diff: previous hunk",
         group: ShortcutGroup::Diff,
     },
     ActionMeta {
         name: "diff_review_with_agent",
         factory: || Box::new(crate::DiffReviewWithAgent),
-        context: "DiffView && !Terminal && !TextInput && !PaneflowTextArea",
+        context: "DiffView && !Terminal && !TextInput",
         description: "Diff: review with agent",
         group: ShortcutGroup::Diff,
     },
     ActionMeta {
         name: "diff_toggle_view",
         factory: || Box::new(crate::DiffToggleView),
-        context: "DiffView && !Terminal && !TextInput && !PaneflowTextArea",
+        context: "DiffView && !Terminal && !TextInput",
         description: "Diff: toggle unified / split",
         group: ShortcutGroup::Diff,
     },
     ActionMeta {
         name: "diff_dismiss",
         factory: || Box::new(crate::DiffDismiss),
-        context: "DiffView && !Terminal && !TextInput && !PaneflowTextArea",
+        context: "DiffView && !Terminal && !TextInput",
         description: "Diff: close popover / refocus body",
         group: ShortcutGroup::Diff,
-    },
-    // EP-001 (CLI Cockpit): CLI cockpit steering.
-    // Global context - the handlers gate on `AppMode::Cli` themselves.
-    ActionMeta {
-        name: "open_composer",
-        factory: || Box::new(crate::OpenComposer),
-        context: "",
-        description: "Open prompt composer",
-        group: ShortcutGroup::Agents,
-    },
-    ActionMeta {
-        name: "toggle_broadcast_member",
-        factory: || Box::new(crate::ToggleBroadcastMember),
-        context: "",
-        description: "Toggle pane in broadcast group",
-        group: ShortcutGroup::Agents,
-    },
-    ActionMeta {
-        name: "open_broadcast_groups",
-        factory: || Box::new(crate::OpenBroadcastGroups),
-        context: "",
-        description: "Broadcast groups",
-        group: ShortcutGroup::Agents,
     },
     // Keep the overview with pane navigation so its visible button name is easy to find.
     ActionMeta {

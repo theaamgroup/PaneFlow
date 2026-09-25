@@ -427,8 +427,7 @@ impl PaneFlowApp {
     /// Build the deferred pane context menu, anchored on the pane header
     /// (EP-002 US-007). A pane is mono-surface, so the former "Move to pane…"
     /// entry is gone along with the tab strip that anchored it: what remains
-    /// are the surface actions (copy path, cancel a queued prompt, close the
-    /// pane). No dead or disabled move entry is left behind.
+    /// are the surface actions (copy path, close the pane). No dead or disabled move entry is left behind.
     /// US-010: right-click menu on a sidebar tab row. Two entries - Rename and
     /// Close - in the shared select-menu language of the workspace menu. Close
     /// keeps FR-01: the last tab of a workspace is replaced by an empty one,
@@ -694,16 +693,7 @@ impl PaneFlowApp {
                 .unwrap_or_else(|| path.to_string_lossy().into_owned())
         });
 
-        // EP-001 US-003 (cli-cockpit): cancel this surface's queued prompt -
-        // the non-Composer cancel path. Only shown when a buffer exists.
-        let pending_sid = source
-            .read(cx)
-            .surface
-            .as_terminal()
-            .map(|t| t.entity_id().as_u64())
-            .filter(|sid| self.broadcast.pending.contains_key(sid));
-
-        let rows = 3 + usize::from(pending_sid.is_some()) + 1;
+        let rows = 3 + 1;
         let menu_height = px(8. + rows as f32 * 29. + 18.);
         let menu_pos = clamped_context_menu_position(menu.position, px(248.), menu_height, window);
 
@@ -782,21 +772,6 @@ impl PaneFlowApp {
                 "pane-context-copy-relative-path-disabled".into(),
                 "Copy Relative Path unavailable",
                 ui,
-            ));
-        }
-
-        if let Some(sid) = pending_sid {
-            context_menu = context_menu.child(self.render_select_menu_item(
-                SharedString::from("pane-cancel-queued"),
-                "Cancel queued prompt",
-                None,
-                ui,
-                cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                    this.pane_menu_open = None;
-                    this.cancel_pending_for(sid, cx);
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
             ));
         }
 

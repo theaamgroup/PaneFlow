@@ -2152,15 +2152,6 @@ impl PaneFlowApp {
         }
         self.save_session(cx);
         cx.notify();
-        // EP-001 (cli-cockpit): the closed workspace's panes may have carried
-        // a Composer target, queued prompts, or group memberships. Refresh:
-        // a dead-target Composer closes itself (refresh_composer_slot),
-        // stale group members are pruned, and orphaned buffers drop on the
-        // next flush (their terminals no longer resolve).
-        self.refresh_composer_slot(cx);
-        self.sync_broadcast_stripes(cx);
-        self.flush_pending_prefill(cx);
-        self.sync_pending_chips(cx);
         // US-014 (prd-git-diff-mode-2026-Q3.md): in Diff mode, closing a
         // workspace reconciles the diff (a Multi-project group / column for the
         // closed workspace must drop). Deferred so the rebuild runs after the
@@ -4574,14 +4565,10 @@ mod tests {
     }
 
     #[test]
-    fn close_workspace_shared_closer_runs_composer_and_diff_teardown() {
+    fn close_workspace_shared_closer_runs_diff_teardown() {
         let src = include_str!("mod.rs");
         let closer = source_slice(src, "fn close_workspace_at_inner", "fn reorder_workspace");
         for helper in [
-            "refresh_composer_slot",
-            "sync_broadcast_stripes",
-            "flush_pending_prefill",
-            "sync_pending_chips",
             "reconcile_diff_after_workspace_change",
             "active_idx_after_workspace_remove",
         ] {

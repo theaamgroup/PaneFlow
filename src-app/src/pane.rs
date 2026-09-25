@@ -32,7 +32,6 @@ use gpui::{
 
 use crate::settings::components::with_alpha;
 use crate::ui_primitives::squircle::{squircle_border, squircle_fill};
-use crate::ui_primitives::{AnimatedHoverExt, lerp_color};
 
 use crate::diff::DiffView;
 use crate::pane_drag::{
@@ -368,21 +367,6 @@ pub struct Pane {
     /// Last observed content size (captured in the `on_drag_move` handler), used
     /// to convert a [`DropEdge`] into an absolute-pixel rectangle for the glide.
     overlay_pane_size: Size<Pixels>,
-    /// EP-001 US-001/US-003 (cli-cockpit): the Composer overlay pushed by
-    /// `PaneFlowApp::refresh_composer_slot` when this pane is the Composer
-    /// target. `None` on every other pane. The pane renders it bottom-anchored
-    /// and routes gestures back through the slot's closures - it never reads
-    /// app state.
-    composer_slot: Option<crate::app::composer::ComposerSlot>,
-    /// EP-001 US-003: this pane's terminal holds a queued prompt
-    /// (broadcast/Composer buffer awaiting the agent's next idle transition).
-    /// Pushed by `PaneFlowApp::sync_pending_chips`; drives the "1 queued" chip.
-    pending_prefill: bool,
-    /// EP-001 US-002: broadcast-group stripe color index (`UiColors::group_*`)
-    /// when this pane is a group member. Pushed by
-    /// `PaneFlowApp::sync_broadcast_stripes`. The stripe is a DISTINCT element
-    /// from the attention border below - the pane border slot stays the glow's.
-    broadcast_stripe: Option<usize>,
     /// Issue #83: `true` while this pane's header `x` is armed - one click has
     /// landed, a live agent would die, and the next click closes for real.
     /// Pushed by `PaneFlowApp::set_pending_close`, which owns the single
@@ -452,9 +436,6 @@ impl Pane {
             overlay_current: Rc::new(Cell::new((0.0, 0.0, 0.0, 0.0))),
             overlay_seq: 0,
             overlay_pane_size: Size::default(),
-            composer_slot: None,
-            pending_prefill: false,
-            broadcast_stripe: None,
             close_armed: false,
             rename: None,
             review_menu_open: false,
@@ -491,27 +472,6 @@ impl Pane {
         }
     }
 
-    /// EP-001 US-001 (cli-cockpit): install/clear the Composer overlay on
-    /// this pane. Always notifies - the slot carries live `busy`/group data
-    /// recomputed by the pusher, and the closure fields defeat `PartialEq`.
-    pub fn set_composer_slot(
-        &mut self,
-        slot: Option<crate::app::composer::ComposerSlot>,
-        cx: &mut Context<Self>,
-    ) {
-        self.composer_slot = slot;
-        cx.notify();
-    }
-
-    /// EP-001 US-003: set/clear the queued-prompt indicator. Idempotent push
-    /// from `PaneFlowApp::sync_pending_chips` - repaints only on change.
-    pub fn set_pending_prefill(&mut self, pending: bool, cx: &mut Context<Self>) {
-        if self.pending_prefill != pending {
-            self.pending_prefill = pending;
-            cx.notify();
-        }
-    }
-
     /// Set/clear this pane's unfocused dim. Idempotent push from
     /// [`crate::layout::LayoutTree::sync_unfocused_dim`]: it repaints only on
     /// a real flip, and snapshots the live alpha first so an interrupted
@@ -526,17 +486,8 @@ impl Pane {
         cx.notify();
     }
 
-    /// EP-001 US-002: set/clear the broadcast-group stripe color slot.
-    /// Idempotent push from `PaneFlowApp::sync_broadcast_stripes`.
-    pub fn set_broadcast_stripe(&mut self, color_idx: Option<usize>, cx: &mut Context<Self>) {
-        if self.broadcast_stripe != color_idx {
-            self.broadcast_stripe = color_idx;
-            cx.notify();
-        }
-    }
-
     /// Issue #83: light this pane's header `x` up as "one more click closes
-    /// me". Same idempotent push contract as [`Pane::set_broadcast_stripe`],
+    /// me". Idempotent push (repaints only on change),
     /// driven from `PaneFlowApp::set_pending_close` - the app owns the single
     /// pending-close slot, so a pane can never arm itself and can never be
     /// left lit after another target takes the slot.
@@ -550,164 +501,6 @@ impl Pane {
     /// Whether this pane's header `x` is currently armed.
     pub fn close_armed(&self) -> bool {
         self.close_armed
-    }
-
-    /// EP-001 US-001/US-003: the Composer overlay - a bottom-anchored prompt
-    /// panel over a click-swallowing backdrop, so the terminal underneath
-    /// receives neither keystrokes (the TextArea holds focus) nor clicks
-    /// while the user is composing (theme-picker overlay model).
-    fn render_composer_overlay(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let slot = self.composer_slot.clone()?;
-        let ui = pane_colors();
-
-        let mut header = div().flex().flex_row().items_center().gap(px(6.)).child(
-            div()
-                .text_size(px(11.))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(ui.text)
-                .child("Composer"),
-        );
-
-        // Broadcast toggle: shows the active group when armed, plain label
-        // otherwise. With no group defined the click routes to a toast that
-        // points at the picker (handled app-side).
-        let toggle = slot.toggle_broadcast.clone();
-        let broadcast_label: SharedString = if slot.broadcast {
-            match &slot.group_label {
-                Some(label) => format!("Broadcast: {label}").into(),
-                None => "Broadcast".into(),
-            }
-        } else {
-            "Single pane".into()
-        };
-        let broadcast_bg = if slot.broadcast {
-            ui.accent.opacity(0.15)
-        } else {
-            ui.subtle
-        };
-        let broadcast_text = if slot.broadcast { ui.accent } else { ui.muted };
-        let broadcast_hover_text = if slot.broadcast { ui.accent } else { ui.text };
-        header = header.child(
-            div()
-                .id("composer-broadcast-toggle")
-                .px(px(6.))
-                .py(px(2.))
-                .rounded(px(4.))
-                .text_size(px(10.))
-                .bg(broadcast_bg)
-                .text_color(broadcast_text)
-                .animated_hover(move |style, delta| {
-                    style.text_color(lerp_color(broadcast_text, broadcast_hover_text, delta));
-                })
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    toggle(cx);
-                })
-                .child(broadcast_label),
-        );
-
-        if slot.busy {
-            // US-001 AC5 chip (US-003 unified semantics): the target's agent
-            // is generating - validation queues instead of delivering.
-            header = header.child(
-                div()
-                    .px(px(6.))
-                    .py(px(2.))
-                    .rounded(px(4.))
-                    .text_size(px(10.))
-                    .bg(ui.vc_modified.opacity(0.15))
-                    .text_color(ui.vc_modified)
-                    .child("agent generating - Enter queues"),
-            );
-        }
-
-        if slot.pending_count > 0 {
-            let cancel = slot.cancel_pending.clone();
-            header = header.child(
-                div()
-                    .id("composer-cancel-pending")
-                    .px(px(6.))
-                    .py(px(2.))
-                    .rounded(px(4.))
-                    .text_size(px(10.))
-                    .bg(ui.subtle)
-                    .text_color(ui.muted)
-                    .animated_hover(move |style, delta| {
-                        style.text_color(lerp_color(ui.muted, ui.vc_deleted, delta));
-                    })
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        cancel(cx);
-                    })
-                    .child(format!("{} queued · cancel", slot.pending_count)),
-            );
-        }
-
-        // US-001 AC4: the explicit deliver-then-submit gesture is documented
-        // right on the surface; US-003 AC7: it is unavailable in broadcast.
-        let submit_chord = if cfg!(target_os = "macos") {
-            "⌘+Enter"
-        } else {
-            "Ctrl+Enter"
-        };
-        let hint: SharedString = if slot.broadcast {
-            "Enter pre-fills every ready member - broadcast never submits".into()
-        } else {
-            format!("Enter pre-fills without submitting · {submit_chord} pre-fills and submits")
-                .into()
-        };
-
-        let dismiss_backdrop = slot.dismiss.clone();
-        let dismiss_out = slot.dismiss.clone();
-        Some(
-            deferred(
-                div()
-                    .id("composer-backdrop")
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .justify_end()
-                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                        cx.stop_propagation();
-                        dismiss_backdrop(cx);
-                    })
-                    // The scrim takes the card's silhouette so it does not
-                    // repaint the corners square over the pane behind it.
-                    .child(squircle_fill(
-                        crate::app::constants::PANE_CARD_RADIUS,
-                        gpui::hsla(0., 0., 0., 0.25),
-                    ))
-                    .child(
-                        div()
-                            .id("composer-panel")
-                            .occlude()
-                            .m(px(8.))
-                            .p(px(8.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.))
-                            .bg(ui.overlay)
-                            .border_1()
-                            .border_color(ui.border)
-                            .rounded(px(8.))
-                            .shadow_lg()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_mouse_down_out(move |_, _, cx| {
-                                dismiss_out(cx);
-                            })
-                            .child(header)
-                            .child(div().max_h(px(180.)).child(slot.input.clone()))
-                            .child(div().text_size(px(10.)).text_color(ui.muted).child(hint)),
-                    ),
-            )
-            .with_priority(4)
-            .into_any_element(),
-        )
     }
 
     /// US-020 (orchestration-v2): a compact badge on the pane showing the
@@ -1647,30 +1440,13 @@ impl Pane {
                 .into_any_element()
         });
 
-        // EP-001 US-003 (cli-cockpit): queued-prompt chip - ranked just below
-        // the state dot in the FR-11 anatomy.
-        let has_pending = self.pending_prefill;
-        let pending_chip = has_pending.then(|| {
-            div()
-                .flex_none()
-                .px(px(4.))
-                .rounded(px(3.))
-                .bg(ui.subtle)
-                .text_size(px(9.))
-                .text_color(ui.muted)
-                .child("1 queued")
-                .into_any_element()
-        });
-
         // OSC 9;4 progress chip (#184). `terminal.progress` stays `None`
         // until the engine decodes an OSC 9;4 sequence, so the chip only
         // appears for a program that actually reports progress.
-        let leading_slots: u8 = u8::from(has_errored || has_attention) + u8::from(has_pending);
         let progress = self
             .surface
             .as_terminal()
             .and_then(|terminal| terminal.read(cx).terminal.progress)
-            .filter(|_| leading_slots < 2)
             .and_then(|report| progress_chip_label(report).map(|label| (report.state, label)));
         let progress_chip = progress.as_ref().map(|(state, label)| {
             div()
@@ -1721,7 +1497,6 @@ impl Pane {
             }))
             .child(self.render_surface_title(cx))
             .children(status_dot)
-            .children(pending_chip)
             .children(progress_chip);
 
         // Close the pane. It lives in the header's leading corner, alone and
@@ -1797,7 +1572,7 @@ impl Pane {
             )
             // EP-002 US-007: the pane context menu is anchored here now that
             // the tab strip is gone, so the surface actions it carries (copy
-            // path, cancel a queued prompt, close) stay reachable.
+            // path, close) stay reachable.
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|_this, e: &MouseDownEvent, _window, cx| {
@@ -2033,17 +1808,15 @@ impl Render for Pane {
         // Unfocused-pane dim (Ghostty `unfocused-split-opacity`, rebuilt as a
         // single layer instead of one per apprt): a plain compositing quad over
         // this pane's content, never a renderer or GPU effect. It sits inside
-        // `content`, so the pane header, the US-018 attention glow, the peek badge,
-        // the broadcast stripe and the Composer all stay at full contrast - the
-        // dim only ever touches terminal or diff output. It carries no
+        // `content`, so the pane header, the US-018 attention glow and the peek
+        // badge all stay at full contrast - the dim only ever touches terminal
+        // or diff output. It carries no
         // `id` and no handlers, so GPUI inserts no hitbox for it and it cannot
         // swallow a click (Ghostty needs three explicit opt-outs for this).
         //
-        // The Composer steals focus from the pane it is attached to, so a pane
-        // hosting one is never dimmed even though it reads as unfocused.
         // `resolved_unfocused_pane_dim_alpha` already inverts opacity -> alpha
         // once, in the config crate; nothing here re-derives `1 - x`.
-        let dim_target = if self.dimmed && self.composer_slot.is_none() {
+        let dim_target = if self.dimmed {
             self.cached_config.resolved_unfocused_pane_dim_alpha()
         } else {
             0.0
@@ -2289,7 +2062,6 @@ impl Render for Pane {
         let has_attention = self.attention.is_some();
         let attention_color = pane_colors().vc_conflict;
         let peek = self.render_peek_overlay(cx);
-        let composer = self.render_composer_overlay(cx);
         let card_radius = crate::app::constants::PANE_CARD_RADIUS;
         div()
             .flex()
@@ -2308,21 +2080,6 @@ impl Render for Pane {
             .child(squircle_fill(card_radius, card_background))
             .child(content)
             .children(peek)
-            // EP-001 US-002: broadcast-group stripe - a DISTINCT left-edge
-            // element; the pane border slot above stays the attention glow's
-            // (Files NOT to Modify). Absolutely positioned so it never
-            // perturbs the header/content flex chain.
-            .when_some(self.broadcast_stripe, |d, idx| {
-                d.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top(card_radius)
-                        .bottom(card_radius)
-                        .w(px(3.))
-                        .bg(pane_colors().group_color(idx)),
-                )
-            })
             .child(squircle_border(
                 card_radius,
                 px(1.),
@@ -2332,7 +2089,6 @@ impl Render for Pane {
                     pane_colors().border
                 },
             ))
-            .children(composer)
     }
 }
 

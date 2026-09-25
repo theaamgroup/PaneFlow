@@ -154,7 +154,7 @@ pub fn apply_keybindings(cx: &mut App, user_shortcuts: &HashMap<String, String>)
     }
 
     // `cx.clear_key_bindings()` at the top wiped EVERY binding, including the
-    // global `TextInput` / `TextArea` widget bindings (caret movement, Home/End,
+    // global `TextInput` widget bindings (caret movement, Home/End,
     // selection, Backspace/Delete, clipboard) that are registered once at
     // startup. Re-register them on every apply so text fields keep working after
     // a shortcut rebind, config reload, settings navigation, or IPC-driven
@@ -162,7 +162,6 @@ pub fn apply_keybindings(cx: &mut App, user_shortcuts: &HashMap<String, String>)
     // typing (the field accepts characters but ignores arrows, selection, and
     // clipboard).
     crate::widgets::text_input::register_keybindings(cx);
-    crate::widgets::text_area::register_keybindings(cx);
 }
 
 #[cfg(test)]
@@ -503,13 +502,59 @@ mod tests {
         }
     }
 
+    /// Issue #809: the Composer and broadcast groups are gone with their three
+    /// actions. A `paneflow.json` that still maps them under `shortcuts` must
+    /// keep loading (the sibling settings survive, not a fallback to
+    /// defaults), and none of the chords may bind to anything.
+    #[gpui::test]
+    fn removed_composer_and_broadcast_actions_in_config_load_and_bind_nothing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let json = r#"{
+            "font_size": 17,
+            "shortcuts": {
+                "cmd-shift-space": "open_composer",
+                "cmd-shift-b": "toggle_broadcast_member",
+                "cmd-shift-m": "open_broadcast_groups"
+            }
+        }"#;
+        let config = paneflow_config::loader::try_parse_and_validate(json)
+            .expect("a config naming removed actions still loads");
+        assert_eq!(
+            config.font_size,
+            Some(17.0),
+            "the rest of the file must load, not fall back to defaults"
+        );
+        let removed = [
+            ("cmd-shift-space", "open_composer"),
+            ("cmd-shift-b", "toggle_broadcast_member"),
+            ("cmd-shift-m", "open_broadcast_groups"),
+        ];
+        for (key, action) in removed {
+            assert_eq!(config.shortcuts.get(key).map(String::as_str), Some(action));
+            assert!(
+                action_from_name(action).is_none(),
+                "{action} must no longer be a registered action"
+            );
+        }
+
+        cx.update(|cx| apply_keybindings(cx, &config.shortcuts));
+        for (key, _) in removed {
+            let chord = canonical_keystroke(key).expect("a parsable chord");
+            let bound: Vec<&'static str> = cx
+                .update(|cx| cx.all_bindings_for_input(std::slice::from_ref(&chord)))
+                .iter()
+                .map(|binding| binding.action().name())
+                .collect();
+            assert!(bound.is_empty(), "{key} must bind nothing, got {bound:?}");
+        }
+    }
+
     /// Issue #106: the primary rail's collapse chord is bindable, claimed by
     /// exactly one default, and free of any conflict with the rest of the
-    /// table. `secondary-alt-b` sits one modifier away from
-    /// `secondary-shift-b` (`toggle_broadcast_member`), and
-    /// `keystrokes_conflict` normalizes modifier order, so a chord picked by
-    /// eye rather than by this assertion could silently shadow broadcast
-    /// membership instead of failing loudly.
+    /// table. `keystrokes_conflict` normalizes modifier order, so a chord
+    /// picked by eye rather than by this assertion could silently shadow
+    /// another default instead of failing loudly.
     #[test]
     fn primary_sidebar_chord_is_bindable_and_does_not_collide() {
         use super::super::defaults::DEFAULTS;
@@ -539,11 +584,6 @@ mod tests {
             claimants,
             vec![action_name],
             "{key} must be claimed by exactly one default on this platform"
-        );
-
-        assert!(
-            !keystrokes_conflict(key, "secondary-shift-b"),
-            "{key} must stay distinct from the broadcast-member chord"
         );
     }
 

@@ -166,7 +166,7 @@ impl PaneFlowApp {
                 let Some(terminal) = app.open_agent_tab_at_cwd(ws_idx, cwd, Some(command), Some(target), cx) else { return; };
                 if ws_idx != app.active_idx { app.activate_workspace_without_window(ws_idx, cx); }
                 let block = format!("{}{}", handoff_prompt(&meta), evidence);
-                let (prompt, _) = crate::app::composer::normalize_composer_text(&block);
+                let (prompt, _) = crate::text_sanitize::normalize_prompt_text(&block);
                 Self::schedule_prompt_prefill(&terminal, prompt, usize::MAX, cx);
             });
         }).detach();
