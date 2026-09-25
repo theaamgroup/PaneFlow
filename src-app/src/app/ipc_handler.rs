@@ -2947,56 +2947,18 @@ impl PaneFlowApp {
                 let tool = crate::agent_launcher::TerminalAgent::from_binary(tool_name.as_str());
                 let explicit_surface_id = self.validated_frame_surface_id(params, cx);
 
-                // The session is over, so are its subagents, including when
-                // a legacy no-PID frame falls back to a real-PID row below.
-                let mut subagent_parent = pid;
-                if let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id == workspace_id) {
-                    // Prefer exact PID removal. Legacy no-PID frames are only
-                    // allowed to clear an unambiguous row: first by explicit
-                    // surface_id when present, otherwise by tool only when a
-                    // single non-errored candidate exists. This avoids
-                    // evicting a sibling session of the same agent.
-                    //
-                    // EP-004 US-010: an `Errored` session is SPARED - the
-                    // shim's `ai.exit` lands just before this frame, and
-                    // removing the row here would wipe the crash signal the
-                    // instant it appeared. The Errored row is evicted later
-                    // by a new session resolving the same pane
-                    // (`set_session_surface`) or by the sweep once its pane
-                    // closes (`sweep_stale_pids`).
-                    let is_errored =
-                        |s: &ai_types::AgentSession| s.state == ai_types::AgentState::Errored;
-                    let removed = if let Some(p) = pid
-                        && ws
-                            .agent_sessions
-                            .get(&p)
-                            .is_some_and(|session| !is_errored(session))
-                    {
-                        ws.agent_sessions.remove(&p).is_some()
-                    } else if pid.is_some_and(|p| ws.agent_sessions.contains_key(&p)) {
-                        // Exact-PID match exists but is Errored: keep it, and
-                        // do NOT fall through to the tool-name removal (it
-                        // would evict an unrelated sibling session).
-                        false
-                    } else {
-                        let pid_to_remove = session_end_fallback_candidate(
-                            &ws.agent_sessions,
-                            tool,
-                            explicit_surface_id,
-                        );
-                        if let Some(k) = pid_to_remove {
-                            ws.agent_sessions.remove(&k);
-                            subagent_parent = Some(k);
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    if subagent_parent
-                        .is_some_and(|key| forget_subagents_everywhere(&mut self.workspaces, key))
-                    {
+                if let Some(ws_idx) = self.workspaces.iter().position(|ws| ws.id == workspace_id) {
+                    let outcome = end_agent_session(
+                        &mut self.workspaces,
+                        ws_idx,
+                        pid,
+                        tool,
+                        explicit_surface_id,
+                    );
+                    if outcome.subagents_changed {
                         cx.notify();
                     }
+                    let removed = outcome.removed;
                     if removed {
                         self.sync_attention(cx);
                         // EP-001 US-003 (cli-cockpit): a removed session
@@ -3132,6 +3094,79 @@ fn record_subagent_stop(
             .remember_stop(pid, subagent_id, emitted_at_ms);
     }
     changed
+}
+
+/// What `ai.session_end` changed: whether it removed a session row, and
+/// whether it changed any workspace's running-subagent count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionEndOutcome {
+    removed: bool,
+    subagents_changed: bool,
+}
+
+/// Apply `ai.session_end` to the workspace at `ws_idx`: remove the ended
+/// session's row and forget its subagents.
+fn end_agent_session(
+    workspaces: &mut [crate::workspace::Workspace],
+    ws_idx: usize,
+    pid: Option<u32>,
+    tool: Option<crate::agent_launcher::TerminalAgent>,
+    explicit_surface_id: Option<u64>,
+) -> SessionEndOutcome {
+    // The session is over, so are its subagents. A frame that carries a
+    // real PID keeps that PID as the subagent parent; only a legacy no-PID
+    // frame adopts the key of the row the fallback below removes.
+    let mut subagent_parent = pid;
+    let Some(ws) = workspaces.get_mut(ws_idx) else {
+        return SessionEndOutcome {
+            removed: false,
+            subagents_changed: false,
+        };
+    };
+    // Prefer exact PID removal. Otherwise the tool-name fallback may clear
+    // an unambiguous row: first by explicit surface_id when present,
+    // otherwise by tool only when a single non-errored candidate exists.
+    // This avoids evicting a sibling session of the same agent. It serves
+    // legacy no-PID frames and real-PID frames whose own row is keyed
+    // elsewhere (a folded shell/agent twin, a synthetic legacy key).
+    //
+    // EP-004 US-010: an `Errored` session is SPARED - the shim's `ai.exit`
+    // lands just before this frame, and removing the row here would wipe
+    // the crash signal the instant it appeared. The Errored row is evicted
+    // later by a new session resolving the same pane (`set_session_surface`)
+    // or by the sweep once its pane closes (`sweep_stale_pids`).
+    let is_errored = |s: &AgentSession| s.state == ai_types::AgentState::Errored;
+    let removed = if let Some(p) = pid
+        && ws
+            .agent_sessions
+            .get(&p)
+            .is_some_and(|session| !is_errored(session))
+    {
+        ws.agent_sessions.remove(&p).is_some()
+    } else if pid.is_some_and(|p| ws.agent_sessions.contains_key(&p)) {
+        // Exact-PID match exists but is Errored: keep it, and do NOT fall
+        // through to the tool-name removal (it would evict an unrelated
+        // sibling session).
+        false
+    } else if let Some(k) =
+        session_end_fallback_candidate(&ws.agent_sessions, tool, explicit_surface_id)
+    {
+        ws.agent_sessions.remove(&k);
+        // A real PID names its own subagents; adopting `k` would clear a
+        // live sibling's count and leave this PID's counted (#831).
+        if pid.is_none() {
+            subagent_parent = Some(k);
+        }
+        true
+    } else {
+        false
+    };
+    let subagents_changed =
+        subagent_parent.is_some_and(|key| forget_subagents_everywhere(workspaces, key));
+    SessionEndOutcome {
+        removed,
+        subagents_changed,
+    }
 }
 
 /// Drop one agent process's subagents from every workspace. Returns whether
@@ -3889,6 +3924,88 @@ mod tests {
                 .iter()
                 .all(|ws| ws.running_subagents.total() == 0)
         );
+    }
+
+    #[test]
+    fn session_end_for_an_unknown_pid_keeps_a_siblings_subagents() {
+        use crate::workspace::Workspace;
+        let mut workspaces = vec![Workspace::empty_with_cwd_and_id(
+            1,
+            "a",
+            std::path::PathBuf::new(),
+        )];
+        // A live same-tool sibling (PID 200) with a running subagent. The
+        // ending agent (PID 100) has no row left (its Finished row already
+        // cleared) but its background subagent is still counted.
+        workspaces[0].agent_sessions.insert(
+            200,
+            AgentSession::new(TerminalAgent::ClaudeCode, ai_types::AgentState::Thinking),
+        );
+        assert!(record_subagent_start(
+            &mut workspaces,
+            0,
+            200,
+            "sibling",
+            None,
+            None,
+            None
+        ));
+        assert!(record_subagent_start(
+            &mut workspaces,
+            0,
+            100,
+            "own",
+            None,
+            None,
+            None
+        ));
+
+        let outcome = end_agent_session(
+            &mut workspaces,
+            0,
+            Some(100),
+            Some(TerminalAgent::ClaudeCode),
+            None,
+        );
+        assert!(outcome.subagents_changed);
+        let running = &workspaces[0].running_subagents;
+        assert!(
+            running.contains_pid(200),
+            "a real-PID session_end must not clear a sibling's subagents"
+        );
+        assert!(
+            !running.contains_pid(100),
+            "the ended PID's own subagents go with it"
+        );
+        assert_eq!(running.total(), 1);
+
+        // A legacy no-PID frame has no PID of its own, so it still adopts
+        // the key of the row the fallback removes.
+        workspaces[0].agent_sessions.insert(
+            300,
+            AgentSession::new(TerminalAgent::ClaudeCode, ai_types::AgentState::Thinking),
+        );
+        workspaces[0].agent_sessions.remove(&200);
+        assert!(record_subagent_start(
+            &mut workspaces,
+            0,
+            300,
+            "legacy",
+            None,
+            None,
+            None
+        ));
+        let outcome = end_agent_session(
+            &mut workspaces,
+            0,
+            None,
+            Some(TerminalAgent::ClaudeCode),
+            None,
+        );
+        assert!(outcome.removed);
+        assert!(!workspaces[0].agent_sessions.contains_key(&300));
+        assert!(!workspaces[0].running_subagents.contains_pid(300));
+        assert!(workspaces[0].running_subagents.contains_pid(200));
     }
 
     #[test]
