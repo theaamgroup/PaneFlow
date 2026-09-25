@@ -234,8 +234,8 @@ Color resolves in three layers.
    `scrollbar_thumb`, `link_text`, and two title bar colors — plus a 30-slot
    `SyntaxPalette` for Changes and Review diffs
    (`theme/model.rs:11-64,75-104`).
-2. **UI colors**: the 30 semantic roles plus one flag (`use_theme_diff_washes`)
-   that the chrome consumes, `UiColors` (`theme/model.rs:522-596`). Vercel,
+2. **UI colors**: the 24 semantic roles plus one flag (`use_theme_diff_washes`)
+   that the chrome consumes, `UiColors` (`theme/model.rs:522-576`). Vercel,
    Claude, and Cursor each ship their own; PaneFlow Dark and PaneFlow Light
    carry `ui: None` and are derived by lightness.
 3. **Local tints**: alpha washes computed at render time from `text`, `muted`,
@@ -248,13 +248,13 @@ only for the fixed and Contextual values listed in 4.3.
 **The palette lives in two files, not one.** `theme/builtin.rs` holds the ANSI
 and base slots for all eight variants and the `UiColors` of Vercel, Claude, and
 Cursor. The PaneFlow Dark and PaneFlow Light `UiColors` are computed in
-`theme/model.rs::ui_colors_with` (`:677-778`), and the dark surface constants
+`theme/model.rs::ui_colors_with` (`:657-746`), and the dark surface constants
 `CHROME_BACKGROUND_HEX`, `TERMINAL_BACKGROUND_HEX`, and `BORDER_HEX` are at
 `theme/model.rs:458-461`. Cite both files when changing a role.
 
-`UiColors::diff_colors()` (`theme/model.rs:620-640`) is the single source the
+`UiColors::diff_colors()` (`theme/model.rs:600-620`) is the single source the
 diff dock, the Review view, and the Changes rail read; `UiColors::group_color(i)`
-(`:643-658`) wraps modulo 8 so no render site indexes the broadcast slots by
+(`:622-636`) wraps modulo 8 so no render site indexes the broadcast slots by
 hand.
 
 ### 4.2 Semantic roles
@@ -277,7 +277,7 @@ hand.
 The dark work surface is `#181818` and the dark chrome is `#141414`: the panel
 is lighter than the shell around it, which is what makes the inset card read
 as a card without a shadow. Light inverts the ramp: pure white work surface,
-`#f7f7f7` cards, and a `#f3f4f9` title bar (`theme/builtin.rs:123`).
+`#f7f7f7` cards, and a `#f3f4f9` title bar (`theme/builtin.rs:119`).
 
 `apply_surface_overrides` (`theme/model.rs:491-511`) normalizes a dark preset
 that ships no `UiColors` — in practice only PaneFlow Dark, since the other six
@@ -291,9 +291,9 @@ recomputes the selection foreground.
 
 Diff colors on a dark theme fall back to PaneFlow's canonical green and red
 with opaque row washes unless the preset sets `use_theme_diff_washes`; **both
-Vercel variants do** (`builtin.rs:251,335`), and no other preset does. The
+Vercel variants do** (`builtin.rs:247,325`), and no other preset does. The
 opaque dark fallbacks are `#57d992` / `#ff6f6a` on `#1d3a2b` / `#402425`, with
-gutters `#16281f` / `#2c1718` (`theme/model.rs:631-639`).
+gutters `#16281f` / `#2c1718` (`theme/model.rs:611-619`).
 
 Status hues are functional and MUST NOT be recolored to match a brand when
 doing so weakens the meaning. The terminal selection foreground is never
