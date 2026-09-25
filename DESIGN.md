@@ -549,10 +549,10 @@ icon buttons on the right: the Customize Sidebar menu behind
 is deliberately **no new-workspace button** (issue #105); a guard test
 (`the_workspaces_header_carries_no_new_workspace_button`) fails if one returns.
 New Workspace is `secondary-shift-n`, the Window menu, and the empty state's
-`Open folder` button. Beneath that button, and only when `recents.json` has
-entries, an `Open recent` list (11 px `muted` heading, up to eight
-`empty-recent-<n>` rows: folder-open glyph, basename, full path as tooltip,
-`⌘1`-`⌘5` on the first five, which open that row while no workspace is open).
+`Open folder` button. The empty state carries only `Open folder` and
+`Command palette`; the `Open recent` list was removed (issue #813), and a
+guard test (`the_empty_state_has_no_recent_folders_list`) fails if it returns.
+With no workspace open, `⌘1`-`⌘9` do nothing.
 
 A workspace is a folder row; its tabs are child rows with inline rename, hover
 actions, and reorder by drag. The branch and the diffstat are **meta lines
