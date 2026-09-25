@@ -554,8 +554,8 @@ pub(crate) fn pending_managed_worktree_from_persisted_record(
 /// One entry of `git worktree list --porcelain`.
 ///
 /// A `worktree ` line is enough to keep the entry. Bare and other HEAD-less
-/// checkouts are included so collision checks and the Review
-/// Worktree-scope picker list the same set.
+/// checkouts are included so collision checks, branch checkout planning and
+/// checkout removal all see every registered worktree.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorktreeEntry {
     pub path: PathBuf,
