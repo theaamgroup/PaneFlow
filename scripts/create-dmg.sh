@@ -38,7 +38,7 @@
 #
 # Usage:
 #   scripts/create-dmg.sh --version 0.2.0 --arch aarch64
-#   scripts/create-dmg.sh --version 0.2.0 --arch x86_64 --app path/to/X.app
+#   scripts/create-dmg.sh --version 0.2.0 --arch aarch64 --app path/to/X.app
 #
 # Sourced by scripts/create-dmg.test.sh (CREATE_DMG_LIB=1) so retry/verify
 # can be exercised without a signed .app.
@@ -54,7 +54,7 @@ set -euo pipefail
 
 usage() {
     cat >&2 <<EOF
-Usage: $0 --version <ver> --arch {aarch64|x86_64} [--app <path>]
+Usage: $0 --version <ver> --arch aarch64 [--app <path>]
 EOF
 }
 
@@ -248,8 +248,8 @@ create_dmg_main() {
     [ -n "$VERSION" ] || { usage; die "--version is required"; }
     [ -n "$ARCH" ]    || { usage; die "--arch is required"; }
     case "$ARCH" in
-        aarch64|x86_64) ;;
-        *) die "--arch must be 'aarch64' or 'x86_64' (got '$ARCH')" ;;
+        aarch64) ;;
+        *) die "--arch must be 'aarch64' (got '$ARCH'); this fork is Apple Silicon only" ;;
     esac
     [ -d "$APP" ] || die "bundle not found: $APP"
 

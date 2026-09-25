@@ -230,6 +230,7 @@ checks do not block).
 | `cargo test` fails on a flaky test | 1. Re-run the specific test with `cargo test <name> -- --nocapture`. 2. If genuinely flaky, file an issue and mark `#[ignore]` in a separate commit BEFORE tagging. Do not tag a known-broken release. 3. If the failure is real, fix it and restart Step 1. |
 | Working tree not clean (leftover unstaged changes) | 1. `git stash` to park the noise. 2. `git diff` to audit each change: uncommitted work from a different branch should be committed or stashed, never force-discarded. 3. Only after `git status` is clean do you proceed. |
 | `sed -i` errors with `invalid command code` | You used the GNU form. BSD sed on macOS requires an explicit empty backup suffix: `sed -i '' ...`. |
+| `cargo fmt --check` fails on code nobody touched | The toolchain moved. The pin in `rust-toolchain.toml` and every workflow `toolchain:` input must match; bump them together as described in [release/rustfmt.md](release/rustfmt.md). |
 
 ---
 

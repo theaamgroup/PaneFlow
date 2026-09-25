@@ -9,7 +9,7 @@ Windows `.ico`, or anything under `packaging/wix/`.
 
 | File | Required | Used for |
 |---|---|---|
-| `paneflow-icon-macos-1024.png` | yes | Plated macOS artwork. The legacy ICNS fallback applies the Apple-style inset and rounded mask only to this source. Also downscaled to the GPUI runtime icon. |
+| `paneflow-icon-macos-1024.png` | yes | Plated macOS artwork. The legacy ICNS fallback applies the Apple-style inset and rounded mask only to this source. Also downscaled to `src-app/assets/icons/paneflow.png`, the About dialog image (nothing sets a window icon). |
 | `paneflow-icon-template-1024.png` | no | macOS menubar Template image. Pure black silhouette on alpha, no chrome, no fill. AppKit applies the system tint at runtime. |
 
 ## Regenerating

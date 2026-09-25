@@ -9,17 +9,17 @@
 #     Resources/PaneFlow.icns         (from assets/PaneFlow.icns, produced by US-014)
 #
 # Usage:
+#   cargo build --release --target aarch64-apple-darwin -p paneflow-app
 #   scripts/bundle-macos.sh --version 0.2.0 --arch aarch64
-#   scripts/bundle-macos.sh --version 0.2.0 --arch x86_64 \
-#       --target-dir target/x86_64-apple-darwin/release
 #
 # Arguments:
 #   --version <string>       Version to stamp into Info.plist (required).
-#   --arch <aarch64|x86_64>  Target architecture (required).
+#   --arch aarch64           Target architecture (required). This fork is
+#                            Apple Silicon only; nothing else is accepted.
 #   --target-dir <path>      Directory containing the built `paneflow` binary.
-#                            Defaults to target/<triple>/release where
-#                            <triple> is aarch64-apple-darwin or
-#                            x86_64-apple-darwin depending on --arch.
+#                            Defaults to target/aarch64-apple-darwin/release,
+#                            which a plain `cargo build --release` (no
+#                            `--target`) never writes.
 #
 # Signing, notarization, and .dmg creation are intentionally out of scope -
 # see US-015 (codesign + notarytool) and US-016 (hdiutil .dmg).
@@ -36,7 +36,7 @@ TARGET_DIR=""
 
 usage() {
     cat >&2 <<EOF
-Usage: $0 --version <ver> --arch {aarch64|x86_64} [--target-dir <path>]
+Usage: $0 --version <ver> --arch aarch64 [--target-dir <path>]
 EOF
 }
 
@@ -79,8 +79,7 @@ done
 
 case "$ARCH" in
     aarch64) TRIPLE="aarch64-apple-darwin" ;;
-    x86_64)  TRIPLE="x86_64-apple-darwin"  ;;
-    *)       die "--arch must be 'aarch64' or 'x86_64' (got '$ARCH')" ;;
+    *)       die "--arch must be 'aarch64' (got '$ARCH'); this fork is Apple Silicon only" ;;
 esac
 
 if [ -z "$TARGET_DIR" ]; then

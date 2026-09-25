@@ -6,20 +6,10 @@
 #
 # build-icons.sh passes a prepared plated source directory through
 # PANEFLOW_ICNS_SOURCE_DIR. Requiring it prevents a direct invocation from
-# accidentally rebuilding the Apple bundle from Linux's transparent assets.
+# packing an unprepared iconset.
 #
-# Tool selection cascades at runtime (first available wins):
-#   1. iconutil        (macOS, Apple-blessed, best quality)
-#   2. png2icns        (Linux, from libicns)
-#   3. icnsutil        (Linux, Python package)
-#   4. python3 + inline packer   (guaranteed fallback - stdlib only)
-#
-# AC3 of the PRD lists `png2icns` or `icnsutil` as the Linux fallback.
-# The Python stdlib fallback is added last because (a) Python3 is
-# near-universal on dev machines and CI runners, and (b) the ICNS wire
-# format is simple enough to emit directly in ~30 lines of Python (file
-# header + typed sub-image chunks). ImageMagick was considered but its
-# ICNS coder isn't compiled into standard packages.
+# macOS only: `sips` resizes and `iconutil` packs. Both ship with macOS, so
+# there is no Linux packer cascade (png2icns / icnsutil / python3) any more.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
@@ -45,22 +35,14 @@ for size in 16 32 128 256 512; do
 done
 
 # --- Resize helper --------------------------------------------------------
-# Prefer `sips` on macOS (native, no extra deps) and `magick` elsewhere.
-# Lanczos is the best general-purpose resampling filter for both up- and
-# downscaling of RGBA icons.
+# `sips` is macOS-native, so no extra dependency is needed.
 resize_png() {
     local src="$1" dst="$2" size="$3"
-    if command -v sips >/dev/null 2>&1; then
-        sips -Z "$size" "$src" --out "$dst" >/dev/null
-    elif command -v magick >/dev/null 2>&1; then
-        magick "$src" -filter Lanczos -resize "${size}x${size}" "$dst"
-    elif command -v convert >/dev/null 2>&1 \
-        && convert -version 2>&1 | grep -qi "ImageMagick"; then
-        convert "$src" -filter Lanczos -resize "${size}x${size}" "$dst"
-    else
-        die "need sips (macOS) or magick/convert (ImageMagick) to resize PNGs"
-    fi
+    sips -Z "$size" "$src" --out "$dst" >/dev/null
 }
+
+command -v sips >/dev/null 2>&1 || die "sips not found (macOS built-in)"
+command -v iconutil >/dev/null 2>&1 || die "iconutil not found (macOS built-in)"
 
 # --- Build iconset staging dir --------------------------------------------
 STAGING="$(mktemp -d)"
@@ -96,69 +78,8 @@ cp "$SRC_DIR/paneflow-512.png"          "$ICONSET/icon_512x512.png"
 cp "$SRC_1024"                          "$ICONSET/icon_512x512@2x.png"
 
 # --- Pack .icns -----------------------------------------------------------
-if command -v iconutil >/dev/null 2>&1; then
-    echo "Packing via iconutil (macOS)..."
-    iconutil -c icns "$ICONSET" -o "$OUT"
-elif command -v png2icns >/dev/null 2>&1; then
-    echo "Packing via png2icns (libicns)..."
-    # png2icns takes the largest sizes (512, 256, 128, 32, 16) and auto-picks
-    # which ones to embed. Feed the staging copies to be explicit.
-    png2icns "$OUT" \
-        "$ICONSET/icon_512x512@2x.png" \
-        "$ICONSET/icon_512x512.png" \
-        "$ICONSET/icon_256x256.png" \
-        "$ICONSET/icon_128x128.png" \
-        "$ICONSET/icon_32x32.png" \
-        "$ICONSET/icon_16x16.png"
-elif command -v icnsutil >/dev/null 2>&1; then
-    echo "Packing via icnsutil..."
-    icnsutil compose "$OUT" \
-        "$ICONSET/icon_512x512@2x.png" \
-        "$ICONSET/icon_512x512.png" \
-        "$ICONSET/icon_256x256.png" \
-        "$ICONSET/icon_128x128.png" \
-        "$ICONSET/icon_32x32.png" \
-        "$ICONSET/icon_16x16.png"
-elif command -v python3 >/dev/null 2>&1; then
-    echo "Packing via python3 inline packer (stdlib-only fallback)..."
-    # The ICNS wire format is trivial: 8-byte file header (b'icns' + u32
-    # total length, both big-endian) followed by typed sub-image chunks
-    # (4-byte OSType + u32 chunk length including header + payload).
-    # Apple's per-resolution OSTypes for PNG-encoded sub-images:
-    #   icp4=16, ic11=32 (16@2x), icp5=32, ic12=64 (32@2x),
-    #   ic07=128, ic13=256 (128@2x), ic08=256, ic14=512 (256@2x),
-    #   ic09=512, ic10=1024 (512@2x).
-    # The chunks are fed in Apple's canonical order (baseline then @2x for
-    # each base size) so Finder's size cache lookups stay fast.
-    ICONSET="$ICONSET" OUT="$OUT" python3 - <<'PY'
-import os, struct
-iconset = os.environ["ICONSET"]
-out = os.environ["OUT"]
-mapping = [
-    (b"icp4", "16x16"),
-    (b"ic11", "16x16@2x"),
-    (b"icp5", "32x32"),
-    (b"ic12", "32x32@2x"),
-    (b"ic07", "128x128"),
-    (b"ic13", "128x128@2x"),
-    (b"ic08", "256x256"),
-    (b"ic14", "256x256@2x"),
-    (b"ic09", "512x512"),
-    (b"ic10", "512x512@2x"),
-]
-body = bytearray()
-for ostype, name in mapping:
-    with open(os.path.join(iconset, f"icon_{name}.png"), "rb") as f:
-        data = f.read()
-    body += ostype + struct.pack(">I", len(data) + 8) + data
-total = b"icns" + struct.pack(">I", len(body) + 8) + bytes(body)
-with open(out, "wb") as f:
-    f.write(total)
-PY
-else
-    die "no .icns packer found - install one of: iconutil (macOS built-in), \
-png2icns (libicns package), icnsutil (pip install icnsutil), or python3"
-fi
+echo "Packing via iconutil..."
+iconutil -c icns "$ICONSET" -o "$OUT"
 
 # --- Verify ---------------------------------------------------------------
 [ -s "$OUT" ] || die "produced empty $OUT"

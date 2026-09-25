@@ -79,12 +79,6 @@ notify = "7"
 # gpui/tokio; making it explicit lets us reference it directly.
 parking_lot = "0.12"
 
-# TOML reader/writer for the Codex CLI's `~/.codex/config.toml`. Used by the
-# composer to mirror the model + reasoning-effort fields into the live pill
-# selectors (same bridge pattern as the JSON one for Claude Code's
-# `~/.claude/settings.json`).
-toml = "1"
-
 # Standard deps
 anyhow.workspace = true
 # EP-001 (prd-cli-agent-orchestration): argument parser for the `paneflow <verb>`
@@ -216,6 +210,8 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "fecc3273ed32643c2ea1b04a74c8780e2c9ffaf8", features = ["test-support", "profiler"] }
 tracing-test = "0.2"
+# Parses `diff/queries/MANIFEST.toml` in the highlighter parity tests.
+toml = "1"
 
 # Clippy lint policy (US-007). Mirrors `[workspace.lints.clippy]` in the
 # root Cargo.toml EXCEPT the unwrap/expect family is demoted from "warn"

@@ -13,9 +13,14 @@ The steps below package a local source build.
 `PaneFlow.app`:
 
 ```bash
-cargo build --release
+cargo build --release --target aarch64-apple-darwin -p paneflow-app
 scripts/bundle-macos.sh --version 0.7.2 --arch aarch64
 ```
+
+Keep `--target aarch64-apple-darwin`: the bundle script reads
+`target/aarch64-apple-darwin/release/paneflow`, which a plain
+`cargo build --release` never writes. Without it the script packages
+whatever stale binary is already there, or fails when none exists.
 
 That writes `dist/PaneFlow.app` with the executable at
 `Contents/MacOS/paneflow`, `Info.plist` (with the version substituted),
@@ -29,7 +34,7 @@ Signing, notarization, and DMG creation are separate scripts:
 ## Verify the build
 
 ```bash
-target/release/paneflow --version
+target/aarch64-apple-darwin/release/paneflow --version
 ```
 
 Or, from an assembled bundle:
@@ -71,6 +76,6 @@ xattr -dr com.apple.quarantine /Applications/PaneFlow.app
 
 ## Intel Macs
 
-Not supported. `scripts/bundle-macos.sh` still accepts `--arch x86_64`,
-but no Intel build is produced or tested in this fork. Apple Silicon
-only.
+Not supported. `scripts/bundle-macos.sh` and `scripts/create-dmg.sh`
+accept only `--arch aarch64`; no Intel build is produced or tested in
+this fork. Apple Silicon only.
