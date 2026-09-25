@@ -74,7 +74,7 @@ pub const HOME_ENV: &str = "PANEFLOW_HOME";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserDirs {
     /// `~/Library/Application Support` (`paneflow.json`, `session.json`,
-    /// `window-state.json`, `recents.json`).
+    /// `window-state.json`; an ignored `recents.json` from older builds).
     pub config: PathBuf,
     /// `~/Library/Application Support` (the stable `bin/` helper copies).
     pub data: PathBuf,

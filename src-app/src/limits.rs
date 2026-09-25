@@ -68,11 +68,6 @@ pub(crate) const MAX_IPC_TEXT_BYTES: usize = 240 * 1024;
 /// saved session on failure, rather than publishing a file the reader rejects.
 pub(crate) const MAX_SESSION_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Read/write cap on `recents.json` (issue #521): at most eight folder paths
-/// plus their titles, so anything past this is not a file PaneFlow wrote.
-/// An oversized or corrupt file is ignored with a log line, never parsed.
-pub(crate) const MAX_RECENTS_SIZE_BYTES: u64 = 64 * 1024;
-
 /// Workspace-level restore cap on PTY-spawning surfaces. Sized from the live
 /// write envelope: MAX_TABS_PER_WORKSPACE tabs × MAX_PANES leaves per tab
 /// (issue #30). The read-side count is surfaces per layout (a restored pane
