@@ -57,8 +57,9 @@ your test runner.
 - **Share context between agents.** The optional MCP bridge lets agents
   read and search other panes in their workspace, and ask which pane they
   are running in.
-- **Script pane workflows.** Use the CLI to inspect panes and agent
-  state or send text behind an explicit write gate.
+- **Script pane workflows.** Inspect panes and agent state through the
+  MCP bridge or the JSON-RPC socket, and use the CLI to send text behind an
+  explicit write gate.
 
 ## Everyday shortcuts
 
@@ -87,12 +88,14 @@ The app and CLI share the `paneflow` binary. **Inside a PaneFlow pane,
 `paneflow` is already on your PATH.** Run these commands while the app is open:
 
 ```bash
-paneflow ps                          # List panes and agent state
-paneflow read <pane-id> --lines 100    # Read recent terminal output
+paneflow send reviewer "Review the current diff"   # Stage text in a pane
+paneflow key reviewer ctrl-c                       # Send one keystroke
 ```
 
-Replace `<pane-id>` with an ID from `paneflow ps`. You can also target panes
-by name.
+Replace `reviewer` with a pane name or surface ID. Both verbs require
+scripting access on the running app. Agents read pane output through the
+[MCP bridge](#let-agents-read-other-panes), and scripts call the JSON-RPC
+socket directly.
 
 The [scripting guide](docs/user/scripting.md) explains prompt delivery,
 submission controls, and pane reads.

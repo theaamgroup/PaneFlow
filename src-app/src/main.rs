@@ -2933,8 +2933,8 @@ fn main() {
     // hands `paneflow mcp …` straight to the dispatcher below.
     let is_mcp_subcommand = args.get(1).map(String::as_str) == Some("mcp");
     // EP-001 (cli-agent-orchestration): same gating rationale as the `mcp`
-    // flag. When argv[1] is a known CLI verb (`paneflow ls --help`,
-    // `paneflow read … --json`), the global flag scans below must NOT fire -
+    // flag. When argv[1] is a known CLI verb (`paneflow send --help`,
+    // `paneflow key … --help`), the global flag scans below must NOT fire -
     // clap owns per-subcommand `--help`/`--version`, and the CLI dispatch runs
     // after the manual intercepts.
     let is_cli_subcommand = cli::is_cli_verb(args.get(1).map(String::as_str));

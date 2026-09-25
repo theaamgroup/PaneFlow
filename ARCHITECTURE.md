@@ -416,7 +416,7 @@ both.
 Every pane's `PANEFLOW_BIN_DIR` (`~/Library/Caches/paneflow/bin/<version>/`)
 holds the 18 agent shims, `paneflow-ai-hook`, and a `paneflow` symlink to the
 running executable (`ai_hooks/extract.rs::link_cli_into`, #440), so `paneflow
-whoami` / `paneflow mcp install` work inside a pane without the user linking the
+send` / `paneflow mcp install` work inside a pane without the user linking the
 bundle binary onto their login PATH. The link is re-pointed at launch when
 `current_exe()` moves.
 
