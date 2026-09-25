@@ -2,7 +2,7 @@
 //!
 //! Runs on the GPUI main thread and owns two pull-based intakes:
 //! - `process_ipc_requests` - drains the Unix-socket IPC receiver and routes
-//!   each request through `handle_ipc` (dispatches over the `surface.*`, `fleet.*`, `task.*`, and `ai.*` namespaces).
+//!   each request through `handle_ipc` (dispatches over the `surface.*`, `fleet.*`, and `ai.*` namespaces, plus `agent.whoami`).
 //! - `process_config_changes` - picks up a hot-reloaded config deposited by
 //!   the `ConfigWatcher` background thread and reapplies keybindings + theme.
 //!
@@ -2042,7 +2042,7 @@ impl PaneFlowApp {
         // moved verbatim into the handlers below; an unknown method inside a
         // known namespace falls into that handler's `_` arm, which produces
         // the same method-not-found envelope as the catch-all here.
-        if method == "agent.whoami" || method.starts_with("task.") {
+        if method == "agent.whoami" {
             self.handle_agent_context_method(method, params, cx)
         } else if method.starts_with("surface.") {
             self.handle_surface_method(method, params, caller_pid, responder, cx)

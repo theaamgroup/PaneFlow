@@ -55,8 +55,8 @@ your test runner.
   change. **Review with agent** opens an agent in a workspace tab with a
   prepared prompt; you press Enter to submit it.
 - **Share context between agents.** The optional MCP bridge lets agents
-  read and search other panes in their workspace. They can also read an
-  assigned task and report progress on it.
+  read and search other panes in their workspace, and ask which pane they
+  are running in.
 - **Script pane workflows.** Use the CLI to inspect panes and agent
   state or send text behind an explicit write gate.
 
@@ -114,13 +114,12 @@ supported agents detected on your machine. It updates each agent's MCP
 configuration and backs up the previous configuration.
 
 The bridge lets agents list panes, read output, and search text in their
-workspace. It can record progress on the calling pane's assigned task,
-but cannot type into terminals. Peer terminal output is marked as
+workspace, and report the calling pane's own identity. It is read-only
+and cannot type into terminals. Peer terminal output is marked as
 untrusted data.
 
-See the [MCP setup guide](docs/mcp-bridge.md) for supported agents and
-installation details, and [agent context](docs/agent-context.md) for task
-assignments and progress reports.
+See the [MCP setup guide](docs/mcp-bridge.md) for supported agents,
+installation details, and the pane identity contract.
 
 ## Settings and configuration
 
@@ -161,7 +160,6 @@ For the code structure and runtime design, see [ARCHITECTURE.md](ARCHITECTURE.md
 - [Troubleshooting](docs/user/troubleshooting.md) — help with common problems
 - [CLI and automation](docs/user/scripting.md) — commands and pane reads
 - [MCP bridge](docs/mcp-bridge.md) — connect agents to pane output
-- [Agent context](docs/agent-context.md) — task assignments and progress reports
 - [Architecture](ARCHITECTURE.md) — how the application is built
 
 ## License

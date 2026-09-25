@@ -275,9 +275,9 @@ flag the key. Repeatable layouts come from session restore.
 }
 ```
 
-`agent_context` on a surface stores the session-owned pane UUID and current agent task.
-Assign tasks through `paneflow task assign`;
-see [Agent context](../../agent-context.md) for the API and persistence contract.
+`agent_context` on a surface stores the session-owned pane UUID that `paneflow whoami`
+reports; see [Pane identity](../../mcp-bridge.md#pane-identity-whoami) for the contract.
+A `task` key left by older builds is ignored.
 
 Legacy `window_decorations` values are accepted and ignored by the loader.
 The editor schema omits this retired setting; macOS always supplies native
