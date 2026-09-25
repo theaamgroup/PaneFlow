@@ -1,17 +1,19 @@
 //! Persisted pane identity and its current agent task. Reports are agent claims,
 //! not independently verified outcomes.
+//!
+//! These types are persisted in `session.json`, so they ignore unknown keys:
+//! a field added by a newer build must not make an older build discard the
+//! whole session (issue #726). Strict IPC input lives in the app's wire types.
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct AgentContext {
     pub pane_id: String,
     pub task: Option<AgentTask>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct TaskAssignment {
     pub objective: String,
     #[serde(default)]
@@ -29,7 +31,6 @@ pub enum TaskStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct TaskReport {
     pub status: TaskStatus,
     pub summary: String,
@@ -44,7 +45,6 @@ pub struct TaskReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct AgentTask {
     pub task_id: String,
     pub revision: u64,
