@@ -1538,8 +1538,6 @@ mod tests {
             cwd: "/repo".to_string(),
             git_branch: String::new(),
             summary: summary.map(str::to_string),
-            model: None,
-            usage: None,
         }
     }
 

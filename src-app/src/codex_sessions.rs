@@ -21,7 +21,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::agent_sessions::{AssistantUsage, SessionAgent, SessionMeta, clean_session_label};
+use crate::agent_sessions::{SessionAgent, SessionMeta, clean_session_label};
 
 /// Maximum number of leading lines to scan for the first user message.
 /// In practice this lands within the first ~10 lines (measured on real
@@ -61,12 +61,6 @@ const SYNTHETIC_USER_PREFIXES: [&str; 8] = [
     "<system",
     "<user_instructions",
 ];
-
-/// EP-004 US-016: deeper line cap for the attribution scan, which walks the
-/// whole rollout to capture the model (`turn_context.payload.model`) and the
-/// last cumulative `token_count` usage event. Bounded, and run ONLY on the
-/// attribution path (the diff column load), never on the popover title scan.
-const MODEL_USAGE_SCAN_LIMIT: usize = 20_000;
 
 // US-013: per-line JSONL read cap, centralized (see `crate::limits`).
 use crate::limits::MAX_LINE_BYTES;
@@ -124,57 +118,16 @@ pub fn read_sessions_for_cwd(cwd: &str) -> Vec<SessionMeta> {
 pub fn read_sessions_for_cwd_with_omitted(cwd: &str) -> (Vec<SessionMeta>, usize) {
     read_sessions_for_cwd_inner(
         cwd,
-        false,
         Some(crate::agent_sessions::SIDEBAR_SESSION_RETAINED_PER_SOURCE),
     )
 }
 
-/// EP-004 US-014/US-016: like [`read_sessions_for_cwd`] but the retained
-/// attribution candidates are scanned deeper to populate `model`
-/// (`turn_context`) + cumulative `usage` (last `token_count` event).
-/// **Blocking I/O** - call from inside `smol::unblock`.
-pub fn read_sessions_with_usage_for_attribution(cwd: &str, branch: &str) -> Vec<SessionMeta> {
-    let Some(root) = sessions_root() else {
-        return Vec::new();
-    };
-
-    let mut candidates: Vec<(SessionMeta, PathBuf)> = Vec::new();
-    walk_jsonl_files(&root, &mut |path| {
-        if let Some(meta) = read_session_meta_inner(path, false, Some(cwd)) {
-            crate::agent_sessions::push_ranked_attribution(
-                &mut candidates,
-                meta,
-                path.to_path_buf(),
-                branch,
-                crate::agent_sessions::DIFF_ATTRIBUTION_MATCH_CAP,
-            );
-        }
-    });
-
-    let enriched: Vec<SessionMeta> = candidates
-        .into_iter()
-        .map(|(fallback, path)| {
-            // The deep re-read can fail where the cheap head scan succeeded
-            // (an I/O error, a body that outruns the usage budget); keep the
-            // already-matched head result rather than dropping the column.
-            read_session_meta_inner(&path, true, Some(cwd)).unwrap_or(fallback)
-        })
-        .collect();
-    crate::agent_sessions::match_sessions_to_column(enriched, cwd, branch)
-}
-
-fn read_sessions_for_cwd_inner(
-    cwd: &str,
-    scan_usage: bool,
-    cap: Option<usize>,
-) -> (Vec<SessionMeta>, usize) {
+fn read_sessions_for_cwd_inner(cwd: &str, cap: Option<usize>) -> (Vec<SessionMeta>, usize) {
     let Some(root) = sessions_root() else {
         return (Vec::new(), 0);
     };
 
-    let cache_mtime = (!scan_usage && cap.is_some())
-        .then(|| jsonl_tree_mtime(&root))
-        .flatten();
+    let cache_mtime = cap.is_some().then(|| jsonl_tree_mtime(&root)).flatten();
     if let Some(cache_mtime) = cache_mtime
         && let Some(cached) =
             crate::agent_sessions::cache::lookup_with_mtime(SessionAgent::Codex, cwd, cache_mtime)
@@ -186,7 +139,7 @@ fn read_sessions_for_cwd_inner(
         Some(cap) => {
             let mut collector = crate::agent_sessions::RecentSessionCollector::new(cap);
             walk_jsonl_files(&root, &mut |path| {
-                if let Some(meta) = read_session_meta_inner(path, scan_usage, Some(cwd)) {
+                if let Some(meta) = read_session_meta_inner(path, Some(cwd)) {
                     collector.push(meta);
                 }
             });
@@ -195,7 +148,7 @@ fn read_sessions_for_cwd_inner(
         None => {
             let mut all = Vec::new();
             walk_jsonl_files(&root, &mut |path| {
-                if let Some(meta) = read_session_meta_inner(path, scan_usage, Some(cwd)) {
+                if let Some(meta) = read_session_meta_inner(path, Some(cwd)) {
                     all.push(meta);
                 }
             });
@@ -204,8 +157,7 @@ fn read_sessions_for_cwd_inner(
         }
     };
 
-    if !scan_usage
-        && cap.is_some()
+    if cap.is_some()
         && let Some(cache_mtime) = cache_mtime
     {
         // #718: test seam. A write here is invisible to the scan above;
@@ -318,13 +270,11 @@ fn is_jsonl_file(path: &Path) -> bool {
 /// [`read_sessions_for_cwd_inner`] → [`read_session_meta_inner`] directly).
 #[cfg(test)]
 fn read_session_meta(path: &Path) -> Option<SessionMeta> {
-    read_session_meta_inner(path, false, None)
+    read_session_meta_inner(path, None)
 }
 
 /// Read the head of a rollout file: extract the `session_meta` envelope
-/// (line 1) and the first user message (typically a few lines later). When
-/// `scan_usage` (EP-004 attribution path) the tail scan also captures the model
-/// (`turn_context`) and the last cumulative `token_count` usage.
+/// (line 1) and the first user message (typically a few lines later).
 ///
 /// `cwd_filter` short-circuits the scan: Codex's store is one flat date tree
 /// for every project, so most files on disk belong to another directory and
@@ -334,11 +284,7 @@ fn read_session_meta(path: &Path) -> Option<SessionMeta> {
 /// Returns `None` for a rollout that is not worth a row: a sub-agent thread
 /// (it belongs to its parent, not to the sidebar) or a session that never ran
 /// a turn.
-fn read_session_meta_inner(
-    path: &Path,
-    scan_usage: bool,
-    cwd_filter: Option<&str>,
-) -> Option<SessionMeta> {
+fn read_session_meta_inner(path: &Path, cwd_filter: Option<&str>) -> Option<SessionMeta> {
     let file = fs::File::open(path).ok()?;
     let mut reader = BufReader::new(file);
     let mut buf = String::new();
@@ -427,13 +373,7 @@ fn read_session_meta_inner(
         .unwrap_or("")
         .to_string();
 
-    // Title-only path keeps the cheap first-user-message scan untouched. The
-    // attribution path runs the deeper tail scan (model + usage).
-    let scan = if scan_usage {
-        scan_tail_with_usage(&mut reader)
-    } else {
-        scan_head_for_title(&mut reader)
-    };
+    let scan = scan_head_for_title(&mut reader);
 
     // A rollout whose only line is `session_meta` is a thread the user opened
     // and closed without sending anything. It has no title and nothing to
@@ -451,103 +391,15 @@ fn read_session_meta_inner(
         cwd,
         git_branch,
         summary: scan.summary,
-        model: scan.model,
-        usage: scan.usage,
     })
 }
 
-/// What one head/tail scan pass recovered from a rollout body.
+/// What one head scan pass recovered from a rollout body.
 #[derive(Default)]
 struct RolloutScan {
     summary: Option<String>,
-    model: Option<String>,
-    usage: Option<AssistantUsage>,
     /// Whether any body record was parsed at all - the empty-session signal.
     saw_activity: bool,
-}
-
-/// EP-004 US-016: deeper tail scan for the attribution path. Walks up to
-/// [`MODEL_USAGE_SCAN_LIMIT`] lines capturing the first user message (label),
-/// the model (`turn_context.payload.model`), and the LAST cumulative
-/// `token_count` usage event. Codex reports `token_count` as a running total,
-/// so the last one wins (not summed). Usage is normalized to the shared
-/// [`AssistantUsage`] tier semantics (input = uncached input, cache_read =
-/// cached subset) so the pricing table treats Claude and Codex uniformly.
-fn scan_tail_with_usage(reader: &mut BufReader<fs::File>) -> RolloutScan {
-    let mut scan = RolloutScan::default();
-    let mut buf = String::new();
-    for _ in 0..MODEL_USAGE_SCAN_LIMIT {
-        buf.clear();
-        let n = match reader.by_ref().take(MAX_LINE_BYTES).read_line(&mut buf) {
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        if n == 0 {
-            break;
-        }
-        let trimmed = buf.trim_end();
-        if !trimmed.starts_with('{') {
-            continue;
-        }
-        let value: serde_json::Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let record_type = value.get("type").and_then(|v| v.as_str());
-        if is_activity_record(record_type) {
-            scan.saw_activity = true;
-        }
-        if scan.summary.is_none() {
-            scan.summary = user_text_from_record(&value);
-        }
-        match record_type {
-            Some("turn_context") => {
-                if scan.model.is_none()
-                    && let Some(m) = value
-                        .get("payload")
-                        .and_then(|p| p.get("model"))
-                        .and_then(|v| v.as_str())
-                    && !m.is_empty()
-                {
-                    scan.model = Some(m.to_string());
-                }
-            }
-            Some("event_msg") => {
-                let Some(payload) = value.get("payload") else {
-                    continue;
-                };
-                if payload.get("type").and_then(|v| v.as_str()) == Some("token_count")
-                    && let Some(total) =
-                        payload.get("info").and_then(|i| i.get("total_token_usage"))
-                {
-                    let input_total = total
-                        .get("input_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let cached = total
-                        .get("cached_input_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let output = total
-                        .get("output_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let u = AssistantUsage {
-                        input: input_total.saturating_sub(cached),
-                        output,
-                        cache_read: cached,
-                        cache_creation: 0,
-                    };
-                    // Cumulative - last non-empty wins.
-                    if !u.is_empty() {
-                        scan.usage = Some(u);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    scan
 }
 
 /// Scan the head of a rollout for the first human-authored message, bounded by
@@ -707,45 +559,6 @@ mod tests {
         assert_eq!(meta.timestamp, "2026-04-26T13:11:03.694Z");
         assert!(meta.git_branch.is_empty());
         assert_eq!(meta.summary.as_deref(), Some("Explique le projet stp"));
-    }
-
-    #[test]
-    fn usage_scan_captures_model_and_normalizes_token_count() {
-        // EP-004 US-016: scan_usage=true captures `turn_context.payload.model`
-        // and the LAST cumulative `token_count`, normalized to the shared tier
-        // semantics (input = uncached input, cache_read = cached subset). The
-        // title-only path leaves model/usage None.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("rollout-usage.jsonl");
-        std::fs::write(
-            &path,
-            concat!(
-                r#"{"timestamp":"2026-04-26T13:11:10.338Z","type":"session_meta","payload":{"id":"019dc9ea-38d7-7372-9cc4-253ce944d41b","timestamp":"2026-04-26T13:11:03.694Z","cwd":"/home/arthur/dev/paneflow"}}"#,
-                "\n",
-                r#"{"type":"turn_context","payload":{"model":"gpt-5"}}"#,
-                "\n",
-                r#"{"type":"event_msg","payload":{"type":"user_message","message":"hi"}}"#,
-                "\n",
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":200,"output_tokens":80}}}}"#,
-                "\n",
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":900,"cached_input_tokens":300,"output_tokens":150}}}}"#,
-                "\n",
-            ),
-        )
-        .expect("write fixture");
-
-        let title_only = read_session_meta_inner(&path, false, None).expect("meta");
-        assert!(title_only.model.is_none());
-        assert!(title_only.usage.is_none());
-
-        let with_usage = read_session_meta_inner(&path, true, None).expect("meta");
-        assert_eq!(with_usage.model.as_deref(), Some("gpt-5"));
-        let usage = with_usage.usage.expect("usage parsed");
-        // Last cumulative event wins: 900 total input, 300 cached → 600 uncached.
-        assert_eq!(usage.input, 600);
-        assert_eq!(usage.cache_read, 300);
-        assert_eq!(usage.output, 150);
-        assert_eq!(usage.cache_creation, 0);
     }
 
     #[test]
@@ -961,9 +774,9 @@ mod tests {
             ),
         )
         .expect("write fixture");
-        assert!(read_session_meta_inner(&path, false, Some("/home/arthur/dev/paneflow")).is_none());
+        assert!(read_session_meta_inner(&path, Some("/home/arthur/dev/paneflow")).is_none());
         assert!(
-            read_session_meta_inner(&path, false, Some("/home/arthur/dev/other")).is_some(),
+            read_session_meta_inner(&path, Some("/home/arthur/dev/other")).is_some(),
             "the matching cwd must still produce a row"
         );
     }
