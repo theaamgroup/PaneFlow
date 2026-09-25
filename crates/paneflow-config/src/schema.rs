@@ -4,14 +4,12 @@ mod agent_panel;
 mod config;
 mod layout;
 mod session;
-mod task;
 mod terminal;
 
 pub use agent_panel::*;
 pub use config::*;
 pub use layout::*;
 pub use session::*;
-pub use task::*;
 pub use terminal::*;
 
 #[cfg(test)]

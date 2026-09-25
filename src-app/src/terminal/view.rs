@@ -983,7 +983,6 @@ impl TerminalView {
             terminal,
             agent_context: paneflow_config::schema::AgentContext {
                 pane_id: uuid::Uuid::new_v4().to_string(),
-                task: None,
             },
             terminal_session_id: uuid::Uuid::new_v4().to_string(),
             focus_handle,

@@ -320,6 +320,18 @@ fn validate_node(node: &mut LayoutNode, leaf_budget: &mut usize) {
     }
 }
 
+/// Session-owned pane identity, persisted per terminal surface so a restored
+/// pane keeps the `pane_id` that `agent.whoami` reports.
+///
+/// Unknown keys are ignored: a field added by a newer build must not make an
+/// older build discard the whole session (issue #726), and sessions written
+/// before task assignment was removed (issue #810) still carry a `task` key,
+/// `null` or a full task object, that loads and is dropped on the next save.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentContext {
+    pub pane_id: String,
+}
+
 pub(crate) fn default_layout_pane() -> LayoutNode {
     LayoutNode::Pane {
         surfaces: vec![SurfaceDefinition::default()],
@@ -332,9 +344,9 @@ pub(crate) fn default_layout_pane() -> LayoutNode {
 /// never reads either value.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SurfaceDefinition {
-    /// Stable pane identity and current task; absent in older sessions.
+    /// Stable pane identity; absent in older sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_context: Option<super::AgentContext>,
+    pub agent_context: Option<AgentContext>,
     /// Surface type identifier: "terminal", "browser", etc.
     pub surface_type: Option<String>,
     /// Display name for this surface.
