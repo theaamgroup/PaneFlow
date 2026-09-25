@@ -14,8 +14,6 @@ mod align;
 mod element;
 mod engine;
 mod extract;
-// Keep the fork's audited discovery helpers and regression tests unchanged.
-#[allow(dead_code)]
 mod git;
 mod highlighter;
 mod hit_test;

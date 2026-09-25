@@ -889,11 +889,22 @@ fn handle_connection(stream: Stream, request_tx: mpsc::SyncSender<IpcRequest>) {
     // past with no idle timeout - the read loop treats every error as a
     // disconnect, so an untimed `read_request_line` would block on a mute
     // peer until the process exits, holding one of the capped slots.
+    //
+    // Issue #824: a fire-and-forget client (`paneflow-ai-hook`) can write its
+    // one frame and close before this runs, and XNU refuses `SO_RCVTIMEO` with
+    // `EINVAL` once the peer is fully disconnected. That frame is already in
+    // the receive buffer, so drain it in non-blocking mode instead of closing:
+    // reads return the buffered bytes, then EOF, and a `WouldBlock` read error
+    // ends the loop, so no read can pin this thread even if `EINVAL` ever
+    // arises for another reason.
     if let Err(e) = stream.set_recv_timeout(Some(IPC_IDLE_TIMEOUT))
         && !socket_timeout_error_is_tolerable(&e)
     {
-        log::warn!("ipc: could not set receive timeout on connection, closing: {e}");
-        return;
+        let drain = e.raw_os_error() == Some(libc::EINVAL) && stream.set_nonblocking(true).is_ok();
+        if !drain {
+            log::warn!("ipc: could not set receive timeout on connection, closing: {e}");
+            return;
+        }
     }
 
     let mut reader = BufReader::new(stream);
@@ -1304,6 +1315,65 @@ mod timeout_policy_tests {
         assert!(
             !src.contains(&discarded),
             "set_recv_timeout result is discarded in handle_connection"
+        );
+    }
+}
+
+#[cfg(test)]
+mod peer_closed_tests {
+    use super::{IpcRequest, handle_connection};
+    use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
+    use paneflow_ipc_client::ai_hook::METHOD_STOP;
+    use serde_json::json;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// Issue #824: a fire-and-forget client writes one frame and closes before
+    /// the handler sets its receive timeout. XNU then refuses `SO_RCVTIMEO`
+    /// with `EINVAL`; the buffered frame must still be dispatched.
+    #[test]
+    fn frame_from_a_peer_that_already_closed_is_still_dispatched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("peer-closed.sock");
+        let name = path
+            .as_path()
+            .to_fs_name::<GenericFilePath>()
+            .expect("socket name");
+        let listener = ListenerOptions::new()
+            .name(name)
+            .create_sync()
+            .expect("bind listener");
+
+        let mut client = UnixStream::connect(&path).expect("connect");
+        let frame = json!({"jsonrpc": "2.0", "method": METHOD_STOP, "params": {}});
+        client
+            .write_all(format!("{frame}\n").as_bytes())
+            .expect("write frame");
+        drop(client);
+
+        let server = listener.accept().expect("accept");
+        // Precondition: this is the bug path, not a socket that still accepts
+        // a receive timeout.
+        let err = server
+            .set_recv_timeout(Some(Duration::from_secs(1)))
+            .expect_err("SO_RCVTIMEO on a peer-closed socket must fail on macOS");
+        assert_eq!(err.raw_os_error(), Some(libc::EINVAL), "got {err:?}");
+
+        let (request_tx, request_rx) = mpsc::sync_channel::<IpcRequest>(4);
+        let handler = std::thread::spawn(move || handle_connection(server, request_tx));
+
+        let request = request_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the buffered frame must reach the GPUI queue");
+        assert_eq!(request.method, METHOD_STOP);
+        let _ = request.response_tx.send(json!({"ok": true}));
+
+        handler.join().expect("handler thread");
+        assert!(
+            request_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "exactly one frame is dispatched, then the handler sees EOF"
         );
     }
 }
