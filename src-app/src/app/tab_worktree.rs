@@ -110,89 +110,13 @@ impl WorktreeStates {
     }
 }
 
-/// Why a tab of workspace `ws_idx` cannot be bound to `path`, or `None` when
-/// it can.
-///
-/// A checkout that another workspace owns as a `ManagedWorktree` - live, or
-/// held by an undo record - is removed when that ownership ends, and a tab
-/// bound to it would then spawn every pane into a missing directory. One the
-/// retirement journal already names is going now. A workspace's own managed
-/// checkouts are fine: their lifetime belongs to the same workspace.
-/// Prefix matches both ways, like the managed-worktree ownership check,
-/// so a binding cannot sit under or over an owned path either.
-fn binding_refusal(
-    path: &std::path::Path,
-    ws_idx: usize,
-    owned: &[(usize, std::path::PathBuf)],
-    closed: &[std::path::PathBuf],
-    pending: &[std::path::PathBuf],
-) -> Option<&'static str> {
-    let overlaps = |owned: &std::path::Path| owned.starts_with(path) || path.starts_with(owned);
-    if pending.iter().any(|p| overlaps(p)) {
-        return Some("That worktree is being retired");
-    }
-    if owned
-        .iter()
-        .any(|(owner, p)| *owner != ws_idx && overlaps(p))
-    {
-        return Some("That worktree belongs to another workspace");
-    }
-    if closed.iter().any(|p| overlaps(p)) {
-        return Some("That worktree belongs to a closed workspace");
-    }
-    None
-}
-
 impl PaneFlowApp {
-    /// Why the tab cannot be bound to `path` right now, as the toast to show,
-    /// or `None` when it can: see [`binding_refusal`].
-    pub(crate) fn tab_binding_refusal(
-        &self,
-        path: &std::path::Path,
-        ws_idx: usize,
-    ) -> Option<&'static str> {
-        let owned: Vec<(usize, std::path::PathBuf)> = self
-            .workspaces
-            .iter()
-            .enumerate()
-            .flat_map(|(index, ws)| {
-                ws.managed_worktrees
-                    .iter()
-                    .map(move |worktree| (index, worktree.path.clone()))
-            })
-            .collect();
-        let closed: Vec<std::path::PathBuf> = self
-            .closed_items
-            .iter()
-            .flat_map(|record| match record {
-                crate::ClosedRecord::Workspace(ws) => ws
-                    .managed_worktrees
-                    .iter()
-                    .map(|worktree| worktree.path.clone())
-                    .collect::<Vec<_>>(),
-                crate::ClosedRecord::Pane(_) | crate::ClosedRecord::Tab(_) => Vec::new(),
-            })
-            .collect();
-        let pending: Vec<std::path::PathBuf> = self
-            .pending_worktree_teardowns
-            .iter()
-            .map(|worktree| worktree.path.clone())
-            .collect();
-        binding_refusal(path, ws_idx, &owned, &closed, &pending)
-    }
-
-    /// Whether a picker may offer `path` to a tab of workspace `ws_idx`:
-    /// the row is left out when binding to it would be refused.
-    pub(crate) fn checkout_is_bindable(&self, path: &std::path::Path, ws_idx: usize) -> bool {
-        self.tab_binding_refusal(path, ws_idx).is_none()
-    }
-
     /// Bind a tab to a checkout the user picked, or say why not.
     ///
     /// The one door for a path chosen from a list: the picker's rows come
     /// from a listing read when it opened, and between then and the click the
-    /// directory can have been removed or claimed. A refusal reaches the user
-    /// as a toast and leaves the tab as it was. Returns whether it bound.
+    /// directory can have been removed. A refusal reaches the user as a toast
+    /// and leaves the tab as it was. Returns whether it bound.
     pub(crate) fn bind_tab_to_checkout(
         &mut self,
         ws_idx: usize,
@@ -200,10 +124,6 @@ impl PaneFlowApp {
         path: std::path::PathBuf,
         cx: &mut Context<Self>,
     ) -> bool {
-        if let Some(reason) = self.tab_binding_refusal(&path, ws_idx) {
-            self.show_toast(reason, cx);
-            return false;
-        }
         let Some(path) = crate::workspace::existing_worktree_dir(Some(path)) else {
             self.show_toast(
                 "That checkout no longer exists; run `git worktree prune`",
@@ -382,8 +302,9 @@ impl PaneFlowApp {
     ///
     /// The work runs off the render thread (a checkout can take seconds on a
     /// large repository) and re-resolves the tab by id when it lands, because
-    /// indices do not survive an await. A checkout made here is deliberately
-    /// not a `ManagedWorktree`: see `prepare_branch_checkout`.
+    /// indices do not survive an await. A checkout made here is the user's:
+    /// nothing removes it but the tab menu's "Remove worktree"
+    /// ([`Self::remove_tab_worktree`]).
     pub(crate) fn bind_tab_to_branch(
         &mut self,
         ws_idx: usize,
@@ -455,11 +376,9 @@ impl PaneFlowApp {
                                 if path == repo_root {
                                     app.set_tab_worktree(ws_idx, tab_idx, None, cx);
                                 } else {
-                                    // The same refusals as the fast path: git
-                                    // resolved the branch to a checkout, but
-                                    // whether this tab may stand on it is
-                                    // PaneFlow's question, and the answer can
-                                    // have changed while git worked.
+                                    // Through the same gate as the fast path,
+                                    // which re-checks that the directory git
+                                    // resolved the branch to still exists.
                                     app.bind_tab_to_checkout(ws_idx, tab_idx, path, cx);
                                 }
                                 app.spawn_worktree_listing(ws_idx, cx);
@@ -519,18 +438,15 @@ impl PaneFlowApp {
     /// in it (issue #348).
     ///
     /// The counterpart of [`Self::bind_tab_to_branch`], and the reason
-    /// `<repo>.worktrees/` no longer grows for the life of the project: a
-    /// checkout the picker created is deliberately NOT a
-    /// [`crate::workspace::worktree::ManagedWorktree`]
-    /// ([`crate::workspace::worktree::prepare_branch_checkout`]), so nothing
-    /// else ever tears it down.
+    /// `<repo>.worktrees/` no longer grows for the life of the project:
+    /// nothing else ever removes a checkout the picker created
+    /// ([`crate::workspace::worktree::prepare_branch_checkout`]).
     ///
-    /// It keeps the invariants workspace teardown holds for orchestration's
-    /// own worktrees, for the same reasons: the BRANCH IS NEVER DELETED, a
-    /// checkout holding uncommitted work is never removed, and a directory
-    /// PaneFlow did not create belongs to somebody else. Unlike teardown,
-    /// this is a gesture the user made, so a refusal is a toast rather than
-    /// a log line nobody reads. The rules are [`removal_refusal`]; the git
+    /// The invariants: the BRANCH IS NEVER DELETED, a checkout holding
+    /// uncommitted work is never removed, and a directory PaneFlow did not
+    /// create belongs to somebody else. This is a gesture the user made, so a
+    /// refusal is a toast rather than a log line nobody reads. The rules are
+    /// [`removal_refusal`]; the git
     /// work is [`remove_checkout`], through `smol::unblock` (four
     /// subprocesses, one of them deleting a tree), and the workspace is
     /// re-resolved by id afterwards, because indices do not survive an await.
@@ -555,37 +471,25 @@ impl PaneFlowApp {
         // terminal yet for the cwd scan to find, so only a re-read of the
         // live workspace list can refuse it.
         let open_roots = self.open_workspace_roots();
-        let reserved = self.teardown_owned_worktrees();
-        // The same live-process gate managed teardown applies: a shell or
-        // agent still working in the checkout (a tab restored from a session
-        // spawned its panes there) must not have its cwd deleted from under it.
+        // A shell or agent still working in the checkout (a tab restored from
+        // a session spawned its panes there) must not have its cwd deleted
+        // from under it.
         let protected = self.live_terminal_session_ids(cx);
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let (probe_root, probe_path) = (repo_root.clone(), path.clone());
                 let checked = smol::unblock(move || {
-                    check_checkout_removable(
-                        &probe_root,
-                        &probe_path,
-                        &open_roots,
-                        &reserved,
-                        &protected,
-                    )
+                    check_checkout_removable(&probe_root, &probe_path, &open_roots, &protected)
                 })
                 .await;
                 // Re-validate against the workspaces open *now*, on the main
-                // thread, and only then delete. The remaining window is the
-                // one managed teardown has too: git itself still refuses a
-                // checkout that turned dirty in between.
+                // thread, and only then delete. In the remaining window git
+                // itself still refuses a checkout that turned dirty.
                 let revalidated = cx.update(|cx| {
                     this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
-                        let refusal = checked.err().or_else(|| {
-                            open_or_reserved_refusal(
-                                &path,
-                                &app.open_workspace_roots(),
-                                &app.teardown_owned_worktrees(),
-                            )
-                        });
+                        let refusal = checked
+                            .err()
+                            .or_else(|| open_workspace_refusal(&path, &app.open_workspace_roots()));
                         match refusal {
                             Some(message) => {
                                 app.show_toast(message, cx);
@@ -623,26 +527,6 @@ impl PaneFlowApp {
         self.workspaces
             .iter()
             .map(|ws| ws.worktree_root.clone())
-            .collect()
-    }
-
-    /// Every checkout the teardown path owns and removes on its own schedule:
-    /// each workspace's managed worktrees, the ones an undo record still
-    /// holds, and the pending teardown journal (issue #348). The tab menu's
-    /// removal must not take one of these from under it.
-    fn teardown_owned_worktrees(&self) -> Vec<std::path::PathBuf> {
-        self.workspaces
-            .iter()
-            .flat_map(|ws| ws.managed_worktrees.iter())
-            .chain(self.closed_items.iter().flat_map(|record| {
-                let held: &[crate::workspace::worktree::ManagedWorktree] = match record {
-                    crate::ClosedRecord::Workspace(ws) => &ws.managed_worktrees,
-                    crate::ClosedRecord::Pane(_) | crate::ClosedRecord::Tab(_) => &[],
-                };
-                held.iter()
-            }))
-            .chain(self.pending_worktree_teardowns.iter())
-            .map(|worktree| worktree.path.clone())
             .collect()
     }
 
@@ -706,18 +590,14 @@ impl PaneFlowApp {
 /// picker made, and the repository root never passes. `open_roots` are the
 /// open workspaces' checkouts: one standing in or under the path would be
 /// left in a directory that no longer exists, so that is a refusal, not a
-/// warning. `reserved` are the paths the teardown path owns (every
-/// workspace's managed worktrees, the ones held by undo records, and the
-/// pending teardown journal), matched both ways like the binding gate, since
-/// it removes them on its own schedule and must not lose one from under it.
+/// warning.
 fn removal_refusal(
     repo_root: &std::path::Path,
     path: &std::path::Path,
     branch: Option<&str>,
     open_roots: &[std::path::PathBuf],
-    reserved: &[std::path::PathBuf],
 ) -> Option<String> {
-    if let Some(reason) = open_or_reserved_refusal(path, open_roots, reserved) {
+    if let Some(reason) = open_workspace_refusal(path, open_roots) {
         return Some(reason);
     }
     let ours = branch.is_some_and(|branch| {
@@ -733,7 +613,7 @@ fn removal_refusal(
 }
 
 /// The blocking half of [`PaneFlowApp::remove_tab_worktree`]: refuse what is
-/// open, reserved, not ours, or not clean, then remove the directory and drop
+/// open, not ours, or not clean, then remove the directory and drop
 /// the administrative entry that named it.
 ///
 /// The branch is read from a fresh `git worktree list` rather than the
@@ -743,8 +623,8 @@ fn removal_refusal(
 /// modifications and untracked files refuse, ignored files (the `.env*`
 /// copies the picker makes, build output) do not, the same gate
 /// `git worktree remove` applies. A live process whose cwd is inside the
-/// checkout refuses too ([`worktree::worktree_has_live_process_cwd`], the
-/// managed-teardown gate, with the open terminals' sessions protected): a
+/// checkout refuses too ([`worktree::worktree_has_live_process_cwd`], with
+/// the open terminals' sessions protected): a
 /// shell or agent must not have its directory deleted from under it. Both
 /// report an error rather than "clean" when they cannot prove it, and that
 /// error propagates: never delete what cannot be read. The BRANCH IS NEVER
@@ -754,33 +634,24 @@ fn remove_checkout(
     repo_root: &std::path::Path,
     path: &std::path::Path,
     open_roots: &[std::path::PathBuf],
-    reserved: &[std::path::PathBuf],
     protected_session_ids: &[u32],
 ) -> Result<(), String> {
-    check_checkout_removable(repo_root, path, open_roots, reserved, protected_session_ids)?;
+    check_checkout_removable(repo_root, path, open_roots, protected_session_ids)?;
     remove_validated_checkout(repo_root, path)
 }
 
-/// The two workspace-state refusals of [`removal_refusal`], on their own so
-/// [`PaneFlowApp::remove_tab_worktree`] can apply them a second time on the
+/// The workspace-state refusal of [`removal_refusal`], on its own so
+/// [`PaneFlowApp::remove_tab_worktree`] can apply it a second time on the
 /// main thread, against the workspaces open at that moment, after the git
 /// probes and before the delete (issue #348). `open_roots` are matched at
-/// or under the path; `reserved` paths both ways, like the binding gate.
-fn open_or_reserved_refusal(
+/// or under the path.
+fn open_workspace_refusal(
     path: &std::path::Path,
     open_roots: &[std::path::PathBuf],
-    reserved: &[std::path::PathBuf],
 ) -> Option<String> {
     if open_roots.iter().any(|root| root.starts_with(path)) {
         return Some(format!(
             "{} is open as a workspace - close it first",
-            path.display()
-        ));
-    }
-    let overlaps = |owned: &std::path::Path| owned.starts_with(path) || path.starts_with(owned);
-    if reserved.iter().any(|owned| overlaps(owned)) {
-        return Some(format!(
-            "{} is managed by workspace teardown - it is removed when its workspace closes",
             path.display()
         ));
     }
@@ -794,7 +665,6 @@ fn check_checkout_removable(
     repo_root: &std::path::Path,
     path: &std::path::Path,
     open_roots: &[std::path::PathBuf],
-    reserved: &[std::path::PathBuf],
     protected_session_ids: &[u32],
 ) -> Result<(), String> {
     use crate::workspace::worktree;
@@ -805,13 +675,7 @@ fn check_checkout_removable(
             path.display()
         ));
     };
-    if let Some(reason) = removal_refusal(
-        repo_root,
-        path,
-        entry.branch.as_deref(),
-        open_roots,
-        reserved,
-    ) {
+    if let Some(reason) = removal_refusal(repo_root, path, entry.branch.as_deref(), open_roots) {
         return Err(reason);
     }
     if !worktree::is_clean_for_removal(path)? {
@@ -847,7 +711,7 @@ fn remove_validated_checkout(
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckoutGit, WorktreeStates, binding_refusal, removal_refusal, remove_checkout};
+    use super::{CheckoutGit, WorktreeStates, removal_refusal, remove_checkout};
     use crate::workspace::GitDiffStats;
     use std::path::{Path, PathBuf};
 
@@ -883,49 +747,10 @@ mod tests {
     }
 
     #[test]
-    fn a_tab_cannot_bind_to_a_checkout_another_workspace_owns_or_is_retiring() {
-        // Issue #347 review, finding 3: the picker bound to any listing entry
-        // holding the branch, including a managed checkout owned by
-        // another workspace - which is removed when that workspace closes.
-        let feat = PathBuf::from("/repo.worktrees/feat-x");
-        let owned = vec![(0usize, feat.clone())];
-        let none: Vec<PathBuf> = Vec::new();
-        assert_eq!(
-            binding_refusal(&feat, 1, &owned, &none, &none),
-            Some("That worktree belongs to another workspace")
-        );
-        assert_eq!(
-            binding_refusal(&feat.join("src"), 1, &owned, &none, &none),
-            Some("That worktree belongs to another workspace"),
-            "a path under an owned checkout is owned with it"
-        );
-        assert_eq!(
-            binding_refusal(&feat, 0, &owned, &none, &none),
-            None,
-            "a workspace may bind its own managed checkout - that is what `up` does"
-        );
-        assert_eq!(
-            binding_refusal(Path::new("/repo.worktrees/feat-y"), 1, &owned, &none, &none),
-            None,
-            "a sibling checkout nobody owns is free"
-        );
-        assert_eq!(
-            binding_refusal(&feat, 0, &[], std::slice::from_ref(&feat), &none),
-            Some("That worktree belongs to a closed workspace"),
-            "an undo record still owns its checkouts"
-        );
-        assert_eq!(
-            binding_refusal(&feat, 0, &owned, &none, std::slice::from_ref(&feat)),
-            Some("That worktree is being retired"),
-            "retirement outranks ownership: the directory is going now"
-        );
-    }
-
-    #[test]
     fn every_picked_checkout_passes_through_the_binding_gate() {
         // Findings 3 and 4 at the source level: the fast path and the async
         // landing of `bind_tab_to_branch` bind through `bind_tab_to_checkout`
-        // (refusals + "still a directory"), never through the raw setter,
+        // ("still a directory"), never through the raw setter,
         // and a stale listing entry whose directory is gone is not bound.
         let src = include_str!("tab_worktree.rs");
         let bind = crate::source_probe::source_slice(
@@ -962,20 +787,17 @@ mod tests {
             "pub(crate) fn bind_tab_to_checkout(",
             "/// Every checkout worth probing",
         );
-        let refusal_at = gate
-            .find("self.tab_binding_refusal(&path, ws_idx)")
-            .expect("the gate consults the refusal rules");
         let exists_at = gate
             .find("crate::workspace::existing_worktree_dir(Some(path))")
             .expect("the gate checks the directory still exists");
         let set_at = gate
             .find("self.set_tab_worktree(ws_idx, tab_idx, Some(path), cx)")
             .expect("the gate is what binds");
-        assert!(refusal_at < exists_at && exists_at < set_at, "{gate}");
+        assert!(exists_at < set_at, "{gate}");
         assert_eq!(
             gate.matches("self.show_toast(").count(),
-            2,
-            "each refusal reaches the user as a toast: {gate}"
+            1,
+            "the refusal reaches the user as a toast: {gate}"
         );
     }
 
@@ -1012,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn removal_is_refused_for_what_is_not_ours_open_or_reserved() {
+    fn removal_is_refused_for_what_is_not_ours_or_open() {
         // Issue #348: the tab menu's "Remove worktree" row takes a
         // picker-created checkout back down, and every refusal is a toast.
         use crate::workspace::worktree::{worktree_dir, worktree_dir_hashed};
@@ -1020,7 +842,7 @@ mod tests {
         let ours = worktree_dir(&repo, "feat/x");
         let none: Vec<PathBuf> = Vec::new();
         assert_eq!(
-            removal_refusal(&repo, &ours, Some("feat/x"), &none, &none),
+            removal_refusal(&repo, &ours, Some("feat/x"), &none),
             None,
             "a clean, owned, not-open checkout may go"
         );
@@ -1029,14 +851,13 @@ mod tests {
                 &repo,
                 &worktree_dir_hashed(&repo, "feat/x"),
                 Some("feat/x"),
-                &none,
                 &none
             ),
             None,
             "the collision-resistant directory is ours too"
         );
         let not_ours = |path: &Path, branch: Option<&str>| {
-            removal_refusal(&repo, path, branch, &none, &none)
+            removal_refusal(&repo, path, branch, &none)
                 .unwrap_or_default()
                 .contains("not created by PaneFlow")
         };
@@ -1057,40 +878,16 @@ mod tests {
             "the repository root is never a worktree to remove"
         );
         assert!(
-            removal_refusal(
-                &repo,
-                &ours,
-                Some("feat/x"),
-                std::slice::from_ref(&ours),
-                &none
-            )
-            .unwrap_or_default()
-            .contains("open as a workspace"),
+            removal_refusal(&repo, &ours, Some("feat/x"), std::slice::from_ref(&ours))
+                .unwrap_or_default()
+                .contains("open as a workspace"),
             "a checkout that is itself an open workspace is somebody's cwd"
         );
         assert!(
-            removal_refusal(&repo, &ours, Some("feat/x"), &[ours.join("src")], &none)
+            removal_refusal(&repo, &ours, Some("feat/x"), &[ours.join("src")])
                 .unwrap_or_default()
                 .contains("open as a workspace"),
             "a workspace standing under the checkout is open in it"
-        );
-        assert!(
-            removal_refusal(
-                &repo,
-                &ours,
-                Some("feat/x"),
-                &none,
-                std::slice::from_ref(&ours)
-            )
-            .unwrap_or_default()
-            .contains("teardown"),
-            "a managed or retiring checkout is the teardown path's to remove"
-        );
-        assert!(
-            removal_refusal(&repo, &ours, Some("feat/x"), &none, &[ours.join("nested")])
-                .unwrap_or_default()
-                .contains("teardown"),
-            "a managed checkout under the path is reserved with it"
         );
     }
 
@@ -1149,23 +946,19 @@ mod tests {
         let before = list_worktrees(&repo_root).expect("listing");
         assert_eq!(before.len(), 4, "root, two picker checkouts, one foreign");
 
-        let refused =
-            remove_checkout(&repo_root, &dirty, &[], &[], &[]).expect_err("dirty is refused");
+        let refused = remove_checkout(&repo_root, &dirty, &[], &[]).expect_err("dirty is refused");
         assert!(refused.contains("uncommitted"), "{refused}");
         assert!(dirty.is_dir());
         let refused =
-            remove_checkout(&repo_root, &foreign, &[], &[], &[]).expect_err("foreign is refused");
+            remove_checkout(&repo_root, &foreign, &[], &[]).expect_err("foreign is refused");
         assert!(refused.contains("not created by PaneFlow"), "{refused}");
         assert!(foreign.is_dir());
-        let refused = remove_checkout(&repo_root, &clean, std::slice::from_ref(&clean), &[], &[])
+        let refused = remove_checkout(&repo_root, &clean, std::slice::from_ref(&clean), &[])
             .expect_err("an open workspace is refused");
         assert!(refused.contains("open as a workspace"), "{refused}");
-        let refused = remove_checkout(&repo_root, &clean, &[], std::slice::from_ref(&clean), &[])
-            .expect_err("a managed checkout is refused");
-        assert!(refused.contains("teardown"), "{refused}");
 
-        // A shell still working in the checkout keeps it: the same gate
-        // managed teardown applies, so its cwd is never deleted from under it.
+        // A shell still working in the checkout keeps it: its cwd is never
+        // deleted from under it.
         struct ChildCleanup(std::process::Child);
         impl Drop for ChildCleanup {
             fn drop(&mut self) {
@@ -1188,7 +981,7 @@ mod tests {
         )
         .expect("read child readiness");
         assert_eq!(ready.trim_end(), "ready");
-        let refused = remove_checkout(&repo_root, &clean, &[], &[], &[])
+        let refused = remove_checkout(&repo_root, &clean, &[], &[])
             .expect_err("a checkout with a live process inside is refused");
         assert!(refused.contains("in use by a running process"), "{refused}");
         assert!(clean.is_dir());
@@ -1204,8 +997,7 @@ mod tests {
         // The ignored `.env` copy is still there, and it is not "uncommitted
         // work": the checkout the picker made is removable as it stands.
         assert!(clean.join(".env").is_file());
-        remove_checkout(&repo_root, &clean, &[], &[], &[])
-            .expect("a clean owned checkout is removed");
+        remove_checkout(&repo_root, &clean, &[], &[]).expect("a clean owned checkout is removed");
         assert!(!clean.exists(), "the directory is gone");
         let after = list_worktrees(&repo_root).expect("listing");
         assert_eq!(after.len(), 3);

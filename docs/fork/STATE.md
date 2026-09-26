@@ -602,8 +602,8 @@ where the evidence is:
 - **Per-tab worktree binding** (#347). `Tab::worktree`
   (`src-app/src/workspace/tab.rs`), `bind_tab_to_branch` in
   `src-app/src/app/tab_worktree.rs` (`prepare_branch_checkout` runs
-  off-thread and owns nothing: a tab checkout is marker-less, never
-  managed). Session carries it as `TabSession.worktree` (additive; a
+  off-thread and owns nothing: a tab checkout is marker-less). Session
+  carries it as `TabSession.worktree` (additive; a
   missing key restores unbound: `a_tab_bound_to_a_missing_worktree_restores_unbound`,
   `tab_worktree_needs_no_schema_bump`,
   `every_picked_checkout_passes_through_the_binding_gate`).
@@ -611,11 +611,11 @@ where the evidence is:
   menu (`sidebar/context_menu.rs`, `tab-context-remove-worktree`, present
   only for a bound tab) into `remove_tab_worktree`. Ownership is option B:
   `is_paneflow_worktree_dir` (`workspace/worktree.rs`) decides, there is no
-  owner marker. Four refusals (`removal_refusal` + the dirty check in
-  `remove_checkout`): open as a workspace, managed by workspace teardown,
-  not created by PaneFlow, uncommitted changes. The branch is never
-  deleted. Pinned by
-  `removal_is_refused_for_what_is_not_ours_open_or_reserved` and
+  owner marker. Refusals (`removal_refusal` + `check_checkout_removable`):
+  open as a workspace, not created by PaneFlow, uncommitted changes, a live
+  process in the checkout, and a path git no longer lists as a worktree.
+  The branch is never deleted. Pinned by
+  `removal_is_refused_for_what_is_not_ours_or_open` and
   `a_clean_owned_checkout_is_removed_keeping_its_branch_and_a_dirty_one_is_refused`.
 - **Mark as read** (#408). A row at the top of the tab context menu
   (`sidebar/context_menu.rs`, `tab-context-mark-read`) present only while
@@ -879,14 +879,9 @@ Three findings in that cluster are worth carrying forward, because each was a
 
 Workspace-scope close now shares the live-agent confirmation guard across
 `Cmd+Shift+Q`, the sidebar folder row, the workspace context menu, and IPC.
-It captures a whole-workspace undo record before removal; managed-worktree
-ownership follows that record until restore, FIFO eviction, or final quit.
+It captures a whole-workspace undo record before removal.
 Cached Review and mounted/parked Diff Dock terminals are included in the same
 guard and are dropped with their workspace even while their UI is unmounted.
-Managed-worktree retirement is journaled before cleanup, reserves its paths
-against every workspace/pane ingress, and recovers the exact marker-unlink
-crash window only when the persisted macOS directory identity still matches,
-so a same-path/same-branch replacement cannot inherit teardown ownership.
 Terminal teardown pins every authenticated process group in the PTY session,
 including stopped/background groups, for both orderly close and parent death.
 

@@ -8,17 +8,22 @@ so a standard checkout only verifies and links repository content. **No Zig
 toolchain is needed to build PaneFlow.**
 
 This fork ships exactly one target, `aarch64-apple-darwin`, under
-`prebuilt/aarch64-apple-darwin/`. The archive, header, bindings and
-`build-info.txt` were vendored byte-for-byte from upstream
+`prebuilt/aarch64-apple-darwin/`. That directory holds three inputs: the
+archive, the header and `build-info.txt`, vendored byte-for-byte from upstream
 `arthjean/paneflow` tag `v0.10.0` (`b4da6ba`) on 2026-08-31 (issue #184);
-the Linux and Windows archives upstream also ships were not copied.
+the Linux and Windows archives upstream also ships were not copied. Upstream
+also keeps a `bindings.rs` in each target directory. This fork does not
+(issue #842), so a re-vendor of `prebuilt/aarch64-apple-darwin/` must not bring
+it back.
 
 The pinned source is Ghostty
 `f2d5758f6305867dc36b36293c6165d8152b853e` built with Zig 0.16.0 in
 `ReleaseFast` (`ghostty_app_version` `1.3.2-dev+f2d5758f6`, ABI
-`api_version` `0.1.0`). `bindings.rs` is pregenerated from the pinned C
-header. Its normalized UTF-8 checksum is verified both in the workspace and in
-the prepared artifact. Note what `header_sha256` covers: `include/ghostty/vt.h`
+`api_version` `0.1.0`). `native/libghostty/bindings.rs` is the only bindings
+file, pregenerated from the pinned C header. The build compiles it and verifies
+its normalized UTF-8 checksum against `bindings_sha256`; `build-info.txt`
+records the same digest as the bindings the archive was built against. Note
+what `header_sha256` covers: `include/ghostty/vt.h`
 is Ghostty's umbrella header (29 `#include`s), and the per-module headers it
 pulls in are not vendored here - the ABI is pinned by `bindings.rs` plus
 `api_version`, checked at build time against the archive's build-info symbol.
@@ -49,9 +54,13 @@ rebuilds the archive; an independent rebuild-and-compare job is a follow-up to
 upstream's review plus the hash match above.
 
 `PANEFLOW_LIBGHOSTTY_DIR` points the build at a prepared directory instead of
-`prebuilt/aarch64-apple-darwin/`. The same checks apply: the archive, header,
-bindings and `build-info.txt` must all match the manifest, and symlinked inputs
-are rejected.
+`prebuilt/aarch64-apple-darwin/`. The header must match the manifest, and so
+must every `build-info.txt` value except `archive_sha256`; symlinked inputs are
+rejected. The archive is checked against the `archive_sha256` that the prepared
+directory's own `build-info.txt` records, not against the manifest's reviewed
+fingerprint above. The bindings always come from
+`native/libghostty/bindings.rs`; a `bindings.rs` in the prepared directory is
+ignored.
 
 ## ABI and licensing
 

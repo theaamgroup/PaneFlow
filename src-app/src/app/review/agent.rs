@@ -85,10 +85,6 @@ impl PaneFlowApp {
             self.show_toast("Open this repository before starting a review", cx);
             return;
         };
-        if crate::workspace::path_is_in_retiring_worktree(&subject.worktree.path) {
-            self.show_toast("Worktree is still being retired", cx);
-            return;
-        }
         if !subject.worktree.path.is_dir() {
             self.show_toast("Review checkout no longer exists", cx);
             return;

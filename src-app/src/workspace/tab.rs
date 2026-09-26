@@ -366,7 +366,7 @@ fn volume_folds_case(path: &std::path::Path) -> bool {
 /// Every path that rebuilds a bound tab - session restore, undo-close-tab,
 /// undo-close-workspace, a pick from a cached worktree listing - runs its
 /// binding through here, so a checkout removed in the meantime (by
-/// `git worktree remove`, by another PaneFlow session's teardown, by hand)
+/// `git worktree remove`, by another tab's "Remove worktree", by hand)
 /// restores the tab unbound instead of pinning every pane it opens to a
 /// missing directory. A plain `is_dir`, no canonicalization: a stat is
 /// bounded where resolving symlinks across a dead mount is not.

@@ -181,10 +181,19 @@ from inside a pane, only that pane's tab takes on the new checkout - the
 sibling tabs keep the branch they were on.
 
 A checkout made from the palette or the tab menu is yours: closing the
-workspace never removes it (`git worktree list` still shows it). A managed
-worktree recorded from an earlier session is still torn down with its
-workspace when clean. Remove a palette checkout with
-`git worktree remove` when you are done.
+tab or the workspace never removes it (`git worktree list` still shows
+it). Remove it with the tab menu's **Remove worktree** row, or with
+`git worktree remove`, when you are done. **Remove worktree** removes
+only a clean checkout PaneFlow created, and never deletes the branch.
+
+PaneFlow no longer deletes any checkout when a workspace closes. A
+checkout an older build created for a workspace stays on disk, and it
+still holds that build's `.paneflow-worktree` file, so **Remove
+worktree** refuses it as having uncommitted changes unless the
+repository ignores that file. Delete
+`.paneflow-worktree` from the checkout first, or run
+`git worktree remove --force <path>`, which also discards any other
+uncommitted changes in it.
 
 ## Agent chat
 

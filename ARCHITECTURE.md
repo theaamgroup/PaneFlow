@@ -50,7 +50,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── command_palette.rs             ← Cmd+Shift+O palette: every context-free registry action with its live
 │   │                                     binding, whole-word filter, Enter dispatches, never lists itself (#523)
 │   ├── tab_worktree.rs                ← per-tab worktree binding (#347): cached checkout git state, branch/worktree
-│   │                                     listings, bind_tab_to_branch (prepare_branch_checkout off-thread, never managed)
+│   │                                     listings, bind_tab_to_branch (prepare_branch_checkout off-thread)
 │   └── workspace_ops/                 ← create/close/select/rename/reveal, focus, layout, swap, tab
 ├── cli/                               ← CLI commands over the IPC socket
 ├── window_chrome/

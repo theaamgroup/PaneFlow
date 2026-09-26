@@ -730,10 +730,6 @@ impl PaneFlowApp {
                 } else {
                     std::path::PathBuf::from(&cwd)
                 };
-                if self.pending_worktree_teardown_conflicts(&cwd_path) {
-                    self.show_toast("Worktree is still being retired", cx);
-                    return;
-                }
                 let Some(edge) = edge else {
                     // EP-002 US-007: a center drop opens the resumed session
                     // in a NEW WORKSPACE TAB. The pane is mono-surface, so
