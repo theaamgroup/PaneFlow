@@ -26,7 +26,7 @@ mod syntax;
 mod view;
 
 #[cfg(test)]
-pub(crate) use git::tests::{capture_logs, captured_logs_contain};
+pub(crate) use git::tests::{capture_logs, captured_logs_contain, captured_logs_count};
 
 // Only the host view and its subject/seed types are consumed outside this
 // module (`pane::PaneSurface::Diff`, `app/review/`). The engine / git / rows

@@ -1516,6 +1516,18 @@ pub(crate) mod tests {
             .any(|(_, message)| message.contains(needle))
     }
 
+    /// How many captured records contain `needle`. The logger is
+    /// process-wide, so pass a needle only one test emits.
+    pub(crate) fn captured_logs_count(needle: &str) -> usize {
+        TEST_LOGGER
+            .records
+            .lock()
+            .expect("test logger lock poisoned")
+            .iter()
+            .filter(|(_, message)| message.contains(needle))
+            .count()
+    }
+
     #[test]
     fn name_status_z_parsing() {
         // status\0path\0 records; includes an addition, a deletion, a rename.
