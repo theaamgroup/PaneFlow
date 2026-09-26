@@ -7,11 +7,14 @@ use super::checksum::{validate_sha256, verify_hash, verify_text_hash};
 use super::manifest::TargetContract;
 use super::{BuildResult, artifact_error, build_error};
 
+/// The prepared libghostty directory: the archive, the header and
+/// `build-info.txt`. The compiled bindings are only ever the workspace copy
+/// named by `manifest.toml` `bindings_path`, so a `bindings.rs` placed in this
+/// directory is ignored.
 pub(crate) struct ArtifactBundle {
     root: PathBuf,
     archive: PathBuf,
     header: PathBuf,
-    bindings: PathBuf,
     build_info: PathBuf,
     uses_bundled_archive: bool,
 }
@@ -37,7 +40,6 @@ impl ArtifactBundle {
         Self {
             archive: root.join(&contract.archive_path),
             header: root.join(contract.header_path()),
-            bindings: root.join("bindings.rs"),
             build_info: root.join("build-info.txt"),
             root,
             uses_bundled_archive,
@@ -48,7 +50,6 @@ impl ArtifactBundle {
         vec![
             self.archive.as_path(),
             self.header.as_path(),
-            self.bindings.as_path(),
             self.build_info.as_path(),
         ]
     }
@@ -68,12 +69,6 @@ impl ArtifactBundle {
         verify_artifact_text(
             &self.header,
             &contract.header_sha256,
-            contract.target(),
-            action,
-        )?;
-        verify_artifact_text(
-            &self.bindings,
-            &contract.bindings_sha256,
             contract.target(),
             action,
         )?;
@@ -269,9 +264,13 @@ mod tests {
         bundle.validate(&contract, "replace reviewed fixture")
     }
 
-    /// A macOS bundle laid out exactly as upstream's build script writes it (the
-    /// shape of the vendored `prebuilt/aarch64-apple-darwin/` tree), paired with
-    /// the manifest that declares its target.
+    /// A macOS bundle shaped like the vendored `prebuilt/aarch64-apple-darwin/`
+    /// tree (the archive, the header and `build-info.txt`), paired with the
+    /// manifest that declares its target.
+    ///
+    /// Upstream's build script also writes `bindings.rs` into the bundle; this
+    /// fork compiles only the workspace copy, so the fixture has none. The
+    /// manifest and the build info still pin a `bindings_sha256`.
     ///
     /// Returns the manifest source and the ten `build-info.txt` entries.
     fn macos_fixture(root: &Path) -> BuildResult<(String, Vec<(String, String)>)> {
@@ -284,7 +283,6 @@ mod tests {
         fs::create_dir_all(root.join("include/ghostty"))?;
         fs::create_dir_all(root.join("lib"))?;
         fs::write(root.join("include/ghostty/vt.h"), HEADER)?;
-        fs::write(root.join("bindings.rs"), BINDINGS)?;
         fs::write(root.join("lib/libghostty-vt.a"), ARCHIVE)?;
 
         let archive_sha256 = format!("{:x}", Sha256::digest(ARCHIVE));
@@ -365,10 +363,9 @@ mod tests {
             .iter()
             .map(|path| path.display().to_string())
             .collect::<Vec<_>>();
-        assert_eq!(inputs.len(), 4, "unexpected macOS inventory: {inputs:?}");
+        assert_eq!(inputs.len(), 3, "unexpected macOS inventory: {inputs:?}");
         assert!(inputs.iter().any(|path| path.ends_with("libghostty-vt.a")));
         assert!(inputs.iter().any(|path| path.ends_with("vt.h")));
-        assert!(inputs.iter().any(|path| path.ends_with("bindings.rs")));
         assert!(inputs.iter().any(|path| path.ends_with("build-info.txt")));
         bundle.validate(&contract, &contract.corrective_action())
     }
@@ -453,10 +450,10 @@ mod tests {
         let (source, _) = macos_fixture(root.path())?;
         let manifest = Manifest::parse(&source)?;
         let contract = manifest.target_contract(MACOS_TARGET)?;
-        let bindings = root.path().join("bindings.rs");
-        let elsewhere = root.path().join("bindings.real.rs");
-        fs::rename(&bindings, &elsewhere)?;
-        symlink(&elsewhere, &bindings)?;
+        let header = root.path().join("include/ghostty/vt.h");
+        let elsewhere = root.path().join("include/ghostty/vt.real.h");
+        fs::rename(&header, &elsewhere)?;
+        symlink(&elsewhere, &header)?;
         let bundle = ArtifactBundle::resolve(root.path(), &contract, Some(root.path().into()));
         let error = bundle
             .validate(&contract, &contract.corrective_action())
