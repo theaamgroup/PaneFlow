@@ -108,13 +108,6 @@ headless agents in separate git worktrees. A read-only MCP bridge exposes pane r
 agents, so an assistant can inspect another pane without copy-paste.
 The guide and command reference live on the [scripting and automation page](scripting.md).
 
-## Custom action buttons
-
-Pin a frequent command to a one-click button at the top of the window.
-Give it a name, a shell command - say `clear && cargo run` for a dev
-server - and an icon, then click it to run that command in the focused
-pane. Stop retyping your build, test, or lint invocation on every loop.
-
 ## Opening a file
 
 There is no in-app file tree and no in-app editor. Clicking a file path

@@ -11,8 +11,6 @@ pub mod blink;
 mod clipboard_gate;
 pub mod element;
 mod ghostty_session;
-#[cfg(test)]
-mod ghostty_stress;
 mod input;
 pub mod kitty;
 mod marks;

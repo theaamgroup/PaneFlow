@@ -145,7 +145,7 @@ the linked issues; raw Markdown examples do not establish eligibility.
 
 The workflow derives additional conservative path flags:
 `src-app/`, `assets/`, `DESIGN.md` → ui;
-`crates/`, `schemas/`, `examples/`, `mcps/` → integration;
+`crates/`, `schemas/`, `examples/` → integration;
 `native/` → platform-wide;
 `.github/`, `.agents/`, `.claude/`, `.cursor/`, `scripts/`, `skills/`, `packaging/`,
 manifests/lockfiles, toolchains, deny/clippy configuration, and agent instructions

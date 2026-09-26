@@ -271,31 +271,6 @@ mod tests {
     }
 
     #[test]
-    fn static_manifests_match_runtime_specs() {
-        let manifest_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mcps/paneflow/tools");
-        // A removed tool must not leave an orphaned manifest behind (issue #810).
-        let mut on_disk: Vec<String> = std::fs::read_dir(&manifest_dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        on_disk.sort();
-        let mut expected: Vec<String> = tool_specs()
-            .iter()
-            .map(|spec| format!("{}.json", spec["name"].as_str().expect("tool name")))
-            .collect();
-        expected.sort();
-        assert_eq!(on_disk, expected);
-        for spec in tool_specs() {
-            let name = spec["name"].as_str().expect("tool name");
-            let path = manifest_dir.join(format!("{name}.json"));
-            let manifest: Value =
-                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            assert_eq!(manifest, spec, "{} drifted", path.display());
-        }
-    }
-
-    #[test]
     fn schemas_use_safe_integer_targets_and_explicit_maxima() {
         let specs = tool_specs();
         let target = &specs[1]["inputSchema"]["properties"]["target"];

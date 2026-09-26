@@ -3,7 +3,7 @@
 //! The streams are generated, never recorded, so a benchmark run is
 //! reproducible from `CORPUS_SEED` alone and no fixture file has to be kept in
 //! sync with the engine. Nothing here touches a terminal backend: the same
-//! bytes feed the Ghostty stress scenarios and the GPUI input-to-frame probe.
+//! bytes feed the terminal pipeline bench and the GPUI input-to-frame probe.
 //! The percentile and process-counter helpers that used to sit beside the
 //! corpus live in `crate::bench_harness`.
 

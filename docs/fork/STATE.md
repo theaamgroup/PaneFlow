@@ -1,24 +1,8 @@
 # PaneFlow fork: current state
 
-Living handoff record. Updated 2026-09-23 for the 0.7.2 cut (see the entry
-below), and before that 2026-09-22 for the 0.7.1 cut, 2026-09-18 for the 0.7.0 cut, 2026-09-17 after the #519 startup bench port and
-2026-09-16 after the post-0.6.1 review follow-ups. The prior header described
-the 0.6.1 cut;
-the one before that the 0.6.0 cut, and before that the 0.5.0 cut, which shipped
-the Review grid port (#438) and the first v0.12.0 port batch (#417: the
-terminal rendering chain #418 / #419 / #420, the Zed highlight queries #433,
-and the editor benchmark harness #425). The prior
-entries covered the 2026-09-04 deep-review sweep (PRs #372 and #373, issues
-#357-#371) and the 0.3.1 cut, and before that #341 (upstream v0.11.0
-adopted: the `PublishGate`, per-tab worktree binding, the Customize Sidebar
-menu, the pull-request marker, and the 0.3.0 cut).
-
-The Files rail, the dock code editor, `paneflow-textdiff`, and the editor
-benchmark suite are removed (#597). A clicked file path opens in the
-configured external editor. Git diff viewing and Review mode stay. The
-terminal bench and the startup bench are the performance suites that remain.
-The in-app Markdown viewer is removed (#598): a Cmd-clicked `.md` path opens in the external editor, and tree-sitter Markdown highlighting in Changes and Review stays.
-The fleet agent summary (`Cmd+Shift+I`) and its Swift sidecar are removed (#605). Pane overview stays.
+Living handoff record: what has landed, how to verify it, and the method rules
+this project has paid for. Updated 2026-09-26 for the removal round tracked in
+#841, on top of the 0.7.2 cut.
 
 **2026-09-23: the 0.7.2 cut.** 83 non-merge commits since `v0.7.1`, a patch
 bump. No new surfaces. The cut fixes pointer hits on cell boundaries, keeps
@@ -45,782 +29,9 @@ license field remain accepted warnings). `cargo build -p paneflow-app
 `layout::render::tests::eight_pane_gpui_input_to_paint_performance_gate`,
 `startup_bench::startup_first_frame_benchmark`,
 `terminal::ghostty_stress::ghostty_spawn_resize_close_stress_has_no_residual_growth`,
-and `terminal::perf_bench::terminal_pipeline_benchmark`. The version bump
-does not change platform `cfg` sites, so the 0.7.0 census stands.
-
-**2026-09-22: the 0.7.1 cut.** 47 non-merge commits since `v0.7.0`, a patch
-bump. The release removes surfaces that 0.7.0 added or still carried: the
-fleet summary and its sidecar (#605), the Launch Pad (#603), the Clone
-repository modal (#600), the title-bar profile menu (#604), fleet search
-(#602), the attention queue (#601, `Cmd+Shift+J` still jumps to the next
-waiting agent), the sidebar pull-request marker (#606), the workspace
-template builder (#607), and per-workspace custom buttons (#608). File and
-Markdown clicks open the configured external editor (#597, #598, #593).
-`Ctrl+Alt+Z` opens the workspace in that same editor (#599). CLI verbs
-`up`, `new`, `select`, `split`, and `focus`, and the CLI event stream, are
-gone (#610, #611, #612). Curated notes live in `docs/releases/v0.7.1.md`.
-
-Pre-flight on the bump, warm `target/`: `cargo test --workspace --locked
---no-fail-fast` **2,917 passed, 0 failed, 4 ignored**; `cargo clippy
---workspace --all-targets --locked -- -D warnings` exit 0, **WARNING COUNT
-1** (`block v0.1.6`); `cargo fmt --check` exit 0; `cargo deny check
-advisories licenses sources` exit 0 -> `advisories ok, licenses ok, sources
-ok` (the two GPUI crates without a license field remain accepted warnings).
-`cargo build -p paneflow-app --locked` exit 0, with the known vendored
-Ghostty `duplicate symbol '_memset'` linker notice. `./target/debug/paneflow
---version` reports `paneflow 0.7.1`. The four ignored tests are
-`layout::render::eight_pane_gpui_input_to_paint_performance_gate`,
-`startup_bench::startup_first_frame_benchmark`,
-`terminal::ghostty_stress::ghostty_spawn_resize_close_stress_has_no_residual_growth`,
-and `terminal::perf_bench::terminal_pipeline_benchmark`. The version bump
-does not change platform `cfg` sites, so the 0.7.0 census stands.
-
-**2026-09-18: the 0.7.0 cut.** 36 non-merge commits since `v0.6.1`, a minor
-bump because the release adds surfaces rather than only fixing them: the
-agent-summary overlay on `Cmd+Shift+I` (#576, summaries produced on-device by
-Apple's foundation model through a signed Swift sidecar), the command palette
-on `Cmd+Shift+O` (#523), the Clone repository modal driving `gh repo clone`
-and git (#524), recent workspace folders in `recents.json` (#521), the
-release-notes toast on the first launch of a newer bundle (#526), and two more
-hooked agent launchers - DeepSeek Harness (#527) and Muse Code (#528), both
-off by default. Startup lost the 900 ms splash (#517) and the cold
-installed-agent scan came off the render thread (#518). `MAX_WORKSPACES` went
-20 -> 32 and the create path now reports the cap (#572). Every overlay restores
-focus to the pane it was opened from (#584). #586 was the sidecar SDK trap
-on that cut: release.yml pinned Xcode 16.4 for Metal, and that SDK predates
-`FoundationModels`, so a sidecar compiled with it would have answered "This
-build has no Foundation Models support". The overlay and sidecar were removed
-later (#605); a release no longer selects, builds, or verifies them. Curated
-notes for the cut live in `docs/releases/v0.7.0.md`.
-
-Pre-flight verification on `main` at `1497db7e` (the commit the bump sits on),
-warm `target/`: `cargo build` exit 0; `cargo test --workspace --no-fail-fast`
-**3,674 passed, 0 failed, 8 ignored** (3,523 / 0 / 7 at `05839a5f`). The eighth
-ignored test is `startup_bench::startup_first_frame_benchmark` from the #519
-port; the other seven are unchanged (the two perf benches, the two
-`tree_memory_probe` tests, the two `layout::render` frame gates, and the
-ghostty stress test). The +151 executed tests were **not** name-diffed against
-the `05839a5f` log this run. `cargo clippy --workspace --all-targets` exit 0,
-**WARNING COUNT 1** (`block v0.1.6`); `cargo fmt --check` exit 0;
-`cargo deny check advisories licenses sources` exit 0 ->
-`advisories ok, licenses ok, sources ok`. `./scripts/linux-census.sh` exit 0,
-**STAGE 2c ZERO-CONDITION 0** with all six components at 0, negative control
-**178** `cfg(unix)` / **93** `cfg(macos)` live sites. `cfg(unix)` moved
-177 -> 178, so CLAUDE.md's figure is corrected rather than re-attested;
-`cfg(macos)` is unchanged. Non-blocking review lines: 76 different-term-space
-hits, 7 orphaned `.rs` files, 0 comment-only references, and **32** ungated
-platform strings (issue #103). `./target/debug/paneflow --version` was
-re-run on the bump commit itself, after `cargo build` exit 0, and reports
-`paneflow 0.7.0`; the pre-bump run of the same gate reported `paneflow 0.6.1`,
-which is the expected reading for `1497db7e` and not the version this release
-ships.
-
-**2026-09-17: #519 startup trace probe and first-frame bench.** Upstream
-`df375ba5` part 3. `PANEFLOW_STARTUP_TRACE=<file>` makes the release binary
-record a mark per launch stage (`src-app/src/startup_trace.rs`), write the
-timeline once the measured frame is presented, and quit; the ignored
-`startup_bench::startup_first_frame_benchmark` launches it against two seeded
-`PANEFLOW_HOME` fixtures (the new env override in
-`paneflow_config::loader::user_dirs`, which relocates the config, data, and
-cache roots and keeps the `APP_SUBDIR` namespace) and
-`scripts/bench-startup.sh` archives the run. Two things upstream did not need:
-the restore scenario ends at the frame after the last #156 restore batch
-(`restored_frame`), because the first frame alone shows an empty root; and
-the probe pumps its own frames by sending `displayLayer:` to the GPUI view
-every 8 ms, because macOS refuses to activate an app launched from a process
-that is not the active application, and GPUI never starts a display link for
-a window that is not key, so a restore stalled on its first batch (found
-with `sample`, the main thread idle in `mach_msg`, zero frames after the
-first). Baseline measured on this Mac with
-`scripts/bench-startup.sh --set-baseline` at `bf6c39921986`, core-share
-probe 1.00, medians of 10: `fresh_first_frame_total` **379.67 ms** (an empty
-session; the default workspace and its shell exist before the first frame)
-and `restore3_first_frame_total` **481.31 ms** (three workspaces with one
-terminal each, to the frame after the last batch). It replaces the first
-recording at `8b462d0d37e0` (378.24 ms / 479.83 ms), which review found to
-carry one launch that stalled ~300 ms in `window_created` (its
-`restore3_first_frame_total` mean, 513.7 ms, sat above its p95, 484.9 ms);
-the probe runs before the launches and cannot see a stall that starts during
-them, so check `mean` against `p95` before recording a baseline. Three runs
-at the same code (the two archived under `bench/results/` at `8b462d0d37e0`
-and this one) agree within 0.5% on both medians. The
-largest single steps in both are `gpui_app_ready` (~48 ms),
-`window_created` (~41 ms), `ipc_server_started` (~144 ms, the singleton
-guard and IPC thread inside `PaneFlowApp::new`), and for the fresh launch
-`default_workspace_built` (~51 ms, the shell spawn) and
-`window_open_returned` (~65 ms, the first layout and paint). Never compare
-against upstream's numbers; they were measured on Windows.
-
-**2026-09-16: #517 splash removed.** Upstream `df375ba5` part 1: the 900 ms
-`StartupSplashView` (its `STARTUP_SPLASH_*` consts, the letter and shimmer
-helpers, and the `min_visible` timer) is deleted from `src-app/src/main.rs`,
-and `mount_paneflow_app` now builds `PaneFlowApp` as the window root directly
-inside `open_window` (a synchronous, capped `load_session` read, then the
-#156 batched restore), so the first presented frame is the restored session
-or the empty state. The splash-only test and the DESIGN.md splash rows went
-with it. Gates on the branch (warm `target/`): `cargo build` exit 0; `cargo
-test --workspace --no-fail-fast` 3,523 passed, 0 failed, 7 ignored (the one
-removed test is `startup_splash_uses_bootstrap_material_value_without_reloading_config`);
-`cargo clippy --workspace --all-targets` exit 0, WARNING COUNT 1 (`block
-v0.1.6`); `cargo fmt --check` exit 0; `paneflow --version` -> `paneflow 0.6.1`.
-
-**2026-09-16: post-0.6.1 gate run on `main`.** Six PRs landed after the
-0.6.1 tag, all squash-merged: the bounded `hdiutil` retry for #547 (#557),
-the empty-state New Workspace copy for #533 (#558), the DeepSeek Harness
-(`dsh`) agent with live state for #527 (#559), cheaper debug embeds and a
-parallel CI release job for #554 (#560), the review follow-ups across the
-last ten PRs (#561), and the review leftovers - DSH argv and sibling
-overlays, `hdiutil` backoff, fair config lock (#563). No release was cut;
-`main` is `05839a5f`.
-
-Verification on `main` at `05839a5f`, run from a cold `target/` (the
-21-minute build is the dependency tree, not a regression): `cargo build`
-exit 0; `cargo test --workspace --no-fail-fast` **3,523 passed, 0 failed, 7
-ignored** (3,481 / 0 / 7 at the 0.6.1 cut; the seven ignored are the two
-perf benches, the two `tree_memory_probe` tests, the two `layout::render`
-frame gates, and the ghostty stress test, unchanged). The +42 is exactly the
-`#[test]` additions across those six PRs (#559 +21, #563 +12, #560 +7, #558
-+1, #561 +1, #557 +0; 0 removed), counted from `git show` on each squash
-commit; executed test names were **not** diffed against the 0.6.1 log this
-run. `cargo clippy
---workspace --all-targets` exit 0, **WARNING COUNT 1** (`block v0.1.6`);
-`cargo fmt --check` exit 0; `./target/debug/paneflow --version` ->
-`paneflow 0.6.1`; `cargo deny check advisories licenses sources` exit 0 ->
-`advisories ok, licenses ok, sources ok`. `./scripts/linux-census.sh` was
-not run this pass; the 177 / 93 figures in CLAUDE.md stand as of 0.6.1.
-
-Housekeeping the same day: the merged `fix/547-dmg-hdiutil-retry` branch
-and three stale worktrees (two `paneflow.worktrees/main*` checkouts from an
-earlier session and a finished autopilot baseline) were removed; the
-hourly-autopilot worktree under `.worktrees/` is live and was left alone.
-The `cargo test` gate waited several minutes on the build-directory lock
-because a second session's `cargo test` was compiling in the same `target/`;
-per the fan-out rule that is a lock fight to kill, not wait out, but it was
-another session's run and it was left to finish.
-
-**2026-09-15: the 0.6.1 cut.** 20 non-merge commits since `v0.6.0`, a patch
-bump because the release is mostly fixes: the Files sidebar colored by git
-status (#525) and the pane palette surviving a workspace with no pane (#522)
-are the only added surfaces. The rest are fixes: editor and Finder launches
-moved off the render thread with a toast on a failed exit (#530), worktree
-paths mapped back onto the fork's sibling `<repo>.worktrees` form (#529), the
-Files tree's git status refreshed when a directory is newly expanded (#540),
-Settings select rows painted in the theme text color, and the agent-hook path
-batch (#542, #543, #544) that landed on `main` mid-cut: managed hook blocks
-were pinned to a version-scoped `ai-hook` cache path, so every hook died on
-the first self-update. Curated notes live in `docs/releases/v0.6.1.md`.
-
-Pre-flight verification on `main` at the bump commit (`a34569f0`, the tagged
-commit): `cargo build` exit 0; `cargo test --workspace` **3,481 passed, 0
-failed, 7 ignored** (3,460 / 0 / 7 before the #545 merge landed; the delta is
-exactly the 21 tests that PR adds, with 0 removed - counted by diffing
-`#[test]` additions across `98558acd..0d52bf7a`, not by trusting the integer);
-`cargo clippy --workspace --all-targets` exit 0, **WARNING COUNT 1**
-(`block v0.1.6`); `cargo fmt --check` exit 0; `./target/debug/paneflow
---version` -> `paneflow 0.6.1`; `cargo deny check advisories licenses sources`
-exit 0 -> `advisories ok, licenses ok, sources ok`. The full set was run
-twice: once before #545 landed, and again from scratch after rebasing onto it.
-`./scripts/linux-census.sh` exit 0, **STAGE 2c ZERO-CONDITION 0** with all six
-components at 0, and the negative control at **177** `cfg(unix)` / **93**
-`cfg(macos)` live sites. The `cfg(unix)` figure **moved** 176 -> 177: #545 adds
-one `#[cfg(unix)]` site in the hook code, so CLAUDE.md's number is corrected
-rather than re-attested. `cfg(macos)` is unchanged. The script's non-blocking
-review lines read 75 different-term-space hits, 6 orphaned `.rs` files, 0
-comment-only references, and **30** ungated platform strings (issue #103).
-
-Release: workflow run
-https://github.com/theaamgroup/PaneFlow/actions/runs/34994566263, both jobs
-green, DMG `paneflow-0.6.1-aarch64-apple-darwin.dmg` (31M) with
-`hdiutil: verify: checksum ... is VALID`. Signing, notarization, stapling, and
-the in-DMG `codesign --verify --deep --strict` / `stapler validate` /
-`spctl --assess` checks all passed inside the run, and the `release` job
-published, which it only does after its own appcast-signature and public-feed
-delivery checks pass (it returns the release to draft otherwise).
-**Not verified this cut:** the local post-publish pass - no DMG was downloaded
-and re-checked by hand, and `scripts/verify-update-feed.py` was not run
-locally. Still unvalidated from previous cuts: the Gatekeeper **UI** path (a
-`gh release download` carries no `com.apple.quarantine`) and a full
-installed-update replacement cycle.
-
-**The release-path trap this cut hit.** `Produce .dmg` failed on the first
-attempt with `hdiutil: verify: unable to recognize ... as a disk image.
-(Resource temporarily unavailable)` - **after** signing and notarization had
-succeeded, so it burned the full Apple queue wait. It is not a repo defect:
-`create-dmg.sh`, `release.yml` and `bundle-macos.sh` were byte-identical to
-the successful 0.6.0 run, the runner image was the same
-`macos-15-arm64 20260907.0337.1`, the source was the same 66M, and 40 GiB were
-free - so it is neither the ENOSPC mode the script's header designs around nor
-a checksum failure. `hdiutil create` exited 0 (under `set -euo pipefail` a
-non-zero create aborts there), the error is `EAGAIN`, and job cleanup reported
-`Terminate orphan process: pid (47329) (diskimages-help)`: a wedged
-`diskimages-helper` that `verify` could not obtain, leaving it unable to probe
-an image that had been written correctly. Re-running the identical job with no
-changes packaged fine, which is what confirmed the diagnosis. The script has
-no retry around `hdiutil`; issue #547 tracks a bounded retry. The rule: on
-this error, **re-run the failed job, do not re-tag**, and do not treat it as a
-packaging regression without first diffing the script and the runner image
-version against the last good run.
-
-**2026-09-13: the 0.6.0 cut.** 23 non-merge commits since `v0.5.0`, a minor
-bump because the release adds surfaces rather than only fixing them: the
-Cmd+Shift+F dock maximize (#490), the optional dock file tree (#437) and the
-opt-in Changes tab with every dock tab closable (#436), workspace notification
-controls (#493), per-workspace new-tab branches (#501), persisted editor
-display settings (#495), the restored unread / muted / pull-request session
-state (#489, #494), `terminal.minimum_contrast` with seen-gated desktop
-notifications (#421, #422), and motion-aware menu reveals (#491). Performance:
-viewport-bounded editor highlighting with an off-thread initial parse and a
-2 MB cap (#427), and the Files tree moved onto a worker thread (#430). The two
-issues open at the cut were fixed into it: unread completions now follow a
-moved pane (#515) and the tree-sitter memory probe installs its counting
-allocator in an isolated child process (#516). Curated notes live in
-`docs/releases/v0.6.0.md`.
-
-Pre-flight verification on `main` at the bump commit: `cargo build` exit 0;
-`cargo test --workspace` **3,428 passed, 0 failed, 7 ignored** (3,426 / 0 / 6
-at the #495 landing; the delta is exactly the three tests #515 and #516 add,
-two executed and one `#[ignore]`); `cargo clippy --workspace --all-targets`
-exit 0, **WARNING COUNT 1** (`block v0.1.6`); `cargo fmt --check` exit 0,
-re-run on the exact tagged commit; `./target/debug/paneflow --version` ->
-`paneflow 0.6.0`; `cargo deny check advisories licenses sources` exit 0 ->
-`advisories ok, licenses ok, sources ok`. `./scripts/linux-census.sh` exit 0,
-**STAGE 2c ZERO-CONDITION 0** with all six components at 0, and the negative
-control at **176** `cfg(unix)` / **93** `cfg(macos)` live sites - re-measured
-on 2026-09-14, unchanged from the 2026-09-07 count despite 23 commits landing
-between them, so the CLAUDE.md figures are re-attested rather than corrected.
-The script's non-blocking review lines read 75 different-term-space hits, 6
-orphaned `.rs` files, 0 comment-only references, and **30** ungated platform
-strings (issue #103, deliberately outside the STAGE 2c integer).
-
-Post-publish verification of the released artifacts: workflow run
-https://github.com/theaamgroup/PaneFlow/actions/runs/34792747822 green with no
-warning annotations; the three expected assets attached; the downloaded DMG's
-SHA-256 matched the published `.sha256`; `spctl --assess --type exec` on the
-mounted bundle returned `accepted`, `source=Notarized Developer ID`;
-`xcrun stapler validate` worked; `codesign --verify --deep --strict` reported
-valid on disk and satisfying its Designated Requirement, signed by
-`Developer ID Application: AAM USA INC (K7X6VGPFR8)`;
-`python3 scripts/verify-update-feed.py --expected-version 0.6.0` exit 0. Not
-validated: the Gatekeeper UI path (a `gh release download` carries no
-`com.apple.quarantine`, so it is not a realistic download) and a full
-installed-update replacement cycle.
-
-**The tag trap this cut hit, and the guard now in place.** `git tag -a v0.6.0`
-failed with `tag 'v0.6.0' already exists` because a past
-`git fetch upstream --tags` had seeded upstream's `v0.1.4`-`v0.14.0` into the
-same bare `refs/tags/` namespace this fork uses. The follow-up
-`git push origin v0.6.0` then pushed **upstream's** tag while printing
-`[new tag]`, starting release.yml on upstream commit `ae0d9f2c` (run
-34792486245, cancelled; no release object was created, and its Linux/Windows
-job names confirmed it was upstream's workflow). Recovery deleted the remote
-ref, removed all 76 upstream tags locally, and set
-`remote.upstream.tagOpt = --no-tags`. The rule, now in CLAUDE.md's gotchas: a
-bare `vX.Y.Z` tag is this fork's release iff it is on `origin`. Step 2 of the
-release runbook asserts `git rev-parse <tag>^{commit}` equals `HEAD` before
-pushing.
-
-**2026-09-13 #495 / #487: editor display settings complete the v0.13.0 /
-v0.14.0 adoption.** Upstream `463673ed` and `03e2b181` add the `editor`
-config object: minimap defaults off, scrollbar on. The Editor Controls menu
-persists both choices through the generation-checked config writer; startup,
-menu changes, and the config watcher apply the same process-wide settings to
-live and parked file tabs. The fork's incremental highlighting reads the same
-minimap preference. The trigger matches the Files toggle (28 px / radius 8),
-uses neutral `ui.text` while open, and its menu uses `menu_surface` /
-`select_item` while preserving #491's motion-aware reveal and keyboard states.
-The schema, configuration guide, and DESIGN.md describe the contract.
-
-The other #487 ports (#488, #489, #490, #491, #492, #493, #494) were already
-closed when this final port began. The maintainer's SKIP decisions in #487
-remain in force. Completed user-visible changes are collected in
-`docs/releases/unreleased.md` for the next cut.
-
-Verification: `cargo build` exit 0; `cargo test --workspace` **3,426 passed,
-0 failed, 6 ignored** versus the clean baseline's 3,424 / 0 / 6. Executed test
-names: two additions (editor defaults/partial-config handling and persisted
-editor choices with stale-write rejection), no removals.
-`cargo clippy --workspace --all-targets` exit 0, **WARNING COUNT 1**
-(`block v0.1.6`); the same check with `-- -D warnings` exit 0;
-`cargo fmt --check` exit 0; `./target/debug/paneflow --version` →
-`paneflow 0.5.0`; `cargo deny check advisories licenses sources` exit 0 →
-`advisories ok, licenses ok, sources ok`. Tests and the audit ran outside the
-sandbox for process leases, filesystem watcher delivery, and the advisory DB.
-Manual visual/VoiceOver checks and captures were not run: macOS reported UI
-automation disabled; no theme/material/minimum-window variants are claimed.
-
-**2026-09-07: the 0.5.0 cut.** 85 non-merge commits since `v0.4.0`, a minor
-bump because the release adds a surface rather than only fixing one: Review
-mode's rails and diff-pane grid (#438), the editor's gutter markers, revert
-chip and minimap (#432, #435), the Changes-dock scrollbar (#434), the
-font-measured cell grid and sprite/Nerd Font chain (#418-#420), Zed highlight
-queries for 15 languages (#433), the compacted Pane Overview (#389), the
-sidebar MCP-bridge nudge (#443), agent context and task reporting (#409), and
-`Entity::cached` idle terminal panes (#429). Curated notes live in
-`docs/releases/v0.5.0.md`; the release workflow feeds that file to both the
-GitHub Release and Sparkle.
-
-Pre-flight verification on `main` at the bump commit: `cargo build` exit 0;
-`cargo test --workspace` **3,326 passed, 0 failed, 5 ignored** (3,300 at the
-#438 landing; executed test names diffed identical across two consecutive
-runs); `cargo clippy --workspace --all-targets` exit 0, **WARNING COUNT 1**
-(`block v0.1.6`); `cargo fmt --check` exit 0;
-`./target/debug/paneflow --version` -> `paneflow 0.5.0`;
-`cargo deny check advisories licenses sources` exit 0 ->
-`advisories ok, licenses ok, sources ok`. `./scripts/linux-census.sh` STAGE 2c
-zero-condition **0** with the negative control at **176** `cfg(unix)` /
-**93** `cfg(macos)` live sites (CLAUDE.md's figures were refreshed to match);
-`./scripts/win-census.sh` STAGE 2b zero-condition **0**.
-
-The first pre-flight run failed one test:
-`terminal::element::hyperlink::tests::perf_scan_200_lines_under_budget`
-measured 76 ms against its 25 ms debug budget, then passed on an immediate
-re-run and in isolation. It took a single wall-clock sample inside a test
-binary libtest runs fully parallel, so it charged the scan for whatever else
-was scheduled; zeroing the budget showed the scan actually costs **431 us**,
-58x under. It now asserts the fastest of five passes (#477), which keeps the
-algorithmic-regression signal that `#[ignore]` would have discarded. Issue
-#477 lists the five sibling single-sample budget tests that share the shape.
-
-**2026-09-09 #436: Changes opt-in, every dock tab closable (upstream
-`f587f7fc`).** The dock no longer seeds a permanent `Changes` tab:
-`bootstrap.rs` starts `diff_tabs` empty, `cli_diff_dock.rs` parks with
-`mem::take` and treats an empty strip as idle, `tabs.rs::open_diff_changes_tab`
-creates or reuses the Changes tab, `select_diff_tab` owns `picker` / `picked`,
-and both `index == 0` close guards are gone, so the close chip renders on all
-five tab kinds (`Setup` included) and closing the last tab returns the dock to
-the picker, re-armed. The `+` menu gains a Changes row (`plus-minus.svg`, no
-chord) above File / Terminal / Agent setup. **Maintainer decision (2026-09-07,
-issue #436):** the surface picker is the default landing for a fresh dock
-regardless of git state; #393 / #394's blank Changes body is kept as the
-rendering of a Changes tab the user explicitly opened against a non-git or
-clean-diff workspace. Auto-creating Changes inside a git worktree and showing
-the picker only outside git was rejected (it puts a git probe back into the
-session-model decision and makes the parking plumbing conditional on repository
-state).
-
-**2026-09-07 #438: Review rails and diff pane grid.** The port of upstream
-`a8d55f74` replaces the former scope/multi-view Review surface with
-`app/review/`: a 220 px Workspaces rail, a 300 px Changes rail following
-the active pane, and a `LayoutTree` of at most six single-subject diff panes.
-Clicking a checkout focuses its existing pane or replaces the active subject;
-rail drag supports center replacement and edge splits, and pane headers use
-the existing move/split/zoom machinery. Each viewer owns its base and display
-mode. Session save/restore retains subjects, split geometry, and collapsed
-repository groups, pruning missing checkouts or repositories no longer open.
-
-The fork's Review with agent action lives in the diff pane header and opens
-selected installed agents in ordinary workspace tabs through
-`open_agent_tab_at_cwd`, with a second-opinion prompt for additional agents.
-It copies the first prompt to the clipboard and prefills with delayed
-`send_text` only, preserving `review_prefill_delay_ms` and human Enter
-submission. Embedded Review/shell terminals and the old multi-project
-scope/sync layer are removed. The `review_enabled` entry and demotion gates
-live in `app/review/mode.rs`; disabling it hides the entire mode strip and
-makes `Cmd+Shift+G` inert. Restore requires the switch and a viable layout or
-default subject. The action registry now has 94 actions.
-
-Verification on the port rebased onto `40ef0786` (the merged #452 / #453
-stack): `cargo build` exit 0; `cargo test --workspace` **3,300 passed,
-0 failed, 5 ignored**; `cargo clippy --workspace --all-targets` exit 0,
-**WARNING COUNT 1** (`block v0.1.6`); `cargo fmt --check` exit 0;
-`./target/debug/paneflow --version` → `paneflow 0.4.0`;
-`cargo deny check advisories licenses sources` exit 0 →
-`advisories ok, licenses ok, sources ok`. The strict workspace Clippy check
-(`-- -D warnings`) and both platform censuses also passed.
-
-Executed test names were compared with main CI run `34130251928`: 20
-added and 15 removed. Five removals are moved/renamed switch, checkout-dedup,
-cache-cleanup and session tests; nine belong to the deleted custom column
-arranger; one covered ownership of the removed embedded Review terminals.
-All eight acceptance tests, both #309 budget tests, seven prompt tests and
-three fork watcher-cooldown tests pass. New coverage exercises actual grid
-serialization, the six-pane cap while zoomed, revealing a parked pane,
-linked-checkout agent placement, non-submitting prefill, mode gates and
-context-menu close routing. `diff/git.rs` is unchanged from the base.
-Independent spec and quality reviews passed after their fixes. Manual UI
-smoke was not run because macOS UI automation was disabled.
-
-**2026-09-06 #417, first batch: upstream v0.12.0 terminal chain, Zed
-queries, editor bench.** Upstream tagged v0.12.0 at `0ce6fd35`; the survey
-taken at `fbfefd25` stands (the two commits between them are README/ABOUT
-copy and the version bump, both on the SKIP list). Five of the twenty
-sub-issues landed on one `issues-fix` branch, one commit each, every commit
-green on its own:
-
-- **Font-measured cell grid** (#418, upstream `7706b771` + `6c00ae77`).
-  `terminal/element/face_tables.rs` reads the embedded faces' `hhea` /
-  `post` / `OS/2` tables through a direct `ttf-parser = "0.25"` dep
-  (`RUSTSEC-2026-0192` ignored in `deny.toml` with the "only ever parses the
-  bundled TTFs" rationale); `CellMetrics` (whole device pixels, integer
-  baseline) rides on `CellGeometry`; `paint/decorations.rs` draws single /
-  double / dotted / dashed / curly underlines and strikethroughs under the
-  glyphs; the cursors take `cursor_thickness`. **Config semantics changed:**
-  `line_height` and `cell_width` are multipliers of the measured cell,
-  default `1.0` (ranges 0.8-2.5 / 0.8-2.0) in the loader, JSON schema, docs
-  and the Settings steppers; a carried-over `1.2` now means 20% taller than
-  the face's design (`docs/user/configuration/schema.md` says so). The
-  fork-only Pane Overview thumbnail measures the same way without a Window
-  (`font.rs::cell_metrics_without_window`). Sixteen upstream tests carried
-  by name; goldens reblessed, `golden/decorations.txt` added.
-- **Sprite font** (#419, `b6bf46d0`). `element/sprites.rs` +
-  `paint/sprites.rs` draw the whole U+2500-257F block, `░▒▓`, all 256
-  braille patterns and the Powerline geometry on the device grid at the
-  font's underline thickness; `paint/box_drawing.rs` is gone,
-  `BoxDrawingGlyph` is `SpriteGlyph`, the `integrated_glyphs_enabled` gate
-  stays, the thumbnail paints sprites. Seven upstream tests; goldens gain
-  `sprites[N]:`.
-- **Regular Nerd Font + icon constraint** (#420, `73e51a01`). The eight
-  `JetBrainsMonoNerdFontMono-*.ttf` faces are replaced by the regular
-  `JetBrainsMonoNerdFont-*.ttf` variant (+1,328,724 B of embedded assets;
-  no `build.rs` gate measures fonts, open question). PUA glyphs are laid out
-  as `SymbolGlyph` and constrained with Ghostty's rule (cover one cell; keep
-  the designed size over two cells only before an empty cell), ink bounds
-  from `face_tables.rs::embedded_glyph_ink`. Default `font_family` is now
-  `JetBrainsMono Nerd Font`; the old `JetBrainsMono Nerd Font Mono`,
-  `JetBrainsMono NFM` and the new `JetBrainsMono NF` alias all resolve to
-  the bundled family. Six upstream tests; `golden/icons.txt`.
-- **Zed highlight queries** (#433, `1f5fde23`). `src-app/src/diff/queries/`
-  vendors Zed's `highlights.scm` for 15 grammars, hash-pinned by
-  `MANIFEST.toml` (verified by
-  `manifest_hashes_match_the_vendored_queries`; `scripts/sync-zed-queries.sh
-  --check` needs a `ZED_DIR` checkout and was not run). `resolve_runs` is
-  Zed's last-active-capture stack (self-contained; #426's sweep line has not
-  landed) with `MAX_CAPTURES_PER_ROW = 4_096`; `tree-sitter-cpp` is pinned
-  to the module-syntax grammar by git rev (`deny.toml` `allow-git`);
-  `queries/NOTICE` ships as `ThirdPartyLicenses/zed-queries.txt`
-  (`scripts/bundle-macos.sh`). No vendored query needed editing for
-  tree-sitter 0.27. `parity_tests.rs` is the oracle (byte oracle, 10k
-  overlap inputs, 15 `_query_compiles`).
-- **Editor benchmark harness** (#425, `d0674b4c` + `5ca9776b` +
-  `330793e3`). `src-app/src/bench_harness.rs` is shared by the terminal and
-  editor benches, built around the fork's macOS libproc +
-  `mach_timebase_info` counters and `live_bytes()` on the fork's one
-  `#[global_allocator]`; `scripts/bench-editor.sh`, `code/perf_bench.rs`,
-  `code/bench_corpus.rs`, and the ignored
-  `layout::render::tests::editor_scroll_frame_by_pane_count` (p95 261 / 543
-  / 1016 us at 0 / 2 / 6 panes on this machine). `bench/editor-baseline.json`
-  is fork-measured on Apple Silicon (cpu share 0.999, no warning) but
-  carries `git_dirty: true` because it measured the patched worktree at
-  `78a4cb75`; re-record with `--set-baseline` at a clean sha when convenient.
-  `--set-baseline` refuses a contended run (upstream `b64c5c2a`'s rule).
-
-Method notes from the run: the nine recurring test failures under build
-load (eight `paneflow-ai-hook` 7 s subprocess timeouts and
-`opencode_sessions::…retention_limit`) have one root cause, the first exec
-of a newly written executable on this Mac taking 12-20 s (a Gatekeeper /
-XProtect first-launch scan); they pass alone and are judged by test name,
-never by the `test result:` summary line. Chaining #418 → #419 → #420
-without waiting for the lead's verify worked by scratch-committing each
-handed-off port (detached, never pushed) in its worker worktree and
-dispatching the next link there. Still open from the survey: #421, #422
-(both were gated on #410, now merged), #424, #426-#432, #434-#439, with the
-Review rework #438 the decision that shapes #435-#437 and #439.
-
-**2026-09-04 deep review: 33 findings landed, 0.3.1 cut.** A `/deep-review`
-pass at `e5b01e4` over ten lenses found 36 problems and split them: 18 it
-fixed in place, 18 it referred for a human decision. Sixteen of the latter
-became issues #356-#371. Both halves are now on `main`.
-
-- **PR #372 (`bdd21e37`)** fixed 15 of those issues, one commit each, each
-  with its own test. The thread they share is work running where it must
-  not: `canonicalize_workspace_cwd` and the `surface.read` / `surface.search`
-  runtime waits both left the GPUI automation tick (#358, #363; the latter
-  answers through the request's own channel and returns a deferral marker
-  `process_ipc_requests` recognises), and `GitDiffStats::from_cwd` now
-  threads one budget through its three git probes instead of stacking three
-  10 s deadlines (#365). Three more fixed a stale or unresolved on-disk
-  identity: the editor's conflict stamp now comes from the handle the bytes
-  were read through (#357), `session.json` publishes onto a symlink's target
-  instead of replacing the link (#360), and a zero `st_birthtime` is refused
-  rather than collapsing worktree identity to inode reuse (#371). The rest:
-  a global cap on concurrent `gh` lookups (#359), `surface.search` returning
-  a JSON-RPC error where it used to return `truncated=true` (#362),
-  keyboard- and AT-reachable Settings combo boxes (#361), shaped IME caret
-  geometry and macOS word chords in `TextArea` (#364, #370), a UTF-8 locale
-  the child actually gets (#369), case-folded `confine_cwd` (#366), and hook
-  cleanup that reports a failed delete (#367, #368).
-- **PR #373 (`08a00a09`)** committed the 18 auto-fixed findings, which had
-  been sitting uncommitted in one working tree and would have been lost with
-  it. Seven commits grouped by subsystem: hook merges that refuse a hostile
-  config shape instead of overwriting it, Pi status frames as JSON-RPC
-  notifications, honest `send_keystroke` and agent-panel write failures,
-  bounded session sweeps and walks, `wait` no longer reading every `-32602`
-  as a closed pane, Sentry's `server_name` no longer carrying the hostname,
-  and a tilde-expanded `default_shell`.
-- **Five bugs the reviews of those PRs found** are fixed on top, three of
-  them in code #372 had already landed. `is_utf8_locale` required a dot, so
-  Terminal.app's codeset-only `LC_CTYPE=UTF-8` read as non-UTF-8 and the
-  override forced `LC_ALL` over the user's other categories.
-  `confine_cwd` case-folded on every volume, so on a case-sensitive one a
-  sibling checkout differing only by case counted as inside; it now asks
-  `pathconf(_PC_CASE_SENSITIVE)` and fails closed when the path cannot be
-  probed. And a no-pid `ai.*` frame minted a fresh synthetic session row
-  each time once two rows of that tool existed - each row it made left the
-  next frame ambiguous too, and nothing collected them, because the stale
-  sweep only probes real PIDs; the band now holds one row per tool.
-- **Release `v0.3.1`** is on `a6e7043f`, Developer ID signed, notarized and
-  stapled, verified from the downloaded artifact (`spctl` reports
-  `source=Notarized Developer ID`, `stapler validate` passes, the `.sha256`
-  matches). The `release` environment gates both jobs of `release.yml`, so a
-  tag push waits for an approval before signing and again before publishing.
-- **The fork's tags collide with upstream's.** `v0.3.1` already existed
-  locally as `arthjean/paneflow`'s tag on an unrelated commit, and the
-  fork's own `v0.3.0` on `origin` names a different commit from upstream's
-  `v0.3.0`. Cutting a release means deleting the local upstream ref first
-  (`git fetch upstream --tags` restores it). Unresolved: a fork tag prefix
-  would end it but changes a naming contract `release.yml`, the Sparkle
-  appcast, and the runbook all share.
-
-**2026-09-04 #341: upstream v0.11.0 adopted.** Nine code sub-issues landed
-one PR each (#342 through #350), then the 0.3.0 cut. What is now true, and
-where the evidence is:
-
-- **`PublishGate`** (#342, #343; `src-app/src/terminal/ghostty_session.rs`).
-  The runtime thread holds a frame while DEC 2026 synchronized output is set
-  (one FFI mode query per wake, `DisplayTerminal::synchronized_output` in
-  `crates/paneflow-terminal-ghostty/src/engine.rs`, `SYNC_OUTPUT_MAX_HOLD`
-  150 ms so a program that opens a bracket and dies cannot freeze the pane)
-  or while the previous publish is under `MIN_PUBLISH_INTERVAL` (8 ms;
-  deferred through `next_wake`, never dropped). Resize, scroll, scrollback
-  clear, reset, select-all, a command mark, the first frame, and the frame
-  before `ChildExited` bypass it (`publish_now`); a `Wakeup` is queued only
-  for a frame that was published, and only the engine's dirty rows are
-  converted (`CellMirror`). Pinned by
-  `a_trickle_publishes_once_per_interval`,
-  `synchronized_output_holds_a_frame_the_rate_limit_would_have_allowed`,
-  `a_synchronized_output_hold_expires_so_a_stalled_program_cannot_freeze_the_pane`,
-  `a_synchronized_redraw_is_not_published_until_the_bracket_closes_or_the_hold_expires`,
-  and `a_synchronized_output_hold_parks_the_loop_instead_of_spinning_it`.
-- **Cursor blink out of the layout memo, shared `FontSettings`** (#344;
-  `terminal/element/font.rs`, `LayoutCacheKey` in `terminal/element/mod.rs`,
-  `layout_cache_key_ignores_the_blink_phase`) and the **memoized per-cell
-  contrast** (#345; `contrast_cache_get_or_insert` in
-  `terminal/element/color.rs`,
-  `the_contrast_cache_matches_the_uncached_search_across_the_bundled_themes`).
-- **Reproducible terminal benchmark** (#346) re-baselined on this machine:
-  `bench/baseline.json` and `bench/results/` hold only fork-measured JSON.
-- **Per-tab worktree binding** (#347). `Tab::worktree`
-  (`src-app/src/workspace/tab.rs`), `bind_tab_to_branch` in
-  `src-app/src/app/tab_worktree.rs` (`prepare_branch_checkout` runs
-  off-thread and owns nothing: a tab checkout is marker-less). Session
-  carries it as `TabSession.worktree` (additive; a
-  missing key restores unbound: `a_tab_bound_to_a_missing_worktree_restores_unbound`,
-  `tab_worktree_needs_no_schema_bump`,
-  `every_picked_checkout_passes_through_the_binding_gate`).
-- **Remove worktree** (#348, commit `d1f79614`). A row on the tab context
-  menu (`sidebar/context_menu.rs`, `tab-context-remove-worktree`, present
-  only for a bound tab) into `remove_tab_worktree`. Ownership is option B:
-  `is_paneflow_worktree_dir` (`workspace/worktree.rs`) decides, there is no
-  owner marker. Refusals (`removal_refusal` + `check_checkout_removable`):
-  open as a workspace, not created by PaneFlow, uncommitted changes, a live
-  process in the checkout, and a path git no longer lists as a worktree.
-  The branch is never deleted. Pinned by
-  `removal_is_refused_for_what_is_not_ours_or_open` and
-  `a_clean_owned_checkout_is_removed_keeping_its_branch_and_a_dirty_one_is_refused`.
-- **Mark as read** (#408). A row at the top of the tab context menu
-  (`sidebar/context_menu.rs`, `tab-context-mark-read`) present only while
-  the tab has a badge to clear - a `WaitingForInput`, `Errored`, or
-  `Stalled` session bound to one of its own surfaces
-  (`agent_status::session_is_unread_on`, gated by `tab_has_unread`). It
-  sets `AgentSession::read` on those sessions and re-runs `sync_attention`,
-  so the bell, the pane ring and the peek overlay clear together; sibling
-  tabs and live `Thinking` work are untouched. The row is kept, not
-  deleted (PR #413 review): deleting it let the 400 ms registry sweep
-  reopen a hook-held wait, and let a queued Composer prompt flush into a
-  stalled pane. `state` stays the truth for the delivery gate, the stall
-  clock, and IPC; everything that asks for attention (sidebar summary,
-  `sync_attention`, Attention Queue, jump-to-waiting, workspace-select
-  focus, overview dot, work review label) reads `presented_state()`, and
-  the write choke point clears the mark on the next accepted frame. #390
-  had removed one false trigger (Codex completion notifications) but left
-  no manual clear. Pinned by
-  `mark_as_read_clears_only_the_badging_states_of_the_tabs_own_surfaces`,
-  `an_accepted_frame_raises_a_badge_the_user_marked_read`,
-  `sidebar_agent_summary_hides_a_session_marked_read`,
-  `a_badged_tab_menu_is_one_row_taller_for_mark_as_read`, and
-  `mark_as_read_is_offered_only_to_a_badged_tab_and_clears_it`.
-- **Customize Sidebar** (#349, commit `36ca19ad`;
-  `sidebar/customize_menu.rs`). A "Show" submenu over `sidebar_show`
-  (`crates/paneflow-config/src/schema/config.rs::SidebarShow`; `branch`
-  defaults on, `diffstat` and `indent_guide` default off). `pr` remains in
-  the object and is ignored (#606). Expand all / Collapse all stay; every
-  flip writes the live keys through `config_writer`
-  (`every_flip_writes_the_whole_sidebar_show_object`,
-  `the_customize_menu_offers_no_settings_affordance`). Per-workspace fold
-  state persists as `WorkspaceSession.sidebar_collapsed`.
-- **Sidebar pull-request marker removed** (#606). Rows show the branch
-  icon. `sidebar_show.pr` stays accepted because that object's published
-  schema sets `additionalProperties` to false. `TabSession.pull_request`
-  still loads and is not written; `SESSION_SCHEMA_VERSION` stays 2. Pinned
-  by `legacy_pull_request_session_and_sidebar_show_pr_still_load`.
-- **Session schema stays v2** (`SESSION_SCHEMA_VERSION` in
-  `crates/paneflow-config/src/schema/session.rs`): `TabSession.worktree`
-  and `WorkspaceSession.sidebar_collapsed` are additive, written only when
-  set. The "Terminal shell resolved" log line rode along
-  (`terminal/pty_session.rs`).
-  Issue #489 (upstream `9da2e4be`, persistence half) adds `TabSession.unread`,
-  `TabSession.pull_request` and `WorkspaceSession.muted` on the same terms;
-  `an_unread_tab_and_a_muted_workspace_survive_a_restart` pins it.
-- **Verified SKIP list**, not ported: the Windows shell work,
-  `timeBeginPeriod`, the verbatim prefix, libghostty CI automation, and
-  Fedora / Discord / CHANGELOG / AppStream.
-- **0.3.0 cut**: `Cargo.toml` workspace version, every `paneflow-*` entry
-  in `Cargo.lock`, the `--version` gates in `CLAUDE.md` and `INSTALL.md`.
-
-**2026-09-01 #226 #227 #228: About and PaneFlow-menu GitHub links.** About
-shows a **View on GitHub** button (`https://github.com/theaamgroup/paneflow`)
-between Version and copyright, and an original-credit plate that opens
-`https://github.com/arthjean/paneflow`. The inert contributors placeholder is
-gone; the David Ayers CRT plate and AAM copyright stay. The PaneFlow menu is
-About / Settings… / separator / Report an Issue / separator / Quit; Report an
-Issue opens `https://github.com/theaamgroup/paneflow/issues/new` (`ReportIssue`,
-menu-only). Pinned by `about_dialog_links_this_forks_github`,
-`about_dialog_credits_the_original_project`,
-`paneflow_menu_report_an_issue_is_wired_at_the_root_and_as_a_fallback`, and
-`report_issue_stays_out_of_the_shortcut_registry`.
-
-**2026-08-31 #184: libghostty-vt is the only engine.** Landed as a stack of
-PRs (#185 toolchain 1.98.0 + chrome; #186 vendored crates + darwin archive;
-the session-host PR on top). What is now true, and where the evidence is:
-
-- `src-app` has no `alacritty_terminal` and no `polling`; every pane runs
-  on `paneflow-terminal-ghostty` over `portable-pty`. `alacritty_is_absent_from_the_app_crate`
-  guards the word itself. `terminal.backend` is gone from the schema; a
-  leftover key is ignored (`leftover_terminal_backend_key_is_ignored`).
-- The fork's teardown contract survived the swap and is stronger than
-  upstream's: `TerminalState::Drop` pins every process group in the PTY
-  session through an app-owned master dup, SIGTERMs, drops the guards,
-  shuts the runtime down, closes the dup, SIGKILLs at 100 ms; the runtime
-  thread reaps, signalling only on its own failure paths (runtime failed,
-  waitid failed, startup panic), never on a user close. Pinned by
-  `dropping_the_state_kills_background_and_stopped_jobs_in_the_pty_session`
-  (real `/bin/sh`, background + stopped `sleep`) and, live, by the
-  parent-death smoke (`kill -9` the GUI: sleep reaped, every
-  `__paneflow-pty-guard` exits). All 28 survival tests named on #184 are
-  present by name.
-- Test names 2378 -> 2371 across the swap, every removed name accounted
-  for by class on the PR (engine internals, `From<Alac*>` maps, the deleted
-  `mouse.rs` encoder, inverted presence assertions, module moves); the
-  fork's behaviour tests were re-created on the Ghostty display-only
-  session under the same names.
-- Rides along from upstream: Kitty graphics, OSC 9/777 notifications, the
-  OSC 9;4 header chip, `TERM_PROGRAM=ghostty`.
-
-**Traps this pass hit, all worth carrying:**
-
-- **A synthetic chord does not drive a GPUI action.** `CGEventPostToPid`
-  delivers printable keys into a pane's PTY (the smoke proved `a` landed),
-  but `Cmd+Shift+W` posted the same way never closed the pane (the AX
-  `frontmost` raise is a documented no-op on macOS 26, so the window was
-  never key), and the IPC `workspace.close` hands the decision
-  to a modal no keystroke can reach without a window focus move. Live
-  checks of close paths therefore go through in-suite tests with real
-  shells; only the parent-death path smokes live. The earlier memory note
-  that "chords DO fire" was about the app receiving them, not acting.
-- **`grep` in the agent's tool shell is not `/usr/bin/grep`.** It is a
-  function routing to `ugrep --ignore-files`, which skips `target/`; the
-  census scripts under `bash` crawled 19 GB with BSD grep and took 27 min
-  cold. `--exclude-dir=target --exclude-dir=.git` (commit `9c86912c`)
-  made both scripts a 2 s gate with byte-identical reports.
-- **`pull_request: branches: [main]` starves a stacked PR of CI.** The
-  filter is gone (`4c512480`), so each phase's "Done when" can be checked
-  on CI before the next phase starts.
-- **Upstream's `tests/display_terminal.rs` had no macOS arm.** Its 15
-  integration tests had never run on this platform; enabled, all pass.
-- **The vendored archive links with `ld: duplicate symbol '_memset'`**
-  (`compiler_rt.o` vs `libghostty-vt-static_zcu.o`) and carries
-  `minos 13.0`. Benign (ld64 keeps the first; `Info.plist` already floors
-  at 13.0), a property of the archive. Not locally fixable: the rebuild
-  needs a Linux host, Zig 0.16.0 and upstream's
-  `scripts/build-libghostty-macos.sh`, which this fork does not vendor, so
-  it rides the next `source_sha` bump. Issue #194 closed 2026-09-02.
-
-**2026-08-28 deep review.** Five parallel agents (correctness, security,
-architecture, performance, reality-check) swept the whole repo. The findings
-are archived as a historical record in
-[archived audit revision](https://github.com/theaamgroup/PaneFlow/commit/693be926) (as of `29ac597a`); it is not
-a backlog and quotes no live open count. Open work is `gh issue list`, and
-`src-app/tests/fork_docs_backlog_policy.rs` fails if either document regains
-the work-queue role (issue #224). Twelve landed in that pass, all gates
-green, test list name-diffed 2075 -> 2079 with zero removed:
-
-- `Tab::pane_count` ignored `saved_layout`, so a pane added while zoomed was
-  destroyed by `exit_zoom` along with its PTY and agent.
-- IPC coerced a malformed `index` to the ACTIVE workspace and reported
-  success - a quoting mistake closed the wrong workspace.
-- Opening the find bar replaced the whole `Terminal` key context (GPUI's
-  `key_context` assigns, it does not merge), killing all 15 Terminal
-  bindings including the `Ctrl+Shift+F` that opened it.
-- `sync_attention`'s `.flatten()` erased the `Some(None)` "waiting, no
-  message" case, so a blocked agent painted no ring, dot or badge.
-- The Settings shortcut recorder wrote macOS HIG glyphs (`to_string()`
-  yields `⌘⇧D`), which nothing validates - so every rebind registered an
-  unproducible chord AND dropped the real default. Mutation-verified.
-- Copy/paste had no focus guard, so Edit > Paste executed the clipboard in
-  the shell while the find bar was focused.
-
-**2026-08-28 UI cluster (six items, from a single issue list).** Landed on
-top of the deep review, in three file-disjoint batches:
-
-- **About dialog** (`app/about_dialog.rs`) grew a retro CRT credit plate
-  (`> made with ❤ by david ayers`) and `© 2026 AAM USA, Inc. All rights reserved.`;
-  the dialog's own "Paneflow" spellings were corrected to "PaneFlow".
-  `VT323-Regular.ttf` + its OFL are in `src-app/assets/fonts/` and need no
-  code change to ship (`Assets::load_fonts` iterates the embed registry).
-  The inert contributors placeholder from that cluster was replaced later
-  (#227); current About chrome is under **2026-09-01 #226 #227 #228** above.
-- **Inactive-workspace dim** reaches sidebar tab rows, on a *second* axis from
-  the existing idle tone. Foreground only, one shared quiet step
-  (`IDLE_WORKSPACE_TEXT_OPACITY`), guarded by a source-scraping test.
-- **Inline rename opens selected.** `rename_seeded` on `PaneFlowApp`; the
-  first printable key or backspace spends the whole seeded value.
-- **A tab label is now DERIVED**, never stored: manual `Tab::title`, else the
-  first pane's `Pane::surface_title` (which already ranks custom name > OSC >
-  agent name), else `Tab N`. Nothing is written to `session.json`.
-- **The sidebar footer gear is gone**, finishing issue #105. Settings is the
-  menu bar and the profile menu, and nothing else.
-- **`View ▸ Themes…` is gone** (issue #120). The View menu had only that
-  item, so the menu went with it. Theme selection is Settings → Appearance
-  plus the title-bar profile menu; the menu bar is PaneFlow / Edit / Window /
-  Help.
-- **`review_enabled`** (default `true`) gates the Review surface; off, the
-  whole mode strip stops rendering.
-
-**Three traps this cluster hit, all worth carrying:**
-
-- **GPUI at this rev has `linear_gradient`, inset `BoxShadow` and
-  `border_dashed`, but NO `text_shadow`.** A neon *text* halo is not
-  reproducible; glow must come from the box. Do not try to fake it with
-  layered offset text.
-- **A shared blink phase does not blink an idle window.** Only `TerminalView`
-  observes `BlinkPhaseGlobal`, so a caret painted off it freezes in its
-  last-painted state - half the time hidden. `PaneFlowApp` now observes it too
-  but repaints ONLY while the About dialog is open; an unconditional notify
-  would wake the whole app every 530 ms for a decoration nobody is watching.
-- **Deriving a display label breaks any equality check written against the
-  stored one.** `tab_rename_should_persist` used to rebuild `"Tab N"` from
-  `Tab::title`; once the label could also come from a pane, that
-  reconstruction stopped matching what the editor was seeded with, and
-  pressing Enter on an untouched agent-derived label would have frozen it into
-  `Tab::title`. It now takes the displayed string from its caller.
-
-**Three method rules this review paid for:**
-
-- **A doc claim is a liability, not a record.** The review falsified
-  `PANEFLOW_ALLOW_MULTIPLE` (documented presence-gated; it is value-gated
-  and was fixed in `1cfee6c7`), issue #39 (documented open; fixed with a
-  regression test), the census counts, the GPUI remote in `AGENTS.md`, and
-  `.mcp.json`'s existence. Each traces to a doc that recorded a BUG and was
-  never updated when the bug was fixed. Closing an issue must include
-  grepping `CLAUDE.md` / `STATE.md` / `AGENTS.md` for its number.
-- **Verify the agent, not just the code.** Two agent-reported site counts
-  were wrong (the IPC index pattern has 2 live sites, not 5), and one of my
-  own mutation checks was invalid (`--lib` on a binary crate exits 101 for
-  the wrong reason). Re-read the source before acting on any finding.
-- **A test that pins a property is not a test that pins the call site.** The
-  first shortcut test asserted `unparse()` round-trips - true regardless of
-  what production called. Extracting `recorded_shortcut_key()` made the call
-  site itself testable without a `Window`.
+and `terminal::perf_bench::terminal_pipeline_benchmark` (the stress test
+was deleted after the cut, #853). The version bump does not change platform
+`cfg` sites, so the 0.7.0 census stands.
 
 Companion documents:
 - [archived execution-plan revision](https://github.com/theaamgroup/PaneFlow/commit/336cdada) is the **historical 2026-08-25
@@ -829,67 +40,19 @@ Companion documents:
   decision: the old hand-rolled updater was deleted. GitHub issue #13's bundle-id and
   Notifications smoke was completed on the installed v0.1.1 app on 2026-08-28.
 - `docs/fork/2026-08-25-mac-only-fork-design.md` holds the **decisions**, the
-  **leak register**, and a **16-item traps register**. Read it before touching
+  **leak register**, and an **18-item traps register**. Read it before touching
   platform code or the config schema. Sparkle owns self-update; the old updater
   and minisign remain gone.
 - `CLAUDE.md` holds build prerequisites, the module tree, and the commands.
 
-This file holds only: where the work stands, what is next, and the rules the
-session learned the hard way.
+This file holds only where the work stands and the rules the project learned
+the hard way. Open work is `gh issue list`. The dated entries for the cuts and
+passes before 0.7.2 are archived in git history (this file as it stood before
+#853), in `docs/releases/v*.md` and in the GitHub releases;
+`src-app/tests/fork_docs_backlog_policy.rs` fails if this file regains the
+work-queue role (issue #224).
 
-v0.9.0 adoption of issues **#87–#103** is on `main` and pushed. The 2026-08-27
-post-adoption pass closed #11, #14, #15 (evidence on the issues), landed the
-CI/test hygiene set #66–#71, and triaged #73–#85 against 925e21ce (comments
-on each; #75 closed as superseded; #74/#77/#80/#82 retitled to their
-residuals). Remaining standing visual/runtime checks are in
-[historical verification revision](https://github.com/theaamgroup/PaneFlow/commit/b9fbb457).
-
-The 2026-08-27 keyboard-correctness cluster closed **#108**, **#79** and the
-focus-routing half of **#78** across five commits
-(`ea09225c`, `2f5a1f00`, `66b2ca0b`, `bb938ae6`, `30809b70`). Test count
-1900 -> 1913, name-diffed at every landing; all six gates green on each.
-All three were re-verified as live defects in code before any work started,
-and both `CHANGES REQUESTED` review loops (#108, #79) were closed.
-
-The 2026-08-27 tab-close cluster closed **#83** across nine commits
-(`508f7904`, `79d6b821`, `2ac394ff`, `028d47ab`, `1b6bfc47`, `ae0b800f`,
-`6d20ce0e`, `dacce668`, `b6b70729`). Closing a tab running an agent now asks
-first, and every user-initiated tab or pane close is undoable with
-`Cmd+Shift+T`. Test count 1913 -> 1975, name-diffed at every landing; all six
-gates green on each.
-
-Three findings in that cluster are worth carrying forward, because each was a
-*correct-looking* design that a review falsified:
-
-- **Arm-then-confirm without a debounce is not a confirmation.** A double-click
-  on an inline `x` fired both the arm and the confirm, so the process group died
-  behind a state painted for one frame. GPUI dispatches every click listener on
-  each mouse-up, and this repo already relies on that (`sidebar/mod.rs`
-  double-click-to-rename). Any future arm-then-confirm needs a settle delay;
-  `ARM_SETTLE` in `app/close_guard.rs` is the one to copy.
-- **"Put the record back on any refusal" bricks an undo stack.**
-  `handle_undo_close_pane` pops NEWEST and `push_closed_record` appends to
-  NEWEST, and `next_workspace_id` is a monotonic `fetch_add` - so re-pushing a
-  record whose workspace is gone re-promotes it forever and buries every record
-  beneath it. Re-push only on TRANSIENT refusals; drop on permanent ones.
-- **`close_workspace_tab`'s re-focus is gated on `ws_idx == self.active_idx`.**
-  A background workspace's tab row is right-clickable, so any `Window`-holding
-  path that closes a background tab must hand focus back itself or it strands
-  the window - the issue #108 class again.
-
-Workspace-scope close now shares the live-agent confirmation guard across
-`Cmd+Shift+Q`, the sidebar folder row, the workspace context menu, and IPC.
-It captures a whole-workspace undo record before removal.
-Cached Review and mounted/parked Diff Dock terminals are included in the same
-guard and are dropped with their workspace even while their UI is unmounted.
-Terminal teardown pins every authenticated process group in the PTY session,
-including stopped/background groups, for both orderly close and parent death.
-
-Issue **#110** is implemented: the window-level focus-loss fallback commits or
-cancels transient editing state even when the focused row unmounts or a
-Window-less navigation path runs. It no longer belongs in the follow-up list.
-
-Three things that pass gates but are **not** end-to-end verified:
+Two things that pass gates but are **not** end-to-end verified:
 
 - **No live GUI smoke was possible.** Plain keystrokes deliver via
   `CGEventPostToPid`, but modified chords never fire an action, and
@@ -898,10 +61,6 @@ Three things that pass gates but are **not** end-to-end verified:
   `paneflow-live-keystroke-smoke` memory and in issue #109's
   "Verifying this" section. Rename and the zero-pane chords still want one
   human pass before release.
-- **`F2` as a rename-START gesture is structurally dead** and documented as
-  such at both sites: a sidebar row only joins the dispatch path once its
-  rename is already live, but the `f2` branch only runs when it is not.
-  Fixing it needs per-row focus handles.
 - **Sparkle's full installed-update path needs two consecutive signed tags.**
   The bundled framework loads and starts in a live GUI, but the first
   Sparkle-enabled release must still prove `/Applications` vN staging vN+1,
@@ -913,7 +72,7 @@ Three things that pass gates but are **not** end-to-end verified:
 | | |
 |---|---|
 | Local clone | `~/Github/paneflow` (directory still carries the upstream name) |
-| Branch | **`main`**. Reconciled 2026-08-25: the fork point is tagged `upstream-fork-point`, `main` was fast-forwarded to the fork work (strict ancestor, no rewrite), and `mac-only-fork` remains at the same commit - delete it after the first release tag. |
+| Branch | **`main`**. Reconciled 2026-08-25: the fork point is tagged `upstream-fork-point`, `main` was fast-forwarded to the fork work (strict ancestor, no rewrite), and the `mac-only-fork` branch it was reconciled with has since been deleted. |
 | `origin` | `github.com/theaamgroup/paneflow` (public since 2026-08-30 so Sparkle can fetch release assets anonymously). Renamed from `panescli` on 2026-08-25 when the PanesCLI rebrand was dropped; GitHub keeps redirects. |
 | `upstream` | `github.com/arthjean/paneflow` (read-only, kept for cherry-picks) |
 | Fork point | v0.8.2, commit `f53f982291f75a9daf565827b3167d0e96925d0a` |
@@ -963,20 +122,20 @@ even though signed release DMGs are also available.
 | CI | **Done.** `run_tests.yml` macos-15 only; `release.yml` one signed aarch64 lane. Apple secrets proven 2026-08-26; first tag `v0.1.0` published. |
 | 2d. Rename to PanesCLI | **Dropped.** Product stays PaneFlow. |
 | Community files | **Gone.** No `SECURITY.md`, `CONTRIBUTING.md`, or code of conduct. README is the product page; from-source setup is `INSTALL.md`; agent rules live in `AGENTS.md` / `CLAUDE.md`. |
-| Version | **0.3.1** (the 2026-09-04 deep-review sweep, PRs #372 and #373; tag on `a6e7043f`, signed + notarized + stapled). Before it, **0.3.0** (upstream v0.11.0 adopted; #341), **0.2.1**, and **0.2.0** was the libghostty-vt engine (#184). First release tag `v0.1.0` is on `44150ff` (2026-08-26). Releases before Sparkle carried DMG + `.sha256`; Sparkle-enabled releases add `appcast.xml`. `upstream-fork-point` remains. Fork tag names collide with upstream's - see the 2026-09-04 entry. |
+| Version | **0.7.2** (2026-09-23; tag on `1e6621a0`; notes in `docs/releases/v0.7.2.md`). Before it 0.7.1, 0.7.0, 0.6.1, 0.6.0, 0.5.0 and 0.4.0 (notes under `docs/releases/`), 0.3.1 (the 2026-09-04 deep-review sweep), 0.3.0 (upstream v0.11.0 adopted; #341), 0.2.1, and 0.2.0, the libghostty-vt engine (#184). First release tag `v0.1.0` is on `44150ff` (2026-08-26). Releases before Sparkle carried DMG + `.sha256`; Sparkle-enabled releases add `appcast.xml`. `upstream-fork-point` remains. Fork tag names collide with upstream's; CLAUDE.md's gotchas carry the tag-ownership rule. |
 
 ## Verified green, and how to reproduce it
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # 2877 names, 0 failed, 3 ignored (2026-09-04, the deep-review sweep + the 0.3.1 cut)
-cargo deny check advisories licenses sources # exit 0 (cargo-deny 0.19.9, 2026-09-04)
+cargo test --workspace                       # exit 0, 2,781 passed, 0 failed, 3 ignored (2026-09-26)
+cargo deny check advisories licenses sources # exit 0 (cargo-deny 0.19.9, 2026-09-26)
 cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0
-./target/debug/paneflow --version            # paneflow 0.3.1
+./target/debug/paneflow --version            # paneflow 0.7.2
 ./scripts/win-census.sh                      # STAGE 2b ZERO-CONDITION: 0
 ./scripts/linux-census.sh                    # STAGE 2c ZERO-CONDITION: 0
-                                             # negative control: cfg(unix) 172, cfg(macos) 94 (2026-09-04)
+                                             # negative control: cfg(unix) 176, cfg(macos) 90 (2026-09-26)
 ```
 
 The census negative control is not decoration. Read it every time: a census
@@ -1032,7 +191,9 @@ which were fixed in this stage:
 4. **Dependency-graph residue.** `tar` and `flate2` were direct deps of the
    deleted tar.gz updater with zero code references; `widestring` sat in
    `[workspace.dependencies]` unused by any member.
-5. **YAML.** `run_tests.yml` - see the liability section below.
+5. **YAML.** `run_tests.yml` and `release.yml` still carried the four-platform
+   matrices. Both are macos-15 now, and YAML stays its own sweep: the cfg
+   census cannot see it.
 
 The generalisable rule: **a detector only measures the shape it was written
 for.** The cfg census measures cfg predicates. Ungated code, enum variants,
@@ -1041,7 +202,7 @@ each need their own sweep, and the audit is what supplies them.
 
 **`cargo fmt --check` is now in the list and was not before.** It had been
 failing since c925ece (stage 2a) with 27 hunks across four terminal files, and
-nothing local caught it because the four-command block above did not include
+nothing local caught it because the gate list at the time did not include
 it. The release pipeline runs it inside every build-matrix leg, so a tag push
 would have burned a ~25 min run before failing. Fixed in 1b1af25.
 
@@ -1058,9 +219,15 @@ grep -oE '^test [a-zA-Z0-9_:]+ \.\.\.' <log> | sed 's/^test //; s/ \.\.\.$//' | 
 
 The only clippy warning is a pre-existing `block v0.1.6` future-incompat notice
 from a transitive dependency. It was present in the very first baseline build
-and is not ours.
+and is not ours. `cargo build` also prints the vendored Ghostty archive's
+`ld: duplicate symbol '_memset'` notice (`compiler_rt.o` vs
+`libghostty-vt-static_zcu.o`). It is benign (ld64 keeps the first) and a
+property of the archive; only a rebuilt archive at the next `source_sha` bump
+removes it (issue #194).
 
-**Run all five before and after every pass.** Two real breakages were caught by
+**Run all six CLAUDE.md gates (`cargo build`, `cargo test --workspace`, clippy,
+`cargo fmt --check`, `paneflow --version`, `cargo deny`) before and after every
+pass.** Two real breakages were caught by
 the test run and by nothing else, and a third (`unused_braces`, introduced when
 rustfmt collapsed a ghostty leftover onto one line) was caught only by reading
 clippy's WARNING COUNT rather than its exit code. Clippy exits 0 with warnings,
@@ -1170,6 +337,67 @@ is cheap and is how the tool stays honest as new spellings turn up.
     identity tasks all touched overlapping files. Check overlap before
     launching parallel worktrees. Three concurrent, APFS `cp -c -R
     target`, agents never git: still the working recipe.
+12. **A doc claim is a liability, not a record.** The 2026-08-28 review
+    falsified `PANEFLOW_ALLOW_MULTIPLE` (documented presence-gated; it is
+    value-gated), issue #39 (documented open; fixed with a regression test),
+    the census counts, the GPUI remote in `AGENTS.md`, and `.mcp.json`'s
+    existence. Each was a doc that recorded a bug and was never updated when
+    the bug was fixed. Closing an issue includes grepping `CLAUDE.md`,
+    `STATE.md` and `AGENTS.md` for its number.
+13. **Verify the agent, not just the code.** Agent-reported site counts have
+    been wrong (the IPC index pattern had 2 live sites, not 5), and a
+    mutation check can fail for the wrong reason (`--lib` on a binary crate
+    exits 101). Re-read the source before acting on any finding.
+14. **A test that pins a property is not a test that pins the call site.** A
+    shortcut test asserted that `unparse()` round-trips, which held whatever
+    production called. Extracting `recorded_shortcut_key()` made the call
+    site itself testable without a `Window`.
+15. **A wall-clock budget test takes the fastest of several passes.** libtest
+    runs the binary fully parallel, so a single sample charges the code for
+    whatever else is scheduled: `perf_scan_200_lines_under_budget` read 76 ms
+    against a 25 ms budget for a scan that costs 431 us (#477). The fastest of
+    five keeps the regression signal that `#[ignore]` would discard.
+16. **The first exec of a newly written executable takes 12-20 s on this
+    Mac** (a Gatekeeper / XProtect first-launch scan). It is the one cause of
+    the `paneflow-ai-hook` "hook subprocess exceeded 7s" timeouts and the
+    `opencode_sessions…retention_limit` failure under build load. They pass
+    alone; judge a run by test name, never by the `test result:` line.
+17. **`grep` in the agent's tool shell is not `/usr/bin/grep`.** It routes to
+    `ugrep --ignore-files`, which skips `target/`. The census scripts run
+    BSD grep under `bash` and pass `--exclude-dir=target --exclude-dir=.git`
+    (`9c86912c`); without that they crawled 19 GB in 27 minutes.
+18. **`pull_request: branches: [main]` starves a stacked PR of CI.** The
+    filter was removed (`4c512480`) so each phase of a stack runs CI before
+    the next one starts. Do not restore it.
+19. **Deriving a display label breaks any equality check written against the
+    stored one.** Once a tab label could come from its pane, a rename check
+    that rebuilt `"Tab N"` from `Tab::title` stopped matching what the editor
+    was seeded with, and Enter on an untouched agent-derived label would have
+    frozen it into `Tab::title`. Compare against the displayed string the
+    caller passes in.
+20. **An arm-then-confirm without a settle delay is not a confirmation.**
+    GPUI dispatches every click listener on each mouse-up, so a double-click
+    fires both the arm and the confirm. Copy `ARM_SETTLE` in
+    `app/close_guard.rs`.
+21. **Re-push an undo record only on a transient refusal.**
+    `handle_undo_close_pane` pops the newest record, `push_closed_record`
+    appends to the newest, and workspace ids come from a monotonic
+    `fetch_add`, so re-pushing a record whose workspace is gone re-promotes
+    it forever and buries every record beneath it. Drop it on a permanent
+    refusal.
+22. **`close_workspace_tab` re-focuses only when `ws_idx == self.active_idx`.**
+    A background workspace's tab row is right-clickable, so any `Window`-holding
+    path that closes a background tab must hand focus back itself or it
+    strands the window (the issue #108 class).
+23. **GPUI at the pinned rev has `linear_gradient`, inset `BoxShadow` and
+    `border_dashed`, but no `text_shadow`.** A glow must come from the box;
+    do not fake a text halo with layered offset text.
+24. **A shared blink phase does not blink an idle window.** Only observers of
+    `BlinkPhaseGlobal` repaint on it. `PaneFlowApp` observes it for the About
+    dialog's caret but notifies only while the dialog is open; an
+    unconditional notify wakes the whole app every 530 ms.
+25. **Never compare the startup bench against upstream's numbers.** Upstream
+    measured them on Windows.
 
 ## Notes from the Windows and Linux passes (2b, 2c - both DONE)
 
@@ -1189,10 +417,11 @@ before writing another one:
 What those passes proved, kept because the next platform-shaped pass will
 need it:
 
-- `#[cfg(unix)]` now appears **138 times** and macOS needs nearly all of it.
-  `#[cfg(target_os = "macos")]` appears **71 times**. Both are live arms; both
-  stay. This was the highest-risk distinction in 2c and no batch got it wrong -
-  because every brief opened with the same four lines, verbatim:
+- `#[cfg(unix)]` and `#[cfg(target_os = "macos")]` are live arms and macOS
+  needs nearly every site of both; the census negative control in the
+  verified-green block carries the current counts. Both stay. This was the
+  highest-risk distinction in 2c and no batch got it wrong - because every
+  brief opened with the same four lines, verbatim:
 
   > `#[cfg(unix)]` is TRUE on macOS. macOS IS a unix. Never remove one.
   > `unix` is not `linux`. Only `all(unix, not(target_os = "macos"))` is Linux.
@@ -1234,49 +463,6 @@ need it:
   (shim 472,368 + ai-hook 336,464 + mcp 403,008), `EMBED_SIZE_LIMIT_BYTES =
   1_400_000` = total + 15.5% (slack 188,160 B = 13.4% of the cap).
 
-## Biggest remaining liability
-
-`main` is pushed to `origin`. First signed GitHub Release is out:
-https://github.com/theaamgroup/paneflow/releases/tag/v0.1.0
-(`v0.1.0` on `44150ff`, DMG + `.sha256`). #7 and #9 are closed.
-
-Closed by machine evidence:
-
-- #13 (2026-08-28): the user confirmed the clean v0.1.1 build is installed
-  and running. The installed `com.theaamgroup.paneflow` app passes
-  `codesign --verify`, Gatekeeper accepts it as Notarized Developer ID, its
-  stapled ticket validates, and live IPC returned three surfaces. A synthetic
-  permission notification sent through the shipped v0.1.1 hook reached the
-  app as an isolated `waiting_for_input` session; `SessionEnd` then removed
-  the test row without changing the real sessions. Accessibility, Automation,
-  and FDA are not request surfaces; only Notifications is in play.
-
-- #10: next-workspace rebound from `secondary-tab` (Cmd+Tab, eaten by the
-  macOS app switcher; synthetic Cmd+Tab moved focus to another app while
-  Cmd+1/Cmd+2 switched workspaces) to `ctrl-tab`, with a test that fails
-  if any default binds `secondary-tab` again.
-
-- #11: the shipped v0.1.0 dmg is Developer ID signed (K7X6VGPFR8),
-  notarized and stapled; `spctl -a -t exec` on a quarantined copy →
-  `accepted, source=Notarized Developer ID`. The local `dist/` dmg is a
-  different, adhoc build; do not smoke with it.
-- #14: Cmd+Shift+D / E / W / T each moved `paneflow ls` pane counts
-  3→4→5→4→5 on a debug instance with an isolated socket.
-- #15: `which claude` in a pane → the paneflow-dev shim dir first on
-  PATH; `status`/`ps`/`watch` tracked idle → thinking(Bash/Read) →
-  finished → idle across a real `claude -p` turn.
-
-#8 (minisign keypair) is obsolete. #12 (no GitHub Releases request) is
-automatic now that the updater is deleted. #16–#19 are closed.
-
-Product bugs continue from #20. Some early issues (#1 in particular)
-were filed before `release.yml` was cut to one aarch64 lane; check the
-tree before treating an issue as still open work.
-
-The 2c-era four-platform `run_tests.yml` / `release.yml` are gone. Both
-workflows are macos-15. YAML is still its own sweep: the cfg census cannot
-see it.
-
 ## Parallel work
 
 Use headless agents in separate git worktrees for batch work. The pane-driving
@@ -1303,9 +489,9 @@ The mechanics that made it cheap:
   ~0 bytes on disk, and a warm incremental rebuild instead of a 15-25 minute
   cold GPUI build.
 - Worktrees are reusable between waves: `git -C <wt> reset --hard` then
-  `git -C <wt> checkout -B <branch> mac-only-fork`.
+  `git -C <wt> checkout -B <branch> origin/main`.
 - Agents never touch git. They leave edits unstaged; the orchestrator collects
-  `git -C <wt> diff`, applies it to the main worktree, re-runs all five gates
+  `git -C <wt> diff`, applies it to the main worktree, re-runs all six gates
   itself, and writes the commit. Agent "green" claims are never the evidence -
   in 2b one batch reported green from a clippy run that predated its own final
   edits.
@@ -1317,3 +503,7 @@ The mechanics that made it cheap:
 - `--json-schema` is for bounded site lists. On an open-ended audit it can
   stop grok after one turn with an empty object. The 37-turn final audit
   ran without it.
+- A chain of dependent ports does not have to wait for the lead's verify
+  between links: scratch-commit each handed-off port (detached, never pushed)
+  in its worker worktree and dispatch the next link there (#418 -> #419 ->
+  #420 ran this way).

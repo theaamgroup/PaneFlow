@@ -78,7 +78,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── service_detector.rs / shell.rs ← dev-server detection, shell resolution
 │   ├── blink.rs / types.rs            ← cursor blink, shared terminal types
 │   ├── bench_corpus.rs / perf_bench.rs ← deterministic VT corpus, terminal bench (#[ignore], scripts/bench-terminal.sh)
-│   ├── ghostty_stress.rs / test_allocator.rs ← runtime stress (#[ignore]); the test binary's one #[global_allocator]
+│   ├── test_allocator.rs              ← the test binary's one #[global_allocator]
 │   └── element/                       ← low-level GPUI Element rendering
 │       ├── mod.rs                     ← TerminalElement: layout → prepaint → paint
 │       ├── color.rs                   ← ANSI→Hsla, APCA contrast
@@ -181,7 +181,7 @@ keeping the workspace lint policy strict in production code.
 - **Watcher threads**: config (notify, 300 ms debounce, 1 s max-wait ceiling; also drives theme reload), git state.
 - **Shared state**: `parking_lot::RwLock<SharedState>` (`Content` cells + modes + metrics + kitty placements) written by the runtime thread and read by the GPUI thread; `UiEventState` slots carry title/cwd/progress/notification/clipboard events. The libghostty C handle never leaves the runtime thread.
 
-Blocking git, filesystem walks, recursive watcher registration, and fleet-wide search run off the render thread.
+Blocking git, filesystem walks, and recursive watcher registration run off the render thread.
 
 ## Opening a file
 
@@ -208,9 +208,8 @@ Captures without a palette role do not enter the stack. Each row caps input
 at 4,096 captures. Theme changes rebuild color tables without querying or
 reparsing the retained trees. Variables and namespaces use the text
 color; constructors share the function role. `diff/parity_tests.rs` holds the
-independent byte oracle, the token expectations per language and the frozen
-`fixtures/stock-priority-audit.txt` of every byte the stock-to-Zed switch
-recolored on the corpus.
+shared corpus, the independent byte oracle and the token expectations per
+language.
 
 `diff/queries/MANIFEST.toml` records the upstream commit, source paths, SHA-256
 hashes, license evidence and the JavaScript grammar deviation; a unit test

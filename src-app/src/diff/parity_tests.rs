@@ -1,14 +1,13 @@
 //! Issue #433 (upstream `1f5fde23`): the regression corpus every highlighting
 //! surface shares, an independent byte-level oracle for Zed's
 //! last-active-capture rule, per-language token expectations for the vendored
-//! queries, the frozen audit of what the stock-to-Zed switch recolored, and
-//! the `queries/MANIFEST.toml` hash pin.
+//! queries, and the `queries/MANIFEST.toml` hash pin.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ops::Range;
 
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Parser, Query, QueryCursor};
+use tree_sitter::{Parser, QueryCursor};
 
 use super::highlighter::{
     Grammar, MAX_CAPTURES_PER_ROW, grammar_for_ext, highlight_lines, markdown_inline_grammar,
@@ -391,113 +390,6 @@ fn extension_aliases_select_the_intended_query() {
         grammar_for_ext("tsx").unwrap(),
         grammar_for_ext("js").unwrap()
     ));
-}
-
-#[test]
-fn stock_queries_report_every_same_node_priority_change() {
-    let syntax = DiffSyntax::from_theme(&paneflow_dark());
-    let mut report = Vec::new();
-    for (name, text) in CORPUS
-        .iter()
-        .filter(|(name, _)| !matches!(*name, "sample.rs" | "sample.jsonc" | "sample.js"))
-    {
-        let ext = name.rsplit('.').next().unwrap();
-        let source = match ext {
-            "json" => tree_sitter_json::HIGHLIGHTS_QUERY.to_owned(),
-            "sh" => tree_sitter_bash::HIGHLIGHT_QUERY.to_owned(),
-            "py" => tree_sitter_python::HIGHLIGHTS_QUERY.to_owned(),
-            "ts" | "tsx" => tree_sitter_typescript::HIGHLIGHTS_QUERY.to_owned(),
-            "toml" => tree_sitter_toml_ng::HIGHLIGHTS_QUERY.to_owned(),
-            "md" => tree_sitter_md::HIGHLIGHT_QUERY_BLOCK.to_owned(),
-            "go" => tree_sitter_go::HIGHLIGHTS_QUERY.to_owned(),
-            "yaml" => tree_sitter_yaml::HIGHLIGHTS_QUERY.to_owned(),
-            "css" => tree_sitter_css::HIGHLIGHTS_QUERY.to_owned(),
-            "html" => tree_sitter_html::HIGHLIGHTS_QUERY.to_owned(),
-            "c" => tree_sitter_c::HIGHLIGHT_QUERY.to_owned(),
-            "cpp" => format!(
-                "{}\n{}",
-                tree_sitter_c::HIGHLIGHT_QUERY,
-                include_str!("fixtures/cpp-stock-0.23.4.scm")
-            ),
-            "java" => tree_sitter_java::HIGHLIGHTS_QUERY.to_owned(),
-            "rb" => tree_sitter_ruby::HIGHLIGHTS_QUERY.to_owned(),
-            _ => unreachable!(),
-        };
-        let language = grammar_for_ext(ext).unwrap().language.clone();
-        let query = Query::new(&language, &source).unwrap();
-        let mut parser = Parser::new();
-        parser.set_language(&language).unwrap();
-        let tree = parser.parse(text, None).unwrap();
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.captures(&query, tree.root_node(), text.as_bytes());
-        let mut nodes: BTreeMap<(usize, usize, usize), Vec<&str>> = BTreeMap::new();
-        let mut raw = Vec::new();
-        while let Some((mat, index)) = matches.next() {
-            let cap = mat.captures()[*index];
-            let class = query.capture_names()[cap.index as usize];
-            if syntax.color_for_capture(class).is_some() {
-                nodes
-                    .entry((cap.node.start_byte(), cap.node.end_byte(), cap.node.id()))
-                    .or_default()
-                    .push(class);
-                raw.push((cap.node.byte_range(), class));
-            }
-        }
-        let mut conflicts = 0;
-        for ((start, end, _), classes) in nodes {
-            if classes.first() != classes.last() {
-                conflicts += 1;
-                report.push(format!(
-                    "STOCK {ext} {start}..{end} {:?}: {} -> {}",
-                    &text[start..end],
-                    classes[0],
-                    classes.last().unwrap()
-                ));
-            }
-        }
-        report.push(format!("STOCK {ext}: {conflicts} conflicts"));
-        let stacked = oracle(&raw, text.len());
-        let mut resolved = raw.clone();
-        resolve_runs(&mut resolved);
-        let mut resolved_bytes = vec![None; text.len()];
-        for (span, class) in resolved {
-            resolved_bytes[span].fill(Some(class));
-        }
-        assert_eq!(resolved_bytes, stacked, "stock resolver parity {ext}");
-        let mut changes: Vec<(Range<usize>, Option<&str>, Option<&str>)> = Vec::new();
-        for (byte, class) in stacked.into_iter().enumerate() {
-            let previous = raw
-                .iter()
-                .enumerate()
-                .filter(|(_, (span, _))| span.contains(&byte))
-                .min_by_key(|(order, (span, _))| (span.len(), *order))
-                .map(|(_, (_, class))| *class);
-            if previous != class {
-                if let Some((span, from, to)) = changes.last_mut()
-                    && span.end == byte
-                    && *from == previous
-                    && *to == class
-                {
-                    span.end = byte + 1;
-                } else {
-                    changes.push((byte..byte + 1, previous, class));
-                }
-            }
-        }
-        for (span, from, to) in changes {
-            report.push(format!(
-                "BYTES {ext} {}..{} {:?}: {from:?} -> {to:?}",
-                span.start,
-                span.end,
-                &text[span.clone()]
-            ));
-        }
-    }
-    assert_eq!(
-        report.join("\n") + "\n",
-        include_str!("fixtures/stock-priority-audit.txt").replace("\r\n", "\n"),
-        "stock priority changes require explicit review"
-    );
 }
 
 #[test]

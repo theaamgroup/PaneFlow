@@ -13,7 +13,7 @@ function pathRisks(paths) {
   const result = new Set();
   for (const path of paths) {
     if (/^(src-app\/|assets\/|DESIGN\.md$)/.test(path)) result.add('safety:ui');
-    if (/^(crates\/|schemas\/|examples\/|mcps\/)/.test(path)) result.add('safety:integration');
+    if (/^(crates\/|schemas\/|examples\/)/.test(path)) result.add('safety:integration');
     if (/^native\//.test(path)) result.add('safety:platform-wide');
     if (/^(\.github\/|\.agents\/|\.claude\/|\.cursor\/|scripts\/|skills\/|packaging\/)|(^|\/)(Cargo\.(toml|lock)|rust-toolchain(\.toml)?|deny\.toml|clippy\.toml|AGENTS\.md|CLAUDE\.md|SKILL\.md)$/.test(path)) result.add('safety:release');
   }

@@ -41,10 +41,10 @@ Every tool is annotated read-only.
 > is instructed to treat bridge output as data, never as instructions to
 > execute. The bridge exposes no keystroke tool and no write tool.
 
-`tab_id` is a stable identity, never a positional index, and it is omitted for
-surfaces that live outside the CLI tab hierarchy (Agents threads, the bottom
-dock) or when the running PaneFlow predates it. Targeting stays by surface
-name or `surface_id`: the tab is context for the agent, not an addressing key.
+`tab_id` is a stable identity, never a positional index. Every listed surface
+carries it; it is omitted only when the running PaneFlow predates the tab
+hierarchy. Targeting stays by surface name or `surface_id`: the tab is context
+for the agent, not an addressing key.
 
 MCP resources use stable `surface_id` URIs:
 `pane://surface/{surface_id}/content`. Human names and titles stay in
@@ -84,11 +84,10 @@ access to its new workspace's peers.
 
 `pane_id` is saved per terminal surface as `surfaces[].agent_context` in
 `session.json` through the normal debounced save. Session restoration and
-undo-close keep it; `terminal_session_id` changes on reconstruction. Omit
-`agent_context` from reusable templates; it is session-owned metadata. Sessions
-saved by builds that had task assignment still carry an `agent_context.task`
-key. It loads, is ignored, and is dropped on the next save; the pane keeps its
-`pane_id`.
+undo-close keep it; `terminal_session_id` changes on reconstruction.
+`agent_context` is session-owned metadata. Sessions saved by builds that had
+task assignment still carry an `agent_context.task` key. It loads, is ignored,
+and is dropped on the next save; the pane keeps its `pane_id`.
 
 ## Install (one command)
 
