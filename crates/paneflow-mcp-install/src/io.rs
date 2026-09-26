@@ -4,9 +4,12 @@
 //! config lock ([`with_config_lock`]), which is:
 //! - **guarded** - the file is re-read right before the atomic rename, and
 //!   the write is refused when its bytes differ from what the caller
-//!   parsed. Claude Code rewrites `~/.claude.json` itself without
-//!   PaneFlow's lock; replacing a file it changed mid-pass would drop its
-//!   changes. The next launch retries.
+//!   parsed; the next launch retries. Claude Code rewrites `~/.claude.json`
+//!   itself without PaneFlow's lock, and replacing a file it changed
+//!   mid-pass would drop its changes. The re-read makes that unlikely but
+//!   does not prevent it: `rename(2)` replaces whatever is there, so a write
+//!   that lands between the re-read and the rename is lost, and the backup
+//!   holds the parsed bytes, not that write.
 //! - **backed up** - the parsed bytes are copied to a backup *before* the new
 //!   bytes land, and a backup failure aborts the write (we never modify the
 //!   original if we could not preserve it first). The backup never replaces
@@ -269,10 +272,14 @@ fn ensure_unchanged(path: &Path, parsed: &str) -> Result<()> {
 /// Replace `path`, whose current bytes the caller parsed as `parsed`, with
 /// `contents`. Assumes the caller already holds the config lock for `path`.
 ///
-/// Refuses, writing nothing, when the file no longer holds `parsed` (checked
-/// before the backup and again immediately before the rename; a backup this
-/// call already wrote is removed again). On success the returned path is the
-/// backup that holds `parsed` (see [`write_backup`] for its name).
+/// Refuses, writing nothing, when a check finds that the file no longer
+/// holds `parsed`: once before the backup and again immediately before the
+/// rename (a backup this call already wrote is removed again). The checks
+/// narrow the race with a writer that skips PaneFlow's lock, such as Claude
+/// Code, but do not close it: a write that lands after the second check and
+/// before the rename is replaced, and the backup holds `parsed`, not that
+/// write. On success the returned path is the backup that holds `parsed`
+/// (see [`write_backup`] for its name).
 pub(crate) fn replace_unchanged_unlocked(
     path: &Path,
     parsed: &str,

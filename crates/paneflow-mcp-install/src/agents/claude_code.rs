@@ -5,8 +5,10 @@
 //! `{type: "stdio", command, args: []}` with no `env` block. Removal is a
 //! direct edit under [`crate::io`]'s lock: every other key and sibling server
 //! stays, and the old bytes land in `.claude.json.bak` first. Claude Code
-//! rewrites this file itself without PaneFlow's lock, so the write is refused
-//! when the file changes between the parse and the rename.
+//! rewrites this file itself without PaneFlow's lock, so the file is re-read
+//! right before the rename and the write is refused when it no longer holds
+//! the parsed bytes. That narrows the race with Claude Code's own writes but
+//! does not close it (see [`crate::io`]).
 
 use std::path::{Path, PathBuf};
 

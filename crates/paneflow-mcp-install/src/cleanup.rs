@@ -17,8 +17,10 @@
 //! 3. PaneFlow's entry is removed under the config lock by splicing it out,
 //!    so every other byte of the file stays. The old bytes go to a backup
 //!    that never replaces an existing file. Nothing is written when the file
-//!    fails to parse, is a Codex inline `mcp_servers` table, or changes
-//!    between the parse and the rename.
+//!    fails to parse, is a Codex inline `mcp_servers` table, or no longer
+//!    holds the parsed bytes when it is re-read right before the rename. A
+//!    writer that skips PaneFlow's lock (Claude Code) can still lose a write
+//!    that lands between that re-read and the rename; see the `io` module.
 //! 4. The binary is deleted in a second phase: only by a pass that finds no
 //!    bridge entry at all - nothing removed, nothing kept, no config it
 //!    could not read. A pass that removed entries keeps it, because an agent

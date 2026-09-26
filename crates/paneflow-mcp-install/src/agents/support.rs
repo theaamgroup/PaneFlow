@@ -6,7 +6,8 @@
 //!   and [`crate::io`] primitives. Every removal edits the agent's config
 //!   file directly under the PaneFlow config lock; no agent CLI is spawned. A
 //!   write first copies the parsed bytes to a backup that never replaces an
-//!   existing file, and is refused when the file changed since the parse.
+//!   existing file, and is refused when a re-read right before the rename
+//!   finds the file changed since the parse.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -146,8 +147,8 @@ fn read_if_it_may_name_bridge(path: &Path) -> Result<Option<String>> {
 /// absent; a `paneflow` entry with any other command is left alone
 /// ([`UninstallOutcome::KeptUserEntry`]). Every file is parsed as JSONC and
 /// edited by splicing, so the rest of it stays byte for byte. A
-/// present-but-invalid file, or a file that changes between the parse and
-/// the rename, is never written.
+/// present-but-invalid file is never written, and neither is one that a
+/// re-read right before the rename finds changed since the parse.
 pub(crate) fn json_uninstall(
     path: &Path,
     container: &str,
