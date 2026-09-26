@@ -47,10 +47,7 @@ pub(super) const FIXED: &[(&str, &str)] = &[
     ("end", "Sessions sidebar · last row"),
     ("enter", "Sessions sidebar · resume selection"),
     ("space", "Sessions sidebar · resume selection"),
-    (
-        "escape",
-        "Sessions sidebar · dismiss menu, clear filter, then close",
-    ),
+    ("escape", "Sessions sidebar · clear filter, then close"),
     ("up", "Work review · previous checkout"),
     ("down", "Work review · next checkout"),
     ("enter", "Work review · visit checkout"),

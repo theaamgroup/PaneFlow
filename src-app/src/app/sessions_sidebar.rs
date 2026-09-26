@@ -676,10 +676,6 @@ impl PaneFlowApp {
             title: title.clone(),
             icon: SharedString::from(agent_icon_path(agent)),
         };
-        // Issue #334: right-click opens the row menu (Resume / Copy summary /
-        // Continue in). Left-click and drag keep today's behaviour exactly.
-        let menu_session_id = session_id.clone();
-        let menu_cwd = session.cwd.clone();
 
         div()
             .id(row_id)
@@ -702,21 +698,6 @@ impl PaneFlowApp {
             .animated_hover(move |style, delta| {
                 style.bg(lerp_color(resting_background, hover_background, delta));
             })
-            .on_aux_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
-                if e.is_right_click()
-                    && let Some(position) = e.mouse_position()
-                {
-                    this.agent_sessions.sessions_focus.focus(window, cx);
-                    this.open_sessions_context_menu(
-                        agent,
-                        &menu_session_id,
-                        &menu_cwd,
-                        position,
-                        cx,
-                    );
-                    cx.stop_propagation();
-                }
-            }))
             // US-007 (partial): resume into the bound pane; the docked sidebar
             // stays open (unlike the old popover).
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -753,7 +734,7 @@ impl PaneFlowApp {
     }
 
     /// Resume into the bound pane (or the picker tab). Shared by the row
-    /// click, Enter, and the row menu's Resume (issue #334).
+    /// click and Enter / Space.
     pub(crate) fn resume_session_from_sidebar(
         &mut self,
         agent: SessionAgent,
@@ -883,12 +864,7 @@ impl PaneFlowApp {
             // Issue #333: Escape empties the field first; a second Escape (or
             // one on an already-empty field) closes the sidebar as before.
             "escape" => {
-                // Issue #334: an open row menu is the first thing Escape
-                // dismisses, before the filter and before the sidebar.
-                if self.agent_sessions.sessions_menu_open.is_some() {
-                    self.agent_sessions.sessions_menu_open = None;
-                    cx.notify();
-                } else if !self.clear_sessions_filter(window, cx) {
+                if !self.clear_sessions_filter(window, cx) {
                     self.close_sessions_sidebar(cx);
                 }
             }
@@ -1112,7 +1088,6 @@ impl PaneFlowApp {
         self.agent_sessions.sessions_group_show_all =
             [false; crate::agent_sessions::SESSION_AGENT_COUNT];
         self.agent_sessions.sessions_scanning = [false; crate::agent_sessions::SESSION_AGENT_COUNT];
-        self.agent_sessions.sessions_menu_open = None;
     }
 
     /// Start closing the sidebar and invalidate in-flight scans immediately.

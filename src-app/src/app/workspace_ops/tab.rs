@@ -237,13 +237,13 @@ impl PaneFlowApp {
     /// spawned at `cwd` - the one path that places a surface at an arbitrary
     /// directory rather than the active tab's checkout. Lifted from the
     /// session-drop handler's center band (`event_handlers.rs`) for issue
-    /// #334, which needs the same placement for "Continue in ▸".
+    /// #334; that drop and Review with agent both place through it.
     ///
     /// In order: the terminal (with `command` written through `send_command`
     /// and `declared` stamped on it); the pane in a new tab, or `None` after
     /// the tab-cap toast; the issue #347 binding when `cwd` sits in a bound
     /// worktree ([`worktree_binding_for_cwd`]); focus, session save, notify.
-    /// Returns the terminal so a caller can schedule a prefill.
+    /// Returns the terminal so a caller can prefill a prompt.
     pub(crate) fn open_agent_tab_at_cwd(
         &mut self,
         ws_idx: usize,

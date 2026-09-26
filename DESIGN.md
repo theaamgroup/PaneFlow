@@ -224,14 +224,15 @@ explicit priority.
 
 Color resolves in three layers.
 
-1. **Terminal theme**: 36 `Hsla` slots per variant — 24 ANSI colors, 5 base
-   colors (`background`, `foreground`, `bright_foreground`, `dim_foreground`,
-   `ansi_background`), `cursor`, `selection`, the derived `selection_foreground`,
+1. **Terminal theme**: 26 `Hsla` slots per variant — 16 ANSI colors (normal
+   and bright), 3 base colors (`background`, `foreground`, `ansi_background`),
+   `cursor`, `selection`, the derived `selection_foreground`,
    `scrollbar_thumb`, `link_text`, and two title bar colors — plus a 30-slot
    `SyntaxPalette` for Changes and Review diffs
-   (`theme/model.rs:11-64,75-104`).
+   (`theme/model.rs:11-56,65-96`). There is no dim palette: faint (SGR 2)
+   text is drawn in its normal color at half opacity.
 2. **UI colors**: the 24 semantic roles plus one flag (`use_theme_diff_washes`)
-   that the chrome consumes, `UiColors` (`theme/model.rs:522-576`). Vercel,
+   that the chrome consumes, `UiColors` (`theme/model.rs:510-551`). Vercel,
    Claude, and Cursor each ship their own; PaneFlow Dark and PaneFlow Light
    carry `ui: None` and are derived by lightness.
 3. **Local tints**: alpha washes computed at render time from `text`, `muted`,
@@ -244,11 +245,11 @@ only for the fixed and Contextual values listed in 4.3.
 **The palette lives in two files, not one.** `theme/builtin.rs` holds the ANSI
 and base slots for all eight variants and the `UiColors` of Vercel, Claude, and
 Cursor. The PaneFlow Dark and PaneFlow Light `UiColors` are computed in
-`theme/model.rs::ui_colors_with` (`:657-746`), and the dark surface constants
+`theme/model.rs::ui_colors_with` (`:614-685`), and the dark surface constants
 `CHROME_BACKGROUND_HEX`, `TERMINAL_BACKGROUND_HEX`, and `BORDER_HEX` are at
-`theme/model.rs:458-461`. Cite both files when changing a role.
+`theme/model.rs:448-451`. Cite both files when changing a role.
 
-`UiColors::diff_colors()` (`theme/model.rs:600-620`) is the single source the
+`UiColors::diff_colors()` (`theme/model.rs:574-594`) is the single source the
 Review view and the Changes rail read.
 
 ### 4.2 Semantic roles
@@ -270,23 +271,22 @@ Review view and the Changes rail read.
 The dark work surface is `#181818` and the dark chrome is `#141414`: the panel
 is lighter than the shell around it, which is what makes the inset card read
 as a card without a shadow. Light inverts the ramp: pure white work surface,
-`#f7f7f7` cards, and a `#f3f4f9` title bar (`theme/builtin.rs:119`).
+`#f7f7f7` cards, and a `#f3f4f9` title bar (`theme/builtin.rs:117`).
 
-`apply_surface_overrides` (`theme/model.rs:491-511`) normalizes a dark preset
+`apply_surface_overrides` (`theme/model.rs:481-502`) normalizes a dark preset
 that ships no `UiColors` — in practice only PaneFlow Dark, since the other six
-carry `ui: Some(..)`. It rewrites **nine** terminal slots: both title bar
+carry `ui: Some(..)`. It rewrites **eight** terminal slots: both title bar
 colors to `#141414`, `background` and `ansi_background` to `#181818`,
-`foreground` `#f0f3f7`, `bright_foreground` `#ffffff`, `dim_foreground`
-`#9ca7b5`, `selection` `#5aa6ff` at 0.22, `scrollbar_thumb` `#9aa8bd` at 0.30,
-and `link_text` `#57d5c4`. It **never sets `border`** — `#252525` comes from
-the derived dark `UiColors` arm. The light branch returns early but still
-recomputes the selection foreground.
+`foreground` `#f0f3f7`, `selection` `#5aa6ff` at 0.22, `scrollbar_thumb`
+`#9aa8bd` at 0.30, and `link_text` `#57d5c4`. It **never sets `border`** —
+`#252525` comes from the derived dark `UiColors` arm. The light branch returns
+early but still recomputes the selection foreground.
 
 Diff colors on a dark theme fall back to PaneFlow's canonical green and red
 with opaque row washes unless the preset sets `use_theme_diff_washes`; **both
-Vercel variants do** (`builtin.rs:247,325`), and no other preset does. The
+Vercel variants do** (`builtin.rs:217,277`), and no other preset does. The
 opaque dark fallbacks are `#57d992` / `#ff6f6a` on `#1d3a2b` / `#402425`, with
-gutters `#16281f` / `#2c1718` (`theme/model.rs:611-619`).
+gutters `#16281f` / `#2c1718` (`theme/model.rs:585-593`).
 
 Status hues are functional and MUST NOT be recolored to match a brand when
 doing so weakens the meaning. The terminal selection foreground is never
@@ -329,7 +329,7 @@ to the surfaces named:
 | `hsl(40 85% 55%)`, `hsl(0 62% 56%)` | Callout warning and error | Severity hues independent of preset |
 | `#232323` / `#ffffff` | Settings card fill, keyed on `background.l > 0.5` | Card sits one step above `base` in either lightness |
 | `0x2d8c4a` / `0x5cff8a` / `0x021608` (and its inset shadow pair) | About dialog CRT credit plate | **Contextual** period piece, `app/about_dialog.rs:187-258` |
-| `0x89b4facc` on `0x1e1e2e` | Terminal copy-mode `COPY` badge | **Migration**: a leftover Catppuccin pair, `terminal/view.rs:1902-1903` |
+| `0x89b4facc` on `0x1e1e2e` | Terminal copy-mode `COPY` badge | **Migration**: a leftover Catppuccin pair, `terminal/view.rs:1935-1936` |
 | `0x383838` | Dark terminal panel ground (`codex_panel_background_for_terminal`) | **Migration**: the light arm already uses `subtle`, `terminal/element/mod.rs:230-236` |
 | `0x2fd7f2` | Settings ▸ Terminal, the "uses theme" scheme chip | **Migration**: should be `accent`, `settings/tabs/terminal.rs:593-598` |
 | `0xE0_6C_75` | Settings danger text: the injection-fence warning and the MCP failure recap | **Migration**: a fixed One Dark red standing in for a danger role `UiColors` does not have, so it does not follow the theme. `settings/tabs/general.rs:324`, `settings/tabs/mcp.rs:356-360`. Note the literal is written with underscores, so a `0xE06C75` search misses it |

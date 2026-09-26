@@ -252,15 +252,6 @@ fn font_weight_from_key(key: &str) -> FontWeight {
 
 static FONT_CONFIG_CACHE: std::sync::Mutex<Option<CachedFontConfig>> = std::sync::Mutex::new(None);
 
-#[cfg(test)]
-fn select_default_font_family<I, S>(_available_families: I) -> &'static str
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    EMBEDDED_MONO_FAMILY
-}
-
 /// The default monospace family PaneFlow uses out of the box.
 ///
 /// Uses bundled JetBrainsMono Nerd Font so fresh installs are visually
@@ -1361,22 +1352,6 @@ mod tests {
                 family,
             );
         }
-    }
-
-    #[test]
-    fn select_default_font_family_uses_bundled_jetbrains_mono_nfm() {
-        assert_eq!(
-            select_default_font_family(["Menlo", "JetBrainsMono NFM", EMBEDDED_MONO_FAMILY]),
-            EMBEDDED_MONO_FAMILY
-        );
-    }
-
-    #[test]
-    fn select_default_font_family_does_not_depend_on_installed_fonts() {
-        assert_eq!(
-            select_default_font_family(["Menlo", "Cascadia Mono", LEGACY_EMBEDDED_MONO_FAMILY]),
-            EMBEDDED_MONO_FAMILY
-        );
     }
 
     #[test]

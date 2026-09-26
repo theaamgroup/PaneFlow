@@ -71,7 +71,6 @@ pub(crate) fn gemini_config() -> Option<PathBuf> {
 pub(crate) fn opencode_configs() -> Vec<PathBuf> {
     opencode_configs_from(
         dirs::home_dir(),
-        dirs::config_dir(),
         std::env::var_os("XDG_CONFIG_HOME"),
         std::env::var_os("OPENCODE_CONFIG"),
         std::env::var_os("OPENCODE_CONFIG_DIR"),
@@ -80,8 +79,7 @@ pub(crate) fn opencode_configs() -> Vec<PathBuf> {
 
 fn opencode_configs_from(
     home: Option<PathBuf>,
-    _platform_config_dir: Option<PathBuf>,
-    _xdg_config_home: Option<OsString>,
+    xdg_config_home: Option<OsString>,
     opencode_config: Option<OsString>,
     opencode_config_dir: Option<OsString>,
 ) -> Vec<PathBuf> {
@@ -105,7 +103,7 @@ fn opencode_configs_from(
     }
 
     {
-        if let Some(dir) = _xdg_config_home
+        if let Some(dir) = xdg_config_home
             .map(PathBuf::from)
             .filter(|p| !p.as_os_str().is_empty())
             .or_else(|| home.map(|h| h.join(".config")))
@@ -624,7 +622,6 @@ mod tests {
             opencode_configs_from(
                 Some(PathBuf::from("/home/alice")),
                 None,
-                None,
                 Some(OsString::from("/tmp/opencode.jsonc")),
                 None,
             ),
@@ -637,7 +634,6 @@ mod tests {
         assert_eq!(
             opencode_configs_from(
                 Some(PathBuf::from("/home/alice")),
-                None,
                 None,
                 None,
                 Some(OsString::from("/tmp/opencode-config")),
@@ -677,7 +673,6 @@ mod tests {
         for (xdg, config, config_dir, shim_dir) in cases {
             let candidates = opencode_configs_from(
                 home.clone(),
-                None,
                 xdg.map(OsString::from),
                 config.map(OsString::from),
                 config_dir.map(OsString::from),

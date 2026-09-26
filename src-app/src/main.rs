@@ -1323,10 +1323,6 @@ struct AgentSessionsState {
     /// open / retarget; observed in `bootstrap.rs` so each keystroke
     /// re-renders the sidebar.
     sessions_filter_input: gpui::Entity<crate::widgets::text_input::TextInput>,
-    /// Issue #334: the open row menu (Resume / Copy summary / Continue in),
-    /// or `None`. Cleared by every action, click-away, and
-    /// `dismiss_transient_surfaces`.
-    sessions_menu_open: Option<crate::app::sessions_context_menu::SessionContextMenu>,
 }
 
 struct PaneFlowApp {
@@ -2585,16 +2581,6 @@ impl Render for PaneFlowApp {
             app_content = app_content.child(self.render_review_rail_menu(menu, ui, window, cx));
         }
 
-        // Issue #334: sessions-sidebar row menu (Resume / Copy summary /
-        // Continue in). Only while the sidebar is up, so a stale entry cannot
-        // paint over a closed rail.
-        if self.agent_sessions.sessions_sidebar_open
-            && let Some(menu) = self.agent_sessions.sessions_menu_open.clone()
-        {
-            app_content =
-                app_content.child(self.render_sessions_context_menu(menu, ui, window, cx));
-        }
-
         let shell =
             crate::window_chrome::shell::native_window_shell(app_content, window, app_backdrop_bg);
         startup_trace::on_app_render_built();
@@ -2970,22 +2956,6 @@ fn main() {
         runtime_paths::augment_path_for_gui_launch,
     );
     startup_trace::mark("login_shell_env_loaded");
-
-    // US-003: install the process-wide kill-on-parent-death guard BEFORE any
-    // agent CLI or ConPTY spawns so children inherit the Job Object (Windows).
-    match agents::parent_guard::install_process_job() {
-        Ok(agents::parent_guard::ParentGuardStatus::Installed) => {}
-        Ok(agents::parent_guard::ParentGuardStatus::Unsupported) => {
-            log::debug!(
-                "parent_guard: process-wide job guard unsupported on Unix; PTY shells use per-PTY guards and shim-wrapped agents use shim guards"
-            );
-        }
-        Err(err) => {
-            log::warn!(
-                "parent_guard: failed to install Job Object; kill -9 of Paneflow may orphan agent CLIs ({err})"
-            );
-        }
-    }
 
     // EP-002 US-004: `paneflow mcp <subcommand>` runs as a scriptable CLI
     // and exits - it never initializes GPUI / opens a window. Placed after

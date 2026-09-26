@@ -73,12 +73,13 @@ Stable in current builds.
 | Cursor | `"Cursor Dark"` | Cursor IDE-style: near-black workspace, compact graphite sidebar, dark composer surface, pale blue accent. Keeps PaneFlow's canonical diff/status hues. |
 | Cursor | `"Cursor Light"` | The VS Code Light+ identity Cursor ships by default, token family by token family. |
 
-A PaneFlow theme defines 36 terminal colour slots: a 24-colour ANSI
-palette (8 hues x 3 intensities: normal, bright, dim), 5 base
+A PaneFlow theme defines 26 terminal colour slots: a 16-colour ANSI
+palette (8 hues x 2 intensities: normal and bright), 3 base
 background/foreground colours, cursor, selection plus a derived
 selection foreground, scrollbar thumb, link text, and 2 title-bar
-colours. PaneFlow also keeps a separate syntax palette for the Diff
-surface.
+colours. There is no dim palette: faint (SGR 2) text is drawn in its
+normal colour at half opacity. PaneFlow also keeps a separate syntax
+palette for the Diff surface.
 
 The selection foreground is not hand-tuned. PaneFlow recomputes it
 at theme load until it clears APCA Lc >= 45 against the selection
