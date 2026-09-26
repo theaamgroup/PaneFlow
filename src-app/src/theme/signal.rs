@@ -2,7 +2,7 @@
 //! observes (issue #429).
 //!
 //! `Pane::render` hosts its terminal behind `Entity::cached`, so a view that
-//! is not notified keeps last frame's glyphs. `invalidate_theme_cache` only
+//! is not notified keeps last frame's glyphs. `set_active_theme_from` only
 //! touches the application entity, which is why a theme switch also has to
 //! publish the new generation through this entity: Settings → Appearance and
 //! `process_config_changes` call [`publish_theme_generation`], and each view's

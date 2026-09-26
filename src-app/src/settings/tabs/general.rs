@@ -12,7 +12,7 @@
 //! because they gate what an agent may do to the machine and to its peer panes
 //! rather than which launcher buttons show up:
 //! - **Permissions** - the Claude Code full-access guard.
-//! - **AI access** - free-access mode plus its injection fence (EP-003 US-009).
+//! - **AI access** - free-access mode (EP-003 US-009).
 //!
 //! **Notifications** closes the page. It had a section of its own until it was
 //! down to a single toggle, which is not a page.
@@ -278,19 +278,17 @@ impl PaneFlowApp {
             .into_any_element()
     }
 
-    /// EP-003 US-009: AI access (free-access mode + injection fence). The fence
-    /// sub-toggle only appears once free-access is on: with the mode off,
-    /// `surface.read` is always fenced and there is nothing to relax.
+    /// EP-003 US-009: AI access (free-access mode). A `surface.read` that does
+    /// not pass `fenced: false` is always fenced, so there is no fence toggle.
     fn render_ai_access_section(
         &self,
         ui: crate::theme::UiColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // Defaults: unrestricted OFF, fence ON.
+        // Default: unrestricted OFF.
         let unrestricted = self.cached_config.ai_unrestricted_enabled();
-        let fence = self.cached_config.ai_injection_fence_enabled();
 
-        let mut access_card = setting_card(ui).child(toggle_row(
+        let access_card = setting_card(ui).child(toggle_row(
             "row-ai-unrestricted",
             "AI free access",
             "Lets an agent auto-submit prompts to your other panes, without the \
@@ -301,34 +299,6 @@ impl PaneFlowApp {
             ui,
             cx,
         ));
-        if unrestricted {
-            access_card = access_card.child(hairline(ui)).child(toggle_row(
-                "row-ai-injection-fence",
-                "Injection fence",
-                "Marks peer-pane output as untrusted when an agent reads it, so a \
-                 malicious repo cannot hijack it.",
-                None,
-                fence,
-                "ai_injection_fence",
-                ui,
-                cx,
-            ));
-            // AC #3: once the fence is OFF, surface the active risk in red so
-            // the trade-off is explicit and impossible to miss.
-            if !fence {
-                access_card = access_card.child(hairline(ui)).child(
-                    div()
-                        .px(px(12.))
-                        .py(px(8.))
-                        .text_size(px(12.))
-                        .text_color(gpui::rgb(0xE0_6C_75))
-                        .child(
-                            "Fence off: a malicious pane can silently redirect \
-                             your agent.",
-                        ),
-                );
-            }
-        }
 
         div()
             .mt(px(24.))

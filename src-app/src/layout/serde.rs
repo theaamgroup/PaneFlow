@@ -133,7 +133,6 @@ impl LayoutTree {
                                 custom_name: tv_ref.terminal.custom_name.clone(),
                                 cwd,
                                 path: None,
-                                env: None,
                                 focus: Some(true),
                                 scrollback,
                                 agent: tv_ref.terminal.detected_agent.map(|a| a.tag().to_string()),
@@ -239,7 +238,7 @@ impl LayoutTree {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::VecDeque;
 
     use gpui::{AppContext, Entity, TestAppContext};
     use paneflow_config::schema::{LayoutNode, SurfaceDefinition};
@@ -259,7 +258,7 @@ mod tests {
         SurfaceDefinition {
             custom_name: Some(custom_name.to_string()),
             cwd: Some(cwd.to_string()),
-            env: Some(HashMap::from([("LEAF".into(), custom_name.into())])),
+            name: Some(format!("{custom_name}-leaf")),
             ..Default::default()
         }
     }
@@ -315,14 +314,7 @@ mod tests {
                 assert_eq!(surfaces.len(), 2, "leaf 0 keeps both surfaces");
                 assert_eq!(surfaces[0].custom_name.as_deref(), Some("agent"));
                 assert_eq!(surfaces[0].cwd.as_deref(), Some("/tmp/agent"));
-                assert_eq!(
-                    surfaces[0]
-                        .env
-                        .as_ref()
-                        .and_then(|env| env.get("LEAF"))
-                        .map(String::as_str),
-                    Some("agent")
-                );
+                assert_eq!(surfaces[0].name.as_deref(), Some("agent-leaf"));
                 assert_eq!(surfaces[1].custom_name.as_deref(), Some("logs"));
             }
             LayoutNode::Split { .. } => panic!("leaf 0 spawn must receive the pane node"),

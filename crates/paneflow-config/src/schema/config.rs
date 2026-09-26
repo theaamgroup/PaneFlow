@@ -1,15 +1,15 @@
-use super::{
-    AgentPanelConfig, CursorBlinkConfig, CursorShapeConfig, Osc52ClipboardConfig, TerminalConfig,
-};
+use super::{AgentPanelConfig, TerminalConfig};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Top-level PaneFlow configuration.
 ///
-/// Unknown keys are ignored. Retired keys such as `commands` (issue #607) and
-/// `custom_buttons` (issue #608) therefore still load from an older file
-/// without a field here; the published schema keeps a stub for `commands` so
-/// editors do not flag it (issue #817).
+/// Unknown keys are ignored. Retired keys such as `commands` (issue #607),
+/// `custom_buttons` (issue #608), `new_tabs_on_main`, `ai_injection_fence` and
+/// `agent_button_visibility_defaults_migrated` (issue #850) therefore still
+/// load from an older file without a field here; the published schema keeps a
+/// deprecated stub for `commands` and the three #850 keys so editors do not
+/// flag them (issue #817).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PaneFlowConfig {
@@ -62,9 +62,6 @@ pub struct PaneFlowConfig {
     /// storage-order.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub workspace_auto_sort: Option<bool>,
-    /// Legacy new-tab switch, used only when `new_tab_branch` is absent.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub new_tabs_on_main: Option<bool>,
     /// Default branch for new tabs. Absent defaults to main; empty uses the workspace checkout.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub new_tab_branch: Option<String>,
@@ -211,25 +208,8 @@ pub struct PaneFlowConfig {
     /// Re-evaluated per IPC call, so the mode takes effect (or is revoked)
     /// hot with no residual capability. A non-boolean value resolves to
     /// `None` (false) with a warn, never an accidentally-open state.
-    #[serde(default, deserialize_with = "lenient_opt_bool")]
-    pub ai_unrestricted: Option<bool>,
-    /// EP-003 US-008/US-011 (agent-control-plane): anti-injection fence on
-    /// the `surface.read` CLI/IPC path, INDEPENDENT of `ai_unrestricted`.
-    /// `Some(true)` / `None` (the default) wraps returned terminal text in
-    /// the `<untrusted_terminal_output id="…">` marker (parity with the MCP
-    /// bridge) so a malicious peer pane cannot hijack an orchestrator reading it.
-    /// `Some(false)` returns raw text (historical behavior), a risk the user
-    /// assumes. The fence PROTECTS the AI from being redirected; it does not
-    /// bridle it, so it stays ON by default even in free-access mode. A
-    /// non-boolean value resolves to `None` (fence ON) with a warn.
-    #[serde(default, deserialize_with = "lenient_opt_bool")]
-    pub ai_injection_fence: Option<bool>,
-    /// One-time issue #85 compatibility marker. `Some(true)` records that an
-    /// existing config's installed, previously auto-visible agent launchers
-    /// were promoted to explicit `true` values before the default allowlist
-    /// changed. Runtime visibility does not otherwise consult this field.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub agent_button_visibility_defaults_migrated: Option<bool>,
+    pub ai_unrestricted: Option<bool>,
     /// Show the built-in "Claude Code" command button in the tab bar.
     /// `Some(true)` always renders the button, `Some(false)` hides it, and
     /// `None` (default) renders it only when its CLI binary is installed.
@@ -453,18 +433,10 @@ impl PaneFlowConfig {
         self.reduce_motion.unwrap_or(false)
     }
 
-    /// Global new-tab policy, including compatibility with the original toggle.
+    /// Global new-tab policy. Absent means `main`; empty selects the
+    /// workspace checkout.
     pub fn default_new_tab_branch(&self) -> &str {
-        self.new_tab_branch
-            .as_deref()
-            .unwrap_or_else(|| {
-                if self.new_tabs_on_main == Some(false) {
-                    ""
-                } else {
-                    "main"
-                }
-            })
-            .trim()
+        self.new_tab_branch.as_deref().unwrap_or("main").trim()
     }
 
     /// A workspace-specific choice wins over the global default. An empty
@@ -608,109 +580,16 @@ impl PaneFlowConfig {
     pub fn ai_unrestricted_enabled(&self) -> bool {
         self.ai_unrestricted.unwrap_or(false)
     }
-
-    /// EP-003 US-008/US-011 (agent-control-plane): resolve the anti-injection
-    /// fence. Default ON (`true`): a missing or malformed value fails closed
-    /// to fenced, even when free-access mode is on (the fence protects the
-    /// orchestrator, it does not bridle it).
-    pub fn ai_injection_fence_enabled(&self) -> bool {
-        self.ai_injection_fence.unwrap_or(true)
-    }
 }
 
-/// Lenient `Option<bool>` deserializer for optional config toggles. A
-/// non-boolean value (e.g. the string `"true"`)
-/// deserializes to `None` with a `warn!` instead of hard-erroring, which would
-/// propagate to `parse_and_validate` and wipe EVERY sibling setting on a single
-/// typo (the all-or-nothing fallback the terminal enums avoid for the same
-/// reason). `None` then resolves through each field's resolver.
-pub(super) fn lenient_opt_bool<'de, D>(d: D) -> Result<Option<bool>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    lenient_opt_value(d, "boolean config toggle")
-}
-
-pub(super) fn lenient_opt_string<'de, D>(d: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    lenient_opt_value(d, "string config value")
-}
-
-pub(super) fn lenient_opt_usize<'de, D>(d: D) -> Result<Option<usize>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    lenient_opt_value(d, "positive integer config value")
-}
-
-pub(super) fn lenient_opt_f32<'de, D>(d: D) -> Result<Option<f32>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    lenient_opt_value(d, "number config value")
-}
-
-pub(super) fn lenient_opt_cursor_shape<'de, D>(d: D) -> Result<Option<CursorShapeConfig>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    lenient_opt_value(d, "terminal cursor shape")
-}
-
-pub(super) fn lenient_opt_cursor_blink<'de, D>(d: D) -> Result<Option<CursorBlinkConfig>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    lenient_opt_value(d, "terminal cursor blink mode")
-}
-
-pub(super) fn lenient_opt_osc52_clipboard<'de, D>(
-    d: D,
-) -> Result<Option<Osc52ClipboardConfig>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    lenient_opt_value(d, "terminal OSC 52 clipboard policy")
-}
-
-pub(super) fn lenient_opt_string_map<'de, D>(
-    d: D,
-) -> Result<Option<HashMap<String, String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    lenient_opt_value(d, "string map config value")
-}
-
-fn lenient_opt_value<'de, D, T>(d: D, expected: &'static str) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: DeserializeOwned,
-{
-    let v = Option::<serde_json::Value>::deserialize(d)?;
-    Ok(match v {
-        None | Some(serde_json::Value::Null) => None,
-        Some(value) => match serde_json::from_value::<T>(value.clone()) {
-            Ok(parsed) => Some(parsed),
-            Err(_) => {
-                tracing::warn!(
-                    target: "paneflow_config",
-                    value = %value,
-                    expected,
-                    "config value has an unexpected type, ignoring value and using resolver default",
-                );
-                None
-            }
-        },
-    })
-}
-
-/// Deserialize one top-level config field independently. A malformed field is
-/// ignored without discarding valid siblings, so the derived `PaneFlowConfig`
-/// deserializer remains the single source of truth for the public schema.
-fn lenient_value_or_default<'de, D, T>(d: D) -> Result<T, D::Error>
+/// Deserialize one config field independently. A malformed field (e.g. the
+/// string `"true"` for a boolean toggle) is ignored with a `warn!` and falls
+/// back to its default (`None` for an `Option`) without discarding valid
+/// siblings: a hard error would propagate to `parse_and_validate` and wipe
+/// every sibling setting on a single typo. The derived `PaneFlowConfig` and
+/// `TerminalConfig` deserializers remain the single source of truth for the
+/// public schema.
+pub(super) fn lenient_value_or_default<'de, D, T>(d: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: DeserializeOwned + Default,

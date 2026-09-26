@@ -17,7 +17,6 @@ pub(crate) fn surface_for_subject(subject: &ReviewSubject) -> SurfaceDefinition 
         custom_name: None,
         cwd: Some(subject.worktree.path.to_string_lossy().into_owned()),
         path: Some(subject.repo_root.to_string_lossy().into_owned()),
-        env: None,
         focus: Some(true),
         scrollback: None,
         agent: None,

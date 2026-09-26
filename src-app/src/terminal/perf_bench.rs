@@ -289,7 +289,7 @@ fn idle_scenarios(metrics: &mut Vec<Metric>) {
         std::thread::sleep(Duration::from_millis(200));
     }
     let cwd = std::env::current_dir().ok();
-    match TerminalState::new(cwd, 1, 1, Some((80, 24)), None, None) {
+    match TerminalState::new(cwd, 1, 1, Some((80, 24)), None) {
         Ok(shell) => {
             // A shell takes its own time to print a prompt (a login zsh with
             // a heavy rc file can need a second or two). Wait for the PTY to

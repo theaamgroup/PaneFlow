@@ -750,9 +750,9 @@ fn requested_bounded(
         })
 }
 
-/// Extract the optional `fenced` param, distinguishing ABSENT (use the
-/// config default) from a non-boolean, which is rejected rather than
-/// silently mapped to the default (issue #281).
+/// Extract the optional `fenced` param, distinguishing ABSENT (the read is
+/// fenced) from a non-boolean, which is rejected rather than silently mapped
+/// to the default (issue #281).
 fn requested_fenced(params: &serde_json::Value) -> Result<Option<bool>, JsonRpcError> {
     let Some(value) = params.get("fenced") else {
         return Ok(None);
@@ -1265,7 +1265,10 @@ impl PaneFlowApp {
                 // stale (an index past the new end renders as nothing).
                 self.rebuild_shortcut_rows(cx);
             }
-            crate::theme::invalidate_theme_cache();
+            // Resolve the theme from the config being applied, never from a
+            // second read of the file: an invalid save landing before the
+            // next render would otherwise cache PaneFlow Dark (issue #850).
+            crate::theme::set_active_theme_from(&config);
             // US-014 (render cache): refresh the cached config so render paths
             // pick up the reload without a per-frame `load_config()`. Last use
             // of `config` - move it in.
@@ -1299,21 +1302,9 @@ impl PaneFlowApp {
             cx.notify();
         }
 
-        // US-006: drain the theme watcher's "file changed" signal. The
-        // watcher invalidates the cache directly on its background thread;
-        // this only schedules the GPUI repaint so the next render picks up
-        // the freshly-resolved theme. `swap` is the cheapest way to read +
-        // reset atomically - we don't care about preserving other writers.
-        if self
-            .theme_changed
-            .swap(false, std::sync::atomic::Ordering::AcqRel)
-        {
-            cx.notify();
-        }
-
         // Issue #429: a cached terminal pane only repaints on a theme change
-        // when its observed signal moves; `cx.notify()` above reaches the
-        // application entity alone.
+        // when its observed signal moves; the reload's `cx.notify()` above
+        // reaches the application entity alone.
         crate::theme::publish_theme_generation(cx);
     }
 
@@ -1931,14 +1922,13 @@ impl PaneFlowApp {
                 let sid = terminal.entity_id().as_u64();
                 // EP-003 US-011 (agent-control-plane): wrap the returned text as
                 // untrusted so a malicious peer pane cannot hijack an orchestrator
-                // reading it. Default follows the global `ai_injection_fence`
-                // setting (ON); a caller can override per call with
-                // `fenced: false`. Internal consumers that parse raw output (the
-                // MCP bridge, which re-fences itself; the `wait` poll
-                // loops) pass `fenced:false`, so this only changes the CLI/IPC
-                // read path an orchestrator uses directly, mirroring the MCP fence.
-                let fenced =
-                    fenced.unwrap_or_else(|| self.cached_config.ai_injection_fence_enabled());
+                // reading it. Fenced by default; a caller can override per call
+                // with `fenced: false`. The in-repo consumer that parses raw
+                // output (the MCP bridge, `crates/paneflow-mcp/src/bridge.rs`,
+                // which re-fences itself) passes `fenced:false`, so the default
+                // covers the raw IPC read path an orchestrator uses directly,
+                // mirroring the MCP fence.
+                let fenced = fenced.unwrap_or(true);
                 // Issue #363: the extract parks on the runtime's reply for up
                 // to a second, and this runs on the 50 ms GPUI automation tick
                 // that `wait` hits every 500 ms. Clone the `Send` reader
@@ -4388,6 +4378,19 @@ mod tests {
         assert_eq!(super::neutralize_sentinel(clean), clean);
     }
 
+    /// Issue #850: no config key turns the fence off any more. A raw
+    /// `surface.read` that omits `fenced` is always fenced; only an explicit
+    /// per-call `fenced: false` returns raw text.
+    #[test]
+    fn surface_read_without_a_fenced_param_stays_fenced() {
+        let src = include_str!("ipc_handler.rs");
+        let arm = production_match_arm(src, "\"surface.read\"", "\"surface.status\"");
+        assert!(
+            arm.contains("let fenced = fenced.unwrap_or(true);"),
+            "surface.read must fence when the caller omits `fenced`: {arm}"
+        );
+    }
+
     // -----------------------------------------------------------------
     // EP-004 US-014 (agent-control-plane) - surface.read shape + the
     // ai.* state-machine choke point (upsert_session_state)
@@ -5588,6 +5591,27 @@ mod tests {
         assert!(
             pending.lock().unwrap().is_none(),
             "strictly older incoming_gen must be discarded, not deferred"
+        );
+    }
+
+    /// Issue #850: the config watcher is the only hot-reload path for a
+    /// hand-edited theme. Its applied branch must set the theme cache from the
+    /// config it applies (never from a second read of the file), before the
+    /// config moves into `cached_config`.
+    #[test]
+    fn process_config_changes_sets_the_theme_from_the_applied_config() {
+        let src = include_str!("ipc_handler.rs");
+        let body = production_match_arm(src, "pub(crate) fn process_config_changes(", "\n    }\n");
+        let applied = production_match_arm(body, "take_watcher_config_for_apply(", "\n        }\n");
+        let set = applied
+            .find("crate::theme::set_active_theme_from(&config);")
+            .unwrap_or_else(|| panic!("the applied reload must refresh the theme: {applied}"));
+        let moved = applied
+            .find("self.cached_config = config;")
+            .expect("the applied reload stores the config");
+        assert!(
+            set < moved,
+            "the theme is set from the config before it moves: {applied}"
         );
     }
 

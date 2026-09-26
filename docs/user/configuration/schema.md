@@ -68,7 +68,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `sidebar_show` | object or null | `branch` on, the rest off | What a rail row shows beyond its name, one switch per line: `branch` (boolean, default `true`) paints each terminal's current git branch beneath its name in the sidebar; split tabs show a labeled branch line per terminal; `diffstat` (boolean, default `false`) shows right-aligned insertion and deletion counts on the workspace row or a bound tab's own metadata line, drawn only when the checkout has something to report; `pr` is a retired key: PaneFlow ignores it, and the schema keeps a stub so editors do not flag an older file; it does not change the branch icon; `indent_guide` (boolean, default `false`) draws a hairline under a workspace's folder icon down its tab rows. Branches follow each terminal's current directory and refresh every two seconds. Counts read the tab's bound worktree, or its workspace's checkout when the tab is unbound. An absent object is the rail as it shipped before the switches existed. Toggled from the rail header's Customize Sidebar menu, or hand-edited; hot-reloads. |
 | `new_tab_branch` | string or null | `main` | Default branch for new tabs. Empty uses the workspace checkout. Settings → Workspaces → New tabs lists branches from open workspaces. Existing tabs, splits, and restored sessions keep their directories. |
 | `workspace_new_tab_branches` | object | `{}` | Branch overrides keyed by workspace cwd, e.g. `{"/projects/Aftermarket-Websites": "staging"}`. An absent entry inherits the default; an empty value uses that workspace's checkout. Set these using each workspace's branch picker in New tabs settings. |
-| `new_tabs_on_main` | boolean or null | `true` | Legacy compatibility: when `new_tab_branch` is absent, false uses the workspace checkout and true/absent uses main. |
+| `new_tabs_on_main` | boolean or null | none | Retired: accepted and ignored. New tabs follow `new_tab_branch`; set it to an empty string to use the workspace checkout. |
 | `workspace_auto_sort` | boolean or null | `false` | Order the workspace sidebar automatically: pinned first, then workspaces with something running, then idle ones, alphabetically within each group. Sibling git worktrees stay contiguous. Drag-to-reorder is disabled while this is on. |
 | `window_backdrop` | string or null | `auto` | Accepted: `auto`, `blurred`, `transparent`, `opaque`, `off`. Read once at startup. See the resolution table below: the values do not map one-to-one on macOS. |
 | `macos_chrome_material` | boolean or null | `true` | Reveals AppKit's native Sidebar material across the whole window shell: the primary rail, panel inset, and pane gutters. Silently disabled when `window_backdrop` is `opaque`, `off`, or `transparent`. |
@@ -88,8 +88,8 @@ That strictness is an editor-side aid only; it never affects loading.
 | `commands` | array | `[]` | Retired: legacy command palette entries and workspace templates. Accepted and ignored; see [Commands](#commands). |
 | `claude_code_bypass_permissions` | boolean or null | `false` | Adds Claude Code `--permission-mode bypassPermissions` when launching from PaneFlow. |
 | `ai_unrestricted` | boolean or null | `false` | Allows trusted automation to submit via IPC without `PANEFLOW_IPC_SCRIPTING=1`. |
-| `ai_injection_fence` | boolean or null | `true` | Wraps pane reads in an untrusted-output fence. Keep enabled for AI clients. |
-| `agent_button_visibility_defaults_migrated` | boolean or null | `null` | Internal one-time marker recording that a pre-allowlist config preserved its installed launcher buttons as explicit values. Runtime visibility does not otherwise consult it. |
+| `ai_injection_fence` | boolean or null | none | Retired: accepted and ignored. `surface.read` always fences pane text unless the call itself passes `fenced: false`. |
+| `agent_button_visibility_defaults_migrated` | boolean or null | none | Retired: accepted and ignored. It marked a one-time agent-button migration that no longer runs. |
 | `agent_panel` | object or null | defaults below | Agents-view display, profiles, and notification settings. |
 
 ### How `window_backdrop` resolves on macOS
@@ -119,18 +119,11 @@ material disappears after a backdrop change, this is why.
 ## Agent buttons
 
 Each button visibility key is `boolean or null`. `true` always shows the
-button and `false` always hides it. For a fresh config, `null` or an omitted
-key shows Claude Code, Codex, or Grok only when that CLI is installed; the
-other 15 agents default off even when installed.
+button and `false` always hides it. `null` or an omitted key shows Claude
+Code, Codex, or Grok only when that CLI is installed; the other 15 agents
+default off even when installed.
 
-On the first launch after upgrading from the old all-installed default,
-PaneFlow preserves an existing valid config by writing explicit `true` values
-for its installed agents and setting `agent_button_visibility_defaults_migrated`
-in the same atomic write. A missing file gets only the marker, so a genuinely
-fresh config uses the new allowlist. Explicit booleans and unknown keys are
-preserved; an invalid config is left untouched.
-
-| Key | Agent | Fresh null/omitted default |
+| Key | Agent | Null/omitted default |
 |---|---|---|
 | `claude_code_button_visible` | Claude Code | On if installed |
 | `codex_button_visible` | Codex | On if installed |
@@ -253,8 +246,6 @@ flag the key. Repeatable layouts come from session restore.
   },
   "claude_code_bypass_permissions": false,
   "ai_unrestricted": false,
-  "ai_injection_fence": true,
-  "agent_button_visibility_defaults_migrated": null,
   "claude_code_button_visible": null,
   "codex_button_visible": null,
   "opencode_button_visible": null,

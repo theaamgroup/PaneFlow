@@ -80,7 +80,6 @@ const NAV_GROUPS: &[NavGroup] = &[
                     "bypass",
                     "ai access",
                     "free access",
-                    "injection fence",
                     "notifications",
                     "native",
                     "toast",

@@ -1099,7 +1099,7 @@ impl TerminalState {
     /// ([`new_pending`]), starts the engine against a child
     /// ([`GhosttySession::start`]), and promotes it
     /// ([`promote_ghostty`](Self::promote_ghostty)). The off-thread path
-    /// (`TerminalView::with_cwd_and_env`,) runs the same steps but
+    /// (`TerminalView::with_cwd_env_and_profile`) runs the same steps but
     /// spreads the blocking one across the background executor with a
     /// `signal_mask` so the render thread never blocks on the spawn.
     ///
@@ -1116,7 +1116,6 @@ impl TerminalState {
         workspace_id: u64,
         surface_id: u64,
         initial_size: Option<(usize, usize)>,
-        user_env: Option<std::collections::HashMap<String, String>>,
         signal_mask: Option<ForegroundSignalMask>,
     ) -> anyhow::Result<Self> {
         Self::new_with_profile(
@@ -1124,7 +1123,6 @@ impl TerminalState {
             workspace_id,
             surface_id,
             initial_size,
-            user_env,
             TerminalSurfaceProfile::Normal,
             signal_mask,
         )
@@ -1136,7 +1134,6 @@ impl TerminalState {
         workspace_id: u64,
         surface_id: u64,
         initial_size: Option<(usize, usize)>,
-        user_env: Option<std::collections::HashMap<String, String>>,
         profile: TerminalSurfaceProfile,
         signal_mask: Option<ForegroundSignalMask>,
     ) -> anyhow::Result<Self> {
@@ -1145,7 +1142,6 @@ impl TerminalState {
             workspace_id,
             surface_id,
             initial_size,
-            user_env,
             profile,
             &paneflow_config::loader::load_config(),
         );
@@ -1173,14 +1169,12 @@ impl TerminalState {
         workspace_id: u64,
         surface_id: u64,
         initial_size: Option<(usize, usize)>,
-        user_env: Option<std::collections::HashMap<String, String>>,
     ) -> SpawnParams {
         Self::resolve_spawn_params_with_profile(
             working_directory,
             workspace_id,
             surface_id,
             initial_size,
-            user_env,
             TerminalSurfaceProfile::Normal,
             &paneflow_config::loader::load_config(),
         )
@@ -1194,7 +1188,6 @@ impl TerminalState {
         workspace_id: u64,
         surface_id: u64,
         initial_size: Option<(usize, usize)>,
-        user_env: Option<std::collections::HashMap<String, String>>,
         profile: TerminalSurfaceProfile,
         config: &paneflow_config::schema::PaneFlowConfig,
     ) -> SpawnParams {
@@ -1220,18 +1213,8 @@ impl TerminalState {
             resolved
         };
         let shell_quoting = ShellQuoting::for_shell(&shell);
-        // US-014: layer the per-surface `user_env` on top of the global
-        // `terminal.env` default (surface wins on key collision).
-        let global_env = config.terminal.as_ref().and_then(|t| t.env.clone());
-        let merged_env = match (global_env, user_env) {
-            (None, None) => None,
-            (Some(g), None) => Some(g),
-            (None, Some(s)) => Some(s),
-            (Some(mut g), Some(s)) => {
-                g.extend(s);
-                Some(g)
-            }
-        };
+        // US-014: the global `terminal.env` map, filtered in `assemble_pty_env`.
+        let user_env = config.terminal.as_ref().and_then(|t| t.env.clone());
         let mut env = std::collections::HashMap::new();
         // EP-003 US-007: clean opt-out - with `shell_integration: false` no
         // rc snippet is written or wired and the shell starts untouched.
@@ -1244,7 +1227,7 @@ impl TerminalState {
         // prepend, user-env merge with protected keys). Pure function so the env
         // contract stays unit-testable (the mockable `PtyBackend::spawn` seam is
         // gone).
-        let env = assemble_pty_env(env, workspace_id, surface_id, merged_env);
+        let env = assemble_pty_env(env, workspace_id, surface_id, user_env);
         // Keep terminal.env and identity propagation independent from shell
         // integration: opting out disables rc hooks, not the terminal env contract.
         // U-026 + issue #11: when no cwd is explicit, avoid inheriting a GUI
@@ -2148,14 +2131,13 @@ fn prepend_bin_dir_to_path(
 }
 
 /// True if `key` names a dynamic-loader-influencing environment variable that
-/// an untrusted source (an imported `session.json` surface env, or the global
-/// `terminal.env` config) must NOT be allowed to inject into a spawned child:
+/// an untrusted source (the global `terminal.env` config) must NOT be allowed
+/// to inject into a spawned child:
 /// `LD_PRELOAD` / `LD_LIBRARY_PATH` / `LD_AUDIT` and any `LD_*` on Linux, plus
-/// any `DYLD_*` on macOS. Letting these through is an RCE vector - the operator
-/// treats imported sessions as untrusted, and the child is always the
-/// configured shell. The match is case-sensitive on purpose: the unix loaders
-/// only honour the exact upper-case spelling, so a lower-case `ld_preload` is
-/// inert and need not be dropped.
+/// any `DYLD_*` on macOS. Letting these through is an RCE vector, and the
+/// child is always the configured shell. The match is case-sensitive on
+/// purpose: the unix loaders only honour the exact upper-case spelling, so a
+/// lower-case `ld_preload` is inert and need not be dropped.
 fn is_loader_influencing_env_key(key: &str) -> bool {
     key.starts_with("LD_") || key.starts_with("DYLD_")
 }
@@ -2171,8 +2153,8 @@ fn is_inherited_agent_session_env_key(key: &str) -> bool {
 ///
 /// `AI_HOOK_PATH_ENV` names a binary the shim executes and writes into the
 /// agent's hook configuration, so only a value this instance vouched for may
-/// reach a pane. `PROTECTED` in `assemble_pty_env` guards the `terminal.env` /
-/// session merge, but it cannot unset a variable PaneFlow was itself launched
+/// reach a pane. `PROTECTED` in `assemble_pty_env` guards the `terminal.env`
+/// merge, but it cannot unset a variable PaneFlow was itself launched
 /// with - a release instance started from another PaneFlow pane inherits that
 /// pane's path, and `inject_ai_hook_env` deliberately advertises nothing when
 /// its own stable copy is missing or unrunnable. Stripping it at the spawn
@@ -2451,12 +2433,12 @@ fn assemble_pty_env(
         ];
         for (k, v) in user_vars {
             // Reject malformed env names (empty / `=` / NUL) and drop
-            // dynamic-loader-influencing keys (LD_* / DYLD_*) outright: an
-            // imported `session.json` surface env or the global `terminal.env`
-            // is untrusted, and these inject a bundled `.so` into the spawned
-            // shell (RCE). `PATH` is deliberately still mergeable here (a
-            // documented US-014 use case), but PANEFLOW_BIN_DIR is re-prepended
-            // after the merge so agent commands still route through the shim.
+            // dynamic-loader-influencing keys (LD_* / DYLD_*) outright: the
+            // global `terminal.env` is untrusted, and these inject a bundled
+            // `.so` into the spawned shell (RCE). `PATH` is deliberately still
+            // mergeable here (a documented US-014 use case), but
+            // PANEFLOW_BIN_DIR is re-prepended after the merge so agent
+            // commands still route through the shim.
             if !is_valid_env_name(&k) || is_forbidden_child_env_key(&k) {
                 continue;
             }
@@ -3016,9 +2998,9 @@ mod tests {
     fn resolve_spawn_params_honors_initial_size() {
         // US-012: the cheap, render-thread-safe half of a spawn picks up the
         // requested grid size (and the 120x40 default when unspecified).
-        let p = TerminalState::resolve_spawn_params(None, 1, 1, Some((100, 30)), None);
+        let p = TerminalState::resolve_spawn_params(None, 1, 1, Some((100, 30)));
         assert_eq!((p.cols, p.rows), (100, 30));
-        let d = TerminalState::resolve_spawn_params(None, 1, 1, None, None);
+        let d = TerminalState::resolve_spawn_params(None, 1, 1, None);
         assert_eq!((d.cols, d.rows), (120, 40));
     }
 
@@ -3041,7 +3023,6 @@ mod tests {
             None,
             1,
             1,
-            None,
             None,
             TerminalSurfaceProfile::Normal,
             &config,
@@ -3442,8 +3423,8 @@ mod tests {
         user.insert("TERM_PROGRAM_VERSION".to_string(), "0.0.0".to_string());
         user.insert("SHLVL".to_string(), "99".to_string());
         // #542: the shim runs whatever this names and persists it into the
-        // agent's hook config, so an imported surface env or `terminal.env`
-        // must never be able to point it at another executable.
+        // agent's hook config, so `terminal.env` must never be able to point
+        // it at another executable.
         user.insert(
             AI_HOOK_PATH_ENV.to_string(),
             "/evil/paneflow-ai-hook".to_string(),
@@ -3489,9 +3470,9 @@ mod tests {
         );
     }
 
-    // f010: dynamic-loader env vars from an untrusted source (imported
-    // session.json surface env / global config env) must never reach the child
-    // shell - letting LD_PRELOAD/LD_*/DYLD_* through is an RCE vector.
+    // f010: dynamic-loader env vars from an untrusted source (the global
+    // `terminal.env` config) must never reach the child shell - letting
+    // LD_PRELOAD/LD_*/DYLD_* through is an RCE vector.
     #[test]
     fn loader_influencing_env_vars_are_dropped() {
         let mut user = HashMap::new();
@@ -3684,7 +3665,7 @@ mod tests {
         );
     }
 
-    /// Issue #542: `PROTECTED` guards the `terminal.env` / session merge, but a
+    /// Issue #542: `PROTECTED` guards the `terminal.env` merge, but a
     /// `retain` cannot unset a variable PaneFlow itself was launched with. A
     /// release instance started from another PaneFlow pane would otherwise
     /// inherit that pane's hook path, and `inject_ai_hook_env` advertises
@@ -4259,7 +4240,7 @@ mod tests {
         // echo. A fresh terminal has produced nothing (0); the
         // counter must advance once the shell emits output (Wakeup events
         // drained by `sync`), proving the signal tracks real PTY activity.
-        let mut state = TerminalState::new(None, 1, 1, Some((80, 24)), None, None)
+        let mut state = TerminalState::new(None, 1, 1, Some((80, 24)), None)
             .expect("spawn a PTY-backed terminal");
         assert_eq!(
             state.output_generation, 0,

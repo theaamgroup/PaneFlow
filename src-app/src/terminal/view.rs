@@ -649,7 +649,13 @@ impl TerminalView {
         initial_size: Option<(usize, usize)>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::with_cwd_and_env(workspace_id, cwd, initial_size, None, cx)
+        Self::with_cwd_env_and_profile(
+            workspace_id,
+            cwd,
+            initial_size,
+            TerminalSurfaceProfile::Normal,
+            cx,
+        )
     }
 
     pub fn with_cwd_and_profile(
@@ -659,36 +665,16 @@ impl TerminalView {
         profile: TerminalSurfaceProfile,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::with_cwd_env_and_profile(workspace_id, cwd, initial_size, None, profile, cx)
+        Self::with_cwd_env_and_profile(workspace_id, cwd, initial_size, profile, cx)
     }
 
-    /// Spawn a terminal with an explicit per-surface env map (US-014). The
-    /// global `terminal.env` default is merged underneath in
-    /// [`TerminalState::new`]; `user_env` here is the per-surface override
-    /// (surface wins on key collision). Use this from the session-restore path
-    /// where a [`SurfaceDefinition::env`] is present.
-    pub fn with_cwd_and_env(
-        workspace_id: u64,
-        cwd: Option<std::path::PathBuf>,
-        initial_size: Option<(usize, usize)>,
-        user_env: Option<std::collections::HashMap<String, String>>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::with_cwd_env_and_profile(
-            workspace_id,
-            cwd,
-            initial_size,
-            user_env,
-            TerminalSurfaceProfile::Normal,
-            cx,
-        )
-    }
-
+    /// Spawn a terminal for `profile`. The PTY env is the global
+    /// `terminal.env` from the live config snapshot, filtered at spawn like
+    /// every other env source.
     pub fn with_cwd_env_and_profile(
         workspace_id: u64,
         cwd: Option<std::path::PathBuf>,
         initial_size: Option<(usize, usize)>,
-        user_env: Option<std::collections::HashMap<String, String>>,
         profile: TerminalSurfaceProfile,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -708,7 +694,6 @@ impl TerminalView {
             workspace_id,
             surface_id,
             initial_size,
-            user_env,
             profile,
             &config,
         );
@@ -917,7 +902,7 @@ impl TerminalView {
 
         // Issue #429: `Pane::render` hosts this view behind `Entity::cached`,
         // so a theme switch has to reach it as a notification of its own.
-        // `invalidate_theme_cache` only touches the application entity; the
+        // `set_active_theme_from` only touches the application entity; the
         // picker and the config reload publish the new generation through
         // the app-scoped `ThemeSignal`, and this observer turns that into the
         // repaint that re-resolves the palette in `render`.
@@ -2809,7 +2794,7 @@ mod tests {
         probe.reset();
 
         cx.update(|_window, cx| {
-            crate::theme::invalidate_theme_cache();
+            crate::theme::set_active_theme_from(&paneflow_config::schema::PaneFlowConfig::default());
             crate::theme::publish_theme_generation(cx);
         });
         cx.run_until_parked();

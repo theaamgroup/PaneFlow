@@ -63,12 +63,6 @@ fn test_session_path_uses_config_dir_not_cache_dir() {
         !path.starts_with(cache_dir),
         "session_path {path:?} must not live under cache_dir {cache_dir:?}"
     );
-    let legacy = legacy_session_cache_path().expect("cache dir resolved");
-    assert_eq!(legacy.parent(), Some(cache_dir.join(APP_SUBDIR).as_path()));
-    assert_ne!(
-        path, legacy,
-        "session_path must not still be the cache-dir location"
-    );
 
     if cfg!(debug_assertions) {
         assert_eq!(APP_SUBDIR, "paneflow-dev");
@@ -78,77 +72,6 @@ fn test_session_path_uses_config_dir_not_cache_dir() {
             "debug session must live under paneflow-dev, got {path:?}"
         );
     }
-}
-
-#[test]
-fn test_session_path_migration_copies_from_cache_when_dest_absent() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp
-        .path()
-        .join("cache")
-        .join(APP_SUBDIR)
-        .join("session.json");
-    let dest = tmp
-        .path()
-        .join("config")
-        .join(APP_SUBDIR)
-        .join("session.json");
-    std::fs::create_dir_all(src.parent().unwrap()).unwrap();
-    std::fs::write(&src, r#"{"version":1}"#).unwrap();
-
-    let copied = migrate_session_from_cache(&src, &dest).unwrap();
-    assert!(copied, "expected a one-shot copy into the config dir");
-    assert_eq!(std::fs::read_to_string(&dest).unwrap(), r#"{"version":1}"#);
-    assert!(
-        !src.exists(),
-        "old cache file must be removed after a successful copy"
-    );
-}
-
-#[test]
-fn test_session_path_migration_skips_when_dest_exists() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("old.json");
-    let dest = tmp.path().join("new.json");
-    std::fs::write(&src, "from-cache").unwrap();
-    std::fs::write(&dest, "already-new").unwrap();
-
-    let copied = migrate_session_from_cache(&src, &dest).unwrap();
-    assert!(!copied);
-    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "already-new");
-    assert_eq!(
-        std::fs::read_to_string(&src).unwrap(),
-        "from-cache",
-        "cache copy must stay when dest already exists"
-    );
-}
-
-#[test]
-fn test_session_path_migration_noop_when_src_missing() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("missing.json");
-    let dest = tmp.path().join("config").join("session.json");
-
-    let copied = migrate_session_from_cache(&src, &dest).unwrap();
-    assert!(!copied);
-    assert!(
-        !dest.exists(),
-        "must not create dest when there is nothing to copy"
-    );
-}
-
-#[test]
-fn test_session_path_migration_keeps_src_if_copy_fails() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("old.json");
-    std::fs::write(&src, "payload").unwrap();
-    let blocker = tmp.path().join("not-a-dir");
-    std::fs::write(&blocker, "nope").unwrap();
-    let dest = blocker.join("session.json");
-
-    assert!(migrate_session_from_cache(&src, &dest).is_err());
-    assert!(src.exists(), "src must remain when the copy fails");
-    assert!(!dest.exists());
 }
 
 #[test]
@@ -362,6 +285,33 @@ fn leftover_custom_buttons_still_load() {
     assert_eq!(config.theme.as_deref(), Some("Cursor Dark"));
     let json = serde_json::to_value(&config).unwrap();
     assert!(json.get("custom_buttons").is_none(), "{json}");
+}
+
+#[test]
+fn leftover_new_tab_fence_and_visibility_marker_keys_still_load() {
+    // Issue #850: `new_tabs_on_main`, `ai_injection_fence` and the #85
+    // `agent_button_visibility_defaults_migrated` marker are retired. An older
+    // paneflow.json that still carries them loads, the rest of the file
+    // applies, the legacy `new_tabs_on_main: false` no longer selects the
+    // workspace checkout, and none of the three keys round-trips back out.
+    let config = parse_and_validate(
+        r#"{
+            "theme": "Cursor Dark",
+            "agent_button_visibility_defaults_migrated": true,
+            "new_tabs_on_main": false,
+            "ai_injection_fence": false
+        }"#,
+    );
+    assert_eq!(config.theme.as_deref(), Some("Cursor Dark"));
+    assert_eq!(config.default_new_tab_branch(), "main");
+    let json = serde_json::to_value(&config).unwrap();
+    for key in [
+        "agent_button_visibility_defaults_migrated",
+        "new_tabs_on_main",
+        "ai_injection_fence",
+    ] {
+        assert!(json.get(key).is_none(), "`{key}` round-tripped: {json}");
+    }
 }
 
 #[test]

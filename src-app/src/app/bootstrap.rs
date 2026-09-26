@@ -149,31 +149,6 @@ impl PaneFlowApp {
             log::warn!("config watcher failed to start: {e}; config hot-reload disabled");
         }
 
-        // US-006: dedicated theme watcher. Mirrors `ConfigWatcher` shape but
-        // signals via an `Arc<AtomicBool>` rather than carrying a payload -
-        // theme invalidation is a tristate "did the file change" question,
-        // and the actual `TerminalTheme` is recomputed lazily by
-        // `active_theme()` on the next render. The 50 ms poll loop drains
-        // this flag and calls `cx.notify()` to schedule the repaint. On
-        // init failure the historical 500 ms polling fallback inside
-        // `active_theme()` keeps the UI responsive (AC #3).
-        let theme_changed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let theme_changed_writer = std::sync::Arc::clone(&theme_changed);
-        match crate::theme::ThemeWatcher::new(std::sync::Arc::new(move || {
-            theme_changed_writer.store(true, std::sync::atomic::Ordering::Release);
-        })) {
-            Some(watcher) => {
-                if let Err(e) = watcher.start() {
-                    log::warn!(
-                        "theme watcher failed to start: {e}; falling back to 500 ms polling"
-                    );
-                }
-            }
-            None => {
-                log::warn!("theme watcher: no config dir resolved; falling back to 500 ms polling");
-            }
-        }
-
         // Session bytes were read by `mount_paneflow_app` before this entity
         // was built (#517: no splash any more).
         // Forensic context from an unparseable `session.json` (US-006) is
@@ -763,9 +738,6 @@ impl PaneFlowApp {
             claude_registry_sweep_pending: false,
             pending_close_focus: cx.focus_handle(),
             pending_close_focus_claim: false,
-            // US-006: shared signal flipped by the theme watcher's debounce
-            // thread; drained by the 50 ms IPC loop to schedule a repaint.
-            theme_changed,
             review: crate::app::review::ReviewState::new(cx),
             // Start in the mode the user left on quit, unless a staged
             // restore still has to finish (Diff is applied then).
