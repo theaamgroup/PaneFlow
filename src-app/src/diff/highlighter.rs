@@ -147,7 +147,7 @@ pub(crate) fn grammar_for_ext(ext: &str) -> Option<&'static Grammar> {
             include_str!("queries/markdown/highlights.scm")
         ),
         // EP-002 / US-003 (P1): Go, YAML, CSS, HTML. HTML stays on the crate's
-        // stock query (no Zed import, see `fixtures/README.md`).
+        // stock query (no Zed import), as TOML, Java and Ruby do.
         "go" => grammar!(
             GO,
             tree_sitter_go::LANGUAGE,
@@ -178,7 +178,6 @@ pub(crate) fn grammar_for_ext(ext: &str) -> Option<&'static Grammar> {
         // Zed's C++ query is self-contained (no `; inherits: c` overlay to
         // layer under), and it names the module-syntax nodes that only exist
         // past the crates.io 0.23.4 grammar - hence the git pin in Cargo.toml.
-        // The stock overlay survives as test data in `fixtures/`.
         "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => grammar!(
             CPP,
             tree_sitter_cpp::LANGUAGE,

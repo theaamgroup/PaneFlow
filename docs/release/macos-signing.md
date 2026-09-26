@@ -16,9 +16,9 @@ This document is operator-only. Application code never reads the entitlements
 plists described here. It does consume `assets/Info.plist`, which
 `bundle-macos.sh` templates into the shipped bundle.
 
-Related: [`docs/release-signing.md`](../release-signing.md) and
-[`docs/release-runbook.md`](../release-runbook.md) (the per-release checklist
-that calls these scripts in order).
+Related: [`docs/release-runbook.md`](../release-runbook.md) (the per-release
+checklist that calls these scripts in order, what signs what, and the secrets
+that must never exist in this org).
 
 ---
 
@@ -229,25 +229,43 @@ a flag in the workflow that was never there.
    password manager **before** you upload anything.
 4. **Encode for GitHub Secrets.** Use `gh` rather than the clipboard (Universal
    Clipboard syncs to every signed-in Apple device, and most clipboard managers
-   retain history):
+   retain history). Feed it from a file, never from a pipe or process
+   substitution, which can truncate a long value
+   ([runbook](../release-runbook.md#secrets-the-workflow-reads)):
    ```bash
-   gh secret set APPLE_DEVELOPER_CERT_P12 \
-     -R theaamgroup/paneflow < <(base64 -i developer-id.p12)
+   (
+     umask 077
+     f="$(mktemp)"
+     trap 'rm -f "$f"' EXIT
+     base64 -i developer-id.p12 -o "$f"
+     gh secret set APPLE_DEVELOPER_CERT_P12 -R theaamgroup/PaneFlow --env release \
+       < "$f"
+   )
    ```
-   If `gh` is unavailable, write to a temp file, paste it into the GitHub
-   Secrets UI, and erase:
+   The subshell keeps the `umask` local and runs the `EXIT` trap when the block
+   ends; `mktemp` creates the file owner-only (0600) in your per-user
+   `$TMPDIR`. Do not reach for `rm -P`: it has no effect on current macOS.
+   If `gh` is unavailable, write to an owner-only temp file, paste it into the
+   `release` environment's secrets in the GitHub UI, and delete it:
    ```bash
-   base64 -i developer-id.p12 > /tmp/cert.b64
-   # paste into APPLE_DEVELOPER_CERT_P12 in the repo's Actions secrets
-   rm -P /tmp/cert.b64
+   f="$(mktemp)"
+   base64 -i developer-id.p12 -o "$f"
+   # paste the contents of "$f" into APPLE_DEVELOPER_CERT_P12 under
+   # Settings -> Environments -> release
+   rm -f "$f"
    ```
+   Delete the exported `developer-id.p12` once the secret is set. The
+   certificate and its private key stay in the login keychain, so a later
+   rotation can export them again.
 5. **Generate an app-specific password** at <https://appleid.apple.com> →
    Sign-In and Security → App-Specific Passwords. Label it "PaneFlow
    Notarization". Save the 16-character output to the password manager.
 6. **Locate the Team ID** at <https://developer.apple.com/account> under
    Membership Details → Team ID. 10 alphanumeric characters.
-7. **Populate the five GitHub Secrets** under repo Settings → Secrets and
-   variables → Actions:
+7. **Populate the five GitHub Secrets** in the protected `release`
+   environment (repo Settings → Environments → `release` → Environment
+   secrets, or `gh secret set <NAME> --env release`), never as
+   repository-wide Actions secrets:
 
    | Secret | Source | Notes |
    |---|---|---|
@@ -256,6 +274,12 @@ a flag in the workflow that was never there.
    | `APPLE_ID` | the Apple ID that owns the membership | |
    | `APPLE_APP_SPECIFIC_PASSWORD` | step 5 | NOT the Apple ID login password. |
    | `APPLE_TEAM_ID` | step 6 | Plain text, no quotes, no spaces. Must match the `(TEAMID)` inside the certificate's common name or signing hard-fails. |
+
+   Once the environment copies are in place, delete any repository-scoped
+   copies of the same names. The build job runs in `environment: release`,
+   where an environment secret shadows a repository secret of the same name,
+   so a rotation that updates only the repository copy silently changes
+   nothing.
 
 8. **Re-run the release workflow.** The `Detect macOS signing secrets` step
    logs `All 5 Apple signing secrets are present - will sign + notarize.` The

@@ -118,7 +118,7 @@ test('existing human hold is never automatically cleared', () => {
 });
 test('paths and linked issue flags add risk; renames handled by caller', () => {
   assert.deepEqual(pathRisks(['packaging/macos/paneflow.entitlements']), ['safety:release']);
-  assert.deepEqual(pathRisks(['mcps/paneflow/tools/read_pane.json']), ['safety:integration']);
+  assert.deepEqual(pathRisks(['schemas/paneflow.schema.json']), ['safety:integration']);
   for (const p of ['deny.toml', 'clippy.toml', '.cursor/rules/review.mdc', '.claude/settings.json']) assert.deepEqual(pathRisks([p]), ['safety:release']);
   assert.deepEqual(pathRisks(['skills/example/SKILL.md']), ['safety:release']);
   assert.deepEqual(pathRisks(['.agents/skills/example/SKILL.md']), ['safety:release']);

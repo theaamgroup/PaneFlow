@@ -25,12 +25,9 @@ where the published bundle assessed `accepted / source=Notarized Developer
 ID` and the anonymous feed verified. A full installed-update cycle (an older
 app staging a release and replacing itself on quit) is still unvalidated.
 
-Related runbooks:
-
-- [`docs/release-signing.md`](./release-signing.md) explains what signs what, and
-  which secrets must never exist in this org.
-- [`docs/release/macos-signing.md`](./release/macos-signing.md) is the deep dive
-  on codesign, entitlements, notarization, and the DMG.
+Related runbook:
+[`docs/release/macos-signing.md`](./release/macos-signing.md) is the deep dive
+on codesign, entitlements, notarization, and the DMG.
 
 Prerequisites (one-time, not part of the per-release cadence):
 
@@ -51,8 +48,9 @@ The release workflow is a single signed `aarch64-apple-darwin` lane:
 There is no Intel (`x86_64-apple-darwin`) leg. Dry-run is `workflow_dispatch` on
 the same `build` job; it skips `release`.
 
-Never create `GPG_*`, `AZURE_*`, or `POSTHOG_API_KEY` in this org. Those names
-fed upstream's Linux packages, Windows Authenticode, and product analytics.
+Never create `GPG_*`, `AZURE_*`, `POSTHOG_API_KEY`, or any other name under
+[Secrets to never create in this org](#secrets-to-never-create-in-this-org).
+Those names fed upstream's publishing infrastructure.
 
 ---
 
@@ -61,6 +59,17 @@ fed upstream's Linux packages, Windows Authenticode, and product analytics.
 Populate these before the first Sparkle-enabled tag. That tag is the
 end-to-end test of the update path; a dry-run without Apple secrets will build
 an unsigned `.app` and stop there.
+
+### What signs what
+
+This fork uses two independent trust anchors: Apple Developer ID codesign plus
+notarization for the app bundle, and Sparkle EdDSA for each update archive. The
+old hand-rolled updater and minisign client remain deleted.
+
+| Mechanism | Protects | Verified by | Keys live |
+|---|---|---|---|
+| Developer ID codesign + Apple notarization | The `.app` a user launches | Gatekeeper (`spctl`) | Legacy repository-scoped `APPLE_*` secrets; move them to the protected `release` environment on rotation |
+| Sparkle EdDSA | The DMG offered by the appcast | Sparkle before extraction | `SPARKLE_PRIVATE_KEY` secret in the protected `release` environment; public half committed as `SUPublicEDKey` in `assets/Info.plist` |
 
 ### Secrets the workflow reads
 
@@ -74,19 +83,51 @@ an unsigned `.app` and stop there.
 | `SPARKLE_PRIVATE_KEY` | `release` environment secret | `generate_appcast` | Base64 Ed25519 private seed exported by Sparkle's `generate_keys`. It signs the DMG enclosure and never enters the app bundle. |
 | `GITHUB_TOKEN` | injected by Actions | `gh release view` / `gh release edit` | Do **not** create this. The workflow requests `permissions: contents: write` so the default token can attach assets and undraft the release. |
 
+Populate multi-line secrets from a file, never from a pipe:
+
+```bash
+(
+  umask 077
+  f="$(mktemp)"
+  trap 'rm -f "$f"' EXIT
+  base64 -i DeveloperID.p12 -o "$f"
+  gh secret set APPLE_DEVELOPER_CERT_P12 -R theaamgroup/PaneFlow --env release \
+    < "$f"
+)
+```
+
+A pipe (`base64 -i cert.p12 | gh secret set ...`) has been observed to truncate a
+long value at a buffer boundary, storing a malformed blob that fails at import
+time with no useful error. Process substitution (`< <(base64 ...)`) is the same
+pipe. Single-line values (`APPLE_TEAM_ID`, `APPLE_ID`) can use `--body` safely.
+
+The subshell keeps the `umask` local and runs the `EXIT` trap when the block
+ends, and `mktemp` creates an owner-only (0600) file in the per-user
+`$TMPDIR` rather than a predictable name under `/tmp`. Do not use `rm -P`: it
+has no effect on current macOS. Delete the exported `.p12` once the secret is
+set; the certificate and its key stay in the login keychain for a later
+export.
+
 Generate the Sparkle key once, using the pinned tool the release consumes:
 
 ```bash
 SPARKLE_DIST="$(scripts/sparkle-dist.sh)"
 "$SPARKLE_DIST/bin/generate_keys" --account com.theaamgroup.paneflow
 "$SPARKLE_DIST/bin/generate_keys" --account com.theaamgroup.paneflow -p
-"$SPARKLE_DIST/bin/generate_keys" --account com.theaamgroup.paneflow \
-  -x /tmp/paneflow-sparkle-private-key
-
-gh secret set SPARKLE_PRIVATE_KEY -R theaamgroup/PaneFlow --env release \
-  < /tmp/paneflow-sparkle-private-key
-rm -P /tmp/paneflow-sparkle-private-key
+(
+  umask 077
+  d="$(mktemp -d)"
+  trap 'rm -rf "$d"' EXIT
+  "$SPARKLE_DIST/bin/generate_keys" --account com.theaamgroup.paneflow \
+    -x "$d/sparkle-private-key"
+  gh secret set SPARKLE_PRIVATE_KEY -R theaamgroup/PaneFlow --env release \
+    < "$d/sparkle-private-key"
+)
 ```
+
+The seed is exported into a fresh owner-only (0700) directory, not a
+pre-created file, so `generate_keys` writes a new file there, and the trap
+removes the directory when the block ends.
 
 Commit the printed public key as `SUPublicEDKey` in `assets/Info.plist`; it is
 not a secret or an Actions variable. The value in the plist and the private
@@ -145,6 +186,28 @@ name that stops at `_P`, will pass a presence check you wrote yourself and then
 fail at `security import` twenty minutes into a tagged run.
 
 Onboarding steps for the Apple half: [`docs/release/macos-signing.md`](./release/macos-signing.md) §6.
+
+### Secrets to never create in this org
+
+These names all belonged to upstream's publishing infrastructure. A workflow
+that finds them populated will push our builds to someone else's servers, or
+sign artifacts with a key that has no business existing here. Do not create
+them, and treat their presence in a workflow file as a bug to remove:
+
+| Name | What it fed upstream |
+|---|---|
+| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT`, `R2_BUCKET` | Cloudflare R2 bucket behind upstream's public package host |
+| `CLOUDFLARE_*` | Cache purges and DNS for that same domain |
+| `HOMEBREW_TAP_DEPLOY_KEY` | Push access to upstream's Homebrew tap |
+| `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE`, `GPG_KEY_ID` | Signing `.deb`/`.rpm` packages and apt/dnf repo metadata |
+| `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_TRUSTED_SIGNING_*` | Windows Authenticode signing via Azure Trusted Signing |
+| `POSTHOG_API_KEY` | Upstream product analytics |
+| `MINISIGN_SECRET_KEY`, `PANEFLOW_MINISIGN_*` | Signatures for the deleted hand-rolled updater; Sparkle EdDSA replaced it |
+
+The GPG release key signed only upstream's `.deb`/`.rpm` packages and
+repository metadata and never touched macOS signing; it was deleted with
+`keys/`, `packaging/paneflow-release.asc` and the Linux packaging trees, so a
+release step that reaches for `gpg` is rebuilding a removed path.
 
 ---
 
@@ -327,7 +390,7 @@ a near-miss that would have shipped something users cannot open.
 | `::error title=macOS signing required::One or more APPLE_* secrets are missing` | 1. The run log names which check failed. Re-populate from the password manager per [`docs/release/macos-signing.md`](./release/macos-signing.md) §6. 2. Secrets are routed through `env:` so an empty secret reads as empty rather than as a literal expression: an empty value and an absent value behave the same. 3. Re-run the failed job. Do not re-tag. |
 | `error: signing identity team ID does not match APPLE_TEAM_ID` | 1. `APPLE_TEAM_ID` does not appear as `(TEAMID)` inside the certificate's common name. 2. Either the secret is stale or the `.p12` was minted under a different team. 3. Fix the mismatched half and re-run the job. |
 | Notarization hits the 90-minute ceiling | 1. The script prints the submission ID and the exact `xcrun notarytool info` recovery command. Poll the existing submission rather than re-tagging. 2. If it eventually reports `Accepted`, staple by hand with `xcrun stapler staple` and re-run only the DMG and publish steps. 3. Apple queue backlogs over an hour do happen and are not a repo problem. |
-| `Produce .dmg` fails with `hdiutil: verify: unable to recognize ... as a disk image. (Resource temporarily unavailable)` | 1. **Re-run the failed job; do not re-tag.** This is `EAGAIN` from a wedged `diskimages-helper`, not ENOSPC and not a corrupt image - job cleanup will show `Terminate orphan process: ... (diskimages-help)`. It hit the v0.6.1 cut and a no-change re-run packaged fine. 2. Before assuming a packaging regression, diff `create-dmg.sh` / `release.yml` / `bundle-macos.sh` and the runner image version against the last good run; if they are identical it is the runner, not the repo. 3. `hdiutil create` exits 0 in this mode (the image is written; `verify` cannot get a helper to probe it), so do not go looking for a truncation bug. Issue #547 tracks adding a bounded retry. |
+| `Produce .dmg` fails with `hdiutil: verify: unable to recognize ... as a disk image. (Resource temporarily unavailable)` | 1. **Re-run the failed job; do not re-tag.** This is `EAGAIN` from a wedged `diskimages-helper`, not ENOSPC and not a corrupt image - job cleanup will show `Terminate orphan process: ... (diskimages-help)`. It hit the v0.6.1 cut and a no-change re-run packaged fine. 2. Before assuming a packaging regression, diff `create-dmg.sh` / `release.yml` / `bundle-macos.sh` and the runner image version against the last good run; if they are identical it is the runner, not the repo. 3. `hdiutil create` exits 0 in this mode (the image is written; `verify` cannot get a helper to probe it), so do not go looking for a truncation bug. Since #547, `create-dmg.sh` already retries each create + verify pair (`HDIUTIL_RETRY_ATTEMPTS`, default 3, with exponential backoff), so this error means every attempt in the run failed. |
 | Notarization returns `Invalid` | 1. The step dumps `xcrun notarytool log`. Read the actual rejection reason before changing anything. 2. `The binary is not signed` means a nested binary escaped the walk: run `codesign --verify --deep --strict --verbose=2` on the local bundle. 3. `requests the com.apple.security.get-task-allow entitlement` means a dev-entitlements build reached Apple. |
 
 ---

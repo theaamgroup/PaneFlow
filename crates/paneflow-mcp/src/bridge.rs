@@ -103,9 +103,9 @@ pub struct Surface {
     pub workspace: Option<u64>,
     pub scope: String,
     /// US-019 (`prd-cli-tab-hierarchy`): identity and title of the workspace
-    /// tab owning this surface. Both are additive and absent for surfaces
-    /// outside the CLI tab hierarchy - and absent altogether when talking to a
-    /// Paneflow older than the tab hierarchy, which simply never sends them.
+    /// tab owning this surface. Both are additive: every listed surface carries
+    /// them, and they are absent only when talking to a Paneflow older than the
+    /// tab hierarchy, which simply never sends them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

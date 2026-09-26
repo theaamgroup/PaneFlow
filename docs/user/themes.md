@@ -70,7 +70,7 @@ Stable in current builds.
 | Vercel | `"Vercel Light"` | The same Geist identity on white: near-black structure, darkened accent hues. |
 | Claude | `"Claude Dark"` | Claude Desktop-style: graphite surfaces, ivory text, muted controls, Claude's orange accent. Keeps PaneFlow's canonical diff/status red, green, and yellow. |
 | Claude | `"Claude Light"` | The same identity on Claude's cream paper surface, with warm ink and the orange accent. |
-| Cursor | `"Cursor Dark"` | Cursor IDE-style: near-black workspace, compact graphite sidebar, dark composer surface, pale blue accent. Keeps PaneFlow's canonical diff/status hues. |
+| Cursor | `"Cursor Dark"` | Cursor IDE-style: near-black workspace, compact graphite sidebar, pale blue accent. Keeps PaneFlow's canonical diff/status hues. |
 | Cursor | `"Cursor Light"` | The VS Code Light+ identity Cursor ships by default, token family by token family. |
 
 A PaneFlow theme defines 26 terminal colour slots: a 16-colour ANSI

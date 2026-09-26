@@ -3,9 +3,8 @@
 //! The terminal pipeline (`terminal/perf_bench.rs`) and the startup bench
 //! print the same JSON document and the same Markdown comparison table, so
 //! the metric type, the timing helpers, the process counters and the
-//! reporting live here once. The layout gates in `layout/render.rs` and the
-//! Ghostty stress scenarios read the percentile and process-counter helpers
-//! from here too.
+//! reporting live here once. The layout gates in `layout/render.rs` read the
+//! percentile and process-counter helpers from here too.
 //!
 //! Allocation counts come from the test binary's one `#[global_allocator]`,
 //! `terminal/test_allocator.rs`: a crate may install a single one, and the
