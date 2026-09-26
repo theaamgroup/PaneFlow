@@ -665,8 +665,8 @@ impl PaneFlowApp {
     // Issue #438: the four Review-terminal sweeps that used to live here are
     // gone. Review no longer embeds terminals inside a `DiffView` (upstream
     // a8d55f74 deleted the review terminal panel), so "Review with agent"
-    // opens an ordinary workspace tab at the checkout - the same path #334's
-    // "Continue in" uses. A review agent is therefore an ordinary pane on a
+    // opens an ordinary workspace tab at the checkout through
+    // `open_agent_tab_at_cwd`. A review agent is therefore an ordinary pane on a
     // tab's layout tree, already covered by the normal close-confirmation
     // walk; it no longer needs an off-tree sweep of its own. That also
     // removes the gap where a review agent hosted in a `PaneSurface::Diff`
@@ -792,7 +792,6 @@ impl PaneFlowApp {
         self.tab_menu_open = None;
         self.pane_menu_open = None;
         self.review.dismiss_popovers();
-        self.agent_sessions.sessions_menu_open = None;
         // Issue #349: the rail header's Customize Sidebar popover is a menu
         // like the rest, and folds its submenu with it.
         self.sidebar_customize_menu_open = false;
