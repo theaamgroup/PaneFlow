@@ -4733,7 +4733,6 @@ dependencies = [
  "dirs",
  "log",
  "paneflow-agent-config",
- "paneflow-process",
  "serde_json",
  "tempfile",
  "toml_edit 0.25.9+spec-1.1.0",

@@ -2,8 +2,7 @@
 //!
 //! `Mock` implements [`AgentConfigWriter`] with injected outcomes and a
 //! presence flag, so the engine can be exercised across every branch
-//! without touching the filesystem or PATH (and without ever shelling out
-//! to a real `claude`/`codex` on the developer's machine).
+//! without touching the filesystem or PATH.
 
 use std::cell::Cell;
 use std::path::Path;

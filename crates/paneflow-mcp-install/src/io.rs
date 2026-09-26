@@ -30,23 +30,6 @@ pub fn with_config_lock<T>(path: &Path, f: impl FnOnce() -> Result<T>) -> Result
     f()
 }
 
-/// Copy `path` to `path` + `.bak` when it exists. Returns the backup path
-/// (or `None` if the original did not exist - nothing to preserve).
-///
-/// A copy failure is an error: callers MUST abort the write rather than
-/// risk clobbering a config they could not back up first (US-006 AC).
-pub fn backup(path: &Path) -> Result<Option<PathBuf>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let mut bak = path.as_os_str().to_owned();
-    bak.push(".bak");
-    let bak = PathBuf::from(bak);
-    std::fs::copy(path, &bak)
-        .with_context(|| format!("backup {} -> {} failed", path.display(), bak.display()))?;
-    Ok(Some(bak))
-}
-
 /// Atomically write `contents` to `path`: temp file in the same directory,
 /// flush + fsync, then `rename`. The rename is atomic on POSIX.
 ///
@@ -134,24 +117,6 @@ mod tests {
     /// constant is private and `lock.rs` is outside this job's allowlist, so
     /// this value can drift if the agent-config timeout changes.
     const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
-
-    #[test]
-    fn backup_noop_when_absent() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("missing.json");
-        assert_eq!(backup(&p).unwrap(), None);
-    }
-
-    #[test]
-    fn backup_copies_existing() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("config.json");
-        std::fs::write(&p, b"original").unwrap();
-        let bak = backup(&p).unwrap().unwrap();
-        assert_eq!(std::fs::read(&bak).unwrap(), b"original");
-        // Original untouched.
-        assert_eq!(std::fs::read(&p).unwrap(), b"original");
-    }
 
     #[test]
     fn write_atomic_creates_file_and_parents() {

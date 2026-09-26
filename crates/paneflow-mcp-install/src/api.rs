@@ -5,9 +5,10 @@
 //! button) can render a per-agent recap and derive a single
 //! [`OverallState`] for its button label - without parsing stdout.
 //!
-//! These functions perform blocking filesystem / process I/O; callers on a
-//! UI thread MUST run them on a background executor (the Settings button
-//! uses `smol::unblock`).
+//! These functions block: they read and write agent config files, scan
+//! `PATH` for each agent's CLI, and wait (bounded) on the PaneFlow config
+//! lock. Callers on a UI thread MUST run them on a background executor (the
+//! Settings button uses `smol::unblock`).
 
 use std::path::Path;
 

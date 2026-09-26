@@ -38,9 +38,9 @@ impl Presence {
 /// Real detection: is `cli` resolvable on `PATH`, or does any path in
 /// `config_paths` exist on disk?
 ///
-/// `cli` may be `None` for agents that ship no CLI (e.g. Gemini CLI exposes
-/// no `gemini mcp add`; opencode is config-only here), in which case only
-/// the config-path signal is consulted.
+/// `cli` is the agent's binary name. `None` skips the `PATH` check and
+/// consults only the config-path signal; every current writer passes its
+/// binary name.
 #[must_use]
 pub fn detect(cli: Option<&str>, config_paths: &[PathBuf]) -> Presence {
     let cli_on_path = cli.is_some_and(|c| which::which(c).is_ok());

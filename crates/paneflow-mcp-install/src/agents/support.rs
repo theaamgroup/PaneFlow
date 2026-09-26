@@ -1,17 +1,17 @@
 //! Shared plumbing for the per-agent writers (EP-003).
 //!
 //! - Config-path resolution (cross-platform, `dirs`-based).
-//! - `shell_out` - run an agent's own CLI and surface a clean error on
-//!   non-zero exit (preferred path for Claude Code / Codex per PRD D4).
 //! - Format-generic install / uninstall / status built on the tested
 //!   [`crate::merge`] + [`crate::io`] primitives, so every writer is
-//!   idempotent and no-clobber without repeating the logic.
+//!   idempotent and no-clobber without repeating the logic. Every writer
+//!   edits its agent's config file directly under the PaneFlow config
+//!   lock; no agent CLI is spawned. A write that changes the file first
+//!   copies the old bytes to `<file>.bak`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use paneflow_agent_config::jsonc;
 
 use crate::agents::{InstallOutcome, StatusOutcome, UninstallOutcome};
@@ -124,197 +124,6 @@ fn push_opencode_names(out: &mut Vec<PathBuf>, config_base: PathBuf) {
 fn push_opencode_names_in(out: &mut Vec<PathBuf>, dir: PathBuf) {
     out.push(dir.join("opencode.jsonc"));
     out.push(dir.join("opencode.json"));
-}
-
-// ---------------------------------------------------------------------------
-// CLI shell-out
-// ---------------------------------------------------------------------------
-
-/// Wall-clock deadline for an agent CLI shell-out (U-032). `mcp add` is a quick
-/// local config edit; 30 s is generous for a cold CLI start yet bounds a hung
-/// invocation (network stall, auth prompt) so install can't block.
-const CLI_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// stdout cap for an agent CLI shell-out - `mcp add` prints a short
-/// confirmation, so 1 MiB is plenty while bounding a runaway CLI.
-const CLI_STDOUT_CAP: u64 = 1024 * 1024;
-
-/// Is `cli` resolvable on `PATH`?
-pub(crate) fn cli_on_path(cli: &str) -> bool {
-    which::which(cli).is_ok()
-}
-
-/// Run `program args...`, capturing output. `Ok(())` iff it exits 0;
-/// otherwise an error carrying the trimmed stderr (for `log`/report).
-pub(crate) fn shell_out(program: &str, args: &[&str]) -> Result<()> {
-    // `which::which` resolved the CLI before we spawn it (`cli_on_path`).
-    // On POSIX `execvp` honors `PATH` for a bare program name.
-    let mut command = Command::new(program);
-    command.args(args);
-
-    // U-032: bound the CLI with a wall-clock deadline so a hung `claude`/`codex
-    // mcp add` (network stall, auth prompt) can't block the installer.
-    // run_with_timeout nulls stdin and caps stdout/stderr for us.
-    let output = paneflow_process::run_with_timeout(command, CLI_DEADLINE, CLI_STDOUT_CAP)
-        .map_err(|e| anyhow!("failed to run `{program}`: {e}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Err(anyhow!(
-        "`{program} {}` exited with {}: {}",
-        args.join(" "),
-        output.status,
-        // Some CLIs report errors on stdout; include both, trimmed.
-        format!("{} {}", stderr.trim(), stdout.trim()).trim()
-    ))
-}
-
-// ---------------------------------------------------------------------------
-// CLI-first control flow shared by the Claude Code and Codex writers (#319)
-// ---------------------------------------------------------------------------
-
-/// The agent CLI a writer prefers over editing its config file directly.
-pub(crate) struct Cli<'a> {
-    /// The config file the writer watches and the CLI is expected to edit.
-    pub path: &'a Path,
-    /// CLI program name (`claude`, `codex`), for warnings only.
-    pub name: &'a str,
-    /// Display name of `path` (`~/.claude.json`), for warnings only.
-    pub file: &'a str,
-    /// Whether the CLI may be invoked at all (on PATH and permitted).
-    pub available: bool,
-}
-
-/// Run the agent's own CLI and trust only the on-disk postcondition.
-///
-/// Backs up the watched file, invokes `argv`, then asks `verified` whether
-/// the file now holds the expected state. Returns `Some(outcome)` only when
-/// it does; `None` means the caller must run its locked direct edit: the
-/// CLI is unavailable, failed, or exited 0 without producing the expected
-/// file (issue #215). On that failed or unverified path the snapshot from
-/// this call is put back first, so the fallback merges the pre-CLI bytes
-/// and does not replace `.bak` with the CLI's rewrite (issue #684). An
-/// unavailable CLI returns before any backup and does not restore an older
-/// `.bak`.
-fn cli_then_verify<T>(
-    cli: &Cli<'_>,
-    argv: &[&str],
-    invoke: impl FnOnce(&[&str]) -> Result<()>,
-    verified: impl FnOnce() -> Result<Option<T>>,
-    mismatch: &str,
-) -> Result<Option<T>> {
-    if !cli.available {
-        return Ok(None);
-    }
-    // Only this invocation's snapshot is restored. `None` means the file
-    // was absent; it must not be confused with a stale `.bak` on disk.
-    let backup = io::backup(cli.path)?;
-    let what: Vec<&str> = argv.iter().copied().take(2).collect();
-    let what = format!("`{} {}`", cli.name, what.join(" "));
-    let file = cli.file;
-    match invoke(argv) {
-        Ok(()) => {
-            if let Some(outcome) = verified()? {
-                return Ok(Some(outcome));
-            }
-            log::warn!(
-                "paneflow mcp: {what} exited 0 but {file} {mismatch}; falling back to direct {file} edit"
-            );
-        }
-        Err(e) => {
-            log::warn!("paneflow mcp: {what} failed ({e:#}); falling back to direct {file} edit");
-        }
-    }
-    restore_pre_cli_snapshot(cli.path, backup.as_deref())?;
-    Ok(None)
-}
-
-/// Put the pre-CLI file back so a fallback merge does not read the CLI's rewrite.
-///
-/// `backup` is the [`io::backup`] result from this invocation only. `Some`
-/// copies that snapshot onto `path`. `None` means `path` did not exist, so a
-/// file the CLI created is removed and the fallback starts from absence.
-fn restore_pre_cli_snapshot(path: &Path, backup: Option<&Path>) -> Result<()> {
-    match backup {
-        Some(bak) => {
-            std::fs::copy(bak, path).with_context(|| {
-                format!("restore {} from {} failed", path.display(), bak.display())
-            })?;
-        }
-        None => {
-            if path.exists() {
-                std::fs::remove_file(path)
-                    .with_context(|| format!("remove CLI-created {} failed", path.display()))?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn install_outcome(had_prior: bool) -> InstallOutcome {
-    if had_prior {
-        InstallOutcome::Updated
-    } else {
-        InstallOutcome::Installed
-    }
-}
-
-/// Install via the agent's CLI (`argv`, never preceded by `mcp remove`: a
-/// crash between remove and add used to drop the entry while the rest of
-/// the file stayed intact), verify with `status`, and otherwise run the
-/// locked `fallback` merge. A non-idempotent CLI (entry already present)
-/// fails at `invoke` and the merge repairs it in place. The outcome label
-/// is keyed on `had_prior`, the state before the install started, so a
-/// CLI that wrote an off-schema entry does not turn a fresh install into
-/// `Updated`.
-pub(crate) fn cli_install(
-    cli: &Cli<'_>,
-    had_prior: bool,
-    argv: &[&str],
-    invoke: impl FnOnce(&[&str]) -> Result<()>,
-    status: impl FnOnce() -> Result<StatusOutcome>,
-    fallback: impl FnOnce() -> Result<InstallOutcome>,
-) -> Result<InstallOutcome> {
-    let verified = cli_then_verify(
-        cli,
-        argv,
-        invoke,
-        || Ok(matches!(status()?, StatusOutcome::Installed { .. }).then_some(())),
-        "does not match the managed entry",
-    )?;
-    if verified.is_some() {
-        return Ok(install_outcome(had_prior));
-    }
-    Ok(match fallback()? {
-        InstallOutcome::AlreadyCurrent => InstallOutcome::AlreadyCurrent,
-        InstallOutcome::Installed | InstallOutcome::Updated => install_outcome(had_prior),
-    })
-}
-
-/// Uninstall via the agent's CLI (`argv`), verify with `status`, and
-/// otherwise run the locked `fallback` removal. The CLI can exit 0 while
-/// the watched file still carries the entry (wrong scope, different config
-/// dir), so only `StatusOutcome::NotInstalled` counts as removed.
-pub(crate) fn cli_uninstall(
-    cli: &Cli<'_>,
-    argv: &[&str],
-    invoke: impl FnOnce(&[&str]) -> Result<()>,
-    status: impl FnOnce() -> Result<StatusOutcome>,
-    fallback: impl FnOnce() -> Result<UninstallOutcome>,
-) -> Result<UninstallOutcome> {
-    let verified = cli_then_verify(
-        cli,
-        argv,
-        invoke,
-        || Ok(matches!(status()?, StatusOutcome::NotInstalled).then_some(UninstallOutcome::Removed)),
-        "still carries the paneflow entry",
-    )?;
-    match verified {
-        Some(outcome) => Ok(outcome),
-        None => fallback(),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -623,6 +432,11 @@ pub(crate) fn toml_uninstall(path: &Path) -> Result<UninstallOutcome> {
             return Ok(UninstallOutcome::NothingToRemove);
         }
         let mut doc = merge::read_toml_or_default(path)?;
+        // An inline `mcp_servers = { ... }` can still hold the entry (status
+        // reads it), so it is an error, never "nothing to remove".
+        if doc.get(CODEX_TABLE).is_some_and(|item| !item.is_table()) {
+            bail!("`{CODEX_TABLE}` is not a TOML table - refusing to overwrite");
+        }
         if !merge::remove_toml_entry(&mut doc, CODEX_TABLE, ENTRY) {
             return Ok(UninstallOutcome::NothingToRemove);
         }
@@ -678,34 +492,6 @@ pub(crate) fn array_command(entry: &serde_json::Value) -> Option<String> {
         .first()?
         .as_str()
         .map(str::to_string)
-}
-
-pub(crate) fn json_entry_present(path: &Path, container: &str) -> Result<bool> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    let root = merge::read_json_or_default(path)?;
-    let Some(container_value) = root.get(container) else {
-        return Ok(false);
-    };
-    let Some(container_object) = container_value.as_object() else {
-        bail!("config key `{container}` is not an object - refusing to overwrite");
-    };
-    Ok(container_object.contains_key(ENTRY))
-}
-
-pub(crate) fn toml_entry_present(path: &Path) -> Result<bool> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    let doc = merge::read_toml_or_default(path)?;
-    let Some(parent) = doc.get(CODEX_TABLE) else {
-        return Ok(false);
-    };
-    let Some(parent) = parent.as_table() else {
-        bail!("`{CODEX_TABLE}` is not a TOML table - refusing to overwrite");
-    };
-    Ok(parent.contains_key(ENTRY))
 }
 
 // ---------------------------------------------------------------------------
@@ -952,59 +738,6 @@ mod tests {
         assert_eq!(after["mcpServers"]["other"]["command"], json!("x"));
         assert_eq!(after["theme"], json!("dark"));
         assert_eq!(after["mcpServers"]["paneflow"]["command"], json!("/p"));
-    }
-
-    /// Issue #684: a CLI that exits 0 after dropping sibling keys must not be
-    /// the document the fallback merge reads, and `.bak` must stay the
-    /// pre-CLI bytes even after `write_if_changed_unlocked` rewrites it.
-    #[test]
-    fn fallback_merge_starts_from_the_pre_cli_snapshot() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("settings.json");
-        let pre_cli = serde_json::to_vec(&json!({
-            "theme": "dark",
-            "mcpServers": { "other": { "command": "keep-me" } }
-        }))
-        .unwrap();
-        std::fs::write(&path, &pre_cli).unwrap();
-
-        let bak = io::backup(&path)
-            .unwrap()
-            .expect("existing file is backed up");
-
-        // A bad CLI drops the sibling and leaves an entry verification rejects.
-        std::fs::write(
-            &path,
-            serde_json::to_vec(&json!({
-                "mcpServers": {
-                    "paneflow": {
-                        "command": "/bridge",
-                        "env": { "PANEFLOW_SOCKET_PATH": "/tmp/x.sock" }
-                    }
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        restore_pre_cli_snapshot(&path, Some(&bak)).unwrap();
-        assert_eq!(
-            json_install(
-                &path,
-                "mcpServers",
-                json!({ "command": "/bridge", "args": [] })
-            )
-            .unwrap(),
-            InstallOutcome::Installed
-        );
-
-        let after: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(after["theme"], json!("dark"));
-        assert_eq!(after["mcpServers"]["other"]["command"], json!("keep-me"));
-        assert_eq!(after["mcpServers"]["paneflow"]["command"], json!("/bridge"));
-        assert!(after["mcpServers"]["paneflow"].get("env").is_none());
-        assert_eq!(std::fs::read(&bak).unwrap(), pre_cli);
     }
 
     #[test]
