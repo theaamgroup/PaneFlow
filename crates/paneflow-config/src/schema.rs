@@ -91,7 +91,6 @@ mod tests {
                 indent_guide: Some(true),
             },
             workspace_auto_sort: Some(false),
-            new_tabs_on_main: Some(true),
             new_tab_branch: Some("main".to_string()),
             workspace_new_tab_branches: HashMap::from([(
                 "/projects/aftermarket".to_string(),
@@ -115,8 +114,6 @@ mod tests {
             external_editor: Some("auto".to_string()),
             claude_code_bypass_permissions: Some(false),
             ai_unrestricted: Some(true),
-            ai_injection_fence: Some(false),
-            agent_button_visibility_defaults_migrated: Some(true),
             claude_code_button_visible: Some(true),
             codex_button_visible: Some(true),
             opencode_button_visible: Some(true),
@@ -164,9 +161,15 @@ mod tests {
         schema_top_level.remove("$schemaVersion");
 
         // Retired keys the schema keeps as stubs so editors do not flag an
-        // older file (issue #817). No Rust field backs them: serde ignores
-        // unknown keys. Every other schema key must still match a live field.
-        let retired_top_level = key_set(&["commands"]);
+        // older file (issues #817, #850). No Rust field backs them: serde
+        // ignores unknown keys. Every other schema key must still match a live
+        // field.
+        let retired_top_level = key_set(&[
+            "commands",
+            "new_tabs_on_main",
+            "ai_injection_fence",
+            "agent_button_visibility_defaults_migrated",
+        ]);
         let retired_sidebar_show = key_set(&["pr"]);
         for key in &retired_top_level {
             assert!(
@@ -486,33 +489,22 @@ mod tests {
 
     #[test]
     fn ai_access_toggles_default_safe_and_tolerate_garbage() {
-        // EP-003 US-008 AC #1/#5: a fresh config never opens free-access and
-        // always fences.
+        // EP-003 US-008 AC #1/#5: a fresh config never opens free-access.
         let cfg = PaneFlowConfig::default();
         assert!(!cfg.ai_unrestricted_enabled(), "unrestricted defaults OFF");
-        assert!(cfg.ai_injection_fence_enabled(), "fence defaults ON");
 
         // Explicit booleans round-trip through the lenient deserializer.
-        let cfg: PaneFlowConfig =
-            serde_json::from_str(r#"{"ai_unrestricted": true, "ai_injection_fence": false}"#)
-                .unwrap();
+        let cfg: PaneFlowConfig = serde_json::from_str(r#"{"ai_unrestricted": true}"#).unwrap();
         assert!(cfg.ai_unrestricted_enabled());
-        assert!(!cfg.ai_injection_fence_enabled());
 
-        // AC #3: a non-boolean value fails CLOSED (unrestricted -> false, fence
-        // -> true) instead of erroring the whole parse, and does NOT wipe the
-        // sibling settings the all-or-nothing loader fallback would have lost.
-        let cfg: PaneFlowConfig = serde_json::from_str(
-            r#"{"theme": "One Dark", "ai_unrestricted": "yes", "ai_injection_fence": 0}"#,
-        )
-        .unwrap();
+        // AC #3: a non-boolean value fails CLOSED (unrestricted -> false)
+        // instead of erroring the whole parse, and does NOT wipe the sibling
+        // settings the all-or-nothing loader fallback would have lost.
+        let cfg: PaneFlowConfig =
+            serde_json::from_str(r#"{"theme": "One Dark", "ai_unrestricted": "yes"}"#).unwrap();
         assert!(
             !cfg.ai_unrestricted_enabled(),
             "a garbage value must never open the mode"
-        );
-        assert!(
-            cfg.ai_injection_fence_enabled(),
-            "a garbage value must never drop the fence"
         );
         assert_eq!(
             cfg.theme.as_deref(),

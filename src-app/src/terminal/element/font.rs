@@ -324,7 +324,7 @@ fn resolve_font_family_with_registry<'a>(
 }
 
 /// Read font config, cached and re-validated against the config file's
-/// modification time every 500 ms (same pattern as the theme cache).
+/// modification time every 500 ms.
 ///
 /// Runs on the render thread, so the periodic check is one `stat`; the
 /// config is parsed again only when the file changed or is missing.

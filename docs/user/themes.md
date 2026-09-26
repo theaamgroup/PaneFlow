@@ -106,20 +106,18 @@ Two related settings are separate from the theme name:
 When you save `paneflow.json`, PaneFlow re-resolves the active theme
 on the fly. No restart and no window reload are needed.
 
-Two mechanisms drive the reload:
-
-* **Event-driven path.** A `notify` watcher watches the config
-  directory and debounces file events by 300 ms.
-* **Polling fallback.** The theme cache also carries a 500 ms `mtime`
-  poll (`THEME_CHECK_INTERVAL` in `src-app/src/theme/watcher.rs`) for when
-  the OS watcher cannot start. Note that this fallback belongs to the
-  theme cache specifically. The general config watcher has no poll
-  fallback; it has a 1 s max-wait ceiling instead, so an event flood
-  cannot starve the reload.
+The theme reloads through the config watcher. It watches the config
+directory, debounces file events by 300 ms with a 1 s max-wait ceiling
+(so an event flood cannot starve the reload), and on each applied
+reload resolves the theme from the config it just applied
+(`src-app/src/theme/watcher.rs`). A save that is not valid JSON keeps
+the current theme, like the other settings the config watcher applies.
+If the config watcher cannot start, hand edits to the theme do not
+hot-reload until a restart.
 
 You will see the new palette take effect on the next render frame
-after the watcher or fallback fires. If the reload silently fails on
-your machine, the [troubleshooting page](troubleshooting.md#why-is-my-theme-not-hot-reloading)
+after the reload. If the reload silently fails on your machine, the
+[troubleshooting page](troubleshooting.md#why-is-my-theme-not-hot-reloading)
 walks through the common causes.
 
 > Theme and typography keys hot-reload from `paneflow.json`. The

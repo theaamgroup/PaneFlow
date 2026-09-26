@@ -132,7 +132,7 @@
     "new_tabs_on_main": {
       "type": ["boolean", "null"],
       "deprecated": true,
-      "description": "Legacy new-tab switch. Used only when new_tab_branch is absent: false uses the workspace checkout; otherwise main."
+      "description": "Retired new-tab switch. Accepted and ignored: new tabs follow new_tab_branch, and an empty new_tab_branch uses the workspace checkout."
     },
     "new_tab_branch": {
       "type": ["string", "null"],
@@ -275,7 +275,7 @@
         },
         "env": {
           "type": ["object", "null"],
-          "description": "Environment variables injected into every new terminal. Per-surface values win on collision. TERM, COLORTERM, PANEFLOW_WORKSPACE_ID, PANEFLOW_SURFACE_ID, PANEFLOW_SOCKET_PATH, and PANEFLOW_BIN_DIR are protected at PTY spawn. LD_* and DYLD_* keys are dropped. PATH is accepted, but PANEFLOW_BIN_DIR is re-prepended so agent commands still route through the shim.",
+          "description": "Environment variables injected into every new terminal. TERM, COLORTERM, PANEFLOW_WORKSPACE_ID, PANEFLOW_SURFACE_ID, PANEFLOW_SOCKET_PATH, and PANEFLOW_BIN_DIR are protected at PTY spawn. LD_* and DYLD_* keys are dropped. PATH is accepted, but PANEFLOW_BIN_DIR is re-prepended so agent commands still route through the shim.",
           "additionalProperties": { "type": "string" }
         },
         "scroll_multiplier": {
@@ -319,13 +319,13 @@
     },
     "ai_injection_fence": {
       "type": ["boolean", "null"],
-      "description": "Anti-injection fence on the surface.read CLI/IPC path, independent of ai_unrestricted. Null/true (default) wraps returned terminal text in an <untrusted_terminal_output> marker so a malicious peer pane cannot hijack a conductor reading it. False returns raw text (an assumed risk). Stays ON by default even in free-access mode because the fence protects the AI, it does not bridle it.",
-      "default": true
+      "deprecated": true,
+      "description": "Retired surface.read fence toggle. Accepted and ignored: surface.read always fences returned text unless the call itself passes fenced: false."
     },
     "agent_button_visibility_defaults_migrated": {
       "type": ["boolean", "null"],
-      "description": "Internal one-time compatibility marker. True records that a pre-allowlist config preserved its installed, previously auto-visible agent launchers as explicit values. Runtime visibility does not otherwise consult this field.",
-      "default": null
+      "deprecated": true,
+      "description": "Retired one-time agent-button migration marker. Accepted and ignored."
     },
     "claude_code_button_visible": {
       "type": ["boolean", "null"],

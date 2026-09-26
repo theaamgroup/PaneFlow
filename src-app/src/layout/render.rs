@@ -733,7 +733,7 @@ mod tests {
 
         start_render_content_timing_probe();
         cx.update(|_window, cx| {
-            crate::theme::invalidate_theme_cache();
+            crate::theme::set_active_theme_from(&paneflow_config::schema::PaneFlowConfig::default());
             crate::theme::publish_theme_generation(cx);
         });
         cx.run_until_parked();

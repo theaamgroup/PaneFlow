@@ -813,6 +813,52 @@ fn session_surface_command_and_prompt_still_load() {
     assert!(written_surface.get("prompt").is_none(), "{written}");
 }
 
+/// Issue #850: an older session.json surface may still carry a per-surface
+/// `env` map. Nothing wrote one and restore no longer reads it: the key is
+/// ignored, the surface's other fields load, and a re-save omits it.
+#[test]
+fn session_surface_env_still_loads() {
+    let json = r#"{
+        "version": 2,
+        "active_workspace": 0,
+        "workspaces": [{
+            "title": "paneflow",
+            "cwd": "/home/user/dev/paneflow",
+            "tabs": [{
+                "title": "main",
+                "layout": {
+                    "type": "pane",
+                    "surfaces": [{
+                        "surface_type": "terminal",
+                        "name": "main",
+                        "custom_name": "server",
+                        "cwd": "/tmp",
+                        "env": {"RUST_LOG": "debug"},
+                        "focus": true,
+                        "font_size": 14.0
+                    }]
+                }
+            }]
+        }]
+    }"#;
+    let state: SessionState = serde_json::from_str(json).unwrap();
+    let Some(LayoutNode::Pane { surfaces }) = &state.workspaces[0].tabs[0].layout else {
+        panic!("expected a pane layout");
+    };
+    assert_eq!(surfaces.len(), 1);
+    let surface = &surfaces[0];
+    assert_eq!(surface.surface_type.as_deref(), Some("terminal"));
+    assert_eq!(surface.name.as_deref(), Some("main"));
+    assert_eq!(surface.custom_name.as_deref(), Some("server"));
+    assert_eq!(surface.cwd.as_deref(), Some("/tmp"));
+    assert_eq!(surface.focus, Some(true));
+    assert_eq!(surface.font_size, Some(14.0));
+
+    let written = serde_json::to_value(&state).unwrap();
+    let written_surface = &written["workspaces"][0]["tabs"][0]["layout"]["surfaces"][0];
+    assert!(written_surface.get("env").is_none(), "{written}");
+}
+
 #[test]
 fn workspace_pinned_defaults_to_false_when_the_key_is_absent() {
     // A session.json written before the field existed.

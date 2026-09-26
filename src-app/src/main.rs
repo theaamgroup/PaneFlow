@@ -1605,12 +1605,6 @@ struct PaneFlowApp {
     /// focus for it. Applied after render mounts the pane, like
     /// the guard is reached from a `Window`-less subscriber.
     pending_close_focus_claim: bool,
-    /// US-006: shared "theme file changed" signal flipped by the theme
-    /// watcher's debounce thread (event-driven invalidation). The 50 ms
-    /// IPC poll loop in `process_config_changes` drains this flag and
-    /// calls `cx.notify()` so the next render picks up the new theme.
-    /// `Arc<AtomicBool>` - Send + Sync, lock-free.
-    theme_changed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Issue #438: Review state - the pane grid, the folded Workspaces rows,
     /// and the Changes rail's selection (see `app::review::ReviewState`).
     /// Replaced `DiffModeState`, which modelled Review as one host over a
@@ -3053,14 +3047,6 @@ fn main() {
             ))
         });
     startup_trace::mark("crash_reporting_ready");
-
-    // Issue #85: preserve every agent launcher that an existing installation
-    // would have shown under the old PATH-only default, then let fresh configs
-    // use the Claude/Codex/Grok allowlist. This is deliberately after login-
-    // shell and static PATH adoption, and only after every CLI path has exited,
-    // so the one-time probe sees the GUI's complete PATH and a read-only CLI
-    // invocation never mutates paneflow.json.
-    config_writer::migrate_agent_button_visibility_defaults();
 
     #[cfg(target_os = "macos")]
     warn_if_rosetta_translated();

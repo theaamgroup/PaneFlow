@@ -132,8 +132,10 @@ is case-insensitive, but canonical names keep schema validation clean.
 See [themes.md](themes.md) for the bundled set.
 
 Theme and typography changes hot-reload from `paneflow.json`. PaneFlow
-watches the config directory, debounces changes for 300 ms, and falls
-back to a 500 ms `mtime` poll if the watcher cannot start.
+watches the config directory and debounces changes for 300 ms. For the
+theme, a save that is not valid JSON is ignored until the file parses
+again, and if the config watcher cannot start, a hand-edited theme does
+not hot-reload until a restart.
 
 If the theme does not change within a second:
 

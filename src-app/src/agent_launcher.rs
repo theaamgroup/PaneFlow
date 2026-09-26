@@ -305,8 +305,8 @@ impl TerminalAgent {
         explicit.unwrap_or_else(|| self.is_default_enabled() && is_installed(self))
     }
 
-    /// Fresh-config allowlist. Upgrade compatibility is handled once on the
-    /// raw config by `config_writer::migrate_agent_button_visibility_defaults`.
+    /// Fresh-config allowlist: the launchers shown when the config carries no
+    /// explicit visibility value for them.
     fn is_default_enabled(self) -> bool {
         matches!(
             self,
@@ -314,8 +314,7 @@ impl TerminalAgent {
         )
     }
 
-    /// Raw JSON key used by Settings persistence and the one-time legacy
-    /// visibility migration.
+    /// Raw JSON key used by Settings persistence.
     pub(crate) fn button_visibility_key(self) -> &'static str {
         match self {
             TerminalAgent::ClaudeCode => "claude_code_button_visible",
@@ -404,14 +403,6 @@ impl TerminalAgent {
     /// across `which`.
     pub fn is_installed(self) -> bool {
         installed_binaries_contains(self.binary())
-    }
-
-    /// [`Self::is_installed`] for callers that need a real answer and may
-    /// block for it: the config migration. A cold cache
-    /// waits for the first `paneflow-agent-which` walk to publish; a warm
-    /// one reads the snapshot exactly like `is_installed`.
-    pub fn is_installed_now(self) -> bool {
-        installed_binaries().contains_now(self.binary())
     }
 
     /// Static arguments appended after [`Self::binary`] for interactive agents
@@ -707,7 +698,8 @@ impl InstalledBinaries {
 
     /// Blocking read: like [`Self::contains`], but a cold cache waits for
     /// the first walk to publish instead of answering from the empty
-    /// snapshot.
+    /// snapshot. Only the cache tests need that blocking answer.
+    #[cfg(test)]
     fn contains_now(&self, binary: &'static str) -> bool {
         // `contains` only schedules; wait for the first publish (immediate
         // once ready, and an abandoned spawn marks it ready with the empty
@@ -1262,7 +1254,7 @@ mod tests {
     }
 
     /// Issue #518: the first `is_installed` in a process schedules the walk
-    /// and answers at once; only `is_installed_now` waits for it. The probe
+    /// and answers at once; only the blocking `contains_now` waits for it. The probe
     /// blocks on a channel, so a blocking cold read would hang the test
     /// rather than merely slow it.
     #[test]
@@ -1568,13 +1560,9 @@ mod tests {
         let _ = TerminalAgent::ClaudeCode.is_installed();
         let _ = TerminalAgent::Codex.is_installed();
         let _ = installed_binary_scan_pending();
-        // The process-wide cache: a blocking read must agree with the
-        // snapshot once it is published, and the warm must return.
+        // The process-wide cache: the warm must return with the first
+        // snapshot published.
         refresh_installed_binaries();
         assert!(!installed_binary_scan_pending());
-        assert_eq!(
-            TerminalAgent::Codex.is_installed_now(),
-            TerminalAgent::Codex.is_installed()
-        );
     }
 }

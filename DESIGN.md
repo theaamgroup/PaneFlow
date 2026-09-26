@@ -332,7 +332,7 @@ to the surfaces named:
 | `0x89b4facc` on `0x1e1e2e` | Terminal copy-mode `COPY` badge | **Migration**: a leftover Catppuccin pair, `terminal/view.rs:1935-1936` |
 | `0x383838` | Dark terminal panel ground (`codex_panel_background_for_terminal`) | **Migration**: the light arm already uses `subtle`, `terminal/element/mod.rs:230-236` |
 | `0x2fd7f2` | Settings ▸ Terminal, the "uses theme" scheme chip | **Migration**: should be `accent`, `settings/tabs/terminal.rs:593-598` |
-| `0xE0_6C_75` | Settings danger text: the injection-fence warning and the MCP failure recap | **Migration**: a fixed One Dark red standing in for a danger role `UiColors` does not have, so it does not follow the theme. `settings/tabs/general.rs:324`, `settings/tabs/mcp.rs:356-360`. Note the literal is written with underscores, so a `0xE06C75` search misses it |
+| `0xE0_6C_75` | Settings danger text: the MCP failure recap | **Migration**: a fixed One Dark red standing in for a danger role `UiColors` does not have, so it does not follow the theme. `settings/tabs/mcp.rs:356-360`. Note the literal is written with underscores, so a `0xE06C75` search misses it |
 
 The sidebar's drop affordances are **not** blue. Only the pane split preview
 is; the swap preview, the sidebar placeholder, and the reorder line are all
