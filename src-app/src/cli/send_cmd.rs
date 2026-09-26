@@ -106,9 +106,9 @@ fn prompt_with_report_contract(text: &str, report: &ReportContract) -> String {
     prompt
 }
 
-/// One `surface.send_text` round for a resolved surface. Maps the legacy
-/// `{"error": …}` result shape (empty text / >64 KiB / surface gone) to a
-/// non-zero `CliError` (US-006 AC3) and the `-32601` gate-off reply to an
+/// One `surface.send_text` round for a resolved surface. A server refusal
+/// (>64 KiB / surface gone) arrives as a JSON-RPC error and becomes a
+/// non-zero `CliError` (US-006 AC3); the `-32601` gate-off reply becomes an
 /// actionable hint.
 fn send_to(
     client: &impl IpcTransport,
@@ -131,8 +131,7 @@ fn send_to(
         params["paste"] = json!(true);
     }
     match client.call("surface.send_text", params) {
-        Ok(result) => {
-            let mut result = super::reject_legacy_error(result)?;
+        Ok(mut result) => {
             if should_wait_for_submit_start(&result) {
                 match wait_for_submit_start(client, surface_id, before.as_ref()) {
                     SubmitStart::Confirmed(reason) => {
@@ -281,7 +280,6 @@ pub fn key(client: &impl IpcTransport, target: &str, keystroke: &str) -> Result<
         json!({ "surface_id": surface_id, "keystroke": keystroke }),
     ) {
         Ok(result) => {
-            let result = super::reject_legacy_error(result)?;
             super::print_json(&result)?;
             Ok(EXIT_OK)
         }
@@ -515,10 +513,11 @@ mod tests {
 
     #[test]
     fn broadcast_partial_failure_serves_the_rest_and_exits_nonzero() {
-        // First pane vanished mid-loop (legacy error shape): the second pane
-        // must still be served and the exit must be non-zero (US-003 AC4).
+        // First pane vanished mid-loop (the server's invalid-params reply):
+        // the second pane must still be served and the exit must be non-zero
+        // (US-003 AC4).
         let fake = ScriptedTransport::new(vec![
-            Ok(json!({ "error": "Surface not found" })),
+            Err("paneflow error -32602: Surface not found".to_string()),
             Ok(json!({ "sent": true })),
         ]);
         let code = send(&fake, "shard", "x", true, false, false, None).expect("report, not abort");
@@ -620,11 +619,11 @@ mod tests {
 
     #[test]
     fn key_enter_refusal_is_nonzero_exit() {
-        // The server refuses submitting keystrokes with a legacy error shape
-        // (TerminalView::send_keystroke -> {"error": …}); the CLI must exit
-        // non-zero and surface the `send --submit` hint (US-004 AC3).
-        let fake = ScriptedTransport::new(vec![Ok(
-            json!({ "error": "keystroke 'enter' would submit (CR/LF); use surface.send_text with submit=true (`paneflow send --submit`) instead" }),
+        // The server refuses submitting keystrokes with an invalid-params
+        // JSON-RPC error; the CLI must exit non-zero and surface the
+        // `send --submit` hint (US-004 AC3).
+        let fake = ScriptedTransport::new(vec![Err(
+            "paneflow error -32602: keystroke 'enter' would submit (CR/LF); use surface.send_text with submit=true (`paneflow send --submit`) instead".to_string(),
         )]);
         let err = key(&fake, "shard-api", "enter").expect_err("refused");
         assert_eq!(err.code, EXIT_RUNTIME);

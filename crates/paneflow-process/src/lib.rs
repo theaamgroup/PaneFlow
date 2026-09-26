@@ -14,7 +14,6 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::OnceLock;
 use std::thread;
@@ -62,8 +61,6 @@ impl fmt::Display for OutputStream {
 pub enum ProcError {
     /// The child could not be spawned.
     Spawn(io::Error),
-    /// The platform process-tree guard could not be installed.
-    ProcessTree(io::Error),
     /// A configured capture limit cannot be represented safely on this target.
     InvalidOutputLimit(u64),
     /// The internal supervisor could not be prepared or reached an invalid
@@ -87,19 +84,12 @@ pub enum ProcError {
     /// The child tree was terminated best-effort and cleanup was detached so the
     /// caller is released by the deadline.
     Timeout,
-    /// The caller's cancellation flag was set before the child finished. The
-    /// child tree was terminated best-effort and cleanup was detached, exactly
-    /// as on [`Self::Timeout`].
-    Cancelled,
 }
 
 impl fmt::Display for ProcError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ProcError::Spawn(e) => write!(f, "failed to spawn process: {e}"),
-            ProcError::ProcessTree(e) => {
-                write!(f, "failed to configure process-tree supervision: {e}")
-            }
             ProcError::InvalidOutputLimit(cap) => {
                 write!(f, "capture limit {cap} cannot be represented safely")
             }
@@ -115,7 +105,6 @@ impl fmt::Display for ProcError {
                 write!(f, "process {stream} exceeded its {cap}-byte capture limit")
             }
             ProcError::Timeout => write!(f, "process exceeded its deadline; termination requested"),
-            ProcError::Cancelled => write!(f, "process was cancelled by its caller"),
         }
     }
 }
@@ -123,15 +112,11 @@ impl fmt::Display for ProcError {
 impl Error for ProcError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            ProcError::Spawn(e)
-            | ProcError::ProcessTree(e)
-            | ProcError::Supervision(e)
-            | ProcError::Wait(e) => Some(e),
+            ProcError::Spawn(e) | ProcError::Supervision(e) | ProcError::Wait(e) => Some(e),
             ProcError::ReaderSpawn { source, .. } | ProcError::Read { source, .. } => Some(source),
             ProcError::InvalidOutputLimit(_)
             | ProcError::OutputLimitExceeded { .. }
-            | ProcError::Timeout
-            | ProcError::Cancelled => None,
+            | ProcError::Timeout => None,
         }
     }
 }
@@ -146,8 +131,8 @@ impl Error for ProcError {
 /// - stdin is `/dev/null` so the child can never block waiting on a prompt.
 /// - stdout/stderr are read on dedicated threads; exceeding either cap closes
 ///   the pipe, terminates the run, and returns [`ProcError::OutputLimitExceeded`].
-/// - the child is placed in a process group/job where the platform supports it;
-///   every error path terminates that tree best-effort before cleanup is detached.
+/// - the child leads its own process group; every error path terminates that
+///   group best-effort before cleanup is detached.
 pub fn run_with_timeout(
     cmd: Command,
     deadline: Duration,
@@ -164,46 +149,17 @@ pub fn run_with_timeout_stdin(
     deadline: Duration,
     stdout_cap: u64,
 ) -> Result<BoundedOutput, ProcError> {
-    run_bounded(cmd, Some(stdin), deadline, stdout_cap, STDERR_CAP, None)
-}
-
-/// [`run_with_timeout_stdin`] that also honors a shared cancellation flag.
-///
-/// When `cancel` is set at any point before the child finishes, the run
-/// returns [`ProcError::Cancelled`] after terminating the child tree (the same
-/// best-effort teardown as a deadline). Callers that abandon a batch early
-/// (an overlay closed, a newer request replaced this one) can therefore kill
-/// an in-flight child instead of waiting out its full deadline.
-pub fn run_with_timeout_stdin_cancellable(
-    cmd: Command,
-    stdin: &[u8],
-    deadline: Duration,
-    stdout_cap: u64,
-    cancel: &AtomicBool,
-) -> Result<BoundedOutput, ProcError> {
-    run_bounded(
-        cmd,
-        Some(stdin),
-        deadline,
-        stdout_cap,
-        STDERR_CAP,
-        Some(cancel),
-    )
+    run_bounded(cmd, Some(stdin), deadline, stdout_cap, STDERR_CAP)
 }
 
 /// [`run_with_timeout`] with an explicit stderr capture cap.
-///
-/// Most callers want the crate's small diagnostic [`STDERR_CAP`]. A pane
-/// `setup` command is arbitrary user shell (install logs go to stderr) and
-/// needs a matching budget so fail-closed capture does not SIGKILL a live
-/// `cargo build` / `npm ci`.
-pub fn run_with_timeout_capped(
+fn run_with_timeout_capped(
     cmd: Command,
     deadline: Duration,
     stdout_cap: u64,
     stderr_cap: u64,
 ) -> Result<BoundedOutput, ProcError> {
-    run_bounded(cmd, None, deadline, stdout_cap, stderr_cap, None)
+    run_bounded(cmd, None, deadline, stdout_cap, stderr_cap)
 }
 
 fn run_bounded(
@@ -212,7 +168,6 @@ fn run_bounded(
     deadline: Duration,
     stdout_cap: u64,
     stderr_cap: u64,
-    cancel: Option<&AtomicBool>,
 ) -> Result<BoundedOutput, ProcError> {
     let stdout_cap = validate_capture_cap(stdout_cap)?;
     let stderr_cap = validate_capture_cap(stderr_cap)?;
@@ -232,7 +187,7 @@ fn run_bounded(
     let cleanup = spawn_cleanup_worker()?;
     let child = cmd.spawn().map_err(ProcError::Spawn)?;
     let start = Instant::now();
-    let mut process = RunningProcess::new(child, cleanup)?;
+    let mut process = RunningProcess::new(child, cleanup);
 
     // Hand the pipe ends to reader threads before polling: if we polled while
     // the child filled a ~64 KiB pipe buffer it would block on write and we'd
@@ -272,12 +227,6 @@ fn run_bounded(
         match process.child_mut()?.try_wait().map_err(ProcError::Wait)? {
             Some(status) => break status,
             None => {
-                // A caller that cancelled while the child was running gets its
-                // answer before the deadline, and the child tree is terminated
-                // by the same best-effort teardown as a timeout.
-                if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
-                    return Err(ProcError::Cancelled);
-                }
                 let Some(sleep_for) = poll_sleep_duration(start, deadline) else {
                     return Err(ProcError::Timeout);
                 };
@@ -300,7 +249,7 @@ fn run_bounded(
     }
 
     let (stdout, stderr) = capture.finish()?;
-    process.complete()?;
+    process.complete();
 
     Ok(BoundedOutput {
         status,
@@ -352,21 +301,13 @@ struct RunningProcess {
 }
 
 impl RunningProcess {
-    fn new(mut child: Child, cleanup: mpsc::Sender<CleanupResources>) -> Result<Self, ProcError> {
-        let tree = match ProcessTree::for_child(&child) {
-            Ok(tree) => tree,
-            Err(source) => {
-                let _ = child.kill();
-                send_cleanup(&cleanup, child, None);
-                return Err(ProcError::ProcessTree(source));
-            }
-        };
-        Ok(Self {
+    fn new(child: Child, cleanup: mpsc::Sender<CleanupResources>) -> Self {
+        Self {
+            tree: ProcessTree::for_child(&child),
             child: Some(child),
-            tree,
             reader: None,
             cleanup,
-        })
+        }
     }
 
     fn child_mut(&mut self) -> Result<&mut Child, ProcError> {
@@ -385,10 +326,10 @@ impl RunningProcess {
             .ok_or_else(|| supervision_error("reader channel not attached"))
     }
 
-    fn complete(mut self) -> Result<(), ProcError> {
-        self.tree.disarm().map_err(ProcError::ProcessTree)?;
+    /// The child exited and both streams were captured: release it without
+    /// the teardown `Drop` runs on every early return.
+    fn complete(mut self) {
         self.child = None;
-        Ok(())
     }
 
     fn terminate_and_detach(&mut self) {
@@ -447,21 +388,17 @@ struct ProcessTree {
 }
 
 impl ProcessTree {
-    fn for_child(child: &Child) -> io::Result<Self> {
-        Ok(Self {
+    fn for_child(child: &Child) -> Self {
+        Self {
             #[cfg(unix)]
             pid: child.id(),
-        })
+        }
     }
 
     fn terminate(&self, child: &mut Child) {
         #[cfg(unix)]
         kill_process_group(self.pid);
         let _ = child.kill();
-    }
-
-    fn disarm(&self) -> io::Result<()> {
-        Ok(())
     }
 }
 
@@ -624,10 +561,6 @@ static DETACHED_REAPER: OnceLock<Option<mpsc::Sender<Child>>> = OnceLock::new();
 /// over a socket and exits within milliseconds, so every launch used to leak one
 /// permanent `<defunct>` entry.
 ///
-/// Windows has no zombie semantics, but routing every platform through the same
-/// helper keeps the call sites identical, and the process handle is released the
-/// same way once the child exits.
-///
 /// This never waits synchronously: it returns as soon as the spawn itself
 /// succeeds or fails, so it is safe to call from the render thread. Only spawn
 /// errors are reported; the child's exit code is deliberately discarded.
@@ -776,39 +709,6 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "must not wait for the child to finish on its own"
-        );
-    }
-
-    /// A child cancelled mid-run returns `Cancelled` and is terminated, not left
-    /// to run out its full deadline.
-    #[test]
-    fn sleeping_child_is_killed_when_cancelled() {
-        let cancel = std::sync::Arc::new(AtomicBool::new(false));
-        let cancel_handle = {
-            // Set the flag 100 ms in; the child is a 30 s sleeper.
-            let cancel = std::sync::Arc::clone(&cancel);
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(100));
-                cancel.store(true, Ordering::Release);
-            })
-        };
-
-        let start = Instant::now();
-        let res = run_with_timeout_stdin_cancellable(
-            sleep_command(),
-            b"",
-            Duration::from_secs(30),
-            1 << 20,
-            &cancel,
-        );
-        cancel_handle.join().unwrap();
-        assert!(
-            matches!(res, Err(ProcError::Cancelled)),
-            "expected Cancelled, got {res:?}"
-        );
-        assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "cancellation must not wait out the child or the deadline"
         );
     }
 

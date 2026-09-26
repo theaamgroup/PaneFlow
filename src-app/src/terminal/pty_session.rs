@@ -974,7 +974,7 @@ impl TerminalState {
     pub(super) fn promote_ghostty(&mut self, spawned: SpawnedGhostty) {
         self.ghostty.promote();
         self.child_pid = spawned.child_pid;
-        self.child_proc_start = child_pid_start_time(spawned.child_pid);
+        self.child_proc_start = crate::agents::parent_guard::pid_start_time(spawned.child_pid);
         self.current_cwd = Some(spawned.cwd.to_string_lossy().into_owned());
         // The guard dups the fd again for its own child (FD_CLOEXEC cleared),
         // so this app-owned copy stays ours for `Drop`'s session snapshot.
@@ -2555,24 +2555,6 @@ impl ScrollbackReader {
         }
         self.ghostty.search_scrollback(pattern, max_matches)
     }
-}
-
-/// Spawn-time pin for `child_pid`. Same encoding as session `proc_start`
-/// (`pbi_start_tvsec`/`pbi_start_tvusec`). EPERM and dead-pid races degrade
-/// to `None`.
-#[cfg(target_os = "macos")]
-fn child_pid_start_time(pid: u32) -> Option<u64> {
-    use libproc::libproc::bsd_info::BSDInfo;
-    use libproc::libproc::proc_pid::pidinfo;
-    if pid == 0 || pid > i32::MAX as u32 {
-        return None;
-    }
-    let info = pidinfo::<BSDInfo>(pid as i32, 0).ok()?;
-    Some(
-        info.pbi_start_tvsec
-            .wrapping_mul(1_000_000)
-            .wrapping_add(info.pbi_start_tvusec),
-    )
 }
 
 /// Cap `result` at `max_chars` bytes keeping the NEWEST text: the cut lands

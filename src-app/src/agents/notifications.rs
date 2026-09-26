@@ -39,17 +39,10 @@ pub fn window_active() -> bool {
     WINDOW_ACTIVE.load(Ordering::Relaxed)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DesktopNotificationUrgency {
-    Normal,
-    Critical,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DesktopNotification {
     summary: String,
     body: String,
-    urgency: DesktopNotificationUrgency,
 }
 
 impl DesktopNotification {
@@ -61,7 +54,6 @@ impl DesktopNotification {
         Self {
             summary: format!("{} finished", agent.display_name()),
             body: notification_context_body(workspace_title, session_summary),
-            urgency: DesktopNotificationUrgency::Normal,
         }
     }
 
@@ -73,7 +65,6 @@ impl DesktopNotification {
         Self {
             summary: format!("{} needs input", agent.display_name()),
             body: attention_notification_body(workspace_title, message),
-            urgency: DesktopNotificationUrgency::Critical,
         }
     }
 
@@ -85,7 +76,6 @@ impl DesktopNotification {
         Self {
             summary: format!("{} exited unexpectedly", agent.display_name()),
             body: agent_exit_notification_body(workspace_title, exit_code),
-            urgency: DesktopNotificationUrgency::Critical,
         }
     }
 
@@ -93,7 +83,6 @@ impl DesktopNotification {
         Self {
             summary: format!("{} may be stuck", agent.display_name()),
             body: stalled_notification_body(workspace_title, silent_secs),
-            urgency: DesktopNotificationUrgency::Critical,
         }
     }
 }
@@ -120,7 +109,6 @@ pub(crate) fn program_notification(
             summary
         },
         body,
-        urgency: DesktopNotificationUrgency::Normal,
     }
 }
 
@@ -387,12 +375,11 @@ mod tests {
     }
 
     #[test]
-    fn desktop_notification_constructors_set_title_body_and_urgency() {
+    fn desktop_notification_constructors_set_title_and_body() {
         let finished =
             DesktopNotification::turn_finished(TerminalAgent::Codex, "backend", Some("Tests pass"));
         assert_eq!(finished.summary, "Codex finished");
         assert_eq!(finished.body, "Tests pass");
-        assert_eq!(finished.urgency, DesktopNotificationUrgency::Normal);
 
         let finished_without_summary =
             DesktopNotification::turn_finished(TerminalAgent::Codex, "backend", None);
@@ -406,6 +393,5 @@ mod tests {
         );
         assert_eq!(attention.summary, "Claude Code needs input");
         assert_eq!(attention.body, "Approve edit?");
-        assert_eq!(attention.urgency, DesktopNotificationUrgency::Critical);
     }
 }

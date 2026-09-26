@@ -1216,13 +1216,7 @@ impl PaneFlowApp {
             if !crate::ipc::try_start_dispatch(&req.dispatch) {
                 continue;
             }
-            let result = self.handle_ipc(
-                &req.method,
-                &req.params,
-                req.caller_pid,
-                Some(&req.response_tx),
-                cx,
-            );
+            let result = self.handle_ipc(&req.method, &req.params, &req.response_tx, cx);
             // Issue #363: `surface.read` / `surface.search` took the response
             // channel and answer from a background worker, so the blocking
             // runtime wait never runs on this 50 ms GPUI tick. Sending here
@@ -1648,7 +1642,7 @@ impl PaneFlowApp {
                     let exited = t.terminal.exited;
                     let pin = t.terminal.child_proc_start;
                     let current = (pid > 0 && exited.is_none())
-                        .then(|| super::event_handlers::pid_start_time(pid))
+                        .then(|| crate::agents::parent_guard::pid_start_time(pid))
                         .flatten();
                     offer_live_child_candidate(
                         &mut candidates,
@@ -1724,7 +1718,7 @@ impl PaneFlowApp {
             find_terminal_by_surface_id(&self.workspaces, sid, cx).is_some_and(|terminal| {
                 let t = terminal.read(cx);
                 let current = (t.terminal.child_pid > 0 && t.terminal.exited.is_none())
-                    .then(|| super::event_handlers::pid_start_time(t.terminal.child_pid))
+                    .then(|| crate::agents::parent_guard::pid_start_time(t.terminal.child_pid))
                     .flatten();
                 surface_candidate_still_valid(
                     expected_child_pid,
@@ -1818,13 +1812,10 @@ impl PaneFlowApp {
         &mut self,
         method: &str,
         params: &serde_json::Value,
-        // EP-003 US-010 (agent-control-plane): socket peer PID for the
-        // free-access write trace; None on macOS/Windows. Advisory only.
-        caller_pid: Option<i64>,
         // Issue #363: the channel the socket thread is waiting on. A handler
         // that hands its blocking work to a background worker clones this,
         // answers from there, and returns `ipc_deferred_response()`.
-        responder: Option<&std::sync::mpsc::Sender<serde_json::Value>>,
+        responder: &std::sync::mpsc::Sender<serde_json::Value>,
         cx: &mut Context<Self>,
     ) -> serde_json::Value {
         // Issue #210: thin per-namespace router. Every family's match arms
@@ -1834,7 +1825,7 @@ impl PaneFlowApp {
         if method == "agent.whoami" {
             self.handle_agent_context_method(method, params, cx)
         } else if method.starts_with("surface.") {
-            self.handle_surface_method(method, params, caller_pid, responder, cx)
+            self.handle_surface_method(method, params, responder, cx)
         } else if method.starts_with("fleet.") {
             self.handle_fleet_method(method, params, cx)
         } else if method.starts_with("ai.") {
@@ -1850,11 +1841,8 @@ impl PaneFlowApp {
         &mut self,
         method: &str,
         params: &serde_json::Value,
-        // EP-003 US-010 (agent-control-plane): socket peer PID for the
-        // free-access write trace; None on macOS/Windows. Advisory only.
-        caller_pid: Option<i64>,
         // Issue #363: response channel for the reads that answer off-thread.
-        responder: Option<&std::sync::mpsc::Sender<serde_json::Value>>,
+        responder: &std::sync::mpsc::Sender<serde_json::Value>,
         cx: &mut Context<Self>,
     ) -> serde_json::Value {
         match method {
@@ -1935,10 +1923,7 @@ impl PaneFlowApp {
                 // here (an `Arc` bump) and do the waiting on a background
                 // worker, so a slow or silent runtime cannot stall painting.
                 let reader = terminal.read(cx).terminal.scrollback_reader();
-                let Some(responder) = responder.cloned() else {
-                    return JsonRpcError::internal_error("no response channel for surface.read")
-                        .into_value();
-                };
+                let responder = responder.clone();
                 cx.background_spawn(async move {
                     let read_started = std::time::Instant::now();
                     // The engine cuts the window (`DisplayTerminal::transcript_window`):
@@ -2050,10 +2035,7 @@ impl PaneFlowApp {
                 // background worker.
                 let reader = terminal.read(cx).terminal.scrollback_reader();
                 let pattern = pattern.to_owned();
-                let Some(responder) = responder.cloned() else {
-                    return JsonRpcError::internal_error("no response channel for surface.search")
-                        .into_value();
-                };
+                let responder = responder.clone();
                 cx.background_spawn(async move {
                     let found =
                         smol::unblock(move || reader.search_scrollback(&pattern, max_matches))
@@ -2210,7 +2192,6 @@ impl PaneFlowApp {
                         target: "paneflow::ipc::unrestricted",
                         method = "surface.send_text",
                         surface_id = wrote_sid,
-                        caller_pid = ?caller_pid,
                         length = text.len() as u64,
                         submit = submit,
                         paste = paste,
@@ -2780,7 +2761,7 @@ impl PaneFlowApp {
                         pid,
                         &subagent_id,
                         emitted_at_ms,
-                        super::event_handlers::pid_start_time(pid),
+                        crate::agents::parent_guard::pid_start_time(pid),
                         surface_id,
                     )
                 } else {
@@ -3163,7 +3144,7 @@ pub(crate) fn upsert_session_state(
         source,
         |k| {
             if k <= i32::MAX as u32 {
-                super::event_handlers::pid_start_time(k)
+                crate::agents::parent_guard::pid_start_time(k)
             } else {
                 None
             }
@@ -3554,10 +3535,8 @@ mod tests {
         crate::ipc::IpcRequest {
             method: method.to_string(),
             params: serde_json::json!({}),
-            _id: serde_json::json!(null),
             response_tx,
             dispatch: Arc::new(AtomicU8::new(state)),
-            caller_pid: None,
         }
     }
 
