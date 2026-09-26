@@ -108,8 +108,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │                                        rebuilt every frame made the whole settings surface lag
 ├── diff/                              ← git diff engine + single-ReviewSubject viewer (custom Element, own hscroll);
 │                                         per-pane base + unified/split display, no embedded terminals or scope/sync layer
-├── text_sanitize.rs                   ← strip bidi and zero-width characters from untrusted labels;
-│                                         normalize a prompt for the session-handoff PTY prefill
+├── text_sanitize.rs                   ← strip bidi and zero-width characters from untrusted labels
 ├── agents/                            ← agent process supervision, notifications
 ├── ai_hooks/                          ← ai.* hook payload extraction
 ├── {claude,codex,opencode,pi,command}_sessions.rs ← per-agent session-file readers

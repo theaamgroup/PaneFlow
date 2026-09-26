@@ -1256,27 +1256,6 @@ impl TerminalView {
         self.terminal.write_ghostty_paste(payload);
     }
 
-    /// EP-001 US-001 (agent-control-plane-hardening): deliver an automation /
-    /// agent payload while NEVER synthesizing a submit out of the body. When the
-    /// target has bracketed paste active, the bytes are wrapped (embedded
-    /// newlines stay literal inside the agent's editor); when it does NOT, they
-    /// are written VERBATIM - crucially not through the interactive `\n` -> `\r`
-    /// rewrite that `write_paste_text` applies, which would turn a multi-line
-    /// prompt into N carriage returns and defeat the single, SEPARATE deferred
-    /// `\r` that is the only sanctioned submission (US-005 human-in-loop
-    /// invariant). This is the divergence from `paste_text`: a human pressing
-    /// Ctrl+V into a bare shell still wants newline -> run, but a `send_text`
-    /// inject toward an agent that has not (yet) enabled `ESC[?2004h` must not
-    /// smuggle Enters through the burst.
-    pub fn inject_text(&self, text: &str) {
-        let mode = self.terminal.session_backend().modes();
-        if mode.contains(Modes::BRACKETED_PASTE) {
-            self.write_paste_text(text, mode);
-        } else {
-            self.send_text(text);
-        }
-    }
-
     // --- Scroll handlers ---
 
     pub(super) fn handle_scroll_wheel(

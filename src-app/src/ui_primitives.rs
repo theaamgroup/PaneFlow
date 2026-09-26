@@ -1297,7 +1297,6 @@ mod tests {
             "app/review/menu.rs",
             "app/sidebar/context_menu.rs",
             "app/sidebar/customize_menu.rs",
-            "app/sessions_context_menu.rs",
             "app/pane_palette.rs",
             "diff/view/interaction.rs",
             "pane/review.rs",
@@ -1395,10 +1394,13 @@ mod tests {
                 }
             }
         }
-        // Issue #808 removed the diff dock's four menus (20 -> 16).
+        // Issue #808 removed the diff dock's four menus (20 -> 16), and
+        // issue #845 removed the sessions-row menu (16 -> 15). Four of the
+        // counted ids are fragments of this test's own source, which the
+        // walk also reads, so 11 of the 15 are real reveal ids.
         assert!(
-            ids.len() >= 16,
-            "expected at least 16 literal reveal ids under src-app/src, found {}",
+            ids.len() >= 15,
+            "expected at least 15 literal reveal ids under src-app/src, found {}",
             ids.len()
         );
         let dupes: Vec<_> = ids.iter().filter(|(_, sites)| sites.len() > 1).collect();
@@ -1415,10 +1417,6 @@ mod tests {
             ),
             ("app/sidebar/context_menu.rs", "tab-context-menu-reveal"),
             ("app/sidebar/context_menu.rs", "pane-context-menu-reveal"),
-            (
-                "app/sessions_context_menu.rs",
-                "sessions-context-menu-reveal",
-            ),
             ("diff/view/interaction.rs", "diff-body-context-menu-reveal"),
             ("app/review/menu.rs", "review-rail-menu-reveal"),
         ];
