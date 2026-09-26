@@ -1345,8 +1345,6 @@ impl GhosttySession {
     pub(super) fn render_content(
         &self,
         window_size: TerminalWindowSize,
-        _first_visible_row: i32,
-        _last_visible_row: i32,
         clear_on_resize: bool,
     ) -> (Content, bool) {
         let window_size = normalized_window_size(window_size);
@@ -2676,7 +2674,7 @@ fn run_runtime(
         }
 
         if exit.is_none() {
-            match observe_child_exit(child.child_mut(), child_pid) {
+            match observe_child_exit(child_pid) {
                 Ok(Some(status)) => {
                     exit_seen_at = Some(Instant::now());
                     exit = Some(status);
@@ -3278,7 +3276,6 @@ fn record_command_marks(inner: &SessionInner, raw_marks: &[RawMark]) {
         .map_or(1_i64, |line| i64::from(line.max(0)) + 1);
     drop(state);
 
-    let at = Instant::now();
     let mut marks = inner
         .marks
         .lock()
@@ -3286,9 +3283,7 @@ fn record_command_marks(inner: &SessionInner, raw_marks: &[RawMark]) {
     for raw in raw_marks {
         marks.push(CommandMark {
             kind: raw.kind,
-            exit_code: raw.exit_code,
             abs_line,
-            at,
         });
     }
     marks.retain_at_or_below(history_size.saturating_add(screen_lines.saturating_sub(1)));
@@ -3919,10 +3914,7 @@ fn verified_process_group(child_pid: u32) -> Option<i32> {
     (unsafe { libc::getpgid(pid) } == pid).then_some(pid)
 }
 
-fn observe_child_exit(
-    _child: &mut dyn portable_pty::Child,
-    child_pid: u32,
-) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+fn observe_child_exit(child_pid: u32) -> std::io::Result<Option<portable_pty::ExitStatus>> {
     let pid = i32::try_from(child_pid)
         .ok()
         .filter(|pid| *pid > 0)
@@ -5324,7 +5316,6 @@ mod tests {
             marks,
             vec![RawMark {
                 kind: super::super::marks::MarkKind::CommandFinished,
-                exit_code: Some(7),
             }]
         );
     }
@@ -5721,12 +5712,12 @@ mod tests {
         let desired = TerminalWindowSize::new(91, 33, 10, 21);
         let (session, pending, _events_rx) = GhosttySession::pending(initial);
 
-        let (_, provisional_clear_consumed) = session.render_content(initial, 0, 40, true);
+        let (_, provisional_clear_consumed) = session.render_content(initial, true);
 
         assert!(!provisional_clear_consumed);
         assert!(pending.mailbox.drain().is_empty());
 
-        let (_, actual_clear_consumed) = session.render_content(desired, 0, 33, true);
+        let (_, actual_clear_consumed) = session.render_content(desired, true);
 
         assert!(actual_clear_consumed);
         assert!(matches!(
@@ -6142,8 +6133,7 @@ mod tests {
             }
         }
 
-        let (content, _) =
-            session.render_content(TerminalWindowSize::new(100, 30, 8, 16), -100, 100, false);
+        let (content, _) = session.render_content(TerminalWindowSize::new(100, 30, 8, 16), false);
         let rendered: String = content.cells.iter().map(|cell| cell.c).collect();
         assert!(
             rendered.contains("PANEFLOW_GHOSTTY_RUNTIME_OK:ghostty"),
@@ -6630,13 +6620,10 @@ printf 'PANEFLOW_FINAL_LINE_%s\\n' MARKER; exit\n"
     /// Wait for `observe_child_exit` to report the probe's exit without ever
     /// reaping it, so the caller can re-observe the same status afterwards.
     #[cfg(unix)]
-    fn observe_probe_exit(
-        child: &mut (dyn portable_pty::Child + Send + Sync),
-        pid: u32,
-    ) -> portable_pty::ExitStatus {
+    fn observe_probe_exit(pid: u32) -> portable_pty::ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            match observe_child_exit(child, pid) {
+            match observe_child_exit(pid) {
                 Ok(Some(status)) => return status,
                 Ok(None) => std::thread::sleep(Duration::from_millis(10)),
                 Err(error) => panic!("waitid failed for probe {pid}: {error}"),
@@ -6664,8 +6651,7 @@ printf 'PANEFLOW_FINAL_LINE_%s\\n' MARKER; exit\n"
     fn waitid_probe_is_non_blocking_and_leaves_the_exit_status_unconsumed() {
         let (_master, mut child, pid) = spawn_posix_lifecycle_probe("sleep 0.3; exit 7");
         let started = Instant::now();
-        let pending =
-            observe_child_exit(child.as_mut(), pid).expect("waitid must succeed for a live child");
+        let pending = observe_child_exit(pid).expect("waitid must succeed for a live child");
         assert!(
             pending.is_none(),
             "a still-running child must not report an exit status"
@@ -6675,13 +6661,13 @@ printf 'PANEFLOW_FINAL_LINE_%s\\n' MARKER; exit\n"
             "WNOHANG must return immediately instead of waiting for the child"
         );
 
-        let exit = observe_probe_exit(child.as_mut(), pid);
+        let exit = observe_probe_exit(pid);
         assert_eq!(exit.exit_code(), 7, "CLD_EXITED must carry the exit code");
         assert!(exit.signal().is_none());
 
         // WNOWAIT left the zombie in place, so the leader PID is still
         // reserved and a second observation sees the same status.
-        let again = observe_probe_exit(child.as_mut(), pid);
+        let again = observe_probe_exit(pid);
         assert_eq!(
             again.exit_code(),
             7,
@@ -6694,7 +6680,7 @@ printf 'PANEFLOW_FINAL_LINE_%s\\n' MARKER; exit\n"
     #[test]
     fn waitid_probe_maps_a_killed_child_to_a_named_signal() {
         let (_master, mut child, pid) = spawn_posix_lifecycle_probe("kill -KILL $$; sleep 30");
-        let exit = observe_probe_exit(child.as_mut(), pid);
+        let exit = observe_probe_exit(pid);
         let signal = exit
             .signal()
             .expect("CLD_KILLED must be reported as a signal, not an exit code");

@@ -2988,22 +2988,6 @@ fn main() {
     );
     startup_trace::mark("login_shell_env_loaded");
 
-    // US-003: install the process-wide kill-on-parent-death guard BEFORE any
-    // agent CLI or ConPTY spawns so children inherit the Job Object (Windows).
-    match agents::parent_guard::install_process_job() {
-        Ok(agents::parent_guard::ParentGuardStatus::Installed) => {}
-        Ok(agents::parent_guard::ParentGuardStatus::Unsupported) => {
-            log::debug!(
-                "parent_guard: process-wide job guard unsupported on Unix; PTY shells use per-PTY guards and shim-wrapped agents use shim guards"
-            );
-        }
-        Err(err) => {
-            log::warn!(
-                "parent_guard: failed to install Job Object; kill -9 of Paneflow may orphan agent CLIs ({err})"
-            );
-        }
-    }
-
     // EP-002 US-004: `paneflow mcp <subcommand>` runs as a scriptable CLI
     // and exits - it never initializes GPUI / opens a window. Placed after
     // `augment_path_for_gui_launch` (so agent-CLI detection sees `~/.bun/bin`

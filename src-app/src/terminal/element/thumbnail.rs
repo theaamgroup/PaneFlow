@@ -125,7 +125,7 @@ pub(super) fn thumbnail_snapshot(backend: &TerminalSessionBackend) -> ThumbnailS
         terminal_metric_to_u16(f32::from(dims.cell_width)),
         terminal_metric_to_u16(f32::from(dims.line_height)),
     );
-    let (content, _initial_clear_consumed) = backend.render_content(window_size, 0, 0, false);
+    let (content, _initial_clear_consumed) = backend.render_content(window_size, false);
 
     let last_visible_row = content.rows as i32;
     let first_visible_row = content.rows.saturating_sub(thumbnail_rows_for(&dims)) as i32;
