@@ -99,9 +99,6 @@ impl PaneFlowApp {
             // the nav path; this is the deep-link one.
             self.rebuild_shortcut_rows(cx);
         }
-        // Warm the MCP bridge status off-thread so the MCP page can render its
-        // button label without ever doing config I/O during a frame.
-        self.refresh_mcp_status(cx);
         self.settings_focus.focus(window, cx);
         cx.notify();
     }

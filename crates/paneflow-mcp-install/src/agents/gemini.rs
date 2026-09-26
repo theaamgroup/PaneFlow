@@ -1,26 +1,17 @@
-//! Gemini CLI writer (EP-003 US-009).
+//! Gemini CLI writer.
 //!
-//! Direct merge into `~/.gemini/settings.json` under `mcpServers.paneflow`
-//! = `{command, args: [], trust: true}`. `trust: true` skips the per-call
-//! confirmation prompt - safe because the bridge is a local binary we
-//! control and ship.
-//!
-//! A `gemini mcp add --trust` CLI does exist (verified 2026), but the
-//! direct merge is used so we own the `trust` flag and the idempotent /
-//! no-clobber semantics from [`crate::merge`]. No `env` block (D5).
-//!
-//! **Volatility:** Gemini's settings schema may shift; re-verify the
-//! `mcpServers` key + `trust` field if registration regresses.
+//! PaneFlow registered the bridge in `~/.gemini/settings.json` under
+//! `mcpServers.paneflow` = `{command, args: [], trust: true}`, with no `env`
+//! block. Removal is a direct edit under [`crate::io`]'s lock that keeps
+//! every other setting and server.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use serde_json::json;
 
-use crate::agents::{support, AgentConfigWriter, InstallOutcome, StatusOutcome, UninstallOutcome};
-use crate::detect::{self, Presence};
+use crate::agents::{support, AgentConfigWriter, StatusOutcome, UninstallOutcome};
 
-const CLI: &str = "gemini";
 const CONTAINER: &str = "mcpServers";
 
 pub struct Gemini {
@@ -28,10 +19,18 @@ pub struct Gemini {
 }
 
 impl Gemini {
+    /// A writer for the config at `config_path`; `None` when the home
+    /// directory could not be resolved.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(config_path: Option<PathBuf>) -> Self {
+        Self { config_path }
+    }
+
+    /// A writer for the config at `path`, for tests.
+    #[cfg(test)]
+    pub(crate) fn at(path: PathBuf) -> Self {
         Self {
-            config_path: support::gemini_config(),
+            config_path: Some(path),
         }
     }
 
@@ -41,6 +40,7 @@ impl Gemini {
             .ok_or_else(|| anyhow!("cannot resolve home dir for ~/.gemini/settings.json"))
     }
 
+    /// The entry PaneFlow wrote, so `status` can tell it from a hand edit.
     fn entry(bridge: &str) -> serde_json::Value {
         json!({ "command": bridge, "args": [], "trust": true })
     }
@@ -59,12 +59,6 @@ impl Gemini {
     }
 }
 
-impl Default for Gemini {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl AgentConfigWriter for Gemini {
     fn id(&self) -> &'static str {
         "gemini"
@@ -73,24 +67,8 @@ impl AgentConfigWriter for Gemini {
         "Gemini CLI"
     }
 
-    fn presence(&self) -> Presence {
-        let mut paths: Vec<PathBuf> = Vec::new();
-        if let Some(cfg) = &self.config_path {
-            paths.push(cfg.clone());
-            if let Some(parent) = cfg.parent() {
-                paths.push(parent.to_path_buf());
-            }
-        }
-        detect::detect(Some(CLI), &paths)
-    }
-
-    fn install(&self, bridge: &Path) -> Result<InstallOutcome> {
-        let bridge_s = bridge.to_string_lossy().into_owned();
-        support::json_install(self.path()?, CONTAINER, Self::entry(&bridge_s))
-    }
-
     fn uninstall(&self) -> Result<UninstallOutcome> {
-        support::json_uninstall(self.path()?, CONTAINER)
+        support::json_uninstall(self.path()?, CONTAINER, support::string_command)
     }
 
     fn status(&self, bridge: Option<&Path>) -> Result<StatusOutcome> {
@@ -102,60 +80,38 @@ impl AgentConfigWriter for Gemini {
 mod tests {
     use super::*;
 
-    fn test_writer(path: PathBuf) -> Gemini {
-        Gemini {
-            config_path: Some(path),
-        }
-    }
-
     #[test]
-    fn install_writes_trusted_entry() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("settings.json");
-        let w = test_writer(p.clone());
-        assert_eq!(
-            w.install(Path::new("/data/paneflow-mcp")).unwrap(),
-            InstallOutcome::Installed
-        );
-        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-        let entry = &v["mcpServers"]["paneflow"];
-        assert_eq!(entry["command"], json!("/data/paneflow-mcp"));
-        assert_eq!(entry["trust"], json!(true));
-        assert!(entry.get("env").is_none(), "D5: no env block");
-    }
-
-    #[test]
-    fn install_preserves_other_settings_and_servers() {
+    fn status_then_uninstall_preserves_other_settings_and_servers() {
         let dir = tempfile::TempDir::new().unwrap();
         let p = dir.path().join("settings.json");
         std::fs::write(
             &p,
             serde_json::to_vec(&json!({
                 "theme": "GitHub",
-                "mcpServers": { "context7": { "command": "c7" } }
+                "mcpServers": {
+                    "context7": { "command": "c7" },
+                    "paneflow": Gemini::entry("/data/paneflow-mcp")
+                }
             }))
             .unwrap(),
         )
         .unwrap();
-        let w = test_writer(p.clone());
-        w.install(Path::new("/data/paneflow-mcp")).unwrap();
+        let w = Gemini::at(p.clone());
 
+        assert_eq!(
+            w.status(Some(Path::new("/data/paneflow-mcp"))).unwrap(),
+            StatusOutcome::Installed {
+                path: "/data/paneflow-mcp".into()
+            }
+        );
+        assert!(matches!(
+            w.uninstall().unwrap(),
+            UninstallOutcome::Removed { .. }
+        ));
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
         assert_eq!(v["theme"], json!("GitHub"));
         assert_eq!(v["mcpServers"]["context7"]["command"], json!("c7"));
-        assert_eq!(v["mcpServers"]["paneflow"]["trust"], json!(true));
-    }
-
-    #[test]
-    fn idempotent_and_uninstall() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let w = test_writer(dir.path().join("settings.json"));
-        w.install(Path::new("/data/paneflow-mcp")).unwrap();
-        assert_eq!(
-            w.install(Path::new("/data/paneflow-mcp")).unwrap(),
-            InstallOutcome::AlreadyCurrent
-        );
-        assert_eq!(w.uninstall().unwrap(), UninstallOutcome::Removed);
+        assert!(v["mcpServers"].get("paneflow").is_none());
     }
 
     #[test]
@@ -176,7 +132,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let w = test_writer(p);
+        let w = Gemini::at(p);
 
         assert!(matches!(
             w.status(Some(Path::new("/data/paneflow-mcp"))).unwrap(),
@@ -189,7 +145,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let p = dir.path().join("settings.json");
         std::fs::write(&p, b"{ broken").unwrap();
-        let w = test_writer(p.clone());
+        let w = Gemini::at(p.clone());
 
         assert!(w.uninstall().is_err());
         assert_eq!(std::fs::read(&p).unwrap(), b"{ broken");

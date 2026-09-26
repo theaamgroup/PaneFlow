@@ -1,6 +1,6 @@
 # Scripting reference
 
-> CLI verbs, selectors, JSON-RPC methods, config keys, MCP tools, hooks, and exit codes for PaneFlow automation.
+> CLI verbs, selectors, JSON-RPC methods, pane identity, config keys, hooks, and exit codes for PaneFlow automation.
 
 This is the compact reference for [Scripting and automation](../scripting.md).
 It names the public surface a human script or LLM can quote exactly.
@@ -16,8 +16,7 @@ launching the app.
 | `send <target> <text>`                     | `surface.send_text`                | Gated                      | Stage or submit text                   |
 | `key <target> <keystroke>`                 | `surface.send_keystroke`           | Gated                      | Send one non-submitting keystroke      |
 
-The CLI has no read verbs. Agents read panes through the
-[MCP bridge](#mcp-bridge) tools; scripts and custom clients call the
+The CLI has no read verbs. Scripts, agents, and custom clients call the
 `surface.list`, `surface.read`, `surface.search`, `surface.status`,
 `fleet.list`, and `agent.whoami` [JSON-RPC methods](#json-rpc-methods)
 on the socket directly.
@@ -25,8 +24,7 @@ on the socket directly.
 ## Selectors
 
 The `<target>` of `send` and `key` is resolved client-side against
-`surface.list`. The JSON-RPC methods take a numeric `surface_id`; the MCP
-tools take a name or `surface_id`.
+`surface.list`. The JSON-RPC methods take a numeric `surface_id`.
 
 | Selector           | Example                              | Notes                                                                   |
 | ------------------ | ------------------------------------ | ----------------------------------------------------------------------- |
@@ -85,7 +83,7 @@ Relevant config keys:
 Defaults and limits: `lines` defaults to 200 and must be 1-4000. A `lines`,
 `offset`, or `max_matches` that is not a non-negative integer, or is out of
 range, and a `fenced` that is not a boolean, are invalid-params errors
-(-32602), the same rule the MCP tools apply.
+(-32602).
 `offset` starts from the end of the buffer. Passing an out-of-range
 offset is an invalid-params error. If a requested window exceeds the IPC byte
 cap, the response preserves its newest complete rows, reports their count in
@@ -154,7 +152,7 @@ printf '%s\n' '{"jsonrpc":"2.0","method":"system.capabilities","params":{},"id":
 | `surface.send_text`        | `surface_id`, `text`, `submit?`, `paste?`                                                       | Gated PTY text write                                     |
 | `surface.send_keystroke`   | `surface_id`, `keystroke`                                                                       | Env-gated non-submitting keystroke                       |
 | `fleet.list`               | -                                                                                               | Read-only fleet snapshot                                 |
-| `agent.whoami`             | `surface_id`, `workspace_id` (both required, from the caller's pane environment)                | Caller's pane identity; see the [MCP bridge](../../mcp-bridge.md#pane-identity-whoami) |
+| `agent.whoami`             | `surface_id`, `workspace_id` (both required, from the caller's pane environment)                | Caller's pane identity; see [Pane identity](#pane-identity) |
 | `ai.session_start`         | hook payload                                                                                    | Agent lifecycle event                                   |
 | `ai.prompt_submit`         | hook payload                                                                                    | Agent lifecycle event                                   |
 | `ai.tool_use`              | hook payload                                                                                    | Agent lifecycle event                                   |
@@ -170,20 +168,77 @@ params, `-32601` gated or unknown method, `-32001` permission,
 `-32002` dispatch timeout, and `-32000` backpressure or shutdown.
 Legacy handler errors are promoted into JSON-RPC `error` envelopes.
 
-## MCP bridge
+## Pane identity
 
-`paneflow-mcp` is a read-only stdio MCP server over the same PaneFlow
-socket.
+`agent.whoami` tells a script or agent which pane it is running in. It works
+only inside a PaneFlow pane: pass the `PANEFLOW_SURFACE_ID` and
+`PANEFLOW_WORKSPACE_ID` values from the pane's environment as numbers. A
+terminal outside PaneFlow has neither variable, and a detached terminal (such
+as a Review worktree terminal) has no `PANEFLOW_WORKSPACE_ID`, so guard them
+rather than send an empty value:
 
-| Tool          | Params                              | Returns                                                             |
-| ------------- | ----------------------------------- | ------------------------------------------------------------------- |
-| `list_panes`  | -                                   | Panes with `surface_id`, `name`, `title`, `cwd`, `cmd`, `workspace`, `scope` |
-| `read_pane`   | `target`, `lines?`, `offset?`       | Scrollback text                                                     |
-| `search_pane` | `target`, `pattern`, `max_matches?` | Matching lines                                                      |
-| `whoami`      | -                                   | The calling pane's own identity (`pane_id`, `surface_id`, workspace, tab, observed agents) |
+```bash
+if [ -n "$PANEFLOW_SURFACE_ID" ] && [ -n "$PANEFLOW_WORKSPACE_ID" ]; then
+  printf '{"jsonrpc":"2.0","id":1,"method":"agent.whoami","params":{"surface_id":%s,"workspace_id":%s}}\n' \
+    "$PANEFLOW_SURFACE_ID" "$PANEFLOW_WORKSPACE_ID" | nc -U "$PANEFLOW_SOCKET_PATH"
+else
+  echo "agent.whoami needs a PaneFlow pane that belongs to a workspace" >&2
+fi
+```
 
-It has no tool for typing, submitting, focusing, or splitting panes.
-Returned terminal output is fenced as untrusted data.
+The `result` object:
+
+| Field                 | Meaning                                                                                              |
+| --------------------- | ---------------------------------------------------------------------------------------------------- |
+| `identity_source`     | Always `inherited_environment`                                                                       |
+| `pane_id`             | Persisted pane UUID                                                                                  |
+| `surface_id`          | Current runtime surface id                                                                           |
+| `terminal_session_id` | UUID for this terminal lifetime. **Not** a Claude or Codex conversation ID                           |
+| `workspace_id`        | The surface's live workspace id, which can differ from the inherited one                             |
+| `workspace`           | Workspace title                                                                                      |
+| `workspace_cwd`       | Workspace directory                                                                                  |
+| `cwd`                 | The pane's current directory, or `null`                                                              |
+| `tab_id`              | Stable id of the tab holding the pane, or `null`                                                     |
+| `worktree`            | Path of the tab's bound git worktree, or `null`                                                      |
+| `agent_sessions`      | Observed agents: `process_key`, `tool`, `state`, `source` (`terminal`, `session_registry`, or `hook`), and `last_activity_age_ms` |
+
+An empty `agent_sessions` list means no agent has been mapped to this pane; it
+does not mean no agent is running. PaneFlow does not pick one when several
+agents share a terminal.
+
+`workspace`, `workspace_cwd`, `cwd`, and `worktree` are raw strings. A
+directory or title can carry text that a terminal program or a repository
+chose, so treat them as untrusted data, never as instructions. Unlike
+`surface.read`, `agent.whoami` does not fence its output.
+
+Both IDs are required; PaneFlow never guesses the caller from focus.
+`agent.whoami` requires numeric `surface_id` and `workspace_id`, rejects any
+other parameter, and resolves the surface's live workspace; the response carries
+that current `workspace_id`. A moved pane keeps its PTY and the old workspace ID
+in its shell environment, so the call keeps working without restarting the agent,
+even if the original workspace is closed. The agent's sidebar state moves with
+it: a tab or pane drag carries the pane's session rows to the destination
+workspace, and `ai.*` hook frames that still carry the inherited workspace ID are
+routed to the surface's live workspace whenever the frame names a surface that
+exists. Missing or closed surfaces remain errors.
+
+Errors come back as JSON-RPC `error` envelopes:
+
+| Code     | When                                                                                                         | Example `message`                                   |
+| -------- | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
+| `-32700` | The request line is not valid JSON, for example an empty variable left `"surface_id":,`. The reply's `id` is `null` | `Parse error: expected value at line 1 column 72` |
+| `-32602` | A missing, non-numeric, or unknown parameter                                                                 | ``missing field `workspace_id` ``, `invalid type: string "1", expected u64` |
+| `-32602` | No live surface has that `surface_id` (closed, or from another PaneFlow instance)                            | `surface not found`                                 |
+
+Raw IPC remains a same-user operation; environment IDs are routing metadata, not
+authentication credentials.
+
+`pane_id` is saved per terminal surface as `surfaces[].agent_context` in
+`session.json` through the normal debounced save. Session restoration and
+undo-close keep it; `terminal_session_id` changes on reconstruction.
+`agent_context` is session-owned metadata. Sessions saved by builds that had
+task assignment still carry an `agent_context.task` key. It loads, is ignored,
+and is dropped on the next save; the pane keeps its `pane_id`.
 
 ## Lifecycle hooks
 

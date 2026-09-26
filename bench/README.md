@@ -135,17 +135,18 @@ otherwise resolves to `paneflow` next to the test binary's profile directory.
 
 The marks, in launch order: `login_shell_env_loaded` (the login shell's PATH
 adopted), `crash_reporting_ready` (the first config read and the Sentry
-guard), `bridge_extracted` and `ai_hook_extracted` (the two stable helper copies),
+guard), `ai_hook_extracted` (the stable `paneflow-ai-hook` copy),
 `gpui_app_ready` (platform and text system initialization inside GPUI),
 `config_loaded`, `fonts_loaded` (the embedded fonts registered),
 `window_requested` and `window_created` (the GPU window), `session_loaded`
 (the capped `session.json` read), `ipc_server_started` (the singleton guard
 and IPC thread), then either `default_workspace_built` (Fresh: the shell
-spawned) or `session_restore_scheduled` (Restore), `app_fields_prepared`,
-`app_state_built`, `app_mounted` (the observers and the staged restore
-armed), `window_open_returned`, `first_render`, `first_render_built` (the
-element tree exists; layout and paint have not run), `first_frame`, and for
-Restore `session_restored` (the last batch applied) and `restored_frame`.
+spawned) or `session_restore_scheduled` (Restore), either of which also covers
+the legacy MCP cleanup check, `app_fields_prepared`, `app_state_built`,
+`app_mounted` (the observers and the staged restore armed),
+`window_open_returned`, `first_render`, `first_render_built` (the element tree
+exists; layout and paint have not run), `first_frame`, and for Restore
+`session_restored` (the last batch applied) and `restored_frame`.
 
 The mark names are the metric names, so adding a mark adds a metric and the
 comparison table reports it as new. The timed work happens in a child

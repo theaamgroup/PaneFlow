@@ -7,7 +7,6 @@ members = [
     "crates/paneflow-ghostty-smoke",
     "crates/paneflow-ipc-client",
     "crates/paneflow-libghostty-sys",
-    "crates/paneflow-mcp",
     "crates/paneflow-mcp-install",
     "crates/paneflow-process",
     "crates/paneflow-shim",

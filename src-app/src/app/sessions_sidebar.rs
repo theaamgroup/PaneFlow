@@ -1505,7 +1505,7 @@ mod tests {
             ),
             session_meta(
                 "0b7f1c2d-1111-4222-8333-444455556666",
-                Some("Write docs for the MCP bridge"),
+                Some("Write docs for the hooks CLI"),
             ),
             session_meta("c3d4e5f6-7777-4888-9999-aaaabbbbcccc", None),
         ];

@@ -43,6 +43,7 @@ mod keybindings;
 mod keys;
 mod launch_cwd;
 mod layout;
+mod legacy_bridge;
 mod limits;
 mod login_shell_env;
 mod opencode_sessions;
@@ -121,7 +122,6 @@ pub(crate) enum SettingsSection {
     Shortcuts,
     Terminal,
     AiAgent,
-    McpServers,
     Workspaces,
 }
 
@@ -354,12 +354,11 @@ struct SidebarWidthAnimation {
 }
 
 fn should_load_login_shell_env_for_startup(
-    is_mcp_subcommand: bool,
     is_cli_subcommand: bool,
     is_hooks_subcommand: bool,
     is_unknown_verb: bool,
 ) -> bool {
-    !(is_mcp_subcommand || is_cli_subcommand || is_hooks_subcommand || is_unknown_verb)
+    !(is_cli_subcommand || is_hooks_subcommand || is_unknown_verb)
 }
 
 fn prepare_process_environment_before_threads(
@@ -371,12 +370,6 @@ fn prepare_process_environment_before_threads(
         load_login_shell_env();
     }
     augment_path_for_gui_launch();
-}
-
-fn should_extract_mcp_bridge_for_cli(args: &[String]) -> bool {
-    args.get(1).map(String::as_str) == Some("mcp")
-        && args.get(2).map(String::as_str) == Some("install")
-        && args.len() == 3
 }
 
 /// `paneflow hooks setup` is the durable write (user-scope `settings.json`).
@@ -526,7 +519,6 @@ fn global_help_text() -> String {
          \n\
          Agent workflow:\n\
          \x20 Launch Claude Code, Codex, opencode, Pi, or any CLI agent in panes\n\
-         \x20 Use `paneflow mcp install` so capable agents can read pane output\n\
          \n\
          Keybindings:\n\
          \x20 Cmd+Shift+D/E    Split horizontal/vertical\n\
@@ -585,8 +577,7 @@ fn chrome_material_for_frame(material_enabled: bool, is_fullscreen: bool) -> boo
 mod native_material_tests {
     use super::{
         DEFAULT_LOG_FILTER, chrome_material_for_frame, prepare_process_environment_before_threads,
-        should_extract_mcp_bridge_for_cli, should_load_login_shell_env_for_startup,
-        should_setup_hooks_for_cli,
+        should_load_login_shell_env_for_startup, should_setup_hooks_for_cli,
     };
     use crate::source_probe::source_slice;
 
@@ -648,21 +639,10 @@ mod native_material_tests {
 
     #[test]
     fn login_shell_env_capture_only_runs_for_gui_launches() {
-        assert!(should_load_login_shell_env_for_startup(
-            false, false, false, false
-        ));
-        assert!(!should_load_login_shell_env_for_startup(
-            true, false, false, false
-        ));
-        assert!(!should_load_login_shell_env_for_startup(
-            false, true, false, false
-        ));
-        assert!(!should_load_login_shell_env_for_startup(
-            false, false, true, false
-        ));
-        assert!(!should_load_login_shell_env_for_startup(
-            false, false, false, true
-        ));
+        assert!(should_load_login_shell_env_for_startup(false, false, false));
+        assert!(!should_load_login_shell_env_for_startup(true, false, false));
+        assert!(!should_load_login_shell_env_for_startup(false, true, false));
+        assert!(!should_load_login_shell_env_for_startup(false, false, true));
     }
 
     #[test]
@@ -687,24 +667,6 @@ mod native_material_tests {
     }
 
     #[test]
-    fn mcp_bridge_extraction_only_runs_for_exact_install_command() {
-        assert!(should_extract_mcp_bridge_for_cli(&args(&[
-            "paneflow", "mcp", "install"
-        ])));
-        assert!(!should_extract_mcp_bridge_for_cli(&args(&[
-            "paneflow", "mcp", "status"
-        ])));
-        assert!(!should_extract_mcp_bridge_for_cli(&args(&[
-            "paneflow",
-            "mcp",
-            "uninstall"
-        ])));
-        assert!(!should_extract_mcp_bridge_for_cli(&args(&[
-            "paneflow", "mcp", "install", "--help"
-        ])));
-    }
-
-    #[test]
     fn hooks_setup_is_the_durable_write_command() {
         assert!(should_setup_hooks_for_cli(&args(&[
             "paneflow", "hooks", "setup"
@@ -719,9 +681,6 @@ mod native_material_tests {
             "paneflow",
             "hooks",
             "uninstall"
-        ])));
-        assert!(!should_setup_hooks_for_cli(&args(&[
-            "paneflow", "mcp", "install"
         ])));
         assert!(!should_setup_hooks_for_cli(&args(&["paneflow", "hooks"])));
     }
@@ -833,7 +792,7 @@ mod help_tests {
     use super::{global_help_text, unknown_verb_error};
 
     #[test]
-    fn cli_help_lists_verbs_mcp_and_hooks() {
+    fn cli_help_lists_verbs_and_hooks_but_not_mcp() {
         let help = global_help_text();
         let listing = crate::cli::format_help_commands();
         assert!(
@@ -848,7 +807,10 @@ mod help_tests {
             help.contains("hooks"),
             "--help must list hooks (real intercept, not in VERBS):\n{help}"
         );
-        assert!(help.contains("mcp"), "--help must list mcp:\n{help}");
+        assert!(
+            !help.contains("mcp"),
+            "--help must not list the removed mcp verb:\n{help}"
+        );
     }
 
     #[test]
@@ -1134,10 +1096,10 @@ mod crash_reporting_tests {
     #[test]
     fn crash_reporting_initializes_only_on_the_gui_path_behind_the_config_switch() {
         // Issue #204: the single Sentry init site sits inside `fn main()`
-        // AFTER every CLI intercept has exited (`mcp`, `hooks`, the
-        // scriptable verbs, the unknown-verb error), so `paneflow mcp ...`,
-        // `paneflow hooks ...`, and `paneflow <verb>` never start crash
-        // reporting - and the init is gated on the config's
+        // AFTER every CLI intercept has exited (`hooks`, the scriptable
+        // verbs, the unknown-verb error), so `paneflow hooks ...` and
+        // `paneflow <verb>` never start crash reporting - and the init is
+        // gated on the config's
         // `crash_reporting` master switch. Anchors are composed at runtime
         // because `include_str!` captures this test's own source too, and
         // the slice ends at main's column-0 closing brace (issue #219).
@@ -1153,12 +1115,7 @@ mod crash_reporting_tests {
             "crash reporting must have exactly one init site"
         );
         let before_init = &main_body[..init_at];
-        for intercept in [
-            "paneflow_mcp_install::run_cli(",
-            "run_hooks_cli(",
-            "cli::run()",
-            "unknown_verb_error(",
-        ] {
+        for intercept in ["run_hooks_cli(", "cli::run()", "unknown_verb_error("] {
             assert!(
                 before_init.contains(intercept),
                 "the {intercept} intercept must exit before crash reporting initializes"
@@ -1419,19 +1376,6 @@ struct PaneFlowApp {
     general_dropdown: Option<GeneralDropdown>,
     /// Which new-tab branch select is open (`None` = closed).
     new_tab_branch_dropdown: Option<NewTabBranchDropdown>,
-    /// Codex settings: cached MCP-bridge status snapshot, refreshed off-thread
-    /// so the MCP page never does config I/O during a frame.
-    mcp_status: Option<Vec<paneflow_mcp_install::StatusReport>>,
-    /// Codex settings: result of the last MCP-bridge install (per-agent recap,
-    /// or a wholesale refusal message).
-    mcp_install: Option<Result<Vec<paneflow_mcp_install::InstallReport>, String>>,
-    /// Codex settings: an MCP-bridge install is running.
-    mcp_busy: bool,
-    /// Monotonic token for MCP status probes: a probe whose token is stale
-    /// when it lands (a newer probe, or an install started after it) is
-    /// discarded, so a pre-install read can never overwrite the install's
-    /// own status.
-    mcp_probe_generation: u64,
     /// Scroll state for the persistent sidebar workspace list.
     /// Driven by GPUI's `overflow_y_scroll + track_scroll`; the
     /// visible scroll bar has been removed but the handle is still
@@ -2829,29 +2773,22 @@ fn main() {
     if args.get(1).map(String::as_str) == Some(agents::parent_guard::PTY_GUARD_SUBCOMMAND) {
         std::process::exit(agents::parent_guard::run_pty_guard_from_args(&args));
     }
-    // US-038: detect the `mcp` subcommand BEFORE the global flag scans. Those
-    // scans look at *every* arg, so `paneflow mcp install --help` would
-    // otherwise match the global `--help` and print the top-level help instead
-    // of routing to the `mcp` handler (which forwards `--help` to its own
-    // subcommand parser). Gating the global scans on `!is_mcp_subcommand`
-    // hands `paneflow mcp …` straight to the dispatcher below.
-    let is_mcp_subcommand = args.get(1).map(String::as_str) == Some("mcp");
-    // EP-001 (cli-agent-orchestration): same gating rationale as the `mcp`
-    // flag. When argv[1] is a known CLI verb (`paneflow send --help`,
+    // EP-001 (cli-agent-orchestration): detect a subcommand BEFORE the global
+    // flag scans. Those scans look at *every* arg, so `paneflow send --help`
+    // would otherwise match the global `--help` and print the top-level help.
+    // When argv[1] is a known CLI verb (`paneflow send --help`,
     // `paneflow key … --help`), the global flag scans below must NOT fire -
     // clap owns per-subcommand `--help`/`--version`, and the CLI dispatch runs
     // after the manual intercepts.
     let is_cli_subcommand = cli::is_cli_verb(args.get(1).map(String::as_str));
     // EP-004 (cli-agent-orchestration): `paneflow hooks <cmd>` is intercepted
-    // before clap (like `mcp`) and mutates agent config files offline - so the
-    // global flag scans must not eat its `--help`.
+    // before clap and mutates agent config files offline - so the global flag
+    // scans must not eat its `--help`.
     let is_hooks_subcommand = args.get(1).map(String::as_str) == Some("hooks");
-    let is_global_help = !is_mcp_subcommand
-        && !is_cli_subcommand
+    let is_global_help = !is_cli_subcommand
         && !is_hooks_subcommand
         && args.iter().any(|a| a == "--help" || a == "-h");
-    let is_global_version = !is_mcp_subcommand
-        && !is_cli_subcommand
+    let is_global_version = !is_cli_subcommand
         && !is_hooks_subcommand
         && args.iter().any(|a| a == "--version" || a == "-v");
     let is_unknown_verb = args
@@ -2890,7 +2827,6 @@ fn main() {
     // process environment and rely on that ordering for safety.
     prepare_process_environment_before_threads(
         should_load_login_shell_env_for_startup(
-            is_mcp_subcommand,
             is_cli_subcommand,
             is_hooks_subcommand,
             is_unknown_verb,
@@ -2900,44 +2836,14 @@ fn main() {
     );
     startup_trace::mark("login_shell_env_loaded");
 
-    // EP-002 US-004: `paneflow mcp <subcommand>` runs as a scriptable CLI
-    // and exits - it never initializes GPUI / opens a window. Placed after
-    // `augment_path_for_gui_launch` (so agent-CLI detection sees `~/.bun/bin`
-    // etc.), before any GUI bootstrap. The
-    // install engine lives in the GPU-free `paneflow-mcp-install` crate.
-    // Only `install` extracts the bridge; `status` and `uninstall` must stay
-    // read-only with respect to Paneflow's own data dir.
-    // Diagnostics go to stderr (env_logger), the per-agent report to stdout.
-    if args.get(1).map(String::as_str) == Some("mcp") {
-        if should_extract_mcp_bridge_for_cli(&args)
-            && let Some(msg) = debug_durable_install_refusal("mcp install")
-        {
-            eprintln!("{msg}");
-            std::process::exit(1);
-        }
-        let bridge_path = if should_extract_mcp_bridge_for_cli(&args) {
-            match ai_hooks::extract::ensure_bridge_extracted() {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    log::warn!("paneflow mcp: bridge extraction failed ({e:#})");
-                    // Fall back to the resolved-but-maybe-missing path so the
-                    // engine can emit the precise "binary missing at <path>"
-                    // refusal rather than a vaguer "data dir unresolved".
-                    runtime_paths::bridge_binary_path()
-                }
-            }
-        } else {
-            runtime_paths::bridge_binary_path()
-        };
-        std::process::exit(paneflow_mcp_install::run_cli(&args[2..], bridge_path));
-    }
-
     // EP-004 (cli-agent-orchestration): `paneflow hooks <cmd>` installs the
-    // persistent agent-notification hooks and exits - like `mcp`, it mutates
-    // external config files offline and never initializes GPUI. Extract the
-    // ai-hook callback to its stable path first so the path written into agent
-    // configs is guaranteed to exist; fall back to the resolved-but-maybe-
-    // missing path so the engine can emit a precise refusal.
+    // persistent agent-notification hooks and exits - it mutates external
+    // config files offline and never initializes GPUI. Placed after
+    // `augment_path_for_gui_launch` so agent-CLI detection sees `~/.bun/bin`
+    // etc. Extract the ai-hook callback to its stable path first so the path
+    // written into agent configs is guaranteed to exist; fall back to the
+    // resolved-but-maybe-missing path so the engine can emit a precise refusal.
+    // Diagnostics go to stderr (env_logger), the per-agent report to stdout.
     if is_hooks_subcommand {
         if should_setup_hooks_for_cli(&args)
             && let Some(msg) = debug_durable_install_refusal("hooks setup")
@@ -2952,13 +2858,13 @@ fn main() {
                 runtime_paths::ai_hook_binary_path()
             }
         };
-        std::process::exit(paneflow_mcp_install::run_hooks_cli(&args[2..], hook_path));
+        std::process::exit(ai_hooks::claude_hooks::run_hooks_cli(&args[2..], hook_path));
     }
 
     // EP-001 (cli-agent-orchestration): the `paneflow <verb>` scriptable CLI
     // drives a RUNNING instance over the existing IPC socket and exits - it
     // never initializes GPUI. Gated on a known verb in argv[1] (same pattern as
-    // `mcp`) so unknown args still fall through to the GUI below. Placed after
+    // `hooks`) so unknown args still fall through to the GUI below. Placed after
     // the logger + PATH augmentation so the CLI inherits `RUST_LOG` and the
     // same binary-resolution environment as the GUI.
     if is_cli_subcommand {
@@ -2966,9 +2872,9 @@ fn main() {
     }
 
     // EP-005 US-011: an argv[1] shaped like a verb but not one we own
-    // (`paneflow blah`, a mistyped `paneflow searh`, or the MCP tool name had
-    // an alias not been wired) is a typo, not a GUI launch. The `mcp`/`hooks`/
-    // known-verb intercepts above have all exited by now, so anything still
+    // (`paneflow blah`, a mistyped `paneflow searh`, or the retired `paneflow
+    // mcp`) is a typo, not a GUI launch. The `hooks` and known-verb
+    // intercepts above have both exited by now, so anything still
     // here is genuinely unknown: print an actionable error and exit non-zero
     // (clap's usage-error code 2) instead of falling through to the bootstrap,
     // which would silently trip the single-instance guard. A bare `paneflow`
@@ -2980,8 +2886,8 @@ fn main() {
     }
 
     // Issue #204: crash reporting initializes here - after every CLI
-    // intercept above (`mcp`, `hooks`, the scriptable verbs, the
-    // unknown-verb error) has already exited - so only a real GUI launch
+    // intercept above (`hooks`, the scriptable verbs, the unknown-verb
+    // error) has already exited - so only a real GUI launch
     // ever starts Sentry. The `crash_reporting` config switch (`None`-is-on,
     // like `review_enabled`) is the user's opt-out, and
     // `crash_reporting_options()` keeps `send_default_pii` off. Keep the
@@ -3000,26 +2906,13 @@ fn main() {
     #[cfg(target_os = "macos")]
     warn_if_rosetta_translated();
 
-    // EP-001 US-003: materialize the embedded `paneflow-mcp` bridge to its
-    // stable, non-versioned path so a registered MCP server keeps resolving
-    // across Paneflow updates. SHA-compared + atomic: a no-op when the
-    // on-disk bytes already match the embedded version. Non-fatal - the GUI
-    // must still open if data_dir is unwritable; `paneflow mcp install`
-    // (EP-002) refuses cleanly later rather than write a dangling path.
-    match ai_hooks::extract::ensure_bridge_extracted() {
-        Ok(path) => log::info!("paneflow: MCP bridge ready at {}", path.display()),
-        Err(e) => log::warn!(
-            "paneflow: MCP bridge extraction failed ({e:#}); `paneflow mcp install` will be unavailable until resolved"
-        ),
-    }
-    startup_trace::mark("bridge_extracted");
-
-    // Issue #542: materialize `paneflow-ai-hook` at the same stable,
-    // non-versioned path so the shim can render hook commands that survive an
-    // upgrade. Until this ran on a normal launch, the stable copy existed only
-    // after `paneflow hooks setup`, so every managed block was pinned to the
-    // version-scoped cache directory the next launch prunes. Same SHA-compared
-    // atomic write as the bridge, and equally non-fatal.
+    // Issue #542: materialize `paneflow-ai-hook` at its stable, non-versioned
+    // path so the shim can render hook commands that survive an upgrade.
+    // Until this ran on a normal launch, the stable copy existed only after
+    // `paneflow hooks setup`, so every managed block was pinned to the
+    // version-scoped cache directory the next launch prunes. SHA-compared +
+    // atomic: a no-op when the on-disk bytes already match. Non-fatal - the
+    // GUI must still open if data_dir is unwritable.
     match ai_hooks::extract::ensure_ai_hook_extracted() {
         Ok(path) => log::info!("paneflow: AI hook ready at {}", path.display()),
         Err(e) => log::warn!(

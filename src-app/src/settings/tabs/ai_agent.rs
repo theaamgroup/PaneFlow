@@ -11,8 +11,7 @@
 //! Persistence goes through [`PaneFlowApp::persist_setting`] - it mutates the
 //! cached config for instant feedback and writes `paneflow.json` off the main
 //! thread; `pane.rs` picks up the new state via the ConfigWatcher propagation so
-//! the tab bar reflects changes without a restart. The MCP bridge installer
-//! lives on its own page (`settings::tabs::mcp`).
+//! the tab bar reflects changes without a restart.
 
 use gpui::{
     AnyElement, Context, Hsla, IntoElement, ParentElement, SharedString, Styled, div, img, px, rgb,

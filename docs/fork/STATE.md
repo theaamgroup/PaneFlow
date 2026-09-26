@@ -92,7 +92,7 @@ dropped; see [archived execution-plan revision](https://github.com/theaamgroup/P
 | Config dir | `~/Library/Application Support/paneflow/` |
 | Debug config dir | `paneflow-dev` |
 | Env prefix | `PANEFLOW_*` |
-| MCP server | `paneflow` |
+| MCP server | Removed (#857). A launch-time cleanup deletes the old `paneflow` agent entries until #868 |
 
 The debug sibling is not optional. `APP_SUBDIR` in
 `crates/paneflow-config/src/loader.rs:17` switches to `paneflow-dev` under
@@ -459,15 +459,17 @@ need it:
   side effect. They did not need separate handling and did not survive to 2c.
 - `TerminalBackendConfig` is gone entirely (#184): a leftover `"backend"` key in
   an old `paneflow.json` is ignored, not mapped (`leftover_terminal_backend_key_is_ignored`).
-- Embed size cap is Mach-O `release-min` (2026-08-27): 1,211,840 B measured
-  (shim 472,368 + ai-hook 336,464 + mcp 403,008), `EMBED_SIZE_LIMIT_BYTES =
-  1_400_000` = total + 15.5% (slack 188,160 B = 13.4% of the cap).
+- Embed size cap is Mach-O `release-min` (2026-09-26, after the bridge left
+  the embed in #857): 892,704 B measured (shim 539,504 + ai-hook 353,200),
+  `EMBED_SIZE_LIMIT_BYTES = 975_000` = total + 9.2% (slack 82,296 B = 8.4% of
+  the cap). `build.rs` prunes any staged file not in `EMBED_BINARIES`.
 
 ## Parallel work
 
 Use headless agents in separate git worktrees for batch work. The pane-driving
-pipeline and skill were removed in #609; the CLI, read-only MCP bridge, and
-agent lifecycle hooks remain available for interactive terminal work.
+pipeline and skill were removed in #609 and the MCP server in #857; the CLI,
+JSON-RPC socket, and agent lifecycle hooks remain available for interactive
+terminal work.
 
 **This section used to say the Rust passes do not fan out. 2c falsified that.**
 All eight of its remaining batches ran on headless grok in isolated worktrees,

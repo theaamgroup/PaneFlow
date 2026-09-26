@@ -1,24 +1,36 @@
-//! Shared plumbing for the per-agent writers (EP-003).
+//! Shared plumbing for the per-agent writers.
 //!
-//! - Config-path resolution (cross-platform, `dirs`-based).
-//! - Format-generic install / uninstall / status built on the tested
-//!   [`crate::merge`] + [`crate::io`] primitives, so every writer is
-//!   idempotent and no-clobber without repeating the logic. Every writer
-//!   edits its agent's config file directly under the PaneFlow config
-//!   lock; no agent CLI is spawned. A write that changes the file first
-//!   copies the old bytes to `<file>.bak`.
+//! - Config-path resolution from a home dir and one environment's overrides
+//!   ([`crate::agents::AgentConfigEnv`]).
+//! - Format-generic uninstall / status built on the tested [`crate::merge`]
+//!   and [`crate::io`] primitives. Every removal edits the agent's config
+//!   file directly under the PaneFlow config lock; no agent CLI is spawned. A
+//!   write first copies the parsed bytes to a backup that never replaces an
+//!   existing file, and is refused when a re-read right before the rename
+//!   finds the file changed since the parse.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use paneflow_agent_config::jsonc;
 
-use crate::agents::{InstallOutcome, StatusOutcome, UninstallOutcome};
+use crate::agents::{StatusOutcome, UninstallOutcome};
 use crate::{io, merge};
 
-/// The entry name every writer registers under its container key.
+/// The entry name PaneFlow registered under each agent's container key.
 pub(crate) const ENTRY: &str = "paneflow";
+
+/// File name of the retired bridge binary. Only an entry whose command has
+/// this file name is PaneFlow's; any other `paneflow` entry is the user's.
+const BRIDGE_BINARY: &str = "paneflow-mcp";
+
+/// Does `command` run a `paneflow-mcp` binary, at any path? Covers entries
+/// left at an older data-dir path as well as the current one.
+pub(crate) fn names_bridge_binary(command: &str) -> bool {
+    Path::new(command)
+        .file_name()
+        .is_some_and(|name| name == BRIDGE_BINARY)
+}
 
 // ---------------------------------------------------------------------------
 // Config paths (resolved against the real home / XDG dirs)
@@ -27,11 +39,7 @@ pub(crate) const ENTRY: &str = "paneflow";
 /// User-scope MCP file. Official default is `$HOME/.claude.json` (NOT
 /// `~/.claude/.claude.json`). When `CLAUDE_CONFIG_DIR` is set and non-empty,
 /// Claude Code reads `.claude.json` from inside that directory instead.
-pub(crate) fn claude_config() -> Option<PathBuf> {
-    claude_config_from(dirs::home_dir(), std::env::var_os("CLAUDE_CONFIG_DIR"))
-}
-
-fn claude_config_from(
+pub(crate) fn claude_config_from(
     home: Option<PathBuf>,
     claude_config_dir: Option<OsString>,
 ) -> Option<PathBuf> {
@@ -48,11 +56,10 @@ fn claude_config_from(
 }
 
 /// `$CODEX_HOME/config.toml`, falling back to `~/.codex/config.toml`.
-pub(crate) fn codex_config() -> Option<PathBuf> {
-    codex_config_from(dirs::home_dir(), std::env::var_os("CODEX_HOME"))
-}
-
-fn codex_config_from(home: Option<PathBuf>, codex_home: Option<OsString>) -> Option<PathBuf> {
+pub(crate) fn codex_config_from(
+    home: Option<PathBuf>,
+    codex_home: Option<OsString>,
+) -> Option<PathBuf> {
     codex_home
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
@@ -61,23 +68,14 @@ fn codex_config_from(home: Option<PathBuf>, codex_home: Option<OsString>) -> Opt
 }
 
 /// `~/.gemini/settings.json`.
-pub(crate) fn gemini_config() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".gemini").join("settings.json"))
+pub(crate) fn gemini_config_from(home: Option<PathBuf>) -> Option<PathBuf> {
+    home.map(|h| h.join(".gemini").join("settings.json"))
 }
 
-/// opencode global config candidates. Current opencode supports JSONC and
-/// custom config env vars; the first existing candidate wins, otherwise the
-/// first candidate is used for a new install.
-pub(crate) fn opencode_configs() -> Vec<PathBuf> {
-    opencode_configs_from(
-        dirs::home_dir(),
-        std::env::var_os("XDG_CONFIG_HOME"),
-        std::env::var_os("OPENCODE_CONFIG"),
-        std::env::var_os("OPENCODE_CONFIG_DIR"),
-    )
-}
-
-fn opencode_configs_from(
+/// opencode global config candidates: the one file `OPENCODE_CONFIG` names,
+/// else `opencode.jsonc` and `opencode.json` in the config directory. The
+/// cleanup probes every candidate.
+pub(crate) fn opencode_configs_from(
     home: Option<PathBuf>,
     xdg_config_home: Option<OsString>,
     opencode_config: Option<OsString>,
@@ -125,131 +123,108 @@ fn push_opencode_names_in(out: &mut Vec<PathBuf>, dir: PathBuf) {
 }
 
 // ---------------------------------------------------------------------------
-// JSON install / uninstall / status (Claude Code, Gemini, opencode)
+// Reading
 // ---------------------------------------------------------------------------
 
-/// Upsert `root[container][paneflow] = entry` at `path`, idempotently and
-/// no-clobber. Returns `Installed` (new), `Updated` (entry changed), or
-/// `AlreadyCurrent` (no-op). A present-but-invalid file is an error (never
-/// overwritten).
-pub(crate) fn json_install(
-    path: &Path,
-    container: &str,
-    entry: serde_json::Value,
-) -> Result<InstallOutcome> {
-    io::with_config_lock(path, || {
-        if is_jsonc(path) {
-            let source = read_jsonc_source(path)?;
-            let root = jsonc::parse(&source)
-                .with_context(|| format!("{} is not valid JSONC", path.display()))?;
-            let had_prior = root
-                .get(container)
-                .and_then(|value| value.get(ENTRY))
-                .is_some();
-            let Some(updated) = jsonc::upsert_entry(&source, container, ENTRY, &entry)
-                .with_context(|| format!("edit {} failed", path.display()))?
-            else {
-                return Ok(InstallOutcome::AlreadyCurrent);
-            };
-            io::write_if_changed_unlocked(path, updated.as_bytes())?;
-            return Ok(if had_prior {
-                InstallOutcome::Updated
-            } else {
-                InstallOutcome::Installed
-            });
-        }
-
-        let mut root = merge::read_json_or_default(path)?;
-        let had_prior = root.get(container).and_then(|c| c.get(ENTRY)).is_some();
-        let changed = merge::merge_json_entry(&mut root, container, ENTRY, entry)?;
-        if !changed {
-            return Ok(InstallOutcome::AlreadyCurrent);
-        }
-        io::write_if_changed_unlocked(path, &merge::json_to_bytes(&root)?)?;
-        Ok(if had_prior {
-            InstallOutcome::Updated
-        } else {
-            InstallOutcome::Installed
-        })
-    })
+/// The config text at `path`, or `None` when there is nothing to probe: the
+/// file does not exist, or its raw bytes never mention a `paneflow-mcp`
+/// binary. The byte scan runs before any parse, so a config that is too large
+/// for [`io::read_config`], or does not parse, but never named the bridge
+/// does not hold the binary back.
+fn read_if_it_may_name_bridge(path: &Path) -> Result<Option<String>> {
+    if !path.exists() || !io::may_contain(path, BRIDGE_BINARY.as_bytes()) {
+        return Ok(None);
+    }
+    io::read_config(path)
 }
 
-/// Remove `root[container][paneflow]` at `path`. No-op when the file or
-/// entry is absent.
-pub(crate) fn json_uninstall(path: &Path, container: &str) -> Result<UninstallOutcome> {
+// ---------------------------------------------------------------------------
+// JSON / JSONC uninstall / status (Claude Code, Gemini, opencode)
+// ---------------------------------------------------------------------------
+
+/// Remove `root[container][paneflow]` at `path` when `command_of` says the
+/// entry runs a `paneflow-mcp` binary. No-op when the file or entry is
+/// absent; a `paneflow` entry with any other command is left alone
+/// ([`UninstallOutcome::KeptUserEntry`]). Every file is parsed as JSONC and
+/// edited by splicing, so the rest of it stays byte for byte. A
+/// present-but-invalid file is never written, and neither is one that a
+/// re-read right before the rename finds changed since the parse.
+pub(crate) fn json_uninstall(
+    path: &Path,
+    container: &str,
+    command_of: impl Fn(&serde_json::Value) -> Option<String>,
+) -> Result<UninstallOutcome> {
     if !path.exists() {
         return Ok(UninstallOutcome::NothingToRemove);
     }
     io::with_config_lock(path, || {
-        if !path.exists() {
+        let Some(source) = io::read_config(path)? else {
             return Ok(UninstallOutcome::NothingToRemove);
-        }
-        if is_jsonc(path) {
-            let source = read_jsonc_source(path)?;
-            let Some(updated) = jsonc::remove_entry(&source, container, ENTRY)
-                .with_context(|| format!("edit {} failed", path.display()))?
-            else {
-                return Ok(UninstallOutcome::NothingToRemove);
-            };
-            io::write_if_changed_unlocked(path, updated.as_bytes())?;
-            return Ok(UninstallOutcome::Removed);
-        }
-
-        let mut root = merge::read_json_or_default(path)?;
-        if !merge::remove_json_entry(&mut root, container, ENTRY) {
+        };
+        let root = merge::parse_json_family(path, &source)?;
+        let Some(entry) = json_entry(&root, container)? else {
             return Ok(UninstallOutcome::NothingToRemove);
+        };
+        let command = command_of(entry);
+        if !command.as_deref().is_some_and(names_bridge_binary) {
+            return Ok(UninstallOutcome::KeptUserEntry { command });
         }
-        io::write_if_changed_unlocked(path, &merge::json_to_bytes(&root)?)?;
-        Ok(UninstallOutcome::Removed)
+        let updated = merge::remove_json_family_entry(path, &source, container, ENTRY)?
+            .with_context(|| format!("{} lost its `{ENTRY}` entry mid-edit", path.display()))?;
+        let backup = io::replace_unchanged_unlocked(path, &source, &updated)?;
+        Ok(UninstallOutcome::Removed {
+            file: path.to_path_buf(),
+            backup,
+        })
     })
 }
 
-/// Read-only state of the `paneflow` JSON entry at `path`. `extract`
-/// pulls the command path out of the entry (string for most agents, first
-/// array element for opencode). `expected` is the current bridge path used
-/// to flag staleness when it is available.
+/// Read-only state of the `paneflow` entry in the JSON or JSONC file at
+/// `path`. `validate` classifies the entry (string command for most agents,
+/// first array element for opencode). `expected` is the bridge path used to
+/// flag staleness when it is available. A file that never mentions a
+/// `paneflow-mcp` binary reads as `NotInstalled` without being parsed.
 pub(crate) fn json_status(
     path: &Path,
     container: &str,
     expected: Option<&Path>,
     validate: impl Fn(&serde_json::Value, Option<&Path>) -> StatusOutcome,
 ) -> Result<StatusOutcome> {
-    if !path.exists() {
-        return Ok(StatusOutcome::NotInstalled);
-    }
-    let root = merge::read_json_or_default(path)?;
-    let Some(container_value) = root.get(container) else {
+    let Some(source) = read_if_it_may_name_bridge(path)? else {
         return Ok(StatusOutcome::NotInstalled);
     };
-    let Some(container_object) = container_value.as_object() else {
-        bail!("config key `{container}` is not an object - refusing to classify it");
-    };
-    let Some(entry) = container_object.get(ENTRY) else {
+    let root = merge::parse_json_family(path, &source)?;
+    let Some(entry) = json_entry(&root, container)? else {
         return Ok(StatusOutcome::NotInstalled);
     };
     Ok(validate(entry, expected))
 }
 
-fn is_jsonc(path: &Path) -> bool {
-    path.extension().and_then(|extension| extension.to_str()) == Some("jsonc")
-}
-
-fn read_jsonc_source(path: &Path) -> Result<String> {
-    Ok(paneflow_agent_config::read_optional_text(path)
-        .with_context(|| format!("read {} failed", path.display()))?
-        .unwrap_or_else(|| "{}\n".to_string()))
+/// `root[container][paneflow]`, `None` when either level is absent. A
+/// non-object container is an error: it cannot be classified or edited.
+fn json_entry<'a>(
+    root: &'a serde_json::Value,
+    container: &str,
+) -> Result<Option<&'a serde_json::Value>> {
+    let Some(container_value) = root.get(container) else {
+        return Ok(None);
+    };
+    let Some(container_object) = container_value.as_object() else {
+        bail!("config key `{container}` is not an object - refusing to classify it");
+    };
+    Ok(container_object.get(ENTRY))
 }
 
 // ---------------------------------------------------------------------------
-// TOML install / uninstall / status (Codex)
+// TOML uninstall / status (Codex)
 // ---------------------------------------------------------------------------
 
 /// Codex's parent table for MCP servers.
 pub(crate) const CODEX_TABLE: &str = "mcp_servers";
 
-/// Paneflow pane identity that Codex must explicitly forward to stdio MCP
-/// servers. The surface ID is required by agent context tools; workspace and
-/// socket identify the scope and instance selected by the PaneFlow PTY.
+/// PaneFlow pane identity that Codex was told to forward to the bridge.
+/// Part of the shape PaneFlow wrote, so `status` can tell its own entry
+/// from a hand-edited one.
 pub(crate) const CODEX_ENV_VARS: &[&str] = &[
     "PANEFLOW_SOCKET_PATH",
     "PANEFLOW_WORKSPACE_ID",
@@ -257,9 +232,7 @@ pub(crate) const CODEX_ENV_VARS: &[&str] = &[
 ];
 
 /// Static Codex `env` keys that override the identity the pane is supposed
-/// to forward through [`CODEX_ENV_VARS`]. `PANEFLOW_MCP_SCOPE=all` makes
-/// `paneflow-mcp` read every workspace; the other three pin the socket,
-/// workspace, or surface instead of the launching pane.
+/// to forward through [`CODEX_ENV_VARS`].
 const CODEX_FORBIDDEN_ENV_KEYS: &[&str] = &[
     "PANEFLOW_MCP_SCOPE",
     "PANEFLOW_SOCKET_PATH",
@@ -268,72 +241,6 @@ const CODEX_FORBIDDEN_ENV_KEYS: &[&str] = &[
 ];
 
 const CODEX_ENV_OVERRIDE_REASON: &str = "Codex MCP env must not set PANEFLOW_MCP_SCOPE, PANEFLOW_SOCKET_PATH, PANEFLOW_WORKSPACE_ID, or PANEFLOW_SURFACE_ID";
-
-fn ensure_codex_env_vars(doc: &mut toml_edit::DocumentMut) -> Result<()> {
-    use toml_edit::{value, Array, Item, Value};
-
-    let entry = doc
-        .get_mut(CODEX_TABLE)
-        .and_then(Item::as_table_mut)
-        .and_then(|parent| parent.get_mut(ENTRY))
-        .and_then(Item::as_table_like_mut)
-        .context("managed Codex MCP entry is not a TOML table")?;
-
-    let valid_array = entry
-        .get("env_vars")
-        .and_then(Item::as_array)
-        .is_some_and(|array| array.iter().all(|item| item.as_str().is_some()));
-
-    if valid_array {
-        let array = entry
-            .get_mut("env_vars")
-            .and_then(Item::as_array_mut)
-            .context("validated Codex env_vars array became unavailable")?;
-        for required in CODEX_ENV_VARS {
-            if !array.iter().any(|item| item.as_str() == Some(*required)) {
-                array.push(Value::from(*required));
-            }
-        }
-    } else {
-        let mut array = Array::new();
-        for required in CODEX_ENV_VARS {
-            array.push(Value::from(*required));
-        }
-        entry.insert("env_vars", value(array));
-    }
-
-    Ok(())
-}
-
-/// The managed Codex contract requires the entry to be active (issue #214):
-/// leaving `enabled = false` in place would make `mcp install` report a
-/// successful repair while status keeps saying NeedsRepair ("must not be
-/// disabled") and the bridge stays dead. Repair enables the managed entry
-/// by flipping an explicit `enabled = false` to `true`. An absent `enabled`
-/// key (Codex's default is enabled) is not added, and a non-boolean value
-/// is left alone, matching what [`toml_status`] accepts. Generic unknown-key
-/// preservation in [`crate::merge`] is deliberately unchanged; this override
-/// lives only in the Codex adapter's managed contract.
-fn ensure_codex_entry_enabled(doc: &mut toml_edit::DocumentMut) -> Result<()> {
-    use toml_edit::{value, Item};
-
-    let entry = doc
-        .get_mut(CODEX_TABLE)
-        .and_then(Item::as_table_mut)
-        .and_then(|parent| parent.get_mut(ENTRY))
-        .and_then(Item::as_table_like_mut)
-        .context("managed Codex MCP entry is not a TOML table")?;
-
-    if let Some(enabled) = entry.get_mut("enabled") {
-        if enabled.as_bool() == Some(false) {
-            log::info!(
-                "paneflow mcp: enabling the managed Codex MCP entry (`enabled = false` -> `true`)"
-            );
-            *enabled = value(true);
-        }
-    }
-    Ok(())
-}
 
 fn codex_env_vars_ok(entry: &toml_edit::Item) -> bool {
     entry
@@ -357,104 +264,57 @@ fn codex_env_has_forbidden_override(entry: &toml_edit::Item) -> bool {
         })
 }
 
-/// Delete static PaneFlow identity from the managed entry's `env` table.
-/// `env_vars` is a different key and stays. An `env` table that becomes
-/// empty is removed; unrelated keys in that table stay.
-fn strip_codex_forbidden_env(doc: &mut toml_edit::DocumentMut) {
-    use toml_edit::Item;
-
-    let Some(entry) = doc
-        .get_mut(CODEX_TABLE)
-        .and_then(Item::as_table_mut)
-        .and_then(|parent| parent.get_mut(ENTRY))
-        .and_then(Item::as_table_like_mut)
-    else {
-        return;
-    };
-
-    let (removed, empty) = {
-        let Some(env) = entry.get_mut("env").and_then(Item::as_table_like_mut) else {
-            return;
-        };
-        let mut removed = Vec::new();
-        for key in CODEX_FORBIDDEN_ENV_KEYS {
-            if env.remove(key).is_some() {
-                removed.push(*key);
-            }
-        }
-        (removed, env.is_empty())
-    };
-    // Only drop `env` when this repair emptied it. A table that was already
-    // empty is not an override, and deleting it would rewrite a current file.
-    if empty && !removed.is_empty() {
-        entry.remove("env");
-    }
-    if !removed.is_empty() {
-        log::info!(
-            "paneflow mcp: removing static PaneFlow env overrides from the Codex MCP entry ({})",
-            removed.join(", ")
-        );
-    }
+/// `command` of a Codex entry, when it is a string.
+fn toml_command(entry: &toml_edit::Item) -> Option<String> {
+    entry
+        .get("command")
+        .and_then(|c| c.as_str())
+        .map(str::to_string)
 }
 
-pub(crate) fn toml_install(path: &Path, command: &str) -> Result<InstallOutcome> {
-    io::with_config_lock(path, || {
-        let mut doc = merge::read_toml_or_default(path)?;
-        let had_prior = doc.get(CODEX_TABLE).and_then(|t| t.get(ENTRY)).is_some();
-        let before = doc.to_string();
-        merge::upsert_toml_entry(&mut doc, CODEX_TABLE, ENTRY, command, &[])?;
-        ensure_codex_env_vars(&mut doc)?;
-        ensure_codex_entry_enabled(&mut doc)?;
-        // Before the unchanged-document short-circuit: a scope-widening
-        // `env` value is not part of the managed command/args/env_vars shape,
-        // so leaving it would report AlreadyCurrent and keep the override.
-        strip_codex_forbidden_env(&mut doc);
-        if doc.to_string() == before {
-            return Ok(InstallOutcome::AlreadyCurrent);
-        }
-        io::write_if_changed_unlocked(path, &merge::toml_to_bytes(&doc))?;
-        Ok(if had_prior {
-            InstallOutcome::Updated
-        } else {
-            InstallOutcome::Installed
-        })
-    })
-}
-
+/// Remove `[mcp_servers.paneflow]` at `path` when its command runs a
+/// `paneflow-mcp` binary. Same contract as [`json_uninstall`]. An inline
+/// `mcp_servers = { ... }` parent is refused: it can still hold the entry,
+/// so it is an error, never "nothing to remove".
 pub(crate) fn toml_uninstall(path: &Path) -> Result<UninstallOutcome> {
     if !path.exists() {
         return Ok(UninstallOutcome::NothingToRemove);
     }
     io::with_config_lock(path, || {
-        if !path.exists() {
+        let Some(source) = io::read_config(path)? else {
             return Ok(UninstallOutcome::NothingToRemove);
-        }
-        let mut doc = merge::read_toml_or_default(path)?;
-        // An inline `mcp_servers = { ... }` can still hold the entry (status
-        // reads it), so it is an error, never "nothing to remove".
+        };
+        let mut doc = merge::parse_toml(path, &source)?;
         if doc.get(CODEX_TABLE).is_some_and(|item| !item.is_table()) {
             bail!("`{CODEX_TABLE}` is not a TOML table - refusing to overwrite");
         }
-        if !merge::remove_toml_entry(&mut doc, CODEX_TABLE, ENTRY) {
+        let Some(entry) = doc.get(CODEX_TABLE).and_then(|t| t.get(ENTRY)) else {
             return Ok(UninstallOutcome::NothingToRemove);
+        };
+        let command = toml_command(entry);
+        if !command.as_deref().is_some_and(names_bridge_binary) {
+            return Ok(UninstallOutcome::KeptUserEntry { command });
         }
-        io::write_if_changed_unlocked(path, &merge::toml_to_bytes(&doc))?;
-        Ok(UninstallOutcome::Removed)
+        merge::remove_toml_entry(&mut doc, CODEX_TABLE, ENTRY);
+        let backup = io::replace_unchanged_unlocked(path, &source, &doc.to_string())?;
+        Ok(UninstallOutcome::Removed {
+            file: path.to_path_buf(),
+            backup,
+        })
     })
 }
 
+/// Read-only state of the Codex entry. Same byte-scan shortcut as
+/// [`json_status`].
 pub(crate) fn toml_status(path: &Path, expected: Option<&Path>) -> Result<StatusOutcome> {
-    if !path.exists() {
+    let Some(source) = read_if_it_may_name_bridge(path)? else {
         return Ok(StatusOutcome::NotInstalled);
-    }
-    let doc = merge::read_toml_or_default(path)?;
+    };
+    let doc = merge::parse_toml(path, &source)?;
     let Some(entry) = doc.get(CODEX_TABLE).and_then(|t| t.get(ENTRY)) else {
         return Ok(StatusOutcome::NotInstalled);
     };
-    let found = entry
-        .get("command")
-        .and_then(|c| c.as_str())
-        .map(str::to_string);
+    let found = toml_command(entry);
     let args_ok = entry
         .get("args")
         .and_then(|a| a.as_array())
@@ -541,6 +401,19 @@ mod tests {
     }
 
     #[test]
+    fn names_bridge_binary_matches_the_file_name_at_any_path() {
+        assert!(names_bridge_binary(
+            "/Users/a/Library/Application Support/paneflow/bin/paneflow-mcp"
+        ));
+        assert!(names_bridge_binary("/old/paneflow-dev/bin/paneflow-mcp"));
+        assert!(names_bridge_binary("paneflow-mcp"));
+        assert!(!names_bridge_binary("/usr/local/bin/paneflow-mcp-proxy"));
+        assert!(!names_bridge_binary("/opt/paneflow-mcp/server"));
+        assert!(!names_bridge_binary("npx"));
+        assert!(!names_bridge_binary(""));
+    }
+
+    #[test]
     fn claude_config_default_is_home_dot_claude_json() {
         assert_eq!(
             claude_config_from(Some(PathBuf::from("/home/alice")), None).unwrap(),
@@ -563,45 +436,6 @@ mod tests {
             .unwrap(),
             PathBuf::from("/tmp/claude-cfg").join(".claude.json")
         );
-    }
-
-    #[test]
-    fn claude_config_reads_claude_config_dir_env() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let _guard = ClaudeConfigDirGuard::set(dir.path());
-        assert_eq!(claude_config(), Some(dir.path().join(".claude.json")));
-    }
-
-    struct ClaudeConfigDirGuard {
-        previous: Option<OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    static CLAUDE_CONFIG_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[allow(deprecated)]
-    impl ClaudeConfigDirGuard {
-        fn set(path: &Path) -> Self {
-            let lock = CLAUDE_CONFIG_DIR_LOCK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let previous = std::env::var_os("CLAUDE_CONFIG_DIR");
-            std::env::set_var("CLAUDE_CONFIG_DIR", path);
-            Self {
-                previous,
-                _lock: lock,
-            }
-        }
-    }
-
-    #[allow(deprecated)]
-    impl Drop for ClaudeConfigDirGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-            }
-        }
     }
 
     #[test]
@@ -649,8 +483,8 @@ mod tests {
     /// (`crates/paneflow-shim/src/hooks/opencode.rs`) treats
     /// `OPENCODE_CONFIG_DIR` as the config directory itself and writes
     /// `$DIR/opencode.json`; the candidates this crate edits must resolve to
-    /// the same file for the same env, or `paneflow mcp install` registers the
-    /// bridge where OpenCode never loads it.
+    /// the same file for the same env, or the cleanup looks for the bridge
+    /// entry where OpenCode never loaded it.
     #[test]
     fn opencode_config_candidates_agree_with_shim_config_dir() {
         let home = Some(PathBuf::from("/Users/alice"));
@@ -693,83 +527,53 @@ mod tests {
     }
 
     #[test]
-    fn json_install_then_idempotent() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("settings.json");
-        let entry = json!({ "command": "/p", "args": [] });
-
-        assert_eq!(
-            json_install(&p, "mcpServers", entry.clone()).unwrap(),
-            InstallOutcome::Installed
-        );
-        // Re-run with identical entry → no-op.
-        assert_eq!(
-            json_install(&p, "mcpServers", entry).unwrap(),
-            InstallOutcome::AlreadyCurrent
-        );
-        // Different path → Updated.
-        assert_eq!(
-            json_install(&p, "mcpServers", json!({ "command": "/q", "args": [] })).unwrap(),
-            InstallOutcome::Updated
-        );
-    }
-
-    #[test]
-    fn json_install_preserves_siblings() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("settings.json");
-        std::fs::write(
-            &p,
-            serde_json::to_vec(&json!({
-                "mcpServers": { "other": { "command": "x" } },
-                "theme": "dark"
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        json_install(&p, "mcpServers", json!({ "command": "/p" })).unwrap();
-        let after: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-        assert_eq!(after["mcpServers"]["other"]["command"], json!("x"));
-        assert_eq!(after["theme"], json!("dark"));
-        assert_eq!(after["mcpServers"]["paneflow"]["command"], json!("/p"));
-    }
-
-    #[test]
-    fn json_install_refuses_invalid_file() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("settings.json");
-        std::fs::write(&p, b"{ broken").unwrap();
-        assert!(json_install(&p, "mcpServers", json!({})).is_err());
-        // The invalid file was NOT overwritten.
-        assert_eq!(std::fs::read(&p).unwrap(), b"{ broken");
-    }
-
-    #[test]
     fn json_uninstall_removes_only_target() {
         let dir = tempfile::TempDir::new().unwrap();
         let p = dir.path().join("settings.json");
         std::fs::write(
             &p,
             serde_json::to_vec(&json!({
-                "mcpServers": { "paneflow": { "command": "/p" }, "other": { "command": "x" } }
+                "mcpServers": {
+                    "paneflow": { "command": "/data/paneflow-mcp" },
+                    "other": { "command": "x" }
+                }
             }))
             .unwrap(),
         )
         .unwrap();
 
-        assert_eq!(
-            json_uninstall(&p, "mcpServers").unwrap(),
-            UninstallOutcome::Removed
-        );
+        assert!(matches!(
+            json_uninstall(&p, "mcpServers", string_command).unwrap(),
+            UninstallOutcome::Removed { .. }
+        ));
         let after: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
         assert!(after["mcpServers"].get("paneflow").is_none());
         assert_eq!(after["mcpServers"]["other"]["command"], json!("x"));
         // Second uninstall → nothing to remove.
         assert_eq!(
-            json_uninstall(&p, "mcpServers").unwrap(),
+            json_uninstall(&p, "mcpServers", string_command).unwrap(),
             UninstallOutcome::NothingToRemove
         );
+    }
+
+    #[test]
+    fn json_uninstall_keeps_a_paneflow_entry_with_another_command() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("settings.json");
+        let before = serde_json::to_vec(&json!({
+            "mcpServers": { "paneflow": { "command": "/usr/local/bin/my-server" } }
+        }))
+        .unwrap();
+        std::fs::write(&p, &before).unwrap();
+
+        assert_eq!(
+            json_uninstall(&p, "mcpServers", string_command).unwrap(),
+            UninstallOutcome::KeptUserEntry {
+                command: Some("/usr/local/bin/my-server".into())
+            }
+        );
+        assert_eq!(std::fs::read(&p).unwrap(), before);
+        assert!(!dir.path().join("settings.json.bak").exists());
     }
 
     #[test]
@@ -778,7 +582,7 @@ mod tests {
         let p = dir.path().join("missing-parent").join("settings.json");
 
         assert_eq!(
-            json_uninstall(&p, "mcpServers").unwrap(),
+            json_uninstall(&p, "mcpServers", string_command).unwrap(),
             UninstallOutcome::NothingToRemove
         );
         assert!(!p.parent().unwrap().exists());
@@ -790,8 +594,10 @@ mod tests {
         let p = dir.path().join("settings.json");
         std::fs::write(
             &p,
-            serde_json::to_vec(&json!({ "mcpServers": { "paneflow": { "command": "/cur" } } }))
-                .unwrap(),
+            serde_json::to_vec(
+                &json!({ "mcpServers": { "paneflow": { "command": "/cur/paneflow-mcp" } } }),
+            )
+            .unwrap(),
         )
         .unwrap();
 
@@ -799,25 +605,25 @@ mod tests {
             json_status(
                 &p,
                 "mcpServers",
-                Some(Path::new("/cur")),
+                Some(Path::new("/cur/paneflow-mcp")),
                 validate_string_entry,
             )
             .unwrap(),
             StatusOutcome::Installed {
-                path: "/cur".into()
+                path: "/cur/paneflow-mcp".into()
             }
         );
         assert_eq!(
             json_status(
                 &p,
                 "mcpServers",
-                Some(Path::new("/new")),
+                Some(Path::new("/new/paneflow-mcp")),
                 validate_string_entry,
             )
             .unwrap(),
             StatusOutcome::StalePath {
-                found: "/cur".into(),
-                expected: "/new".into()
+                found: "/cur/paneflow-mcp".into(),
+                expected: "/new/paneflow-mcp".into()
             }
         );
     }
@@ -844,7 +650,10 @@ mod tests {
         let p = dir.path().join("settings.json");
         std::fs::write(
             &p,
-            serde_json::to_vec(&json!({ "mcpServers": { "paneflow": { "args": [] } } })).unwrap(),
+            serde_json::to_vec(
+                &json!({ "mcpServers": { "paneflow": { "args": ["paneflow-mcp"] } } }),
+            )
+            .unwrap(),
         )
         .unwrap();
 
@@ -855,141 +664,67 @@ mod tests {
     }
 
     #[test]
-    fn toml_install_idempotent_and_preserves_comments() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("config.toml");
-        std::fs::write(&p, b"# my codex config\nmodel = \"gpt-5\"\n").unwrap();
-
-        assert_eq!(toml_install(&p, "/p").unwrap(), InstallOutcome::Installed);
-        let txt = std::fs::read_to_string(&p).unwrap();
-        assert!(txt.contains("# my codex config"));
-        assert!(txt.contains("model = \"gpt-5\""));
-        assert!(txt.contains("paneflow"));
-        // Idempotent.
-        assert_eq!(
-            toml_install(&p, "/p").unwrap(),
-            InstallOutcome::AlreadyCurrent
-        );
-        // Updated path.
-        assert_eq!(toml_install(&p, "/q").unwrap(), InstallOutcome::Updated);
-    }
-
-    #[test]
     fn toml_uninstall_and_status() {
         let dir = tempfile::TempDir::new().unwrap();
         let p = dir.path().join("config.toml");
-        toml_install(&p, "/cur").unwrap();
+        std::fs::write(
+            &p,
+            "[mcp_servers.paneflow]\n\
+             command = \"/cur/paneflow-mcp\"\n\
+             args = []\n\
+             env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\", \"PANEFLOW_SURFACE_ID\"]\n",
+        )
+        .unwrap();
 
         assert_eq!(
-            toml_status(&p, Some(Path::new("/cur"))).unwrap(),
+            toml_status(&p, Some(Path::new("/cur/paneflow-mcp"))).unwrap(),
             StatusOutcome::Installed {
-                path: "/cur".into()
+                path: "/cur/paneflow-mcp".into()
             }
         );
         assert_eq!(
-            toml_status(&p, Some(Path::new("/new"))).unwrap(),
+            toml_status(&p, Some(Path::new("/new/paneflow-mcp"))).unwrap(),
             StatusOutcome::StalePath {
-                found: "/cur".into(),
-                expected: "/new".into()
+                found: "/cur/paneflow-mcp".into(),
+                expected: "/new/paneflow-mcp".into()
             }
         );
-        assert_eq!(toml_uninstall(&p).unwrap(), UninstallOutcome::Removed);
+        assert!(matches!(
+            toml_uninstall(&p).unwrap(),
+            UninstallOutcome::Removed { .. }
+        ));
         assert_eq!(
             toml_uninstall(&p).unwrap(),
             UninstallOutcome::NothingToRemove
         );
+        assert_eq!(
+            toml_status(&p, Some(Path::new("/cur/paneflow-mcp"))).unwrap(),
+            StatusOutcome::NotInstalled
+        );
     }
 
     #[test]
-    fn toml_install_enables_disabled_entry_table_form() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("config.toml");
-        // Correct command/args/env_vars but `enabled = false`: status says
-        // NeedsRepair, and the install (the advertised repair) used to
-        // return AlreadyCurrent without touching the file, leaving the
-        // entry disabled indefinitely (issue #214).
-        std::fs::write(
-            &p,
+    fn toml_status_needs_repair_when_disabled_in_either_table_form() {
+        for src in [
             "[mcp_servers.paneflow]\n\
-             command = \"/cur\"\n\
+             command = \"/cur/paneflow-mcp\"\n\
              args = []\n\
              env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\", \"PANEFLOW_SURFACE_ID\"]\n\
              enabled = false\n",
-        )
-        .unwrap();
-
-        assert!(matches!(
-            toml_status(&p, Some(Path::new("/cur"))).unwrap(),
-            StatusOutcome::NeedsRepair { .. }
-        ));
-        assert_eq!(toml_install(&p, "/cur").unwrap(), InstallOutcome::Updated);
-        let txt = std::fs::read_to_string(&p).unwrap();
-        assert!(txt.contains("enabled = true"), "repair must enable: {txt}");
-        assert_eq!(
-            toml_status(&p, Some(Path::new("/cur"))).unwrap(),
-            StatusOutcome::Installed {
-                path: "/cur".into()
-            }
-        );
-        // Only now is the entry truly current.
-        assert_eq!(
-            toml_install(&p, "/cur").unwrap(),
-            InstallOutcome::AlreadyCurrent
-        );
-    }
-
-    #[test]
-    fn toml_install_enables_disabled_entry_inline_table_form() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("config.toml");
-        std::fs::write(
-            &p,
-            "[mcp_servers]\npaneflow = { command = \"/cur\", args = [], env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\", \"PANEFLOW_SURFACE_ID\"], enabled = false }\n",
-        )
-        .unwrap();
-
-        assert!(matches!(
-            toml_status(&p, Some(Path::new("/cur"))).unwrap(),
-            StatusOutcome::NeedsRepair { .. }
-        ));
-        assert_eq!(toml_install(&p, "/cur").unwrap(), InstallOutcome::Updated);
-        let txt = std::fs::read_to_string(&p).unwrap();
-        assert!(txt.contains("enabled = true"), "repair must enable: {txt}");
-        assert_eq!(
-            toml_status(&p, Some(Path::new("/cur"))).unwrap(),
-            StatusOutcome::Installed {
-                path: "/cur".into()
-            }
-        );
-    }
-
-    #[test]
-    fn toml_install_leaves_absent_and_true_enabled_alone() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("config.toml");
-
-        // Fresh install must not add an `enabled` key (absent = enabled).
-        assert_eq!(toml_install(&p, "/cur").unwrap(), InstallOutcome::Installed);
-        let txt = std::fs::read_to_string(&p).unwrap();
-        assert!(!txt.contains("enabled"), "no enabled key added: {txt}");
-
-        // An explicit `enabled = true` stays as the user wrote it.
-        std::fs::write(
-            &p,
-            "[mcp_servers.paneflow]\n\
-             command = \"/cur\"\n\
-             args = []\n\
-             env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\", \"PANEFLOW_SURFACE_ID\"]\n\
-             enabled = true\n",
-        )
-        .unwrap();
-        assert_eq!(
-            toml_install(&p, "/cur").unwrap(),
-            InstallOutcome::AlreadyCurrent
-        );
-        assert!(std::fs::read_to_string(&p)
-            .unwrap()
-            .contains("enabled = true"));
+            "[mcp_servers]\npaneflow = { command = \"/cur/paneflow-mcp\", args = [], env_vars = [\"PANEFLOW_SOCKET_PATH\", \"PANEFLOW_WORKSPACE_ID\", \"PANEFLOW_SURFACE_ID\"], enabled = false }\n",
+        ] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let p = dir.path().join("config.toml");
+            std::fs::write(&p, src).unwrap();
+            assert_eq!(
+                toml_status(&p, Some(Path::new("/cur/paneflow-mcp"))).unwrap(),
+                StatusOutcome::NeedsRepair {
+                    path: Some("/cur/paneflow-mcp".into()),
+                    reason: "Codex MCP entry must have empty args, forward PaneFlow's socket/workspace variables, and must not be disabled".into(),
+                },
+                "{src}"
+            );
+        }
     }
 
     #[test]

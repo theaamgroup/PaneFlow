@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Blocking JSON-RPC client for Paneflow's local IPC socket (shared by the MCP bridge and the CLI)"
+description = "Blocking JSON-RPC client for Paneflow's local IPC socket (shared by the CLI and the AI-hook callback)"
 
 [dependencies]
 interprocess.workspace = true

@@ -40,6 +40,13 @@
 //!   stops one that writes continuously from ballooning the capture buffer;
 //! - **best-effort** - any failure logs and leaves the inherited PATH untouched.
 //!
+//! The same capture also keeps the login shell's values of
+//! [`SIDE_ENV_VARS`] (the variables that move an agent's config file) in a
+//! side map read through [`side_env`]. They are NOT exported to the process
+//! environment; only the first-launch MCP-bridge cleanup (issue #857) reads
+//! them, to find agent configs a profile moved. Issue #868 removes the map
+//! with the cleanup.
+//!
 //! Safety: like [`crate::runtime_paths::augment_path_for_gui_launch`], this
 //! mutates the process-global environment and MUST run on the main thread
 //! before any other thread is spawned (Rust 2024 marks `set_var` `unsafe`). The
@@ -48,6 +55,32 @@
 //! are snapshotted under that mutex first. If a holder keeps the read blocked,
 //! the reader is detached and keeps its own handle to the buffer, so it cannot
 //! overlap `set_var` or use-after-free it.
+
+/// Login-shell variables kept in the side map. Path-valued: only absolute
+/// values are kept.
+pub(crate) const SIDE_ENV_VARS: [&str; 5] = [
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
+];
+
+/// The captured [`SIDE_ENV_VARS`], set once by [`load_login_shell_env`] when
+/// the login shell ran. Empty on a terminal launch (the process already
+/// inherited them) or when the capture was skipped or failed.
+static SIDE_ENV: std::sync::OnceLock<Vec<(String, std::ffi::OsString)>> =
+    std::sync::OnceLock::new();
+
+/// The login shell's value of `name`, one of [`SIDE_ENV_VARS`], when the
+/// startup capture saw it. Never read from, or written to, the process env.
+pub(crate) fn side_env(name: &str) -> Option<std::ffi::OsString> {
+    SIDE_ENV
+        .get()?
+        .iter()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.clone())
+}
 
 #[cfg(unix)]
 pub fn load_login_shell_env() {
@@ -147,6 +180,8 @@ pub fn load_login_shell_env() {
         );
         return;
     }
+    // Side map only: never exported, whatever happens to PATH below.
+    let _ = SIDE_ENV.set(captured.side_env);
 
     match captured.path {
         Some(path) if !captured_path_has_system_bin(&path) => {
@@ -259,6 +294,8 @@ enum CaptureWait {
 #[cfg(unix)]
 struct LoginShellCapture {
     path: Option<String>,
+    /// The absolute [`SIDE_ENV_VARS`] values in the same snapshot.
+    side_env: Vec<(String, std::ffi::OsString)>,
     truncated: bool,
     timed_out: bool,
 }
@@ -306,6 +343,7 @@ where
     wait_for_published_path(&capture, marker);
     let buf = finish_capture_reader(&capture, reader);
     let path = extract_path(&buf, marker);
+    let side_env = extract_side_env(&buf, marker, &SIDE_ENV_VARS);
     let truncated =
         matches!(wait, CaptureWait::Truncated) || buf.len() as u64 >= LOGIN_ENV_CAPTURE_CAP;
     // A complete record is adopted even if we had to kill a child that
@@ -314,6 +352,7 @@ where
     let timed_out = matches!(wait, CaptureWait::TimedOut) && path.is_none();
     LoginShellCapture {
         path,
+        side_env,
         truncated,
         timed_out,
     }
@@ -589,6 +628,47 @@ fn extract_path(buf: &[u8], marker: &[u8]) -> Option<String> {
     None
 }
 
+/// The first complete `NAME=value` record after `marker` for each of
+/// `names`, keeping only non-empty absolute paths. Same record rule as
+/// [`extract_path`]: a line counts only when it ends in `\n`, so a record the
+/// read cap sliced through is dropped rather than adopted as a prefix.
+#[cfg(unix)]
+fn extract_side_env(
+    buf: &[u8],
+    marker: &[u8],
+    names: &[&str],
+) -> Vec<(String, std::ffi::OsString)> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let Some(start) = find_subslice(buf, marker).map(|at| at + marker.len()) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(String, std::ffi::OsString)> = Vec::new();
+    let mut rest = &buf[start..];
+    while let Some(end) = rest.iter().position(|byte| *byte == b'\n') {
+        let line = &rest[..end];
+        rest = &rest[end + 1..];
+        for name in names {
+            if found.iter().any(|(key, _)| key == name) {
+                continue;
+            }
+            let Some(value) = line
+                .strip_prefix(name.as_bytes())
+                .and_then(|tail| tail.strip_prefix(b"="))
+            else {
+                continue;
+            };
+            if value.first() == Some(&b'/') {
+                found.push((
+                    (*name).to_string(),
+                    std::ffi::OsStr::from_bytes(value).to_os_string(),
+                ));
+            }
+        }
+    }
+    found
+}
+
 /// First index at which `needle` occurs in `haystack`. Tiny, allocation-free.
 #[cfg(unix)]
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -603,10 +683,12 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::{
-        LOGIN_ENV_CAPTURE_CAP, capture_login_shell_stdout, captured_path_has_system_bin,
-        extract_path, find_subslice, is_launchd_default_path, is_posix_capture_shell,
-        read_login_shell_capture, reap_login_shell_capture,
+        LOGIN_ENV_CAPTURE_CAP, SIDE_ENV_VARS, capture_login_shell_stdout,
+        captured_path_has_system_bin, extract_path, extract_side_env, find_subslice,
+        is_launchd_default_path, is_posix_capture_shell, read_login_shell_capture,
+        reap_login_shell_capture,
     };
+    use crate::source_probe::source_slice;
     use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
@@ -699,6 +781,45 @@ mod tests {
         assert_eq!(extract_path(b"PATH=/x", b"__M__"), None);
         // Marker present but no PATH line.
         assert_eq!(extract_path(b"__M__\nFOO=bar\n", b"__M__"), None);
+    }
+
+    #[test]
+    fn side_env_keeps_absolute_agent_config_vars_after_the_marker() {
+        let out = b"CODEX_HOME=/before/marker\n__M__\nSCRIPT=line1\nCLAUDE_CONFIG_DIR=/inside/a/value\n\
+                    FOO=bar\nCODEX_HOME=/Users/me/.codex-work\nOPENCODE_CONFIG=relative/opencode.json\n\
+                    XDG_CONFIG_HOME=\nOPENCODE_CONFIG_DIR=/Users/me/oc\nCODEX_HOME=/second/wins-not\n\
+                    CLAUDE_CONFIG_DIR_X=/not/this\nPATH=/usr/bin\nCLAUDE_CONFIG_DIR=/cut/off";
+        let found = extract_side_env(out, b"__M__", &SIDE_ENV_VARS);
+        let found: Vec<(&str, &str)> = found
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.to_str().unwrap()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                // A multi-line value's continuation line reads as a record,
+                // exactly as it would for PATH; the user's own shell wrote it.
+                ("CLAUDE_CONFIG_DIR", "/inside/a/value"),
+                ("CODEX_HOME", "/Users/me/.codex-work"),
+                ("OPENCODE_CONFIG_DIR", "/Users/me/oc"),
+            ]
+        );
+        assert!(extract_side_env(b"CODEX_HOME=/x\n", b"__M__", &SIDE_ENV_VARS).is_empty());
+    }
+
+    /// The side map is never exported: `PATH` stays the only variable this
+    /// module writes into the process environment.
+    #[test]
+    fn only_path_is_ever_written_to_the_process_environment() {
+        let source = include_str!("login_shell_env.rs");
+        let production = source_slice(source, "#[cfg(unix)]\npub fn load_login_shell_env", "\n}\n");
+        let write = format!("{}(", "set_var");
+        assert_eq!(
+            production.matches(write.as_str()).count(),
+            1,
+            "{production}"
+        );
+        assert!(production.contains(&format!("{write}\"PATH\", &path)")));
     }
 
     #[test]

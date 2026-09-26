@@ -70,8 +70,8 @@ is a **false fail** via SIGPIPE after a successful command.
 ## Delegating parallel work
 
 Use headless agents in separate git worktrees for batch fan-out. PaneFlow's
-terminal panes, read-only MCP bridge, and lifecycle hooks remain available
-for interactive work. See `docs/mcp-bridge.md`.
+terminal panes, JSON-RPC socket, and lifecycle hooks remain available
+for interactive work. See `docs/user/scripting.md`.
 
 Fan-out works when the worker does **not** have to discover anything.
 Give exact `file:line` + the cfg/expression as written + the action.
@@ -211,12 +211,7 @@ Detailed styling conventions are in ARCHITECTURE.md.
 
 The contract lives in `TerminalState::Drop` (`terminal/pty_session.rs`): pin every live process group in the PTY session through an **app-owned `dup()` of the master** (`SpawnedGhostty::master_fd`, taken at spawn), SIGTERM them synchronously, drop the external guards, then `GhosttySession::shutdown()`, close the dup, and SIGKILL 100 ms later with start-time pins re-checked. **The runtime thread never signals**: on an app-initiated shutdown or a natural exit it only reaps (`reap_child_bounded`); `terminate_child` survives solely for the engine-failure paths (runtime failed, `waitid` failed, the startup and panic guards). `dropping_the_state_kills_background_and_stopped_jobs_in_the_pty_session` pins the outcome with a live shell.
 
-## MCP and crash reporting
-
-Keep the MCP bridge GPU-free and read-only (`list_panes`, `read_pane`, `search_pane`, `whoami`).
-The embedded bridge installs through `paneflow mcp install` or **Settings → MCP Servers**,
-with status/repair handled off the render thread. Preserve idempotent, no-clobber,
-backup-and-atomic-write behavior. See `docs/mcp-bridge.md`.
+## Crash reporting
 
 Sentry initializes only on GUI launch when `crash_reporting` is enabled. Preserve
 `send_default_pii(false)`, the fixed server name, home-path redaction, and the

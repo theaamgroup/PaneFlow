@@ -3,12 +3,11 @@
 PaneFlow's Settings panel is the human UI for common preferences. It is
 not the full configuration reference. Use it for the settings you adjust
 often: editor, shell, theme, shortcuts, notifications, terminal display,
-sidebar order, new-tab branches, agent launchers, AI access, and MCP setup.
+sidebar order, new-tab branches, agent launchers, and AI access.
 
-**TL;DR.** Most Settings rows write to `paneflow.json` and hot-reload
-  after the file is saved. MCP Servers is different: it installs or
-  repairs PaneFlow's MCP bridge in supported agent configs. Advanced keys
-  remain available in [`paneflow.json`](configuration/schema.md).
+**TL;DR.** Settings rows write to `paneflow.json` and hot-reload
+  after the file is saved. Advanced keys remain available in
+  [`paneflow.json`](configuration/schema.md).
 
 ## Settings map
 
@@ -20,23 +19,17 @@ sidebar order, new-tab branches, agent launchers, AI access, and MCP setup.
 | Terminal           | Cursor shape and color, font family, font size, font weight, line height, cell width, integrated glyphs, and color emoji.                            | `terminal.cursor_shape`, `terminal.cursor_color`, `font_family`, `font_size`, `font_weight`, `line_height`, `cell_width`, `terminal.integrated_glyphs`, `terminal.color_emoji`                              | Display controls hot-reload. Cursor shape applies to the next new terminal. |
 | Workspaces         | Sidebar auto-sort, and the default branch for new tabs, including a per-workspace override.                                                          | `workspace_auto_sort`, `new_tab_branch`, `workspace_new_tab_branches`                                                                                                                                       | Hot-reloads. Open terminals keep their checkout.    |
 | AI Agent           | Whether the Agent sessions sidebar opens beside the New pane picker, and launcher button visibility. | `new_pane_shows_sessions`, `*_button_visible` | Hot-reloads. |
-| MCP Servers        | Installs or repairs the bundled `paneflow-mcp` bridge for Claude Code, Codex, Gemini, and opencode.                                                  | Agent config files, not `paneflow.json`                                                                                                                                                                     | Re-run after a PaneFlow update or when an agent config changes.             |
 
-## AI access vs MCP
+## AI access
 
 The General page's Permissions and AI access sections control how
 PaneFlow launches Claude Code and how much automation a trusted CLI client
-can perform. MCP remains read-only.
+can perform.
 
 `claude_code_bypass_permissions` only affects Claude Code launches. When
 enabled, PaneFlow launches Claude Code with
 `--permission-mode bypassPermissions`. It does not change Codex,
-OpenCode, Gemini, or MCP behavior.
-
-MCP Servers is a separate operational page. It registers the bundled
-`paneflow-mcp` server so supported agents can list, read, and search
-PaneFlow panes. It touches the agents' own config files and can be run
-again safely.
+OpenCode, or Gemini behavior.
 
 ## Config-only controls
 

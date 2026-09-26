@@ -205,7 +205,7 @@ pub struct WorkspaceSession {
     pub tabs: Vec<TabSession>,
     /// Index into [`WorkspaceSession::tabs`] of the tab visible at save time.
     /// Clamped at restore; this is a *persistence* index, never an address -
-    /// no IPC or MCP surface exposes it (FR-07).
+    /// no IPC method exposes it (FR-07).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub active_tab: usize,
     /// v1 only: the single layout tree a workspace used to own. Always `None`

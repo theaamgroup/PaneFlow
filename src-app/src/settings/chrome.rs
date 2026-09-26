@@ -126,22 +126,14 @@ const NAV_GROUPS: &[NavGroup] = &[
     },
     NavGroup {
         label: "Integrations",
-        items: &[
-            NavItem {
-                section: SettingsSection::AiAgent,
-                label: "AI Agent",
-                icon: "icons/sparkles.svg",
-                keywords: &[
-                    "ai", "agent", "claude", "codex", "gemini", "launcher", "tab bar",
-                ],
-            },
-            NavItem {
-                section: SettingsSection::McpServers,
-                label: "MCP Servers",
-                icon: "icons/server.svg",
-                keywords: &["mcp", "bridge", "server", "integration"],
-            },
-        ],
+        items: &[NavItem {
+            section: SettingsSection::AiAgent,
+            label: "AI Agent",
+            icon: "icons/sparkles.svg",
+            keywords: &[
+                "ai", "agent", "claude", "codex", "gemini", "launcher", "tab bar",
+            ],
+        }],
     },
 ];
 
@@ -153,7 +145,6 @@ pub(crate) fn section_title(section: SettingsSection) -> &'static str {
         SettingsSection::Shortcuts => "Keyboard Shortcuts",
         SettingsSection::Terminal => "Terminal",
         SettingsSection::AiAgent => "AI Agent",
-        SettingsSection::McpServers => "MCP Servers",
         SettingsSection::Workspaces => "Workspaces",
     }
 }
@@ -408,7 +399,6 @@ impl PaneFlowApp {
             SettingsSection::Appearance => self.render_appearance_content(cx).into_any_element(),
             SettingsSection::Terminal => self.render_terminal_content(cx).into_any_element(),
             SettingsSection::AiAgent => self.render_ai_agent_content(cx).into_any_element(),
-            SettingsSection::McpServers => self.render_mcp_servers_content(cx).into_any_element(),
             SettingsSection::Workspaces => self.render_workspaces_content(cx).into_any_element(),
             // Handled above; a page that owns its scroll never reaches here.
             SettingsSection::Shortcuts => gpui::Empty.into_any_element(),
@@ -531,8 +521,7 @@ impl PaneFlowApp {
 
     /// Switch the active settings section, resetting any per-page ephemeral UI
     /// (font picker, terminal dropdowns, in-progress shortcut recording) so a
-    /// popover never lingers across a nav change. Warms the MCP status when
-    /// the MCP page is opened.
+    /// popover never lingers across a nav change.
     pub(crate) fn select_settings_section(
         &mut self,
         section: SettingsSection,
@@ -564,9 +553,6 @@ impl PaneFlowApp {
             // frame renders, and `effective_shortcuts` may have changed since
             // the page was last open.
             self.rebuild_shortcut_rows(cx);
-        }
-        if section == SettingsSection::McpServers {
-            self.refresh_mcp_status(cx);
         }
         self.settings_focus.focus(window, cx);
         cx.notify();

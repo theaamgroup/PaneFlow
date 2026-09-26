@@ -21,7 +21,7 @@ and dropped (see [archived execution-plan revision](https://github.com/theaamgro
 | Ghostty backend | Deleted 2026-08-25; **restored as the only engine by #184 on 2026-08-31** | Was verified unreachable on macOS at the time (the historical section below). Upstream v0.10.0 made macOS a Ghostty target; Phase 1 vendored the crates and the darwin archive, Phase 2 swapped the session host and deleted Alacritty, keeping this fork's pinned teardown on top (trap 18). |
 | Self-update | **Sparkle 2, added by #119.** The deleted hand-rolled updater stays deleted | Hourly background checks, EdDSA + Developer ID verification, silent download, install on ordinary quit, no forced relaunch or update UI. No minisign and no `src-app/src/update/`. |
 | Telemetry | **Deleted** (post-2c grind). Do not resurrect PostHog | Never set `POSTHOG_API_KEY`. Crate, app module, consent UI, and `build.rs` env directives are gone. |
-| Branding | Product stays **PaneFlow**. The 2d rename to PanesCLI was scoped and dropped | Task 12 still replaced *upstream's* bundle id, authors and homepage. Binary, CLI, config dir, MCP server and `PANEFLOW_*` stay. The pane-driving skill was later removed (#609). See [archived execution-plan revision](https://github.com/theaamgroup/PaneFlow/commit/336cdada) |
+| Branding | Product stays **PaneFlow**. The 2d rename to PanesCLI was scoped and dropped | Task 12 still replaced *upstream's* bundle id, authors and homepage. Binary, CLI, config dir and `PANEFLOW_*` stay. The pane-driving skill (#609) and the MCP server (#857) were later removed. See [archived execution-plan revision](https://github.com/theaamgroup/PaneFlow/commit/336cdada) |
 | gpui dependency | Pin `zed-industries/zed` by exact revision, keep the AAM fork only as a cold backup | `Cargo.lock` and all three Cargo dependency entries pin the revision, so the risk is availability, not drift. Never restore the old `arthjean/zed` source. |
 | Apple signing | AAM Developer ID, signed and notarized DMG | Other AAM Macs can install without Gatekeeper warnings |
 
@@ -40,7 +40,7 @@ Task 12 still replaced *upstream's* identity so this fork is not signed as
 | Bundle identifier | `com.theaamgroup.paneflow` |
 | Binary and CLI | `paneflow` |
 | Config dir | `~/Library/Application Support/paneflow/paneflow.json`. Driven by `APP_SUBDIR` in `crates/paneflow-config/src/loader.rs` via `dirs::config_dir()`. NOT `~/.config`: that is the Linux path and an earlier draft of this spec had it wrong. |
-| MCP server | `paneflow` |
+| MCP server | Removed (#857); agents read panes over the JSON-RPC socket |
 | Pane-driving automation | Removed (#609); use headless agents in separate worktrees |
 | Env var prefix | `PANEFLOW_*` |
 
@@ -62,7 +62,7 @@ Verified load-bearing. Each of these looks like cruft and is not.
 - `rust-toolchain.toml`: the 1.98.0 pin. The dep graph floor is 1.92 (oo7 0.6, cosmic-text 0.17, smol_str 0.3, several wgpu crates).
 - `LICENSE`: GPL-3.0-or-later, mandatory. GPUI is a Zed fork.
 - `CLAUDE.md`: the single most useful file in the repo. Real build and test commands, annotated module tree, thread model, keystroke-to-pixel data flow, and a Gotchas section with hard-won GPUI behaviour.
-- `ARCHITECTURE.md`, `docs/hooks.md`, `docs/mcp-bridge.md`, `docs/debugging-rendering.md`, `docs/user/configuration/schema.md`, `docs/user/scripting/reference.md`.
+- `ARCHITECTURE.md`, `docs/hooks.md`, `docs/debugging-rendering.md`, `docs/user/configuration/schema.md`, `docs/user/scripting/reference.md`.
 - `src-app/assets/fonts/`: 23M of TTFs, `rust-embed`ed into the binary.
 - `assets/PaneFlow.icns`, `assets/Info.plist`: macOS bundle inputs. The DMG uses no custom background.
 
@@ -146,7 +146,8 @@ rather than living only in chat.
 
 1. **The pane-driving pipeline was unreliable and has been removed (#609).**
    Batch work uses one headless agent process per task in its own git worktree.
-   Terminal panes, the read-only MCP bridge, and agent lifecycle hooks remain.
+   Terminal panes, the JSON-RPC socket, and agent lifecycle hooks remain; the
+   MCP server was removed in #857.
 
 2. **Two narrow keybinding issues. Earlier drafts of this entry overstated the
    problem twice, so the evidence is spelled out here.**

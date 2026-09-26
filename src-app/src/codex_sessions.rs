@@ -78,7 +78,8 @@ pub fn sessions_root() -> Option<PathBuf> {
 /// `$CODEX_HOME` if set, non-empty and absolute, else `~/.codex`, then
 /// `sessions/`. A relative value is ignored (with one warning): the CLI
 /// resolves it against the pane's cwd, which this process does not share.
-/// Duplicated from `paneflow-mcp-install` (no shared crate for this helper).
+/// Same resolution as `paneflow_agent_config::codex_config_dir_from`, plus the
+/// relative-path check that helper does not make.
 fn sessions_root_from(home: Option<PathBuf>, codex_home: Option<OsString>) -> Option<PathBuf> {
     codex_home
         .map(PathBuf::from)

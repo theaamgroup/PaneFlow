@@ -65,9 +65,9 @@ paneflow hooks status      # report per-agent install state
 paneflow hooks uninstall   # remove only PaneFlow-managed hooks (no clobber)
 ```
 
-Exit codes mirror `paneflow mcp`: `0` success (or no agent detected), `1` an
-agent errored, `2` usage error. Writes are atomic, backed up, and refuse to
-overwrite a present-but-invalid JSON config.
+Exit codes: `0` success (or no agent detected), `1` an agent errored, `2`
+usage error. Writes are atomic, backed up, and refuse to overwrite a
+present-but-invalid JSON config.
 
 `uninstall` removes only the `_paneflow_managed` matcher-groups; your own hooks
 and every other key in the file are left untouched. To fully revert: run

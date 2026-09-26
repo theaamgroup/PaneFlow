@@ -13,7 +13,8 @@
 //! ```
 //!
 //! The `paneflow` entry is what lets an agent inside a pane run `paneflow
-//! send` or `paneflow mcp install` without the user ever symlinking the bundle binary onto their login PATH. It is a symlink,
+//! send` or `paneflow hooks status` without the user ever symlinking the
+//! bundle binary onto their login PATH. It is a symlink,
 //! not a copy: the app executable is tens of megabytes, and a link keeps
 //! following the bundle Sparkle swaps in at quit. It is re-pointed on every
 //! launch whose `current_exe()` differs from the link target, so a moved
@@ -30,14 +31,13 @@
 //! unit test below. A successful verification is memoized for the process
 //! lifetime so opening another terminal does not hash every wrapper again.
 //!
-//! EP-001 US-003 - the `paneflow-mcp` bridge takes a **different** path.
-//! The shim/ai-hook helpers live in the version-pinned cache above because
-//! Paneflow re-resolves them on every launch. The bridge path, by contrast,
-//! is written into external, persistent agent configs by `paneflow mcp
-//! install`, so it must NOT change across Paneflow updates. It is extracted
-//! by `ensure_bridge_extracted` to the stable, non-versioned location
-//! `runtime_paths::bridge_binary_path()` (under `data_dir()`, not
-//! `cache_dir()`), with the same atomic-write + SHA-compared idempotency
+//! The ai-hook callback also takes a **second**, stable path. The helpers
+//! above live in the version-pinned cache because Paneflow re-resolves them
+//! on every launch, but `paneflow hooks setup` writes the ai-hook path into
+//! external, persistent agent configs, so that copy must NOT change across
+//! Paneflow updates. `ensure_ai_hook_extracted` materializes it at the
+//! non-versioned `runtime_paths::ai_hook_binary_path()` (under `data_dir()`,
+//! not `cache_dir()`), with the same atomic-write + SHA-compared idempotency
 //! used here.
 //!
 //! Unhappy path: every IO error surfaces as `anyhow::Err` so the caller
@@ -402,8 +402,8 @@ fn version_dir_in_use(dir: &Path) -> bool {
 /// #442: remove sibling `bin/<other-version>/` directories once this
 /// version's wrappers are in place. Nothing references an old version
 /// directory after the app that staged it is gone: `PANEFLOW_BIN_DIR` is
-/// rewritten for every new pane, and the bridge and hook binaries live at
-/// stable non-versioned paths under `data_dir()`.
+/// rewritten for every new pane, and the stable ai-hook copy lives at a
+/// non-versioned path under `data_dir()`.
 ///
 /// A sibling is kept if **any** per-process `.paneflow-live.<pid>` lease
 /// still names a live process. Prune only when every lease is dead (pid
@@ -469,69 +469,6 @@ fn prune_stale_version_dirs(current: &Path) {
     }
 }
 
-/// EP-001 US-003 - materialize the embedded `paneflow-mcp` bridge at the
-/// stable, non-versioned path returned by
-/// `runtime_paths::bridge_binary_path()` and return that absolute path.
-///
-/// Reuses the same atomic-write + SHA256-compared idempotency as
-/// `ensure_binaries_extracted`, but targets `data_dir()/paneflow/bin/`
-/// instead of the version-pinned cache so the path written into external
-/// agent configs survives Paneflow updates. When the embedded bytes differ
-/// from what is on disk (a new Paneflow version shipped a newer bridge), the
-/// file is rewritten atomically; when they match, this is a no-op (no churn).
-///
-/// Unhappy path: if `data_dir()` is unresolvable / unwritable,
-/// `bridge_binary_path()` returns `None` and this returns `Err` - the caller
-/// at launch logs a warn and continues (the GUI still opens; `paneflow mcp
-/// install` will later refuse cleanly rather than write a config pointing at
-/// a non-existent path).
-pub fn ensure_bridge_extracted() -> Result<PathBuf> {
-    let bridge_path = crate::runtime_paths::bridge_binary_path().ok_or_else(|| {
-        anyhow!("EP-001 US-003: data_dir() unresolvable/unwritable; cannot extract paneflow-mcp")
-    })?;
-    let target_dir = bridge_path
-        .parent()
-        .ok_or_else(|| {
-            anyhow!(
-                "EP-001 US-003: bridge path {} has no parent",
-                bridge_path.display()
-            )
-        })?
-        .to_path_buf();
-    let filename = bridge_path
-        .file_name()
-        .ok_or_else(|| {
-            anyhow!(
-                "EP-001 US-003: bridge path {} has no filename",
-                bridge_path.display()
-            )
-        })?
-        .to_string_lossy()
-        .into_owned();
-
-    // Embed source basename matches the bridge filename (`paneflow-mcp`).
-    let bytes = embedded_bytes(&filename)?;
-    let entry = Entry {
-        filename,
-        bytes: bytes.as_ref(),
-    };
-    extract_into(std::slice::from_ref(&entry), &target_dir)?;
-    Ok(bridge_path)
-}
-
-/// EP-004 US-016 - materialize the embedded `paneflow-ai-hook` callback at the
-/// stable, non-versioned path returned by
-/// `runtime_paths::ai_hook_binary_path()` and return that absolute path.
-///
-/// Exactly mirrors [`ensure_bridge_extracted`] (same atomic-write +
-/// SHA256-compared idempotency), but targets the ai-hook binary so
-/// `paneflow hooks setup` can write a durable path into external agent configs
-/// that survives Paneflow updates - unlike the version-pinned cache copy the
-/// shim resolves at launch.
-///
-/// Unhappy path: `data_dir()` unresolvable -> `ai_hook_binary_path()` is `None`
-/// -> `Err`; `paneflow hooks setup` then refuses cleanly rather than writing a
-/// config pointing at a non-existent path.
 /// Stable ai-hook path whose bytes **this** process verified against the
 /// binary it embeds. `None` until `ensure_ai_hook_extracted` succeeds.
 static VERIFIED_AI_HOOK: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -554,6 +491,20 @@ pub fn verified_ai_hook_path() -> Option<PathBuf> {
         .clone()
 }
 
+/// EP-004 US-016 - materialize the embedded `paneflow-ai-hook` callback at the
+/// stable, non-versioned path returned by
+/// `runtime_paths::ai_hook_binary_path()` and return that absolute path.
+///
+/// Same atomic-write + SHA256-compared idempotency as
+/// `ensure_binaries_extracted`, but targets `data_dir()/paneflow/bin/` so
+/// `paneflow hooks setup` can write a durable path into external agent configs
+/// that survives Paneflow updates - unlike the version-pinned cache copy the
+/// shim resolves at launch. When the embedded bytes differ from what is on
+/// disk the file is rewritten atomically; when they match, this is a no-op.
+///
+/// Unhappy path: `data_dir()` unresolvable -> `ai_hook_binary_path()` is `None`
+/// -> `Err`; `paneflow hooks setup` then refuses cleanly rather than writing a
+/// config pointing at a non-existent path.
 pub fn ensure_ai_hook_extracted() -> Result<PathBuf> {
     let hook_path = crate::runtime_paths::ai_hook_binary_path().ok_or_else(|| {
         anyhow!(
@@ -1106,8 +1057,7 @@ mod tests {
         // with every expected key. `embedded_bytes` wraps `Bins::get`;
         // a `None` here means either build.rs did not run or the
         // nested cargo build silently skipped one of the binaries.
-        // `paneflow-mcp` is included by EP-001 US-001.
-        for src in ["paneflow-shim", "paneflow-ai-hook", "paneflow-mcp"] {
+        for src in ["paneflow-shim", "paneflow-ai-hook"] {
             let name = src.to_string();
             let bytes = embedded_bytes(&name).unwrap_or_else(|e| {
                 panic!("US-008/EP-001: Bins must contain `bin/{TARGET_TRIPLE}/{name}`: {e}")
@@ -1531,57 +1481,6 @@ mod tests {
                 "muse",
             ],
         );
-    }
-
-    #[test]
-    fn ensure_bridge_extracted_produces_stable_path() {
-        // EP-001 US-003 end-to-end smoke: extract the bridge to the real
-        // data_dir-backed stable path and assert the binary lands. Skip
-        // when data_dir() is unresolvable (ephemeral CI containers with no
-        // writable $HOME) so the test no-ops rather than false-fails.
-        if crate::runtime_paths::bridge_binary_path().is_none() {
-            eprintln!("skip: bridge_binary_path() unresolvable in this environment");
-            return;
-        }
-        let path = ensure_bridge_extracted().unwrap();
-        assert!(
-            path.is_file(),
-            "EP-001 US-003: ensure_bridge_extracted must produce {}",
-            path.display()
-        );
-        assert_eq!(
-            path.file_name().unwrap().to_string_lossy(),
-            "paneflow-mcp".to_string(),
-            "EP-001 US-003: bridge filename must be paneflow-mcp"
-        );
-    }
-
-    #[test]
-    fn bridge_path_is_non_versioned_and_distinct_from_cache() {
-        // EP-001 US-003 AC: the bridge must live at a NON-versioned path
-        // (no `CARGO_PKG_VERSION` component) and be distinct from the
-        // version-pinned helper cache, so a Paneflow update does not
-        // invalidate the path written into external agent configs.
-        let Some(bridge) = crate::runtime_paths::bridge_binary_path() else {
-            eprintln!("skip: bridge_binary_path() unresolvable in this environment");
-            return;
-        };
-        let bridge_str = bridge.to_string_lossy();
-        let version = env!("CARGO_PKG_VERSION");
-        assert!(
-            !bridge_str.contains(version),
-            "EP-001 US-003: bridge path {bridge_str} must NOT embed the version {version}"
-        );
-        // Distinct from the versioned helper cache dir. Computed, not
-        // extracted: this test must not write into the real per-user cache.
-        if let Some(cache_root) = dirs::cache_dir() {
-            let cache = versioned_bin_dir(&cache_root);
-            assert_ne!(
-                bridge.parent(),
-                Some(cache.as_path()),
-                "EP-001 US-003: bridge dir must differ from the versioned cache dir"
-            );
-        }
     }
 
     #[test]

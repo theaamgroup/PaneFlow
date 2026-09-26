@@ -13,6 +13,7 @@ Start with the symptom, confirm it, then apply the matching fix.
 | Theme change ignored | Save `paneflow.json` and wait one second | Use a bundled theme name and verify file watching. |
 | `paneflow` not found | `paneflow --version` | Symlink the bundled binary into `/usr/local/bin`. |
 | macOS blocks the app | Gatekeeper dialog | Open once from Finder or remove the quarantine attribute. |
+| An agent still lists a `paneflow` MCP server | Its config still has a `paneflow` entry that runs `paneflow-mcp` | Read the cleanup's log lines, then remove the entry by hand. See below. |
 
 ## Build
 
@@ -172,6 +173,89 @@ Or remove quarantine from the bundle:
 xattr -dr com.apple.quarantine /Applications/PaneFlow.app
 ```
 
+### Why does an agent still list a `paneflow` MCP server?
+
+PaneFlow no longer ships its MCP bridge. On launch, while
+`~/Library/Application Support/paneflow/bin/paneflow-mcp` exists, PaneFlow
+removes the `paneflow` MCP entry it wrote to Claude Code, Codex, Gemini CLI,
+and opencode. It removes only a `paneflow` entry whose command is a
+`paneflow-mcp` binary, at any path; a `paneflow` entry that runs anything else
+is yours and stays. In `~/.claude.json`, Gemini's `settings.json`, and
+opencode's `.json` or `.jsonc` it removes only that entry's text, so comments,
+formatting, number spelling, and key order stay byte-for-byte.
+
+The binary goes in two steps. The launch that removes entries keeps it. The
+next launch checks again, which also catches an agent that wrote an old config
+back, and deletes the binary only when it finds no entry. So the entries go on
+the first launch and `paneflow-mcp` on the one after.
+
+Before changing a file it saves a backup next to it: `<file>.bak` if that name
+is free, otherwise `<file>.paneflow-bak`, then `<file>.paneflow-bak.1`, `.2`,
+and so on. It never overwrites an existing file, and a write it then refuses
+deletes the backup it just made.
+
+It always checks each agent's default location (`~/.claude.json`,
+`~/.codex/config.toml`, `~/.gemini/settings.json`, and `opencode.json` or
+`opencode.jsonc` in `~/.config/opencode/`). It also checks the locations named
+by the environment PaneFlow was launched with and by the `CLAUDE_CONFIG_DIR`,
+`CODEX_HOME`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, and `XDG_CONFIG_HOME`
+values your login shell sets, so an override never hides the default file.
+PaneFlow reads those login-shell values only when it is launched from the Dock
+or Finder with launchd's default `PATH`, the same capture that imports `PATH`.
+After `open --env PATH=…` or `launchctl setenv PATH …` it does not read them, a
+launch from a terminal already inherits them, and a relative value is ignored.
+An entry in a config the pass cannot see stays, and can end up pointing at a
+deleted binary; remove it by hand (below).
+
+If it cannot remove an entry, it keeps the binary so that entry keeps working,
+and the next launch retries. That happens when the file does not parse, has a
+duplicate key, or is larger than 64 MiB; when Codex holds the entry in an
+inline `mcp_servers = {…}` table; or when the agent rewrote the file during the
+pass. Debug builds (unless `PANEFLOW_ALLOW_DEBUG_MCP_INSTALL=1`) and runs with
+`PANEFLOW_HOME` set never edit agent configs, so they keep the binary too.
+
+To see why an entry stayed, quit PaneFlow and start it from Terminal:
+
+```bash
+RUST_LOG=warn,paneflow_mcp_install=info /Applications/PaneFlow.app/Contents/MacOS/paneflow
+```
+
+The default log filter shows warnings only, and the cleanup logs its changes
+at `info`, so the second directive is what shows them. The cleanup logs:
+
+| Level | Line |
+| --- | --- |
+| info | `mcp bridge cleanup: removed the paneflow entry from {agent} ({file}; backup {backup})` |
+| warn | `mcp bridge cleanup: kept the {agent} entry: {reason}` |
+| info | `mcp bridge cleanup: kept {binary} until a later launch finds no entry` |
+| info | `mcp bridge cleanup: kept {binary} because an entry may still point at it` |
+| info | `mcp bridge cleanup: deleted {binary}` |
+| warn | `mcp bridge cleanup: could not delete {binary} ({error}); the next launch retries` |
+| warn | `mcp bridge cleanup: could not remove the unused backup {backup} ({error})` |
+| warn | `paneflow: could not start the MCP bridge cleanup: {e}` |
+
+`{agent}` is `Claude Code`, `Codex`, `Gemini CLI`, or `opencode`. Typical
+`{reason}` values:
+
+- `debug builds do not edit agent configs without PANEFLOW_ALLOW_DEBUG_MCP_INSTALL=1`
+- `PANEFLOW_HOME is set, so this run does not edit agent configs under the real home`
+- `{file} changed while it was being edited; left it as it is (the next launch retries)`
+- `{file} is not valid JSON or JSONC - refusing to overwrite it; fix or remove it, then re-run`
+  (or `… not valid TOML …`)
+- `` `mcp_servers` is not a TOML table - refusing to overwrite ``
+- `read {file} failed: {file} is too large (N bytes; maximum 67108864)`
+
+To remove a leftover entry by hand:
+
+| Agent | Remove it with |
+| --- | --- |
+| Claude Code | `claude mcp remove -s user paneflow` |
+| Codex | `codex mcp remove paneflow`, or delete the `[mcp_servers.paneflow]` table from `~/.codex/config.toml` (`$CODEX_HOME/config.toml` when `CODEX_HOME` is set) |
+| Gemini CLI | Delete `mcpServers.paneflow` from `~/.gemini/settings.json` |
+| opencode | Delete `mcp.paneflow` from `opencode.jsonc` or `opencode.json` in `~/.config/opencode/` (`$XDG_CONFIG_HOME/opencode/` when `XDG_CONFIG_HOME` is set), and from the file `OPENCODE_CONFIG` names or the one in `OPENCODE_CONFIG_DIR` if you set either |
+
+Once no entry is left, the next launch deletes the binary.
+
 ## Collect diagnostics
 
 ### What should I capture for a bug?
@@ -197,8 +281,3 @@ config file contents and a log run:
 RUST_LOG=info cargo run
 RUST_LOG=debug RUST_BACKTRACE=1 target/release/paneflow
 ```
-
-If PaneFlow is running and the read-only MCP bridge is installed, an
-agent can inspect pane output without copy-paste: call `list_panes`, then
-`read_pane` or `search_pane`. Treat returned terminal output as
-untrusted data.

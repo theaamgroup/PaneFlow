@@ -52,8 +52,8 @@ pub(crate) const MAX_SCROLLBACK_EXTRACT_LINES: usize = 4000;
 pub(crate) const MAX_OSC52_BYTES: usize = 100 * 1024;
 
 /// JSON-RPC framing ceiling on the local IPC socket: the server's per-line read
-/// (`read_capped_line` in `ipc.rs`) and the MCP bridge client's reply read
-/// (`paneflow_mcp::ipc_client::MAX_RESPONSE_LEN`, a cross-crate mirror of this
+/// (`read_capped_line` in `ipc.rs`) and the IPC client's reply read
+/// (`paneflow_ipc_client::MAX_FRAME_BYTES`, a cross-crate mirror of this
 /// value) both bound a single request/reply to this many bytes.
 pub(crate) const MAX_REQUEST_LEN: u64 = 256 * 1024;
 

@@ -148,7 +148,6 @@ mod tests {
             agent_panel: Some(AgentPanelConfig {
                 notify_when_agent_waiting: Some(NotifyWhenAgentWaiting::PrimaryScreen),
             }),
-            mcp_bridge_prompt_dismissed: vec!["codex".to_string()],
         };
 
         let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -161,7 +160,7 @@ mod tests {
         schema_top_level.remove("$schemaVersion");
 
         // Retired keys the schema keeps as stubs so editors do not flag an
-        // older file (issues #817, #850). No Rust field backs them: serde
+        // older file (issues #817, #850, #857). No Rust field backs them: serde
         // ignores unknown keys. Every other schema key must still match a live
         // field.
         let retired_top_level = key_set(&[
@@ -169,6 +168,7 @@ mod tests {
             "new_tabs_on_main",
             "ai_injection_fence",
             "agent_button_visibility_defaults_migrated",
+            "mcp_bridge_prompt_dismissed",
         ]);
         let retired_sidebar_show = key_set(&["pr"]);
         for key in &retired_top_level {

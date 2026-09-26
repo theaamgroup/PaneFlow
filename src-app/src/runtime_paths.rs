@@ -27,8 +27,8 @@
 //! `OsString`, absolute-only), the `$TMPDIR` acceptance (non-UTF-8, empty, or
 //! not an existing directory reads as unset), the fallback chain, or the
 //! `sun_path` ceiling must be
-//! mirrored there, or the CLI/MCP client dials an endpoint the server never
-//! bound.
+//! mirrored there, or the CLI and ai-hook clients dial an endpoint the
+//! server never bound.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -280,38 +280,29 @@ pub fn data_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Stable, **non-versioned** absolute path of the embedded `paneflow-mcp`
-/// bridge binary (EP-001 US-003).
-///
-/// Unlike the shim / ai-hook helpers - which live under
-/// `cache_dir()/paneflow/bin/<VERSION>/` and are re-resolved by Paneflow on
-/// every launch - the bridge path is written into **external, persistent
-/// agent configs** (`~/.claude.json`, `~/.codex/config.toml`, ...) by
-/// `paneflow mcp install`. A version-pinned path would go stale on the next
-/// Paneflow update, and `cache_dir()` can be purged by the OS. So the bridge
-/// lives under `data_dir()` (durable, non-versioned):
+/// Legacy path of the retired `paneflow-mcp` bridge binary, which older
+/// builds extracted on every launch (issue #857).
 ///
 /// macOS: `~/Library/Application Support/paneflow/bin/paneflow-mcp`
 ///
-/// Returns `None` when `data_dir()` is unresolvable or unwritable. Callers
-/// (`ai_hooks::extract::ensure_bridge_extracted`, and later `paneflow mcp
-/// install`) must treat `None` as "refuse to register a config pointing at a
-/// path that does not exist" rather than fabricating a path.
+/// Nothing extracts it any more. The first-launch cleanup
+/// (`paneflow_mcp_install::remove_legacy_bridge`) runs only while this file
+/// exists, removes the agent-config entries that point at it, and then
+/// deletes it. Issue #868 removes this function with the cleanup.
 ///
-/// This only **computes** the path; it does not extract. The byte
-/// materialization + SHA-compared atomic rewrite is
-/// `ai_hooks::extract::ensure_bridge_extracted`.
+/// Returns `None` when `data_dir()` is unresolvable or unwritable. Computes
+/// the path only.
 pub fn bridge_binary_path() -> Option<PathBuf> {
     Some(data_dir()?.join("bin").join("paneflow-mcp"))
 }
 
 /// Stable, non-versioned path of the `paneflow-ai-hook` callback binary
-/// (EP-004 US-016, prd-cli-agent-orchestration). Same rationale as
-/// [`bridge_binary_path`]: `paneflow hooks setup` writes this path into
-/// **external, persistent agent configs** (`~/.claude/settings.json`, …), so it
-/// must survive Paneflow updates - unlike the version-pinned shim/ai-hook copy
-/// under `cache_dir()/paneflow/bin/<VERSION>/` that the shim itself resolves at
-/// launch. Lives alongside the bridge under `data_dir()/paneflow/bin/`:
+/// (EP-004 US-016, prd-cli-agent-orchestration). `paneflow hooks setup` writes
+/// this path into **external, persistent agent configs**
+/// (`~/.claude/settings.json`, …), so it must survive Paneflow updates -
+/// unlike the version-pinned shim/ai-hook copy under
+/// `cache_dir()/paneflow/bin/<VERSION>/` that the shim itself resolves at
+/// launch, and which the OS may purge. Lives under `data_dir()/paneflow/bin/`:
 ///
 /// macOS: `~/Library/Application Support/paneflow/bin/paneflow-ai-hook`
 ///
@@ -321,18 +312,20 @@ pub fn ai_hook_binary_path() -> Option<PathBuf> {
     Some(data_dir()?.join("bin").join("paneflow-ai-hook"))
 }
 
-/// Opt-in for writing a debug-build MCP-bridge / ai-hook path into durable
-/// agent configs (`~/.claude.json`, `$CLAUDE_CONFIG_DIR/settings.json`, …).
+/// Opt-in for a debug build to edit durable agent configs: `paneflow hooks
+/// setup` writing the debug ai-hook path into `$CLAUDE_CONFIG_DIR/settings.json`,
+/// and the first-launch MCP-bridge cleanup editing `~/.claude.json` and the
+/// other agents' configs. The name predates the bridge's removal (issue #857).
 /// Value-gated (`=1` only), matching `PANEFLOW_ALLOW_MULTIPLE` (#53): unset,
 /// empty, `0`, and `false` still refuse.
 pub(crate) const ALLOW_DEBUG_MCP_INSTALL_ENV: &str = "PANEFLOW_ALLOW_DEBUG_MCP_INSTALL";
 
-/// Whether this process may register the extracted debug-namespaced
-/// `paneflow-mcp` / `paneflow-ai-hook` path with Claude/Codex/Gemini/opencode.
+/// Whether this process may edit durable agent configs: register the extracted
+/// debug-namespaced `paneflow-ai-hook` path, or run the bridge cleanup's
+/// config edits.
 ///
 /// Release builds always allow. Debug builds extract under `paneflow-dev/`
 /// and must not persist that path unless `PANEFLOW_ALLOW_DEBUG_MCP_INSTALL=1`.
-/// Does not bake `PANEFLOW_SOCKET_PATH` into the agent entry (D5).
 pub(crate) fn durable_agent_install_allowed() -> bool {
     durable_agent_install_allowed_from(
         cfg!(debug_assertions),
@@ -354,6 +347,38 @@ pub(crate) fn durable_agent_install_refusal_message() -> String {
         "refusing to write a debug-build path (`paneflow-dev`) into durable agent configs. \
          Use a release build or the installed .app, or set {ALLOW_DEBUG_MCP_INSTALL_ENV}=1 to override."
     )
+}
+
+/// Why the first-launch MCP-bridge cleanup must not edit agent configs in this
+/// process, or `None` when it may (issue #857). The cleanup then only reads,
+/// and keeps the bridge binary while an entry still points at one.
+pub(crate) fn legacy_bridge_edit_refusal() -> Option<&'static str> {
+    legacy_bridge_edit_refusal_from(
+        cfg!(debug_assertions),
+        std::env::var(ALLOW_DEBUG_MCP_INSTALL_ENV).ok().as_deref(),
+        std::env::var_os(paneflow_config::loader::HOME_ENV),
+    )
+}
+
+/// Pure truth table so tests do not mutate process env. Any non-empty
+/// `PANEFLOW_HOME` refuses, even one the app ignores as relative: isolated
+/// smoke and bench runs set it, and agent configs live under the real `$HOME`.
+pub(crate) fn legacy_bridge_edit_refusal_from(
+    debug_build: bool,
+    override_value: Option<&str>,
+    paneflow_home: Option<OsString>,
+) -> Option<&'static str> {
+    if paneflow_home.is_some_and(|home| !home.is_empty()) {
+        return Some(
+            "PANEFLOW_HOME is set, so this run does not edit agent configs under the real home",
+        );
+    }
+    if !durable_agent_install_allowed_from(debug_build, override_value) {
+        return Some(
+            "debug builds do not edit agent configs without PANEFLOW_ALLOW_DEBUG_MCP_INSTALL=1",
+        );
+    }
+    None
 }
 
 #[cfg(unix)]
@@ -396,6 +421,36 @@ mod debug_install_tests {
         assert!(!durable_agent_install_allowed_from(true, Some("false")));
         assert!(!durable_agent_install_allowed_from(true, Some("true")));
         assert!(durable_agent_install_allowed_from(true, Some("1")));
+    }
+
+    #[test]
+    fn legacy_bridge_cleanup_edits_only_in_release_or_with_the_override_and_no_home() {
+        let home = || Some(OsString::from("/tmp/paneflow-smoke"));
+        assert_eq!(legacy_bridge_edit_refusal_from(false, None, None), None);
+        assert_eq!(legacy_bridge_edit_refusal_from(true, Some("1"), None), None);
+        assert_eq!(
+            legacy_bridge_edit_refusal_from(false, None, Some(OsString::new())),
+            None,
+            "an empty PANEFLOW_HOME is unset"
+        );
+        for value in [None, Some(""), Some("0"), Some("true")] {
+            let refusal = legacy_bridge_edit_refusal_from(true, value, None)
+                .unwrap_or_else(|| panic!("debug build with {value:?} must refuse"));
+            assert!(
+                refusal.contains("PANEFLOW_ALLOW_DEBUG_MCP_INSTALL=1"),
+                "{refusal}"
+            );
+        }
+        for (debug, value) in [(false, None), (true, Some("1"))] {
+            let refusal = legacy_bridge_edit_refusal_from(debug, value, home())
+                .unwrap_or_else(|| panic!("PANEFLOW_HOME must refuse ({debug}, {value:?})"));
+            assert!(refusal.contains("PANEFLOW_HOME"), "{refusal}");
+        }
+        assert!(
+            legacy_bridge_edit_refusal_from(false, None, Some(OsString::from("relative/home")))
+                .is_some(),
+            "a relative PANEFLOW_HOME still marks an isolated run"
+        );
     }
 
     #[test]

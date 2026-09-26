@@ -11,10 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 # US-005: idempotent merge of `.claude/settings.local.json` + atomic rename.
-# `preserve_order` matches paneflow-mcp-install: without it `serde_json::Map` is a
+# `preserve_order` keeps the user's key order: without it `serde_json::Map` is a
 # BTreeMap and every shim rewrite silently alphabetizes the user's config keys.
 # `cargo test --workspace` cannot catch this - feature unification turns the
-# feature on there, while the nested `release-min` build that ships has it off.
+# feature on there when any other workspace crate enables it, while the nested
+# `release-min` build that ships has it off.
 serde_json = { workspace = true, features = ["preserve_order"] }
 tempfile.workspace = true
 # Cross-platform file identity for the hardlink loop guard.

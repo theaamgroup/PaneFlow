@@ -600,7 +600,7 @@ impl UiColors {
 /// [`ui_colors_with`] under the hood after a single theme lookup --
 /// render paths that already have a `TerminalTheme` in hand should
 /// call [`ui_colors_with`] directly to avoid re-locking the theme
-/// cache (the sidebar and the MCP settings tab do this).
+/// cache (the Appearance theme previews and the terminal element do this).
 pub fn ui_colors() -> UiColors {
     let theme = super::watcher::active_theme();
     ui_colors_with(&theme)
