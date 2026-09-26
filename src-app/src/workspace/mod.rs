@@ -978,6 +978,65 @@ mod tests {
         });
     }
 
+    /// Issue #474: zooming (`handle_toggle_zoom`) moves the whole tree into
+    /// `saved_layout` and leaves only the zoomed leaf in `root`, so that leaf
+    /// sits in BOTH trees. `collect_panes` is the both-trees walk the close
+    /// confirmation, agent status and the sidebar sweeps rely on: it must
+    /// reach the pane parked under the zoom, and list the zoomed one once.
+    ///
+    /// Asserted in both directions off one fixture: the `root`-only walk is
+    /// evaluated too, because "the walk finds two panes" alone would pass
+    /// against a fixture that was never zoomed. The tab-level walk is checked
+    /// on its own, since the workspace walk's cross-tab de-duplication would
+    /// hide a duplicate coming out of a single tab.
+    #[gpui::test]
+    fn collect_panes_reaches_zoom_parked_panes_once(cx: &mut TestAppContext) {
+        use crate::layout::SplitDirection;
+
+        let cx = cx.add_empty_window();
+        let zoomed = terminal_pane(cx, None);
+        let parked = terminal_pane(cx, None);
+        let root = LayoutTree::from_panes_equal(
+            SplitDirection::Vertical,
+            vec![zoomed.clone(), parked.clone()],
+        )
+        .expect("two panes build a container");
+        let mut ws = Workspace::build(1, "ws".to_string(), String::new(), root);
+
+        // Zoom the tab exactly as `handle_toggle_zoom` does: the tree moves to
+        // `saved_layout` and `root` keeps only the zoomed leaf.
+        let full = ws.active_tab_mut().root.take().expect("the tab has a tree");
+        ws.active_tab_mut().saved_layout = Some(full);
+        ws.active_tab_mut().root = Some(LayoutTree::Leaf(zoomed.clone()));
+        assert!(ws.is_zoomed());
+
+        let root_only = ws
+            .active_tab()
+            .root
+            .as_ref()
+            .map(LayoutTree::collect_leaves)
+            .unwrap_or_default();
+        assert_eq!(
+            root_only,
+            vec![zoomed.clone()],
+            "a `root`-only walk sees just the zoomed leaf and misses the parked pane"
+        );
+
+        let expected = vec![zoomed, parked];
+        let tab_panes = ws.active_tab().collect_panes();
+        assert_eq!(
+            tab_panes.len(),
+            2,
+            "the zoomed leaf is in both trees and must be listed once"
+        );
+        assert_eq!(tab_panes, expected, "the tab walk reaches the parked pane");
+        assert_eq!(
+            ws.collect_panes(),
+            expected,
+            "the workspace walk reaches the parked pane, once each"
+        );
+    }
+
     #[gpui::test]
     fn reorder_tab_keeps_the_same_tab_visible(cx: &mut TestAppContext) {
         // US-011: reordering is a view operation - the tab you were looking at

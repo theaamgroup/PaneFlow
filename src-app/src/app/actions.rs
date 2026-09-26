@@ -50,7 +50,6 @@ actions!(
         LayoutMainVertical,
         LayoutTiled,
         SplitEqualize,
-        SwapPane,
         ToggleSearch,
         ToggleSearchRegex,
         UndoClosePane,
@@ -146,10 +145,13 @@ mod tests {
     /// Keybindings - and both were left behind when `ShowSystemInfo` landed
     /// (#190). Count the real block and read the real doc off disk, so the
     /// next action cannot drift the number again.
+    ///
+    /// `docs/user/keybindings.md` quotes the same "N actions total" and says
+    /// this test fails if it drifts, so it is read here too.
     #[test]
     fn claude_md_action_count_matches_the_actions_macro() {
         let declared = actions_macro_entries(include_str!("actions.rs"));
-        assert_eq!(declared, 76, "review action surface is pinned");
+        assert_eq!(declared, 75, "review action surface is pinned");
 
         let claude_md = include_str!("../../../CLAUDE.md");
         for phrase in ["GPUI action types", "actions total"] {
@@ -160,6 +162,15 @@ mod tests {
                 "CLAUDE.md says `{quoted} {phrase}` but `actions!` declares {declared}"
             );
         }
+
+        let keybindings_md = include_str!("../../../docs/user/keybindings.md");
+        let phrase = "actions total";
+        let quoted = number_before(keybindings_md, phrase)
+            .unwrap_or_else(|| panic!("docs/user/keybindings.md must say `N {phrase}`"));
+        assert_eq!(
+            quoted, declared,
+            "docs/user/keybindings.md says `{quoted} {phrase}` but `actions!` declares {declared}"
+        );
     }
 
     /// Identifier lines inside the `actions!` list, comma-independent (the

@@ -3,7 +3,7 @@
 //! Part of the US-023 workspace_ops decomposition - behaviour identical to
 //! the pre-refactor `main.rs` implementation.
 
-use gpui::{Context, Focusable, Window};
+use gpui::{Context, Window};
 use paneflow_config::schema::AppMode;
 
 use super::WorkspaceFocusTarget;
@@ -18,15 +18,6 @@ impl PaneFlowApp {
             AppMode::Cli => self
                 .active_workspace()
                 .and_then(|ws| ws.active_tab().root.as_ref()),
-        }
-    }
-
-    pub(crate) fn nav_root_mut(&mut self) -> Option<&mut LayoutTree> {
-        match self.mode {
-            AppMode::Diff => self.review.layout.as_mut(),
-            AppMode::Cli => self
-                .active_workspace_mut()
-                .and_then(|ws| ws.active_tab_mut().root.as_mut()),
         }
     }
 
@@ -69,41 +60,6 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // When swap mode is active, perform the swap instead of just moving focus
-        if let Some(source) = self.swap_source.clone() {
-            self.set_swap_source(None, cx);
-
-            // Issue #471: the source is a weak handle now, so a pane closed
-            // while the swap was armed is already gone - which is the point,
-            // its kill ladder ran. A departed source is then indistinguishable
-            // from one that left the tree, and takes the identical path below:
-            // the focus move still happens, and the swap is refused with the
-            // same toast. Nothing here may resurrect it.
-            let source = source.upgrade();
-
-            if let Some(root) = self.nav_root() {
-                // Move focus to find the target pane
-                let moved = matches!(root.focus_in_direction(dir, window, cx), FocusNav::Moved);
-                if let Some(target) = root.focused_pane(window, cx)
-                    && source.as_ref() != Some(&target)
-                {
-                    let swapped = source
-                        .as_ref()
-                        .zip(self.nav_root_mut())
-                        .is_some_and(|(source, root)| root.swap_panes(source, &target));
-                    match source.filter(|_| swapped) {
-                        Some(source) => source.read(cx).focus_handle(cx).focus(window, cx),
-                        None => self.show_toast("Swap source pane is no longer available", cx),
-                    }
-                } else if !moved {
-                    self.show_toast("No pane in that direction", cx);
-                }
-            }
-            self.save_session(cx);
-            cx.notify();
-            return;
-        }
-
         if let Some(root) = self.nav_root()
             && !matches!(root.focus_in_direction(dir, window, cx), FocusNav::Moved)
         {

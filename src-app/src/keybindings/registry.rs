@@ -14,8 +14,8 @@ use crate::{
     RevealWorkspaceInFileManager, ScrollPageDown, ScrollPageUp, SearchNext, SearchPrev,
     SelectWorkspace1, SelectWorkspace2, SelectWorkspace3, SelectWorkspace4, SelectWorkspace5,
     SelectWorkspace6, SelectWorkspace7, SelectWorkspace8, SelectWorkspace9, SplitEqualize,
-    SplitHorizontally, SplitVertically, SwapPane, TerminalCopy, TerminalPaste, ToggleCopyMode,
-    ToggleSearch, ToggleSearchRegex, ToggleZoom, UndoClosePane,
+    SplitHorizontally, SplitVertically, TerminalCopy, TerminalPaste, ToggleCopyMode, ToggleSearch,
+    ToggleSearchRegex, ToggleZoom, UndoClosePane,
 };
 use crate::{FontSizeDecrease, FontSizeIncrease, FontSizeReset};
 
@@ -360,13 +360,6 @@ pub(super) const ACTIONS: &[ActionMeta] = &[
         group: ShortcutGroup::Panes,
     },
     ActionMeta {
-        name: "swap_pane",
-        factory: || Box::new(SwapPane),
-        context: "",
-        description: "Swap pane",
-        group: ShortcutGroup::Panes,
-    },
-    ActionMeta {
         name: "undo_close_pane",
         factory: || Box::new(UndoClosePane),
         context: "",
@@ -606,7 +599,6 @@ mod tests {
         assert!(action_from_name("close_pane").is_some());
         assert!(action_from_name("toggle_zoom").is_some());
         assert!(action_from_name("undo_close_pane").is_some());
-        assert!(action_from_name("swap_pane").is_some());
         assert!(action_from_name("split_equalize").is_some());
         assert!(action_from_name("toggle_copy_mode").is_some());
         assert!(action_from_name("toggle_primary_sidebar").is_some());

@@ -605,7 +605,6 @@ impl Pane {
                 TerminalEvent::CwdChanged(_)
                 | TerminalEvent::ActivityBurst
                 | TerminalEvent::ServiceDetected(_)
-                | TerminalEvent::CancelSwapMode
                 | TerminalEvent::SelectionCopied
                 | TerminalEvent::OpenMarkdownPath(_)
                 | TerminalEvent::OpenCodePath { .. }
@@ -2469,8 +2468,9 @@ mod ownership_tests {
     /// Both halves come off one fixture, because the positive half alone would
     /// pass against a test that never held anything: it is the strong-holder
     /// half that shows the release is real and that ONE side holder defeats
-    /// it. That side holder is exactly the shape `swap_armed_panes` and
-    /// `PaneContextMenu::pane` had.
+    /// it. That side holder is exactly the shape `PaneContextMenu::pane` had
+    /// (issue #472), as did the pane list of the since-removed keyboard swap
+    /// mode (issue #471).
     ///
     /// What this does NOT prove, and no test in this crate can: that the kill
     /// ladder itself then runs. `PaneFlowApp` binds a Unix socket and cannot
@@ -2494,8 +2494,8 @@ mod ownership_tests {
         let cx = cx.add_empty_window();
 
         // Two panes, one per tab, and the workspace is the only owner of the
-        // second - the post-fix shape, where an armed swap and an open pane
-        // menu both hold nothing but a weak handle.
+        // second - the post-fix shape, where an open pane menu holds nothing
+        // but a weak handle.
         let kept = new_pane(cx);
         let released = new_pane(cx);
         let released_weak = released.downgrade();
