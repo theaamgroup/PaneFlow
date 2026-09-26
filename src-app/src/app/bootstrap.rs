@@ -744,8 +744,6 @@ impl PaneFlowApp {
             _toast_task: None,
             toast_serial: 0,
             jump_cursor: None,
-            swap_source: None,
-            swap_armed_panes: Vec::new(),
             closed_items: Vec::new(),
             show_about_dialog: false,
             about_dialog_focus: cx.focus_handle(),

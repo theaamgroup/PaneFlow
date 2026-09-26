@@ -9,14 +9,12 @@
 //! session persistence live in their own siblings under `app/`.
 //!
 //! Module layout:
-//! - [`focus`] - focus-movement handlers (+ swap-on-focus override)
+//! - [`focus`] - focus-movement handlers
 //! - [`tab`] - tab add/close
-//! - [`swap`] - swap-mode toggle
 //! - [`layout`] - zoom, layout presets, JSON layout application
 
 mod focus;
 mod layout;
-mod swap;
 mod tab;
 
 use gpui::{App, AppContext, ClipboardItem, Context, Entity, Focusable, PathPromptOptions, Window};
@@ -3761,9 +3759,9 @@ mod tests {
     /// written - `app/review/agent.rs` holds the terminals it prefills through
     /// a generic - so it is a guard on the OWNING shapes (a field, an
     /// annotated collection) and on pane placement, not a proof of absence.
-    /// Other strong `Entity<Pane>` holders exist elsewhere (`pane_menu_open`,
-    /// `swap_armed_panes`); they are transient UI state, not hosts, and out
-    /// of this guard's scope. The guard fails with the offending `file:line`.
+    /// Other `Entity<Pane>` holders exist elsewhere (`pane_menu_open`); they
+    /// are transient UI state, not hosts, and out of this guard's scope. The
+    /// guard fails with the offending `file:line`.
     #[test]
     fn no_terminal_may_hide_behind_a_pane_surface_the_sweeps_skip() {
         use std::path::{Path, PathBuf};
