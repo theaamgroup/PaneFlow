@@ -204,16 +204,6 @@ impl PaneFlowApp {
         // the rail *starts* in - never as an animation.
         let (restored_primary_sidebar_visible, restored_primary_sidebar_animation) =
             restored_primary_sidebar(saved_session.as_ref());
-        let restored_pending_worktree_teardowns: Vec<_> = saved_session
-            .as_ref()
-            .into_iter()
-            .flat_map(|session| session.pending_worktree_teardowns.iter())
-            .filter_map(super::session::rehydrate_pending_managed_worktree)
-            .collect();
-        let restored_pending_worktree_teardowns =
-            crate::workspace::worktree::merge_managed_worktree_records(
-                restored_pending_worktree_teardowns,
-            );
 
         let session_restore =
             saved_session.and_then(super::session::PendingSessionRestore::from_session);
@@ -757,7 +747,6 @@ impl PaneFlowApp {
             swap_source: None,
             swap_armed_panes: Vec::new(),
             closed_items: Vec::new(),
-            pending_worktree_teardowns: restored_pending_worktree_teardowns,
             show_about_dialog: false,
             about_dialog_focus: cx.focus_handle(),
             system_info_dialog: None,
@@ -804,10 +793,6 @@ impl PaneFlowApp {
                 &restored_review_collapsed,
                 cx,
             );
-            // The journal was durable before the prior process attempted cleanup.
-            // Resume it only after the full app exists so completion can remove the
-            // entries and persist the cleared journal.
-            app.resume_pending_worktree_teardowns(cx);
         }
 
         // Hydrate the motion switch from the config: it gates the
@@ -1317,7 +1302,6 @@ mod tests {
             version: paneflow_config::schema::SESSION_SCHEMA_VERSION,
             active_workspace: 0,
             workspaces: Vec::new(),
-            pending_worktree_teardowns: Vec::new(),
             mode: Default::default(),
             review_layout: None,
             review_collapsed: Vec::new(),

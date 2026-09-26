@@ -743,9 +743,8 @@ impl TerminalView {
         );
         terminal.set_spawn_osc52_mode(osc52_mode);
         // Publish the resolved launch CWD before scheduling the background PTY
-        // open. Worktree retirement scans placeholders too; leaving this None
-        // creates a window where a pending spawn is invisible and its checkout
-        // can be removed before the child forks.
+        // open, so a pane whose child has not forked yet still reports where
+        // it will run (session save and the sidebar read this field).
         terminal.current_cwd = Some(params.cwd.to_string_lossy().into_owned());
         // Route the Drop-time force-kill timer through GPUI's background
         // executor instead of a detached OS thread (no thread leak per closed

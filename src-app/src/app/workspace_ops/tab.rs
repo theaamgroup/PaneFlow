@@ -179,15 +179,6 @@ impl PaneFlowApp {
             .then(|| ws.active_tab().worktree.clone())
             .flatten()
             .or_else(|| (!ws.cwd.is_empty()).then(|| std::path::PathBuf::from(&ws.cwd)));
-        // The same gate every other pane-creation path holds
-        // (`split_pane`, workspace templates): a checkout being
-        // torn down is not a place to start a shell.
-        if let Some(cwd) = cwd.as_deref()
-            && self.pending_worktree_teardown_conflicts(cwd)
-        {
-            self.show_toast("Worktree is still being retired", cx);
-            return false;
-        }
         // A preset label reaches the sidebar verbatim: strip CLI decoration
         // (spinners, zero-width glyphs) the way every other title path does.
         let title = crate::sidebar_title::clean_sidebar_title(&title).unwrap_or_default();
@@ -248,12 +239,11 @@ impl PaneFlowApp {
     /// session-drop handler's center band (`event_handlers.rs`) for issue
     /// #334, which needs the same placement for "Continue in ▸".
     ///
-    /// In order: the worktree-teardown gate every spawn path holds; the
-    /// terminal (with `command` written through `send_command` and
-    /// `declared` stamped on it); the pane in a new tab, or `None` after the
-    /// tab-cap toast; the issue #347 binding when `cwd` sits in a bound or
-    /// managed worktree ([`worktree_binding_for_cwd`]); focus, session save,
-    /// notify. Returns the terminal so a caller can schedule a prefill.
+    /// In order: the terminal (with `command` written through `send_command`
+    /// and `declared` stamped on it); the pane in a new tab, or `None` after
+    /// the tab-cap toast; the issue #347 binding when `cwd` sits in a bound
+    /// worktree ([`worktree_binding_for_cwd`]); focus, session save, notify.
+    /// Returns the terminal so a caller can schedule a prefill.
     pub(crate) fn open_agent_tab_at_cwd(
         &mut self,
         ws_idx: usize,
@@ -263,10 +253,6 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) -> Option<gpui::Entity<TerminalView>> {
         let ws_id = self.workspaces.get(ws_idx)?.id;
-        if self.pending_worktree_teardown_conflicts(&cwd) {
-            self.show_toast("Worktree is still being retired", cx);
-            return None;
-        }
         let terminal = cx.new(|cx| {
             TerminalView::with_cwd_and_profile(
                 ws_id,
@@ -290,15 +276,8 @@ impl PaneFlowApp {
         if !self.open_pane_in_new_workspace_tab(ws_idx, pane.clone(), cx) {
             return None;
         }
-        let binding = {
-            let ws = &self.workspaces[ws_idx];
-            let managed: Vec<std::path::PathBuf> = ws
-                .managed_worktrees
-                .iter()
-                .map(|worktree| worktree.path.clone())
-                .collect();
-            worktree_binding_for_cwd(&ws.bound_tab_worktrees(), &managed, &cwd)
-        };
+        let binding =
+            worktree_binding_for_cwd(&self.workspaces[ws_idx].bound_tab_worktrees(), &cwd);
         if let Some(worktree) = binding {
             let tab_idx = self.workspaces[ws_idx].active_tab_idx();
             self.set_tab_worktree(ws_idx, tab_idx, Some(worktree), cx);
@@ -466,7 +445,7 @@ impl PaneFlowApp {
         // down is a separate, destructive decision.
         self.prune_worktree_states();
         if let Some(record) = record {
-            self.push_closed_record(ClosedRecord::Tab(record), cx);
+            self.push_closed_record(ClosedRecord::Tab(record));
         }
         // Issue #79/#108: this is a focus-tracking clear, not a plain state
         // clear - the renamed sidebar row is the only element that tracks
@@ -820,17 +799,15 @@ impl PaneFlowApp {
 
 /// Issue #347 binding for a tab opened at an arbitrary `cwd`: the worktree it
 /// belongs to, when `cwd` is (or lies under) a worktree some tab is already
-/// bound to, or a worktree the workspace manages. `None` leaves the tab
-/// unbound, exactly as a dropped session at the workspace root is.
+/// bound to. `None` leaves the tab unbound, exactly as a dropped session at
+/// the workspace root is.
 pub(crate) fn worktree_binding_for_cwd(
     bound: &[String],
-    managed: &[std::path::PathBuf],
     cwd: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
     bound
         .iter()
         .map(std::path::PathBuf::from)
-        .chain(managed.iter().cloned())
         .find(|root| !root.as_os_str().is_empty() && cwd.starts_with(root))
 }
 
@@ -1003,31 +980,27 @@ mod tests {
     }
 
     #[test]
-    fn worktree_binding_binds_a_bound_or_managed_checkout_and_nothing_else() {
-        let bound = vec!["/r.worktrees/a".to_string()];
-        let managed = vec![PathBuf::from("/r.worktrees/b")];
+    fn worktree_binding_binds_a_bound_checkout_and_nothing_else() {
+        let bound = vec!["/r.worktrees/a".to_string(), "/r.worktrees/b".to_string()];
         // Equal to a bound worktree: binds to it.
         assert_eq!(
-            worktree_binding_for_cwd(&bound, &managed, Path::new("/r.worktrees/a")),
+            worktree_binding_for_cwd(&bound, Path::new("/r.worktrees/a")),
             Some(PathBuf::from("/r.worktrees/a"))
         );
-        // Under a managed worktree: binds to the root, not the subdirectory.
+        // Under a bound worktree: binds to the root, not the subdirectory.
         assert_eq!(
-            worktree_binding_for_cwd(&bound, &managed, Path::new("/r.worktrees/b/src")),
+            worktree_binding_for_cwd(&bound, Path::new("/r.worktrees/b/src")),
             Some(PathBuf::from("/r.worktrees/b"))
         );
         // Unrelated: unbound. A sibling whose name merely shares a prefix is
         // unrelated too.
+        assert_eq!(worktree_binding_for_cwd(&bound, Path::new("/r")), None);
         assert_eq!(
-            worktree_binding_for_cwd(&bound, &managed, Path::new("/r")),
+            worktree_binding_for_cwd(&bound, Path::new("/r.worktrees/ab")),
             None
         );
         assert_eq!(
-            worktree_binding_for_cwd(&bound, &managed, Path::new("/r.worktrees/ab")),
-            None
-        );
-        assert_eq!(
-            worktree_binding_for_cwd(&[String::new()], &[], Path::new("/anything")),
+            worktree_binding_for_cwd(&[String::new()], Path::new("/anything")),
             None,
             "an empty root must never bind"
         );
@@ -1035,19 +1008,16 @@ mod tests {
 
     #[test]
     fn open_agent_tab_at_cwd_holds_the_placement_contract() {
-        // Issue #334 / #347: the lifted helper gates on teardown before
-        // spawning, opens a NEW workspace tab (never the active one), returns
-        // `None` at the tab cap without focusing anything, and binds the tab
-        // through `set_tab_worktree` so the git probe follows.
+        // Issue #334 / #347: the lifted helper spawns the terminal, opens a
+        // NEW workspace tab (never the active one), returns `None` at the tab
+        // cap without focusing anything, and binds the tab through
+        // `set_tab_worktree` so the git probe follows.
         let src = include_str!("tab.rs");
         let body = src
             .split("pub(crate) fn open_agent_tab_at_cwd(")
             .nth(1)
             .and_then(|rest| rest.split("pub(crate) fn handle_new_tab(").next())
             .expect("open_agent_tab_at_cwd body");
-        let gate = body
-            .find("pending_worktree_teardown_conflicts(&cwd)")
-            .expect("teardown gate");
         let spawn = body
             .find("TerminalView::with_cwd_and_profile(")
             .expect("terminal spawn");
@@ -1060,10 +1030,7 @@ mod tests {
         let focus = body
             .find("self.pending_pane_focus = Some(pane)")
             .expect("pane focus");
-        assert!(
-            gate < spawn && spawn < opened && opened < bind && bind < focus,
-            "{body}"
-        );
+        assert!(spawn < opened && opened < bind && bind < focus, "{body}");
         assert!(
             body[opened..bind].contains("return None;"),
             "the tab cap must return None before any focus or binding: {body}"

@@ -10,7 +10,6 @@ fn make_workspace(title: &str, cwd: &str, tabs: Vec<TabSession>) -> WorkspaceSes
         active_tab: 0,
         legacy_layout: None,
         legacy_empty: false,
-        managed_worktrees: vec![],
         pinned: false,
         sidebar_collapsed: false,
         muted: false,
@@ -82,7 +81,6 @@ fn test_session_roundtrip_single_workspace() {
                 surfaces: vec![make_surface("/home/user/project")],
             })],
         )],
-        pending_worktree_teardowns: vec![],
         mode: AppMode::default(),
         review_layout: None,
         review_collapsed: Vec::new(),
@@ -93,29 +91,89 @@ fn test_session_roundtrip_single_workspace() {
     assert_eq!(state, restored);
 }
 
+/// Issue #846: a session.json written before the managed-worktree lifecycle
+/// was removed may still carry per-workspace `managed_worktrees` and the
+/// top-level `pending_worktree_teardowns` journal. No field backs either key,
+/// so serde ignores both: the workspaces load and a re-save omits both keys,
+/// entry fields included. `SESSION_SCHEMA_VERSION` stays at 2.
 #[test]
-fn pending_worktree_retirement_survives_a_session_roundtrip() {
-    let mut state = SessionState {
-        version: SESSION_SCHEMA_VERSION,
-        active_workspace: 0,
-        workspaces: vec![],
-        mode: AppMode::default(),
-        review_layout: None,
-        review_collapsed: Vec::new(),
-        primary_sidebar_collapsed: false,
-        pending_worktree_teardowns: vec![],
-    };
-    state.pending_worktree_teardowns.push(ManagedWorktreeDef {
-        path: "/tmp/repo.worktrees/feature".to_string(),
-        repo_root: "/tmp/repo".to_string(),
-        branch: "feature".to_string(),
-        teardown: "auto".to_string(),
-        directory_identity: Some("1:2:3:4".to_string()),
-    });
+fn session_managed_worktree_records_still_load() {
+    let json = r#"{
+        "version": 2,
+        "active_workspace": 1,
+        "workspaces": [
+            {
+                "title": "paneflow",
+                "cwd": "/home/user/dev/paneflow",
+                "tabs": [{
+                    "title": "feature",
+                    "worktree": "/home/user/dev/paneflow.worktrees/feature"
+                }],
+                "pinned": true,
+                "managed_worktrees": [{
+                    "path": "/home/user/dev/paneflow.worktrees/feature",
+                    "repo_root": "/home/user/dev/paneflow",
+                    "branch": "feature",
+                    "teardown": "auto",
+                    "directory_identity": "16777232:123456:1700000000:1"
+                }]
+            },
+            {
+                "title": "docs",
+                "cwd": "/home/user/dev/docs"
+            }
+        ],
+        "pending_worktree_teardowns": [{
+            "path": "/home/user/dev/paneflow.worktrees/closed",
+            "repo_root": "/home/user/dev/paneflow",
+            "branch": "closed",
+            "teardown": "keep",
+            "directory_identity": "16777232:654321:1700000000:2"
+        }],
+        "primary_sidebar_collapsed": true
+    }"#;
+    let state: SessionState = serde_json::from_str(json).unwrap();
+    assert_eq!(state.version, SESSION_SCHEMA_VERSION);
+    assert_eq!(SESSION_SCHEMA_VERSION, 2);
+    assert_eq!(state.active_workspace, 1);
+    assert!(state.primary_sidebar_collapsed);
+    assert_eq!(state.workspaces.len(), 2);
+    let paneflow = &state.workspaces[0];
+    assert_eq!(paneflow.title, "paneflow");
+    assert_eq!(paneflow.cwd, "/home/user/dev/paneflow");
+    assert!(paneflow.pinned);
+    assert_eq!(paneflow.tabs.len(), 1);
+    assert_eq!(
+        paneflow.tabs[0].worktree.as_deref(),
+        Some("/home/user/dev/paneflow.worktrees/feature"),
+        "a tab bound to a checkout an old record named keeps its binding"
+    );
+    assert_eq!(state.workspaces[1].title, "docs");
+    assert_eq!(state.workspaces[1].cwd, "/home/user/dev/docs");
 
-    let json = serde_json::to_string(&state).unwrap();
-    let restored: SessionState = serde_json::from_str(&json).unwrap();
-    assert_eq!(restored, state);
+    let written = serde_json::to_value(&state).unwrap();
+    assert!(
+        written.get("pending_worktree_teardowns").is_none(),
+        "{written}"
+    );
+    for workspace in written["workspaces"].as_array().unwrap() {
+        assert!(workspace.get("managed_worktrees").is_none(), "{written}");
+    }
+    let text = written.to_string();
+    for key in [
+        "path",
+        "repo_root",
+        "branch",
+        "teardown",
+        "directory_identity",
+    ] {
+        assert!(
+            !text.contains(&format!("\"{key}\":")),
+            "re-save still writes {key}: {text}"
+        );
+    }
+    let reloaded: SessionState = serde_json::from_str(&text).unwrap();
+    assert_eq!(reloaded, state);
 }
 
 #[test]
@@ -141,7 +199,6 @@ fn test_session_roundtrip_multiple_workspaces() {
             // An empty folder: one tab, no pane (v2 needs no `empty` marker).
             make_workspace("devops", "/home/user/infra", vec![TabSession::empty()]),
         ],
-        pending_worktree_teardowns: vec![],
         mode: AppMode::default(),
         review_layout: None,
         review_collapsed: Vec::new(),
@@ -186,7 +243,6 @@ fn test_session_roundtrip_nested_splits() {
                 ],
             })],
         )],
-        pending_worktree_teardowns: vec![],
         mode: AppMode::default(),
         review_layout: None,
         review_collapsed: Vec::new(),
@@ -217,7 +273,6 @@ fn test_session_roundtrip_with_scrollback() {
                 }],
             })],
         )],
-        pending_worktree_teardowns: vec![],
         mode: AppMode::default(),
         review_layout: None,
         review_collapsed: Vec::new(),
@@ -588,7 +643,6 @@ fn test_session_roundtrip_primary_sidebar_collapsed() {
         version: SESSION_SCHEMA_VERSION,
         active_workspace: 0,
         workspaces: vec![make_workspace("main", "/tmp", vec![TabSession::empty()])],
-        pending_worktree_teardowns: vec![],
         mode: AppMode::default(),
         review_layout: None,
         review_collapsed: Vec::new(),
@@ -624,7 +678,6 @@ fn test_session_without_primary_sidebar_key_restores_visible() {
         version: SESSION_SCHEMA_VERSION,
         active_workspace: 0,
         workspaces: vec![],
-        pending_worktree_teardowns: vec![],
         mode: AppMode::default(),
         review_layout: None,
         review_collapsed: Vec::new(),
@@ -836,7 +889,6 @@ fn tab_worktree_needs_no_schema_bump() {
                 ..Default::default()
             }],
         )],
-        pending_worktree_teardowns: vec![],
         mode: AppMode::default(),
         review_layout: None,
         review_collapsed: Vec::new(),

@@ -473,7 +473,7 @@ impl PaneFlowApp {
         {
             let workspace_id = ws.id;
             if let Some(record) = capture_closed_pane_record(pane, workspace_id, cx) {
-                self.push_closed_record(ClosedRecord::Pane(record), cx);
+                self.push_closed_record(ClosedRecord::Pane(record));
             }
         }
         // Saves the session and repaints.

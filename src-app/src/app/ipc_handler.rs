@@ -14,7 +14,6 @@
 //! verbatim, with an identical method-not-found catch-all in every handler.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, BackgroundExecutor, Context, Entity};
@@ -525,37 +524,6 @@ fn find_terminal_in_tree(
             None
         }
     }
-}
-
-/// Exclusive lifecycle ownership check over canonical worktree paths.
-/// `target_workspace` permits a split to reuse a record already owned by the
-/// workspace it extends, but every other live, undo, or retiring owner is a
-/// conflict.
-///
-/// No production caller remains (issue #603). The check stays with the
-/// managed-worktree lifecycle.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "creation-time ownership check has no production caller; the lifecycle stays"
-    )
-)]
-fn managed_worktree_path_conflicts(
-    path: &std::path::Path,
-    target_workspace: Option<usize>,
-    live: &[(usize, PathBuf)],
-    closed: &[PathBuf],
-    pending: &[PathBuf],
-) -> bool {
-    live.iter().any(|(index, owned)| {
-        (owned.starts_with(path) || path.starts_with(owned)) && Some(*index) != target_workspace
-    }) || closed
-        .iter()
-        .any(|owned| owned.starts_with(path) || path.starts_with(owned))
-        || pending
-            .iter()
-            .any(|owned| owned.starts_with(path) || path.starts_with(owned))
 }
 
 /// Where a surface lives: workspace, owning workspace tab, pane, and the
@@ -1508,49 +1476,6 @@ impl PaneFlowApp {
             .and_then(|idx| self.workspace_id_for_workspace_idx(idx));
         authorize_surface_workspace(surface_id, expected_workspace_id, actual_workspace_id)?;
         Ok(terminal)
-    }
-
-    /// Creation-time ownership check. No production caller remains (issue #603).
-    #[allow(
-        dead_code,
-        reason = "creation-time ownership check has no production caller; the lifecycle stays"
-    )]
-    pub(crate) fn managed_worktree_conflicts(
-        &self,
-        path: &std::path::Path,
-        target_workspace: Option<usize>,
-        cx: &App,
-    ) -> bool {
-        let owned: Vec<_> = self
-            .workspaces
-            .iter()
-            .enumerate()
-            .flat_map(|(index, workspace)| {
-                workspace
-                    .managed_worktrees
-                    .iter()
-                    .map(move |worktree| (index, worktree.path.clone()))
-            })
-            .collect();
-        let closed: Vec<_> = self
-            .closed_items
-            .iter()
-            .flat_map(|record| match record {
-                crate::ClosedRecord::Workspace(workspace) => workspace
-                    .managed_worktrees
-                    .iter()
-                    .map(|worktree| worktree.path.clone())
-                    .collect::<Vec<_>>(),
-                crate::ClosedRecord::Pane(_) | crate::ClosedRecord::Tab(_) => Vec::new(),
-            })
-            .collect();
-        let pending: Vec<_> = self
-            .pending_worktree_teardowns
-            .iter()
-            .map(|worktree| worktree.path.clone())
-            .collect();
-        self.live_workspace_uses_worktree(path, target_workspace, cx)
-            || managed_worktree_path_conflicts(path, target_workspace, &owned, &closed, &pending)
     }
 
     /// Prefill a prompt into a pane once its output settles (US-010,
@@ -4220,62 +4145,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn managed_worktree_path_allows_only_one_workspace_owner() {
-        use std::path::{Path, PathBuf};
-
-        let path = Path::new("/tmp/repo.worktrees/feature");
-        let live = vec![
-            (0, PathBuf::from("/tmp/repo.worktrees/feature")),
-            (1, PathBuf::from("/tmp/repo.worktrees/other")),
-        ];
-
-        assert!(super::managed_worktree_path_conflicts(
-            path,
-            None,
-            &live,
-            &[],
-            &[],
-        ));
-        assert!(super::managed_worktree_path_conflicts(
-            path,
-            None,
-            &[(1, PathBuf::from("/tmp/repo.worktrees/feature/src"))],
-            &[],
-            &[],
-        ));
-        assert!(
-            !super::managed_worktree_path_conflicts(path, Some(0), &live, &[], &[]),
-            "a split may reuse ownership already held by its target workspace"
-        );
-        assert!(super::managed_worktree_path_conflicts(
-            path,
-            Some(0),
-            &live,
-            &[PathBuf::from("/tmp/repo.worktrees/feature")],
-            &[],
-        ));
-        assert!(super::managed_worktree_path_conflicts(
-            path,
-            Some(0),
-            &live,
-            &[],
-            &[PathBuf::from("/tmp/repo.worktrees/feature")],
-        ));
-
-        let duplicate_live = vec![
-            (0, PathBuf::from("/tmp/repo.worktrees/feature")),
-            (1, PathBuf::from("/tmp/repo.worktrees/feature")),
-        ];
-        assert!(super::managed_worktree_path_conflicts(
-            path,
-            Some(0),
-            &duplicate_live,
-            &[],
-            &[],
-        ));
     }
 
     #[test]
