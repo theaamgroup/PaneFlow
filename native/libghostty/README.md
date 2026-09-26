@@ -54,10 +54,13 @@ rebuilds the archive; an independent rebuild-and-compare job is a follow-up to
 upstream's review plus the hash match above.
 
 `PANEFLOW_LIBGHOSTTY_DIR` points the build at a prepared directory instead of
-`prebuilt/aarch64-apple-darwin/`. The same checks apply: the archive, header
-and `build-info.txt` must all match the manifest, and symlinked inputs are
-rejected. The bindings always come from `native/libghostty/bindings.rs`; a
-`bindings.rs` in the prepared directory is ignored.
+`prebuilt/aarch64-apple-darwin/`. The header must match the manifest, and so
+must every `build-info.txt` value except `archive_sha256`; symlinked inputs are
+rejected. The archive is checked against the `archive_sha256` that the prepared
+directory's own `build-info.txt` records, not against the manifest's reviewed
+fingerprint above. The bindings always come from
+`native/libghostty/bindings.rs`; a `bindings.rs` in the prepared directory is
+ignored.
 
 ## ABI and licensing
 
