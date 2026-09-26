@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use tracing::warn;
 
 /// A node in the layout tree: either a leaf pane or a split container.
@@ -340,8 +339,8 @@ pub(crate) fn default_layout_pane() -> LayoutNode {
 /// A surface within a pane (terminal, browser, etc.).
 ///
 /// Older session files may still carry a surface `command` or `prompt`
-/// (issue #817). Unknown keys are ignored, so those files load and restore
-/// never reads either value.
+/// (issue #817), or a per-surface `env` map (issue #850). Unknown keys are
+/// ignored, so those files load and restore never reads any of them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SurfaceDefinition {
     /// Stable pane identity; absent in older sessions.
@@ -362,9 +361,6 @@ pub struct SurfaceDefinition {
     /// markdown file here; the field still deserializes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// Extra environment variables merged over `terminal.env`. The same
-    /// protected-key and loader-key filtering applies at PTY spawn.
-    pub env: Option<HashMap<String, String>>,
     /// Whether this surface should receive initial focus.
     pub focus: Option<bool>,
     /// Saved scrollback text (plain, ANSI stripped). Up to 4000 lines / 400K chars.
@@ -394,7 +390,6 @@ impl Default for SurfaceDefinition {
             custom_name: None,
             cwd: None,
             path: None,
-            env: None,
             focus: None,
             scrollback: None,
             agent: None,

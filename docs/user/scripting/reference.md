@@ -66,7 +66,6 @@ Relevant config keys:
 | Key                     | Default | Meaning                                                           |
 | ----------------------- | ------- | ----------------------------------------------------------------- |
 | `ai_unrestricted`       | `false` | Allows trusted AI automation to submit text without the env gate  |
-| `ai_injection_fence`    | `true`  | Wraps `surface.read` text in an untrusted terminal envelope       |
 | `submit_paste_delay_ms` | `70`    | Base delay between bracketed paste and the submit carriage return |
 | `terminal.env`          | none    | Environment variables injected into new terminals                 |
 
@@ -92,8 +91,9 @@ offset is an invalid-params error. If a requested window exceeds the IPC byte
 cap, the response preserves its newest complete rows, reports their count in
 `lines`, sets `eof: false`, and sets `truncated: true`.
 
-The `fenced` JSON-RPC param defaults to `ai_injection_fence`; pass
-`fenced: false` only from a trusted script.
+The `fenced` JSON-RPC param defaults to `true`: `surface.read` wraps its
+text in an untrusted terminal envelope unless the call passes
+`fenced: false`. Pass `fenced: false` only from a trusted script.
 
 ## Agent state fields
 

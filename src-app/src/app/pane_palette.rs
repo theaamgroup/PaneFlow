@@ -1544,7 +1544,7 @@ mod tests {
             .and_then(|rest| rest.split("\n    }\n").next())
             .expect("looks_launchable exists");
         assert!(
-            looks.contains("agent.is_installed()") && !looks.contains("is_installed_now"),
+            looks.contains("agent.is_installed()") && !looks.contains("refresh_installed_binaries"),
             "looks_launchable never blocks: {looks}"
         );
     }
@@ -1560,7 +1560,8 @@ mod tests {
             .and_then(|rest| rest.split("\n    }\n").next())
             .expect("ensure_launchable exists");
         assert!(
-            !launchable.contains("is_installed_now()"),
+            launchable.contains("self.awaits_scan()")
+                && !launchable.contains("refresh_installed_binaries"),
             "ensure_launchable must not wait on the GPUI thread: {launchable}"
         );
         let launch = src

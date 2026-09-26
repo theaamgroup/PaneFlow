@@ -77,11 +77,11 @@ PTY can drive an agent or shell. There are two relevant controls:
 | -------------------------- | ------- | ------------------------------------------------------------------ |
 | `PANEFLOW_IPC_SCRIPTING=1` | Off     | Enables text and keystroke writes for the running PaneFlow process |
 | `ai_unrestricted`          | `false` | Allows trusted AI automation to submit text without the env gate   |
-| `ai_injection_fence`       | `true`  | Wraps peer terminal output as untrusted text on `surface.read`     |
 
-Keep `ai_injection_fence` enabled. A peer pane can contain hostile
-terminal text, especially when it runs an agent over an untrusted repo.
-The fence helps an LLM treat that output as evidence, not instructions.
+`surface.read` always wraps peer terminal output as untrusted text unless
+the call passes `fenced: false`. A peer pane can contain hostile terminal
+text, especially when it runs an agent over an untrusted repo. The fence
+helps an LLM treat that output as evidence, not instructions.
 
 Pass `fenced: false` only from trusted scripts. Use `--report-file` when a
 full-screen agent may overwrite or truncate scrollback. Use `--paste`

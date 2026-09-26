@@ -63,7 +63,6 @@ pub struct AgentResult<K> {
 /// Ergonomic aliases for GUI/state code.
 pub type InstallReport = AgentResult<InstallKind>;
 pub type StatusReport = AgentResult<StatusKind>;
-pub type UninstallReport = AgentResult<UninstallKind>;
 
 /// Aggregate state used to pick the Settings button's label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,19 +81,15 @@ pub enum OverallState {
 // Install
 // ---------------------------------------------------------------------------
 
-/// Register the bridge with every detected agent. `bridge` is the resolved
-/// stable path (`runtime_paths::bridge_binary_path()`), which must already
-/// exist on disk. `Err` is a whole-operation refusal (bridge missing / data
-/// dir unresolved) that wrote nothing; `Ok` carries one entry per agent.
-pub fn install_all(bridge: Option<&Path>) -> Result<Vec<AgentResult<InstallKind>>, String> {
-    install_with(bridge, &agents::default_writers())
-}
-
-/// [`install_all`], treating every agent whose id is in `known_present` as
-/// present whatever the PATH scan says. The GUI passes the agents its pane
-/// process scan has seen running: a launcher started from Finder can carry
-/// a `PATH` without the agent's binary while a login shell in a pane still
-/// runs it, and that agent may have no config file yet.
+/// Register the bridge with every detected agent, treating every agent whose
+/// id is in `known_present` as present whatever the PATH scan says. `bridge`
+/// is the resolved stable path (`runtime_paths::bridge_binary_path()`), which
+/// must already exist on disk. `Err` is a whole-operation refusal (bridge
+/// missing / data dir unresolved) that wrote nothing; `Ok` carries one entry
+/// per agent. The GUI passes the agents its pane process scan has seen
+/// running: a launcher started from Finder can carry a `PATH` without the
+/// agent's binary while a login shell in a pane still runs it, and that agent
+/// may have no config file yet.
 pub fn install_all_with_known_present(
     bridge: Option<&Path>,
     known_present: &[&str],
@@ -193,16 +188,10 @@ pub(crate) fn install_with_known_present(
 // Status
 // ---------------------------------------------------------------------------
 
-/// Read-only state of the bridge registration per agent. Never writes.
-/// `bridge` is the current expected path used to flag staleness.
-#[must_use]
-pub fn status_all(bridge: Option<&Path>) -> Vec<AgentResult<StatusKind>> {
-    status_with(bridge, &agents::default_writers())
-}
-
-/// [`status_all`], treating every agent whose id is in `known_present` as
-/// present whatever the PATH scan says (see
-/// [`install_all_with_known_present`]).
+/// Read-only state of the bridge registration per agent, treating every agent
+/// whose id is in `known_present` as present whatever the PATH scan says (see
+/// [`install_all_with_known_present`]). Never writes. `bridge` is the current
+/// expected path used to flag staleness.
 #[must_use]
 pub fn status_all_with_known_present(
     bridge: Option<&Path>,
@@ -281,11 +270,7 @@ pub fn overall_state(statuses: &[AgentResult<StatusKind>]) -> OverallState {
 // Uninstall
 // ---------------------------------------------------------------------------
 
-/// Remove the `paneflow` entry from every detected agent.
-pub fn uninstall_all() -> Vec<AgentResult<UninstallKind>> {
-    uninstall_with(&agents::default_writers())
-}
-
+/// Remove the `paneflow` entry from every detected agent in `writers`.
 pub(crate) fn uninstall_with(
     writers: &[Box<dyn AgentConfigWriter>],
 ) -> Vec<AgentResult<UninstallKind>> {

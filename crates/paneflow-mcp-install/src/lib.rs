@@ -43,8 +43,8 @@ pub use api::{
     install_agent_with_known_present, install_all_with_known_present, status_all_with_known_present,
 };
 pub use api::{
-    install_all, overall_state, status_all, uninstall_all, AgentResult, InstallKind, InstallReport,
-    OverallState, StatusKind, StatusReport, UninstallKind, UninstallReport,
+    overall_state, AgentResult, InstallKind, InstallReport, OverallState, StatusKind, StatusReport,
+    UninstallKind,
 };
 pub use cli::run_cli;
 pub use hooks::run_hooks_cli;

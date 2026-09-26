@@ -204,32 +204,3 @@ fn test_nested_split_validation() {
         _ => panic!("expected split"),
     }
 }
-
-#[test]
-fn test_surface_with_env_and_focus() {
-    let node = validated(
-        r#"{
-        "type": "pane",
-        "surfaces": [{
-            "surface_type": "terminal",
-            "name": "main",
-            "command": "cargo run",
-            "cwd": "/tmp",
-            "env": {"RUST_LOG": "debug"},
-            "focus": true
-        }]
-    }"#,
-    );
-    match &node {
-        LayoutNode::Pane { surfaces } => {
-            assert_eq!(surfaces.len(), 1);
-            let s = &surfaces[0];
-            assert_eq!(s.name.as_deref(), Some("main"));
-            assert_eq!(s.cwd.as_deref(), Some("/tmp"));
-            assert_eq!(s.focus, Some(true));
-            let env = s.env.as_ref().unwrap();
-            assert_eq!(env.get("RUST_LOG"), Some(&"debug".to_string()));
-        }
-        _ => panic!("expected pane"),
-    }
-}

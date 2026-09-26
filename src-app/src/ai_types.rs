@@ -433,17 +433,13 @@ pub fn next_waiting_since(
 
 /// Aggregate of a workspace's sessions for a single tool, used by the
 /// sidebar render. Computed on-the-fly from `agent_sessions` - never
-/// stored. The "dominant" state is the most user-salient one across all
-/// sessions of the same tool: `WaitingForInput > Thinking > Finished`.
-/// `count` is the total number of sessions for this tool in any visible
-/// state (i.e., everything in the map for that tool); `extra` is
+/// stored. `count` is the total number of sessions for this tool in any
+/// visible state (i.e., everything in the map for that tool); `extra` is
 /// `count - 1`, the "+N" suffix shown after the lead label.
 #[derive(Debug, Clone)]
 pub struct ToolAggregate {
     pub tool: TerminalAgent,
-    pub dominant: AgentState,
     pub count: usize,
-    pub active_tool_name: Option<String>,
 }
 
 impl ToolAggregate {
@@ -519,20 +515,6 @@ where
     }
 }
 
-/// Salience ranking used to pick the dominant state when a tool has
-/// multiple sessions in different states. `Errored` outranks everything
-/// (a crash must never hide behind a sibling's spinner); `Stalled` sits
-/// between `WaitingForInput` (actionable now) and `Thinking` (nominal).
-fn state_rank(s: &AgentState) -> u8 {
-    match s {
-        AgentState::Errored => 5,
-        AgentState::WaitingForInput => 4,
-        AgentState::Stalled => 3,
-        AgentState::Thinking => 2,
-        AgentState::Finished => 1,
-    }
-}
-
 /// Aggregate the per-PID sessions of a workspace into one row per
 /// `TerminalAgent`, sorted by `TerminalAgent::display_rank`.
 pub fn aggregate_by_tool<'a, I>(sessions: I) -> Vec<ToolAggregate>
@@ -544,18 +526,10 @@ where
     for s in sessions {
         by_tool
             .entry(s.tool)
-            .and_modify(|agg| {
-                agg.count += 1;
-                if state_rank(&s.state) > state_rank(&agg.dominant) {
-                    agg.dominant = s.state.clone();
-                    agg.active_tool_name = s.active_tool_name.clone();
-                }
-            })
+            .and_modify(|agg| agg.count += 1)
             .or_insert_with(|| ToolAggregate {
                 tool: s.tool,
-                dominant: s.state.clone(),
                 count: 1,
-                active_tool_name: s.active_tool_name.clone(),
             });
     }
 
@@ -1121,59 +1095,6 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].count, 3);
         assert_eq!(rows[0].extra_suffix(), " +2");
-    }
-
-    #[test]
-    fn dominant_picks_waiting_over_thinking() {
-        let sessions = [
-            s(TerminalAgent::ClaudeCode, AgentState::Thinking),
-            s(TerminalAgent::ClaudeCode, AgentState::WaitingForInput),
-            s(TerminalAgent::ClaudeCode, AgentState::Finished),
-        ];
-        let rows = aggregate_by_tool(sessions.iter());
-        assert_eq!(rows[0].dominant, AgentState::WaitingForInput);
-    }
-
-    #[test]
-    fn dominant_picks_thinking_over_finished() {
-        let sessions = [
-            s(TerminalAgent::ClaudeCode, AgentState::Finished),
-            s(TerminalAgent::ClaudeCode, AgentState::Thinking),
-        ];
-        let rows = aggregate_by_tool(sessions.iter());
-        assert_eq!(rows[0].dominant, AgentState::Thinking);
-    }
-
-    #[test]
-    fn dominant_picks_errored_over_everything() {
-        let sessions = [
-            s(TerminalAgent::ClaudeCode, AgentState::Thinking),
-            s(TerminalAgent::ClaudeCode, AgentState::WaitingForInput),
-            s(TerminalAgent::ClaudeCode, AgentState::Errored),
-        ];
-        let rows = aggregate_by_tool(sessions.iter());
-        assert_eq!(rows[0].dominant, AgentState::Errored);
-    }
-
-    #[test]
-    fn dominant_picks_waiting_over_stalled() {
-        // A waiting agent is actionable NOW; a stalled one is a suspicion.
-        let sessions = [
-            s(TerminalAgent::ClaudeCode, AgentState::Stalled),
-            s(TerminalAgent::ClaudeCode, AgentState::WaitingForInput),
-        ];
-        let rows = aggregate_by_tool(sessions.iter());
-        assert_eq!(rows[0].dominant, AgentState::WaitingForInput);
-    }
-
-    #[test]
-    fn dominant_picks_stalled_over_thinking() {
-        let sessions = [
-            s(TerminalAgent::ClaudeCode, AgentState::Thinking),
-            s(TerminalAgent::ClaudeCode, AgentState::Stalled),
-        ];
-        let rows = aggregate_by_tool(sessions.iter());
-        assert_eq!(rows[0].dominant, AgentState::Stalled);
     }
 
     #[test]

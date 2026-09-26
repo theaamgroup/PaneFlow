@@ -166,10 +166,8 @@ pub fn session_filename() -> &'static str {
 /// `~/Library/Application Support/paneflow/session.json`.
 ///
 /// Lives next to `paneflow.json`. Debug builds write `session-dev.json`
-/// under the `paneflow-dev` subdir. The previous location was
-/// `dirs::cache_dir()`, which macOS may purge; call
-/// [`session_path_migrated`] (or [`migrate_session_from_cache`]) so a
-/// leftover cache copy is copied forward once.
+/// under the `paneflow-dev` subdir. Never under `dirs::cache_dir()`, which
+/// macOS may purge.
 pub fn session_path() -> Option<PathBuf> {
     user_dirs().map(|dirs| session_path_in(&dirs))
 }
@@ -177,79 +175,6 @@ pub fn session_path() -> Option<PathBuf> {
 /// The session file under the config root of `dirs`.
 pub fn session_path_in(dirs: &UserDirs) -> PathBuf {
     dirs.config.join(APP_SUBDIR).join(session_filename())
-}
-
-/// Pre-#45 location: `~/Library/Caches/paneflow/{session,session-dev}.json`.
-pub fn legacy_session_cache_path() -> Option<PathBuf> {
-    user_dirs().map(|dirs| dirs.cache.join(APP_SUBDIR).join(session_filename()))
-}
-
-/// One-shot copy of a leftover cache-dir session onto `dest`.
-///
-/// No-ops when `src` and `dest` are the same path, `dest` already exists,
-/// `src` is missing, or `src` is not a regular file. Deletes `src` only
-/// after `std::fs::copy` succeeds. Returns `Ok(true)` when a copy happened.
-pub fn migrate_session_from_cache(src: &Path, dest: &Path) -> std::io::Result<bool> {
-    if src == dest {
-        return Ok(false);
-    }
-    if dest.exists() {
-        return Ok(false);
-    }
-    let src_meta = match std::fs::metadata(src) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e),
-    };
-    if !src_meta.is_file() {
-        return Ok(false);
-    }
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = dest.with_extension("json.migrate-tmp");
-    std::fs::copy(src, &tmp)?;
-    if let Err(e) = std::fs::rename(&tmp, dest) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    if let Err(e) = std::fs::remove_file(src) {
-        warn!(
-            "migrated session to {} but could not remove {}: {e}",
-            dest.display(),
-            src.display()
-        );
-    }
-    Ok(true)
-}
-
-/// [`session_path`], after copying a leftover cache-dir session into place.
-///
-/// Load and save must use this so an upgrade still restores. [`session_path`]
-/// stays a pure path computation so tests can assert the location without
-/// touching the user's files.
-pub fn session_path_migrated() -> Option<PathBuf> {
-    let dest = session_path()?;
-    if let Some(src) = legacy_session_cache_path() {
-        match migrate_session_from_cache(&src, &dest) {
-            Ok(true) => {
-                tracing::info!(
-                    "migrated session from {} to {}",
-                    src.display(),
-                    dest.display()
-                );
-            }
-            Ok(false) => {}
-            Err(e) => {
-                warn!(
-                    "failed to migrate session from {} to {}: {e}",
-                    src.display(),
-                    dest.display()
-                );
-            }
-        }
-    }
-    Some(dest)
 }
 
 /// Load the PaneFlow configuration from the default platform path.

@@ -11,6 +11,7 @@ use gpui::{App, AppContext, Context, Entity};
 use notify::Watcher;
 use paneflow_config::schema::TerminalSurfaceProfile;
 
+use crate::agents::parent_guard::{pid_is_alive, pid_start_time};
 use crate::app::close_guard::{ClickOutcome, ConfirmStyle, click_outcome};
 use crate::layout::{LayoutTree, MAX_PANES};
 use crate::pane::{self, Pane};
@@ -18,27 +19,6 @@ use crate::pane_drag::DropEdge;
 use crate::terminal::{self, TerminalView};
 use crate::window_chrome::title_bar;
 use crate::{PaneFlowApp, ai_types};
-
-/// "Is this PID still running?" probe used by the AI agent stale-PID sweep.
-/// Uses `kill(pid, 0)` + `ESRCH` semantics (EPERM ⇒ alive).
-fn pid_is_alive(pid: u32) -> bool {
-    {
-        if pid > i32::MAX as u32 {
-            return false;
-        }
-        // SAFETY: `libc::kill` with sig=0 performs error-checking only and
-        // does not deliver a signal. The call takes an i32 pid by value and
-        // has no memory aliasing requirements.
-        let ret = unsafe { libc::kill(pid as i32, 0) };
-        if ret == -1 {
-            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-            // ESRCH = no such process; EPERM/etc. ⇒ process exists but we
-            // can't signal it - keep the entry.
-            return errno != libc::ESRCH;
-        }
-        true
-    }
-}
 
 pub(crate) fn split_pane_at_edge(
     root: &mut LayoutTree,
@@ -54,21 +34,6 @@ pub(crate) fn split_pane_at_edge(
         root.swap_panes(target, &new_pane);
     }
     true
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn pid_start_time(pid: u32) -> Option<u64> {
-    use libproc::libproc::bsd_info::BSDInfo;
-    use libproc::libproc::proc_pid::pidinfo;
-    // EPERM (SIP-protected targets) and dead-pid races degrade to None.
-    // Read-only session/UI callers apply their documented conservative rule;
-    // destructive process-group signaling separately fails closed on None.
-    let info = pidinfo::<BSDInfo>(pid as i32, 0).ok()?;
-    Some(
-        info.pbi_start_tvsec
-            .wrapping_mul(1_000_000)
-            .wrapping_add(info.pbi_start_tvusec),
-    )
 }
 
 /// [`pid_is_alive`] hardened against PID reuse: when the session pinned a
@@ -1210,9 +1175,8 @@ impl PaneFlowApp {
     }
 
     /// Probe registered AI agent PIDs and clean up stale entries where the
-    /// process no longer exists. See [`pid_is_alive`] for the per-platform
-    /// probe (Unix: `kill(pid, 0)` / `ESRCH`; Windows: `OpenProcess` null
-    /// handle; other: conservative keep).
+    /// process no longer exists. See [`pid_is_alive`] for the probe
+    /// (`kill(pid, 0)` / `ESRCH`).
     pub(crate) fn sweep_stale_pids(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
         // EP-004 US-010: surfaces that still resolve to a live terminal tab.

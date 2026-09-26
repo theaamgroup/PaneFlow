@@ -217,7 +217,7 @@ impl PaneFlowApp {
             return;
         }
         let state = self.build_session_state(cx);
-        let Some(path) = paneflow_config::loader::session_path_migrated() else {
+        let Some(path) = paneflow_config::loader::session_path() else {
             log::warn!("session save skipped: no session path resolved");
             return;
         };
@@ -272,7 +272,7 @@ impl PaneFlowApp {
         self.save_seq
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let state = self.build_session_state(cx);
-        let Some(path) = paneflow_config::loader::session_path_migrated() else {
+        let Some(path) = paneflow_config::loader::session_path() else {
             log::warn!("session save failed: no session path resolved");
             return false;
         };
@@ -343,7 +343,7 @@ impl PaneFlowApp {
         Option<paneflow_config::schema::SessionState>,
         Option<SessionCorruptionInfo>,
     ) {
-        let Some(path) = paneflow_config::loader::session_path_migrated() else {
+        let Some(path) = paneflow_config::loader::session_path() else {
             return (None, None);
         };
         Self::load_session_at(&path)
@@ -744,12 +744,7 @@ impl PaneFlowApp {
 
         let cwd = resolved_surface_cwd(surface.cwd.as_deref(), fallback_cwd);
 
-        // US-014: forward the per-surface env override; the global
-        // `terminal.env` default is merged underneath in `TerminalState::new`.
-        let surface_env = surface.env.clone();
-        let t = cx.new(|cx| {
-            TerminalView::with_cwd_and_env(workspace_id, Some(cwd), None, surface_env, cx)
-        });
+        let t = cx.new(|cx| TerminalView::with_cwd(workspace_id, Some(cwd), None, cx));
         // Explicit layout definitions may still seed scrollback.
         // Session restore clears the legacy field before this path.
         if let Some(ref scrollback) = surface.scrollback {

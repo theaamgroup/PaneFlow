@@ -1,7 +1,4 @@
-use super::config::{
-    lenient_opt_bool, lenient_opt_cursor_blink, lenient_opt_cursor_shape, lenient_opt_f32,
-    lenient_opt_osc52_clipboard, lenient_opt_string, lenient_opt_string_map, lenient_opt_usize,
-};
+use super::config::lenient_value_or_default;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -191,20 +188,20 @@ pub struct TerminalConfig {
     /// Render programming-font ligatures (FiraCode `=>`, `!=`, …) when
     /// `Some(true)`. `None` and `Some(false)` both keep the historical
     /// behavior of disabling ligatures via GPUI's `FontFeatures`.
-    #[serde(default, deserialize_with = "lenient_opt_bool")]
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub ligatures: Option<bool>,
     /// Draw built-in block-element glyphs as filled quads instead of using the
     /// font glyph. `None` resolves to enabled, matching Paneflow's historical
     /// renderer behavior.
-    #[serde(default, deserialize_with = "lenient_opt_bool")]
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub integrated_glyphs: Option<bool>,
     /// Render emoji with the platform color-emoji path. `None` resolves to
     /// enabled, matching Windows Terminal and GPUI's default behavior.
-    #[serde(default, deserialize_with = "lenient_opt_bool")]
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub color_emoji: Option<bool>,
     /// Override the terminal cursor color with a `#RRGGBB` value. `None` keeps
     /// the active color scheme cursor color.
-    #[serde(default, deserialize_with = "lenient_opt_string")]
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub cursor_color: Option<String>,
     /// Maximum scrollback history in lines (`max_scroll_history_lines`).
     /// `None` resolves to
@@ -214,19 +211,18 @@ pub struct TerminalConfig {
     /// config and converts it at spawn time (1 KiB per line, 128 MiB cap).
     /// Read once at PTY spawn time; changing this value takes effect on
     /// the next new terminal.
-    #[serde(default, deserialize_with = "lenient_opt_usize")]
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub scrollback_lines: Option<usize>,
     /// US-007: default cursor shape before any app-driven DECSCUSR escape.
     /// `None` resolves to `Block`. Read once at terminal construction.
-    #[serde(default, deserialize_with = "lenient_opt_cursor_shape")]
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub cursor_shape: Option<CursorShapeConfig>,
     /// US-008: cursor blink override. `None` resolves to `TerminalControlled`
     /// (defer to DECSCUSR). Read once at terminal construction.
-    #[serde(default, deserialize_with = "lenient_opt_cursor_blink")]
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub cursor_blink: Option<CursorBlinkConfig>,
     /// US-014: global default extra environment variables injected into every
-    /// new terminal PTY. Per-surface `env` ([`SurfaceDefinition::env`]) is
-    /// merged on top of these (surface wins on key collision). `TERM`,
+    /// new terminal PTY. `TERM`,
     /// `COLORTERM`, and Paneflow identity keys (`PANEFLOW_WORKSPACE_ID`,
     /// `PANEFLOW_SURFACE_ID`, `PANEFLOW_SOCKET_PATH`, `PANEFLOW_BIN_DIR`) are
     /// protected and cannot be overridden. `LD_*` and `DYLD_*` keys are dropped
@@ -236,7 +232,7 @@ pub struct TerminalConfig {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "lenient_opt_string_map"
+        deserialize_with = "lenient_value_or_default"
     )]
     pub env: Option<HashMap<String, String>>,
     /// US-022: scroll-wheel multiplier for the non-mouse-mode scrollback path.
@@ -246,7 +242,7 @@ pub struct TerminalConfig {
     /// corrupt the report) and in the alt-screen alternate-scroll path. `None`
     /// resolves to `1.0`. Clamped to `[0.1, 10.0]`. Read when a TerminalView is
     /// constructed, so existing terminals keep their current scroll feel.
-    #[serde(default, deserialize_with = "lenient_opt_f32")]
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub scroll_multiplier: Option<f32>,
     /// Minimum APCA lightness contrast (`Lc`) the renderer enforces between a
     /// cell's text and its background, on the theme's ANSI colors only.
@@ -256,13 +252,13 @@ pub struct TerminalConfig {
     /// Fork divergence (#421): `None` resolves to `45` (Zed's floor, the
     /// value PaneFlow enforced before the key existed) so no terminal changes
     /// appearance on upgrade; upstream PaneFlow and Ghostty default to `0`.
-    #[serde(default, deserialize_with = "lenient_opt_f32")]
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub minimum_contrast: Option<f32>,
     /// OSC 52 clipboard policy. `None` resolves to `CopyOnly`: a focused pane
     /// may write the system clipboard. `Disabled` refuses every OSC 52 store,
     /// so PTY-controlled text never reaches the pasteboard. Read once at PTY
     /// spawn time; changing this value takes effect on the next new terminal.
-    #[serde(default, deserialize_with = "lenient_opt_osc52_clipboard")]
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub osc52_clipboard: Option<Osc52ClipboardConfig>,
 }
 

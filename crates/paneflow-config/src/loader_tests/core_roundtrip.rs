@@ -19,7 +19,6 @@ fn test_serialization_roundtrip() {
         reduce_motion: None,
         sidebar_show: SidebarShow::default(),
         workspace_auto_sort: None,
-        new_tabs_on_main: None,
         new_tab_branch: Some("main".to_string()),
         workspace_new_tab_branches: HashMap::from([(
             "/projects/aftermarket".to_string(),
@@ -42,8 +41,6 @@ fn test_serialization_roundtrip() {
         submit_paste_delay_ms: None,
         claude_code_bypass_permissions: None,
         ai_unrestricted: None,
-        ai_injection_fence: None,
-        agent_button_visibility_defaults_migrated: None,
         claude_code_button_visible: None,
         codex_button_visible: None,
         opencode_button_visible: None,
@@ -371,10 +368,19 @@ fn new_tab_branches_inherit_override_and_preserve_legacy_preferences() {
         custom.new_tab_branch_for_workspace("/projects/Aftermarket-Websites"),
         Some("release/next")
     );
+    // Issue #850: the retired `new_tabs_on_main` key is ignored, so a
+    // hand-written `false` no longer selects the workspace checkout. An empty
+    // `new_tab_branch` is the way to ask for it.
     let mut legacy: PaneFlowConfig =
         serde_json::from_str(r#"{"new_tabs_on_main":false}"#).expect("legacy");
     assert_eq!(
         legacy.new_tab_branch_for_workspace("/projects/another"),
+        Some("main")
+    );
+    let checkout: PaneFlowConfig =
+        serde_json::from_str(r#"{"new_tab_branch":""}"#).expect("checkout");
+    assert_eq!(
+        checkout.new_tab_branch_for_workspace("/projects/another"),
         None
     );
     legacy.new_tab_branch = Some("staging".to_string());

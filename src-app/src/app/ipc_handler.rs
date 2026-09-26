@@ -751,9 +751,9 @@ fn requested_bounded(
         })
 }
 
-/// Extract the optional `fenced` param, distinguishing ABSENT (use the
-/// config default) from a non-boolean, which is rejected rather than
-/// silently mapped to the default (issue #281).
+/// Extract the optional `fenced` param, distinguishing ABSENT (the read is
+/// fenced) from a non-boolean, which is rejected rather than silently mapped
+/// to the default (issue #281).
 fn requested_fenced(params: &serde_json::Value) -> Result<Option<bool>, JsonRpcError> {
     let Some(value) = params.get("fenced") else {
         return Ok(None);
@@ -1217,13 +1217,7 @@ impl PaneFlowApp {
             if !crate::ipc::try_start_dispatch(&req.dispatch) {
                 continue;
             }
-            let result = self.handle_ipc(
-                &req.method,
-                &req.params,
-                req.caller_pid,
-                Some(&req.response_tx),
-                cx,
-            );
+            let result = self.handle_ipc(&req.method, &req.params, &req.response_tx, cx);
             // Issue #363: `surface.read` / `surface.search` took the response
             // channel and answer from a background worker, so the blocking
             // runtime wait never runs on this 50 ms GPUI tick. Sending here
@@ -1266,7 +1260,10 @@ impl PaneFlowApp {
                 // stale (an index past the new end renders as nothing).
                 self.rebuild_shortcut_rows(cx);
             }
-            crate::theme::invalidate_theme_cache();
+            // Resolve the theme from the config being applied, never from a
+            // second read of the file: an invalid save landing before the
+            // next render would otherwise cache PaneFlow Dark (issue #850).
+            crate::theme::set_active_theme_from(&config);
             // US-014 (render cache): refresh the cached config so render paths
             // pick up the reload without a per-frame `load_config()`. Last use
             // of `config` - move it in.
@@ -1300,21 +1297,9 @@ impl PaneFlowApp {
             cx.notify();
         }
 
-        // US-006: drain the theme watcher's "file changed" signal. The
-        // watcher invalidates the cache directly on its background thread;
-        // this only schedules the GPUI repaint so the next render picks up
-        // the freshly-resolved theme. `swap` is the cheapest way to read +
-        // reset atomically - we don't care about preserving other writers.
-        if self
-            .theme_changed
-            .swap(false, std::sync::atomic::Ordering::AcqRel)
-        {
-            cx.notify();
-        }
-
         // Issue #429: a cached terminal pane only repaints on a theme change
-        // when its observed signal moves; `cx.notify()` above reaches the
-        // application entity alone.
+        // when its observed signal moves; the reload's `cx.notify()` above
+        // reaches the application entity alone.
         crate::theme::publish_theme_generation(cx);
     }
 
@@ -1659,7 +1644,7 @@ impl PaneFlowApp {
                     let exited = t.terminal.exited;
                     let pin = t.terminal.child_proc_start;
                     let current = (pid > 0 && exited.is_none())
-                        .then(|| super::event_handlers::pid_start_time(pid))
+                        .then(|| crate::agents::parent_guard::pid_start_time(pid))
                         .flatten();
                     offer_live_child_candidate(
                         &mut candidates,
@@ -1735,7 +1720,7 @@ impl PaneFlowApp {
             find_terminal_by_surface_id(&self.workspaces, sid, cx).is_some_and(|terminal| {
                 let t = terminal.read(cx);
                 let current = (t.terminal.child_pid > 0 && t.terminal.exited.is_none())
-                    .then(|| super::event_handlers::pid_start_time(t.terminal.child_pid))
+                    .then(|| crate::agents::parent_guard::pid_start_time(t.terminal.child_pid))
                     .flatten();
                 surface_candidate_still_valid(
                     expected_child_pid,
@@ -1829,13 +1814,10 @@ impl PaneFlowApp {
         &mut self,
         method: &str,
         params: &serde_json::Value,
-        // EP-003 US-010 (agent-control-plane): socket peer PID for the
-        // free-access write trace; None on macOS/Windows. Advisory only.
-        caller_pid: Option<i64>,
         // Issue #363: the channel the socket thread is waiting on. A handler
         // that hands its blocking work to a background worker clones this,
         // answers from there, and returns `ipc_deferred_response()`.
-        responder: Option<&std::sync::mpsc::Sender<serde_json::Value>>,
+        responder: &std::sync::mpsc::Sender<serde_json::Value>,
         cx: &mut Context<Self>,
     ) -> serde_json::Value {
         // Issue #210: thin per-namespace router. Every family's match arms
@@ -1845,7 +1827,7 @@ impl PaneFlowApp {
         if method == "agent.whoami" {
             self.handle_agent_context_method(method, params, cx)
         } else if method.starts_with("surface.") {
-            self.handle_surface_method(method, params, caller_pid, responder, cx)
+            self.handle_surface_method(method, params, responder, cx)
         } else if method.starts_with("fleet.") {
             self.handle_fleet_method(method, params, cx)
         } else if method.starts_with("ai.") {
@@ -1861,11 +1843,8 @@ impl PaneFlowApp {
         &mut self,
         method: &str,
         params: &serde_json::Value,
-        // EP-003 US-010 (agent-control-plane): socket peer PID for the
-        // free-access write trace; None on macOS/Windows. Advisory only.
-        caller_pid: Option<i64>,
         // Issue #363: response channel for the reads that answer off-thread.
-        responder: Option<&std::sync::mpsc::Sender<serde_json::Value>>,
+        responder: &std::sync::mpsc::Sender<serde_json::Value>,
         cx: &mut Context<Self>,
     ) -> serde_json::Value {
         match method {
@@ -1933,24 +1912,20 @@ impl PaneFlowApp {
                 let sid = terminal.entity_id().as_u64();
                 // EP-003 US-011 (agent-control-plane): wrap the returned text as
                 // untrusted so a malicious peer pane cannot hijack an orchestrator
-                // reading it. Default follows the global `ai_injection_fence`
-                // setting (ON); a caller can override per call with
-                // `fenced: false`. Internal consumers that parse raw output (the
-                // MCP bridge, which re-fences itself; the `wait` poll
-                // loops) pass `fenced:false`, so this only changes the CLI/IPC
-                // read path an orchestrator uses directly, mirroring the MCP fence.
-                let fenced =
-                    fenced.unwrap_or_else(|| self.cached_config.ai_injection_fence_enabled());
+                // reading it. Fenced by default; a caller can override per call
+                // with `fenced: false`. The in-repo consumer that parses raw
+                // output (the MCP bridge, `crates/paneflow-mcp/src/bridge.rs`,
+                // which re-fences itself) passes `fenced:false`, so the default
+                // covers the raw IPC read path an orchestrator uses directly,
+                // mirroring the MCP fence.
+                let fenced = fenced.unwrap_or(true);
                 // Issue #363: the extract parks on the runtime's reply for up
                 // to a second, and this runs on the 50 ms GPUI automation tick
                 // that `wait` hits every 500 ms. Clone the `Send` reader
                 // here (an `Arc` bump) and do the waiting on a background
                 // worker, so a slow or silent runtime cannot stall painting.
                 let reader = terminal.read(cx).terminal.scrollback_reader();
-                let Some(responder) = responder.cloned() else {
-                    return JsonRpcError::internal_error("no response channel for surface.read")
-                        .into_value();
-                };
+                let responder = responder.clone();
                 cx.background_spawn(async move {
                     let read_started = std::time::Instant::now();
                     // The engine cuts the window (`DisplayTerminal::transcript_window`):
@@ -2062,10 +2037,7 @@ impl PaneFlowApp {
                 // background worker.
                 let reader = terminal.read(cx).terminal.scrollback_reader();
                 let pattern = pattern.to_owned();
-                let Some(responder) = responder.cloned() else {
-                    return JsonRpcError::internal_error("no response channel for surface.search")
-                        .into_value();
-                };
+                let responder = responder.clone();
                 cx.background_spawn(async move {
                     let found =
                         smol::unblock(move || reader.search_scrollback(&pattern, max_matches))
@@ -2222,7 +2194,6 @@ impl PaneFlowApp {
                         target: "paneflow::ipc::unrestricted",
                         method = "surface.send_text",
                         surface_id = wrote_sid,
-                        caller_pid = ?caller_pid,
                         length = text.len() as u64,
                         submit = submit,
                         paste = paste,
@@ -2792,7 +2763,7 @@ impl PaneFlowApp {
                         pid,
                         &subagent_id,
                         emitted_at_ms,
-                        super::event_handlers::pid_start_time(pid),
+                        crate::agents::parent_guard::pid_start_time(pid),
                         surface_id,
                     )
                 } else {
@@ -3175,7 +3146,7 @@ pub(crate) fn upsert_session_state(
         source,
         |k| {
             if k <= i32::MAX as u32 {
-                super::event_handlers::pid_start_time(k)
+                crate::agents::parent_guard::pid_start_time(k)
             } else {
                 None
             }
@@ -3566,10 +3537,8 @@ mod tests {
         crate::ipc::IpcRequest {
             method: method.to_string(),
             params: serde_json::json!({}),
-            _id: serde_json::json!(null),
             response_tx,
             dispatch: Arc::new(AtomicU8::new(state)),
-            caller_pid: None,
         }
     }
 
@@ -4388,6 +4357,19 @@ mod tests {
         // No false positives: ordinary output is returned byte-for-byte.
         let clean = "build finished in 1.2s\nrunning 3 tests";
         assert_eq!(super::neutralize_sentinel(clean), clean);
+    }
+
+    /// Issue #850: no config key turns the fence off any more. A raw
+    /// `surface.read` that omits `fenced` is always fenced; only an explicit
+    /// per-call `fenced: false` returns raw text.
+    #[test]
+    fn surface_read_without_a_fenced_param_stays_fenced() {
+        let src = include_str!("ipc_handler.rs");
+        let arm = production_match_arm(src, "\"surface.read\"", "\"surface.status\"");
+        assert!(
+            arm.contains("let fenced = fenced.unwrap_or(true);"),
+            "surface.read must fence when the caller omits `fenced`: {arm}"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -5590,6 +5572,27 @@ mod tests {
         assert!(
             pending.lock().unwrap().is_none(),
             "strictly older incoming_gen must be discarded, not deferred"
+        );
+    }
+
+    /// Issue #850: the config watcher is the only hot-reload path for a
+    /// hand-edited theme. Its applied branch must set the theme cache from the
+    /// config it applies (never from a second read of the file), before the
+    /// config moves into `cached_config`.
+    #[test]
+    fn process_config_changes_sets_the_theme_from_the_applied_config() {
+        let src = include_str!("ipc_handler.rs");
+        let body = production_match_arm(src, "pub(crate) fn process_config_changes(", "\n    }\n");
+        let applied = production_match_arm(body, "take_watcher_config_for_apply(", "\n        }\n");
+        let set = applied
+            .find("crate::theme::set_active_theme_from(&config);")
+            .unwrap_or_else(|| panic!("the applied reload must refresh the theme: {applied}"));
+        let moved = applied
+            .find("self.cached_config = config;")
+            .expect("the applied reload stores the config");
+        assert!(
+            set < moved,
+            "the theme is set from the config before it moves: {applied}"
         );
     }
 

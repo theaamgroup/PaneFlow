@@ -53,6 +53,7 @@ use std::sync::Mutex;
 use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 
+use crate::agents::parent_guard::{pid_is_alive, pid_start_time};
 use crate::assets::Bins;
 
 /// Target triple the outer build staged binaries for. Injected by
@@ -309,9 +310,6 @@ fn ensure_binaries_extracted_into(cache_root: &Path, exe: &Path) -> Result<PathB
 /// mistaken for a shim. The pid is in the filename so two same-version
 /// instances (`PANEFLOW_ALLOW_MULTIPLE`) do not overwrite each other.
 const VERSION_LOCK_PREFIX: &str = ".paneflow-live.";
-/// Single-file lease written by the first #442 landing. Still honored so a
-/// process that has not restarted keeps its dir.
-const VERSION_LOCK_LEGACY: &str = ".paneflow-live";
 
 struct VersionLock {
     pid: u32,
@@ -324,7 +322,7 @@ fn version_lock_name(pid: u32) -> String {
 
 fn write_version_lock(dir: &Path) {
     let pid = std::process::id();
-    write_version_lock_for(dir, pid, process_start_time(pid));
+    write_version_lock_for(dir, pid, pid_start_time(pid));
 }
 
 fn write_version_lock_for(dir: &Path, pid: u32, start: Option<u64>) {
@@ -345,54 +343,13 @@ fn write_version_lock_for(dir: &Path, pid: u32, start: Option<u64>) {
     }
 }
 
-fn parse_version_lock(body: &str) -> Option<VersionLock> {
-    let mut pid = None;
-    let mut start = None;
-    for line in body.lines() {
-        if let Some(rest) = line.strip_prefix("pid=") {
-            pid = rest.trim().parse().ok();
-        } else if let Some(rest) = line.strip_prefix("start=") {
-            start = rest.trim().parse().ok();
-        }
-    }
-    Some(VersionLock { pid: pid?, start })
-}
-
 fn parse_lease_file(name: &std::ffi::OsStr, body: &str) -> Option<VersionLock> {
-    let name = name.to_str()?;
-    if name == VERSION_LOCK_LEGACY {
-        return parse_version_lock(body);
-    }
-    let rest = name.strip_prefix(VERSION_LOCK_PREFIX)?;
+    let rest = name.to_str()?.strip_prefix(VERSION_LOCK_PREFIX)?;
     let pid: u32 = rest.parse().ok()?;
     let start = body
         .lines()
         .find_map(|line| line.strip_prefix("start=")?.trim().parse().ok());
     Some(VersionLock { pid, start })
-}
-
-fn process_start_time(pid: u32) -> Option<u64> {
-    use libproc::libproc::bsd_info::BSDInfo;
-    use libproc::libproc::proc_pid::pidinfo;
-    let info = pidinfo::<BSDInfo>(pid as i32, 0).ok()?;
-    Some(
-        info.pbi_start_tvsec
-            .wrapping_mul(1_000_000)
-            .wrapping_add(info.pbi_start_tvusec),
-    )
-}
-
-fn process_is_alive(pid: u32) -> bool {
-    if pid == 0 || pid > i32::MAX as u32 {
-        return false;
-    }
-    // SAFETY: `kill` with sig=0 is an existence check; it does not deliver.
-    let ret = unsafe { libc::kill(pid as i32, 0) };
-    if ret == -1 {
-        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-        return errno != libc::ESRCH;
-    }
-    true
 }
 
 /// Skip prune unless the sibling is proven unused. A live pid whose start
@@ -401,10 +358,10 @@ fn process_is_alive(pid: u32) -> bool {
 /// kept, because deleting a running version's PATH dir is worse than
 /// leaving a stale one.
 fn lock_holder_is_live(pid: u32, pinned_start: Option<u64>) -> bool {
-    if !process_is_alive(pid) {
+    if !pid_is_alive(pid) {
         return false;
     }
-    match (pinned_start, process_start_time(pid)) {
+    match (pinned_start, pid_start_time(pid)) {
         (Some(pinned), Some(current)) => pinned == current,
         _ => true,
     }
@@ -422,10 +379,9 @@ fn version_dir_in_use(dir: &Path) -> bool {
             Err(_) => return true,
         };
         let name = entry.file_name();
-        if name != std::ffi::OsStr::new(VERSION_LOCK_LEGACY)
-            && !name
-                .to_str()
-                .is_some_and(|n| n.starts_with(VERSION_LOCK_PREFIX))
+        if !name
+            .to_str()
+            .is_some_and(|n| n.starts_with(VERSION_LOCK_PREFIX))
         {
             continue;
         }
@@ -450,9 +406,9 @@ fn version_dir_in_use(dir: &Path) -> bool {
 /// stable non-versioned paths under `data_dir()`.
 ///
 /// A sibling is kept if **any** per-process `.paneflow-live.<pid>` lease
-/// (or a legacy `.paneflow-live`) still names a live process. Prune only
-/// when every lease is dead (pid gone or start-time mismatch). This
-/// process's own `VERSION` directory is never a prune target.
+/// still names a live process. Prune only when every lease is dead (pid
+/// gone or start-time mismatch). This process's own `VERSION` directory is
+/// never a prune target.
 ///
 /// Best-effort and never fatal: extraction has already succeeded. The
 /// sweep is all-or-nothing and confined to `bin/`: if any entry beside
@@ -1312,7 +1268,7 @@ mod tests {
             .spawn()
             .expect("sleep");
         let child_pid = child.id();
-        write_version_lock_for(&live, child_pid, process_start_time(child_pid));
+        write_version_lock_for(&live, child_pid, pid_start_time(child_pid));
         write_version_lock(&live);
 
         let _ = child.kill();

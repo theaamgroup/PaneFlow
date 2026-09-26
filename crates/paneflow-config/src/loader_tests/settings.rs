@@ -386,3 +386,35 @@ fn test_terminal_ligatures_wrong_type_falls_back_to_defaults() {
     assert_eq!(terminal.ligatures, None);
     assert_eq!(terminal.color_emoji, Some(false));
 }
+
+#[test]
+fn malformed_terminal_values_load_as_none_and_keep_siblings() {
+    // Issue #850: one wrong-typed value per value type the terminal block
+    // parses (bool, string, usize, f32, cursor shape, cursor blink, OSC 52
+    // policy, string map). Each field resolves as absent, and neither the
+    // valid sibling in the block nor the top-level theme is lost.
+    for (field, bad) in [
+        ("ligatures", r#""yes""#),
+        ("cursor_color", "7"),
+        ("scrollback_lines", "-5"),
+        ("scroll_multiplier", r#""fast""#),
+        ("cursor_shape", "7"),
+        ("cursor_blink", "true"),
+        ("osc52_clipboard", "[]"),
+        ("env", r#"{"FOO": 1}"#),
+    ] {
+        let json = format!(
+            r#"{{"theme": "One Dark", "terminal": {{"{field}": {bad}, "minimum_contrast": 30.0}}}}"#
+        );
+        let config = try_parse_and_validate(&json)
+            .unwrap_or_else(|e| panic!("`{field}: {bad}` must not fail the parse: {e}"));
+        assert_eq!(config.theme.as_deref(), Some("One Dark"), "{field}");
+        let terminal = config.terminal.expect("terminal block survives");
+        assert_eq!(terminal.minimum_contrast, Some(30.0), "{field}");
+        let value = serde_json::to_value(&terminal).unwrap();
+        assert!(
+            value.get(field).is_none_or(serde_json::Value::is_null),
+            "`{field}: {bad}` must load as None: {value}"
+        );
+    }
+}
