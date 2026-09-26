@@ -419,10 +419,6 @@ impl PaneFlowApp {
                                 );
                                 return;
                             };
-                            if let Some(reason) = app.tab_binding_refusal(&path, ws_idx) {
-                                app.show_toast(reason, cx);
-                                return;
-                            }
                             app.open_pane_palette_at_checkout(ws_idx, Some(path), window, cx);
                         }
                         Err(error) => {
@@ -1209,20 +1205,9 @@ impl PaneFlowApp {
     ) -> Vec<BranchOption> {
         let listing = self.workspace_worktree_listing(ws_idx);
         let on_branch = self.tab_branch_label(ws_idx, bound);
-        // A checkout this tab may not stand on - one another workspace owns,
-        // or one being retired - is left out, the rule the tab menu applies.
-        let bindable = |entry: &crate::workspace::worktree::WorktreeEntry| {
-            entry.path == root || self.checkout_is_bindable(&entry.path, ws_idx)
-        };
         let mut options: Vec<BranchOption> = self
             .workspace_branches(ws_idx)
             .iter()
-            .filter(|branch| {
-                listing
-                    .iter()
-                    .find(|entry| entry.branch.as_deref() == Some(branch.as_str()))
-                    .is_none_or(bindable)
-            })
             .map(|branch| BranchOption {
                 target: BranchTarget::Branch(branch.clone()),
                 label: branch.clone(),
@@ -1238,7 +1223,6 @@ impl PaneFlowApp {
             listing
                 .iter()
                 .filter(|entry| entry.branch.is_none() && !entry.is_bare && entry.path != root)
-                .filter(|entry| bindable(entry))
                 .map(|entry| BranchOption {
                     label: crate::workspace::worktree::checkout_label(None, &entry.path, root),
                     target: BranchTarget::Checkout(entry.path.clone()),

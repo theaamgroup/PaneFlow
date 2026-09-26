@@ -322,10 +322,6 @@ pub(crate) struct ClosedWorkspaceRecord {
     pub(crate) tabs: Vec<ClosedWorkspaceTabRecord>,
     pub(crate) sidebar_expanded: bool,
     pub(crate) pinned: bool,
-    /// Lifecycle ownership held while the workspace is undoable. Destructive
-    /// teardown is deferred until this record leaves the undo stack; restoring
-    /// moves the records back onto the new runtime workspace.
-    pub(crate) managed_worktrees: Vec<crate::workspace::worktree::ManagedWorktree>,
 }
 
 /// One entry on the undo-close stack: a pane, a whole tab, or a workspace.
@@ -1555,10 +1551,6 @@ struct PaneFlowApp {
     /// Issues #83 and #111 widened it to whole tabs and workspaces, so one
     /// `Cmd+Shift+T` restores whichever kind was closed most recently.
     closed_items: Vec<ClosedRecord>,
-    /// Durable retirement journal for undo records already evicted from
-    /// `closed_items`. A batch is persisted before teardown starts and removed
-    /// only after the worker finishes, so a crash resumes cleanup safely.
-    pending_worktree_teardowns: Vec<crate::workspace::worktree::ManagedWorktree>,
     /// Whether the "About PaneFlow" dialog is visible.
     show_about_dialog: bool,
     /// Focus handle routing key events to the About dialog while open

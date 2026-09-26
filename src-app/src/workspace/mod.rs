@@ -15,29 +15,6 @@ pub mod surface_naming;
 mod tab;
 pub mod worktree;
 
-static RETIRING_WORKTREE_PATHS: std::sync::LazyLock<std::sync::RwLock<Vec<std::path::PathBuf>>> =
-    std::sync::LazyLock::new(|| std::sync::RwLock::new(Vec::new()));
-
-/// Publish the durable retirement journal to terminal-producing UI that does
-/// not own a `PaneFlowApp` reference (notably embedded Diff Review views).
-pub(crate) fn set_retiring_worktree_paths(paths: Vec<std::path::PathBuf>) {
-    match RETIRING_WORKTREE_PATHS.write() {
-        Ok(mut retiring) => *retiring = paths,
-        Err(poisoned) => *poisoned.into_inner() = paths,
-    }
-}
-
-/// Read-only ingress gate for off-tree terminal producers.
-pub(crate) fn path_is_in_retiring_worktree(path: &std::path::Path) -> bool {
-    let retiring = RETIRING_WORKTREE_PATHS
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Lexical prefix only: `canonicalize` on a hung NFS/SMB cwd blocks the
-    // UI thread for the mount timeout. Retirement roots are already stored
-    // as the path the journal recorded.
-    retiring.iter().any(|root| path.starts_with(root))
-}
-
 pub(crate) use git::parse_head;
 pub use git::{
     GIT_STATS_SWEEP_DEADLINE, GitDiffStats, detect_branch, find_git_dir, resolve_repo_root,
@@ -228,11 +205,6 @@ pub struct Workspace {
     /// is `TerminalAgent::ALL` binaries (18), unified from the historical
     /// 3-name `AI_PROCESS_NAMES` list.
     pub detected_agents: std::collections::HashSet<String>,
-    /// Git worktrees Paneflow created for this workspace's panes. Torn
-    /// down - clean ones only, branch never deleted - when the workspace
-    /// closes; persisted in `session.json` so a crash keeps the ownership
-    /// record. Empty when the workspace owns no managed worktrees.
-    pub managed_worktrees: Vec<worktree::ManagedWorktree>,
     /// US-008: whether the sidebar folder row for this workspace shows its
     /// tab children. Persisted since issue #349 as
     /// `WorkspaceSession::sidebar_collapsed` (written only when folded), so a
@@ -319,7 +291,6 @@ impl Workspace {
             running_subagents: Default::default(),
             agent_completion_notification: AgentCompletionNotification::default(),
             detected_agents: std::collections::HashSet::new(),
-            managed_worktrees: Vec::new(),
             sidebar_expanded: true,
             muted: false,
             pinned: false,

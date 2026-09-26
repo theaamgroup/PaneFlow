@@ -624,21 +624,9 @@ impl PaneFlowApp {
                 .and_then(|entry| entry.branch.clone()),
             None => Some(self.workspace_checkout_label(ws_idx)),
         };
-        // A branch whose checkout this tab may not stand on - one another
-        // workspace owns, or one being retired - is not offered at all: a row
-        // that can only refuse is a row that should not be there.
-        let bindable = |entry: &crate::workspace::worktree::WorktreeEntry| {
-            entry.path == root || self.checkout_is_bindable(&entry.path, ws_idx)
-        };
         let mut rows: Vec<(Option<PathBuf>, String, bool)> = self
             .workspace_branches(ws_idx)
             .iter()
-            .filter(|branch| {
-                listing
-                    .iter()
-                    .find(|entry| entry.branch.as_deref() == Some(branch.as_str()))
-                    .is_none_or(bindable)
-            })
             .map(|branch| {
                 let selected = on_branch.as_deref() == Some(branch.as_str());
                 (None, branch.clone(), selected)
@@ -650,7 +638,6 @@ impl PaneFlowApp {
             listing
                 .iter()
                 .filter(|entry| entry.branch.is_none() && !entry.is_bare && entry.path != root)
-                .filter(|entry| bindable(entry))
                 .map(|entry| {
                     let label =
                         crate::workspace::worktree::checkout_label(None, &entry.path, &root);
