@@ -1394,13 +1394,14 @@ mod tests {
                 }
             }
         }
-        // Issue #808 removed the diff dock's four menus (20 -> 16), and
-        // issue #845 removed the sessions-row menu (16 -> 15). Four of the
-        // counted ids are fragments of this test's own source, which the
-        // walk also reads, so 11 of the 15 are real reveal ids.
+        // Issue #808 removed the diff dock's four menus (20 -> 16), issue
+        // #845 removed the sessions-row menu (16 -> 15), and issue #844
+        // removed the command palette (15 -> 14). Four of the counted ids are
+        // fragments of this test's own source, which the walk also reads, so
+        // 10 of the 14 are real reveal ids.
         assert!(
-            ids.len() >= 15,
-            "expected at least 15 literal reveal ids under src-app/src, found {}",
+            ids.len() >= 14,
+            "expected at least 14 literal reveal ids under src-app/src, found {}",
             ids.len()
         );
         let dupes: Vec<_> = ids.iter().filter(|(_, sites)| sites.len() > 1).collect();
