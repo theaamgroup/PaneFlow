@@ -54,11 +54,11 @@
     },
     "font_family": {
       "type": ["string", "null"],
-      "description": "Font family. Default: bundled JetBrainsMono Nerd Font. Accepts the aliases '.PaneflowMono', 'JetBrainsMono NF', 'JetBrainsMono NFM', and the legacy 'JetBrainsMono Nerd Font Mono' for that default, '.PaneflowSans' for bundled Geist, the concrete embedded names ('JetBrainsMono Nerd Font', 'Geist Mono', 'Geist', 'Lilex', 'IBM Plex Mono', 'IBM Plex Sans'), or any installed system monospace family. Unknown families fall back to the default with a warning."
+      "description": "Font family. Default: bundled JetBrainsMono Nerd Font. Accepts the aliases '.PaneflowMono', 'JetBrainsMono NF', 'JetBrainsMono NFM', and the legacy 'JetBrainsMono Nerd Font Mono' for that default, '.PaneflowSans' for bundled Geist, the embedded names 'JetBrainsMono Nerd Font' and 'Geist', or any installed system monospace family. Unknown families, including names of fonts PaneFlow no longer bundles that are not installed, fall back to the default with a warning."
     },
     "font_fallbacks": {
       "type": ["array", "null"],
-      "description": "Ordered fallback font families consulted (in order) for glyphs the primary font_family does not cover - e.g. a Nerd Font for the Powerline/icon glyphs used by Starship, oh-my-posh or Terminal-Icons, which no system font provides. Null or an empty list keeps GPUI's built-in fallback stack only.",
+      "description": "Ordered fallback font families consulted (in order) for glyphs the primary font_family does not cover - e.g. a Nerd Font for the Powerline/icon glyphs used by Starship, oh-my-posh or Terminal-Icons, which no system font provides. Null or an empty list adds no fallback families; macOS then picks a covering system font for each glyph the primary font lacks.",
       "items": {
         "type": "string"
       }

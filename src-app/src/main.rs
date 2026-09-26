@@ -1543,29 +1543,9 @@ struct PaneFlowApp {
     /// Focus handle routing key events to the System Info dialog while open
     /// (issue #244).
     system_info_dialog_focus: FocusHandle,
-    /// Issue #523: the command palette (`app/command_palette.rs`) over every
-    /// context-free action. Rows are derived from `effective_shortcuts` on
-    /// every render, never stored.
-    command_palette_open: bool,
-    command_palette_query: String,
-    command_palette_selected: usize,
-    command_palette_focus: FocusHandle,
-    command_palette_scroll: gpui::ScrollHandle,
-    /// The pane that held focus when the palette opened, restored before the
-    /// chosen action dispatches so a pane-targeting command (Close pane,
-    /// Split, Toggle zoom) lands on the pane the user was in, not the first
-    /// leaf. Weak, so the palette never keeps a pane closed underneath it
-    /// alive; the restore upgrades and re-checks tree membership. `None`
-    /// when nothing in the pane tree was focused.
-    command_palette_return_pane: Option<WeakEntity<pane::Pane>>,
-    /// Whatever held focus when the palette opened (the pane palette's
-    /// `restore_focus` precedent), restored when no pane did: the sidebar,
-    /// the empty-workspace placeholder.
-    command_palette_return_focus: Option<FocusHandle>,
     /// The pane each open overlay was opened from, keyed by overlay (#584:
-    /// Pane Overview, pane palette). An
-    /// overlay's own close returns the focus to its entry; the command
-    /// palette reads the outermost one when it folds them (#523).
+    /// Pane Overview, pane palette). An overlay's own close returns the focus
+    /// to its entry.
     overlay_origins: app::overlay_origin::OverlayOrigins,
     /// Issue #339: Pane Overview overlay, `None` = closed. Cards are derived
     /// from the live workspace tree on every render, never stored - a pane
@@ -2223,8 +2203,6 @@ impl Render for PaneFlowApp {
             )
             // Issue #106: keyboard access to the primary left rail.
             .on_action(cx.listener(Self::handle_toggle_primary_sidebar))
-            // Issue #523: the command palette (every context-free action).
-            .on_action(cx.listener(Self::handle_open_command_palette))
             .on_action(cx.listener(Self::handle_open_pane_overview))
             // EP-001 US-003: Escape cancels an in-flight tab drag. Capture
             // phase runs ancestor-before-descendant, so this pre-empts the
@@ -2474,22 +2452,6 @@ impl Render for PaneFlowApp {
 
         if let Some(toast) = &self.toast {
             app_content = app_content.child(self.render_toast(toast, ui, cx));
-        }
-
-        // Issue #523: the command palette. Not mode-gated: it lists only
-        // context-free actions, and each of those already decides for itself
-        // what it does outside the CLI cockpit.
-        // A modal opened over the palette from the menu bar (About, System
-        // Info), a close-confirm, or Settings outranks it, so the palette folds itself
-        // at the next frame instead of staying mounted and unfocused with
-        // its keystrokes reaching the terminal under the scrim; the modal's
-        // own close then restores focus through its usual chain.
-        if self.command_palette_open {
-            if self.command_palette_blocked() {
-                self.close_command_palette(cx);
-            } else {
-                app_content = app_content.child(self.render_command_palette(cx));
-            }
         }
 
         // Cockpit overlays stay in Cli mode so a mode switch does not paint

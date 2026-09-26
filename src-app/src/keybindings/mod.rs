@@ -23,10 +23,4 @@ pub use display::{
     ShortcutEntry, displaced_action_description, effective_shortcuts, format_keystroke,
     is_bare_modifier,
 };
-pub use registry::{ShortcutGroup, action_is_global};
-
-/// Resolve a registry action name to a boxed GPUI action, for a caller outside
-/// the keymap (the command palette, issue #523) that dispatches by name.
-pub fn action_for_name(name: &str) -> Option<Box<dyn gpui::Action>> {
-    registry::action_from_name(name)
-}
+pub use registry::ShortcutGroup;

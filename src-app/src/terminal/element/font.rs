@@ -55,13 +55,12 @@ pub(crate) const JETBRAINS_MONO_NF_ALIAS: &str = "JetBrainsMono NF";
 /// #420). Configs written against it keep resolving to the bundled family.
 pub(crate) const LEGACY_JETBRAINS_MONO_NFM_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
 pub(crate) const JETBRAINS_MONO_NFM_ALIAS: &str = "JetBrainsMono NFM";
-pub(crate) const LEGACY_EMBEDDED_MONO_FAMILY: &str = "Lilex";
 
 /// Embedded UI/sans family. Files:
 /// `assets/fonts/Geist-{Regular,Medium,SemiBold,Bold}{,Italic}.ttf`.
 /// Used as Paneflow's primary UI family and as the `.PaneflowSans`
 /// config alias target. The terminal stays mono by default; this
-/// sans target exists for explicit user config and GPUI fallback.
+/// sans target exists for explicit user config.
 pub(crate) const EMBEDDED_SANS_FAMILY: &str = "Geist";
 
 /// Paneflow-side virtual font aliases. Mirror Zed's `.ZedMono` /
@@ -106,8 +105,7 @@ fn expand_paneflow_alias(name: &str) -> &str {
 // Font Mono - are NOT installed on a fresh macOS, and the resulting
 // cascade list, while accepted by Core Text without erroring, ended
 // up suppressing rasterization of the primary face. Icons rendered
-// (different code path, walking GPUI's internal `fallback_font_stack`
-// at gpui/src/text_system.rs:71-83) but text glyphs did not.
+// (SVG icons do not go through the text system) but text glyphs did not.
 //
 // Zed's terminal uses `fallbacks: None` by default
 // (zed/crates/terminal_view/src/terminal_element.rs:908-912). It only
@@ -119,12 +117,18 @@ fn expand_paneflow_alias(name: &str) -> &str {
 // family may not carry), and `None` otherwise - never a hardcoded chain.
 //
 // Glyph fallback for codepoints the primary font doesn't cover (emoji, CJK,
-// symbols) still works: GPUI walks its built-in `fallback_font_stack`
-// - which already ships `.ZedMono` (resolves to Lilex, which we still
-// embed), `.ZedSans` (resolves to IBM Plex Sans, which we historically embed),
-// then OS-canonical sans like Helvetica / Segoe UI / Arial. That
-// chain is global, not per-`Font`, so it does NOT pollute the
-// per-Font CTFont cascade list.
+// symbols) still works, and it is Core Text's own: `layout_line` shapes the
+// text as a `CTLine`, Core Text substitutes a covering system face per run,
+// and GPUI registers that face as it meets it (`id_for_native_font`,
+// gpui_macos/src/text_system.rs:395-411,575-587).
+//
+// GPUI's global `fallback_font_stack` (gpui/src/text_system.rs:71-82) is not
+// a glyph fallback. Only `resolve_font`, when a whole family fails to load,
+// and `all_font_names` read it. Its first two entries, `.ZedMono` and
+// `.ZedSans`, map to families PaneFlow does not bundle, so a family that
+// fails to load lands on Helvetica, which is proportional. Every UI surface
+// that needs monospace therefore names the bundled family itself
+// (`resolve_font_family(None)`).
 
 /// Registry of installed monospace families (Core Text), used to
 /// validate a configured `font_family` against the documented c3e2331
@@ -170,8 +174,9 @@ pub(super) struct FontSettings {
 
 /// Normalize a configured `font_fallbacks` list before it reaches GPUI:
 /// trim each entry, drop empties, and collapse an absent / all-empty list to
-/// `None` so [`base_font`] emits `fallbacks: None` (GPUI's built-in stack
-/// only) rather than an empty `FontFallbacks`.
+/// `None` so [`base_font`] emits `fallbacks: None` (no per-font cascade
+/// list, so Core Text's default glyph fallback applies) rather than an empty
+/// `FontFallbacks`.
 fn sanitize_font_fallbacks(configured: Option<&Vec<String>>) -> Option<Vec<String>> {
     sanitize_font_fallbacks_with_registry(configured, &INSTALLED_MONO_FONTS)
 }
@@ -192,7 +197,10 @@ fn sanitize_font_fallbacks_with_registry(
 }
 
 fn is_retired_font_family(family: &str) -> bool {
-    matches!(family, "Geist Mono" | "IBM Plex Mono")
+    matches!(
+        family,
+        "Geist Mono" | "IBM Plex Mono" | "Lilex" | "IBM Plex Sans"
+    )
 }
 
 fn canonical_font_weight_key(raw: &str) -> String {
@@ -299,11 +307,7 @@ fn resolve_font_family_with_registry<'a>(
     // bypassing the OS font enumeration registry. Short-circuit before
     // the INSTALLED_MONO_FONTS lookup, which only sees system fonts.
     // Installed families flow through normal system-font resolution.
-    if candidate == EMBEDDED_MONO_FAMILY
-        || candidate == LEGACY_EMBEDDED_MONO_FAMILY
-        || candidate == EMBEDDED_SANS_FAMILY
-        || candidate == "IBM Plex Sans"
-    {
+    if candidate == EMBEDDED_MONO_FAMILY || candidate == EMBEDDED_SANS_FAMILY {
         return candidate.to_string();
     }
 
@@ -436,8 +440,8 @@ fn store_font_config(
         .unwrap_or(false);
 
     // User-configured fallback families (Nerd Font for icon glyphs, …),
-    // sanitized to `None` when absent/all-empty so the font keeps GPUI's
-    // built-in stack in that case.
+    // sanitized to `None` when absent/all-empty so the font carries no
+    // cascade list and Core Text's default glyph fallback applies.
     let fallbacks = sanitize_font_fallbacks(config.font_fallbacks.as_ref());
 
     // Diagnostic: log the effective resolved family the first time we
@@ -1321,16 +1325,14 @@ mod tests {
             resolve_font_family(Some("JetBrainsMono Nerd Font")),
             "JetBrainsMono Nerd Font"
         );
-        assert_eq!(resolve_font_family(Some("Lilex")), "Lilex");
         assert_eq!(resolve_font_family(Some("Geist")), "Geist");
-        assert_eq!(resolve_font_family(Some("IBM Plex Sans")), "IBM Plex Sans");
     }
 
     #[test]
     fn retired_bundled_families_load_and_fall_back_unless_installed() {
         let dir = tempfile::tempdir().expect("config directory");
         let path = dir.path().join("paneflow.json");
-        for family in ["Geist Mono", "IBM Plex Mono"] {
+        for family in ["Geist Mono", "IBM Plex Mono", "Lilex", "IBM Plex Sans"] {
             std::fs::write(
                 &path,
                 serde_json::json!({"font_family": family}).to_string(),
@@ -1363,14 +1365,14 @@ mod tests {
     // The wiring that lets a user keep a bundled primary while adding
     // a Nerd Font fallback for Starship / oh-my-posh icons. The sanitizer
     // must collapse absent/all-empty lists to `None` so `base_font` emits
-    // `fallbacks: None` (GPUI's built-in stack) rather than an empty
-    // `FontFallbacks`, and must trim + drop blank entries.
+    // `fallbacks: None` (Core Text's default glyph fallback) rather than an
+    // empty `FontFallbacks`, and must trim + drop blank entries.
 
     #[test]
     fn retired_fallbacks_are_omitted_unless_installed() {
         let dir = tempfile::tempdir().expect("config directory");
         let path = dir.path().join("paneflow.json");
-        for family in ["Geist Mono", "IBM Plex Mono"] {
+        for family in ["Geist Mono", "IBM Plex Mono", "Lilex", "IBM Plex Sans"] {
             std::fs::write(
                 &path,
                 serde_json::json!({"font_fallbacks": [format!(" {family} ")]}).to_string(),

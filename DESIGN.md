@@ -214,7 +214,7 @@ explicit priority.
 | Menus and selects | Deferred, anchored under the trigger | Squircle 18, list padding 4, item height 28 | `settings/components.rs:482,551,627` |
 | Tooltip | After 800 ms | Squircle 14 on the title bar color with a 1 px `border` at full alpha | `ui_primitives.rs:494,524,539-549` |
 | Toast | Bottom right: right 18, bottom **20** | Radius 8 on `subtle`, minimum width 220, one single-line row. The element is built at `bottom(18)`, but the animation callback owns the axis from the first frame: it enters 28 → 20, holds at 20, and exits 20 → 28, so 20 is the resting inset and 18 is never observed. The sticky release-notes toast (5.8) adds an action button and a close glyph to that one row and never exits | `app/notifications.rs` `render_toast`, `render_sticky_toast` |
-| System Info dialog | Centered on a black 0.55 backdrop | Squircle 20, 560 wide, padding 20, label column 116, 1 px `border` at 0.6, `shadow_lg` | `app/system_info_dialog.rs:29-44,305-334` |
+| System Info dialog | Centered on a black 0.55 backdrop | Squircle 20, 560 wide, padding 20, label column 116, 1 px `border` at 0.6, `shadow_lg` | `app/system_info_dialog.rs:29-44,308-337` |
 | About dialog | Centered on the same backdrop | 382 wide, 420 tall body, radius 10 (round, not squircle), 1 px border, `shadow_lg`, 32 px header band; colors derived from `UiColors`; **Migration**, see section 11 | `app/about_dialog.rs:143,354,439-448` |
 | Peek badge | Anchored under the pane header, right 2 | Max width 420, `px 2 / py 1`, `text_xs` on `overlay` with a 1 px `vc_conflict` at 0.6 border; the collapsed line caps at 80 characters and hover expands it | `pane.rs:112-119,740-780` |
 
@@ -401,7 +401,7 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 
 | Role | Family | Size and weight | Where |
 | --- | --- | --- | --- |
-| Interface | Geist, bundled, set on the root element (`main.rs:2153`) | 12 Normal for body, Medium for titles in rows | Everything that is not a terminal or code |
+| Interface | Geist, bundled, set on the root element (`main.rs:2109`) | 12 Normal for body, Medium for titles in rows | Everything that is not a terminal or code |
 | Labels | Geist | 11 Normal muted for eyebrows and descriptions, Semibold for `section_eyebrow` | Settings, rails, pills |
 | Micro | Geist | 9 to 10 | Header chips, hints |
 | Emphasis | Geist | 13 Medium | Row titles that need to outrank body |
@@ -409,7 +409,7 @@ the app's own context menus (`app/sidebar/context_menu.rs`) are plain 4 px and
 | Page heading | Geist | 26 Semibold | Settings page title |
 | Dialog title | Geist | 16 | About only — System Info uses `TITLE` (14) |
 | Terminal | User choice among fixed-pitch families; default the bundled JetBrainsMono Nerd Font | 13 pt default (range 8–32); `line_height` and `cell_width` are multipliers of the measured cell, both defaulting to 1.0 (ranges 0.8–2.5 and 0.8–2.0). At 13 pt the cell measures 10 by 23 px | Panes |
-| Code and diff | `resolve_font_family(None)`, the terminal default | 12 | Review diffs, theme preview |
+| Code and diff | `resolve_font_family(None)`, the terminal default | 12 | Review diffs, theme preview, System Info values |
 
 The named constants live in `ui_primitives.rs:425-433`: `LABEL_XS` 10,
 `LABEL_SM` 11, `BODY` 12, `BODY_EMPHASIS` 13, `TITLE` 14. New interface text
@@ -417,21 +417,31 @@ MUST use them. They are not yet universal — a couple of hundred
 `text_size(px(N.))` literals remain — so treat an existing literal as debt, not
 as licence.
 
-Bundled families (`src-app/assets/fonts/`): Geist, IBM Plex Sans,
-JetBrainsMono Nerd Font, Lilex, VT323. `Assets::load_fonts`
-registers every one with GPUI at boot, but only the first four are selectable:
+Bundled families (`src-app/assets/fonts/`): Geist, JetBrainsMono Nerd Font,
+VT323. `Assets::load_fonts`
+registers every one with GPUI at boot, but only the first two are selectable:
 **VT323 is Contextual to the About dialog's CRT credit plate** and is absent
 from `resolve_font_family`'s embedded list, so configuring it as `font_family`
 is rejected unless the user has it installed system-wide.
 
-Geist Mono and IBM Plex Mono are no longer bundled. Existing configuration
-names remain valid when installed system-wide; otherwise they log a warning
-and fall back to JetBrainsMono Nerd Font. In `font_fallbacks`, unavailable
-retired families are omitted while installed copies and other entries keep
-their order; an emptied list uses GPUI's default fallback stack.
+Geist Mono, IBM Plex Mono, Lilex, and IBM Plex Sans are no longer bundled.
+Existing configuration names remain valid when installed system-wide;
+otherwise they log a warning and fall back to JetBrainsMono Nerd Font. In
+`font_fallbacks`, unavailable retired families are omitted while installed
+copies and other entries keep their order; an emptied list is the same as
+none. Both checks read the installed-monospace registry, so a system-installed
+IBM Plex Sans, which is proportional, is still rejected as `font_family` and
+dropped from `font_fallbacks`. That is accepted.
 Medium and semibold Nerd Font faces
-remain bundled for configured terminal weights and diff headers. Lilex and
-IBM Plex Sans remain available to GPUI’s internal fallback stack.
+remain bundled for configured terminal weights and diff headers.
+
+GPUI's own font stack (`.ZedMono`, `.ZedSans`, then Helvetica) is read only
+when a family fails to load, and PaneFlow bundles no file behind its first
+two entries, so an unloadable family renders in proportional Helvetica. A
+surface that needs monospace names the bundled family through
+`resolve_font_family(None)`, as the System Info value column does. Glyph
+fallback for characters a face lacks is Core Text's own and does not use
+that stack.
 
 The Nerd Font ships in its non-Mono variant so icon glyphs keep their designed
 size; the renderer constrains them to their cells. Aliases that resolve
@@ -544,9 +554,10 @@ icon buttons on the right: the Customize Sidebar menu behind
 is deliberately **no new-workspace button** (issue #105); a guard test
 (`the_workspaces_header_carries_no_new_workspace_button`) fails if one returns.
 New Workspace is `secondary-shift-n`, the Window menu, and the empty state's
-`Open folder` button. The empty state carries only `Open folder` and
-`Command palette`; the `Open recent` list was removed (issue #813), and a
-guard test (`the_empty_state_has_no_recent_folders_list`) fails if it returns.
+`Open folder` button. The empty state carries only an `Open a project folder`
+line and that button; the `Open recent` list (issue #813) and the `Command
+palette` button (issue #844) were removed, and a guard test
+(`the_empty_state_has_no_recent_folders_list`) fails if either returns.
 With no workspace open, `⌘1`-`⌘9` do nothing.
 
 A workspace is a folder row; its tabs are child rows with inline rename, hover
@@ -810,31 +821,14 @@ put and the user picks a preset or closes the workspace instead. Split placement
 renders no branch row and never opens the sessions rail; Tab placement may, when
 `new_pane_shows_sessions` is on.
 
-**The command palette** (`secondary-shift-o`, issue #523) is the theme
-picker's shell: the menu surface of 5.6, 544 wide, docked 96 from the top of
-the window over a 0.4 black scrim. A 13 px query line reading `Execute a
-command…` sits over a hairline, then one `select_item` row per action that
-carries no key context, each showing the Settings description and its live
-binding at 11 px muted on the trailing edge (no chord, no trailing text).
-Typing filters on whole words in any order; arrows move and scroll the
-selection into view; Enter or a click closes the palette, hands focus back to
-the pane, then dispatches; Escape and an outside click close it the same way.
-It never lists itself, opening it folds any other open overlay first (the
-pane palette included, except the §5.7 last-surface case: a pane palette on
-the workspace's sole paneless tab cannot close, so the command palette opens
-over it and hands the keyboard back to it when it closes; the dispatched
-action lands on the pane the outermost folded overlay was opened from; the
-chord is inert while a modal
-dialog or the Settings surface is open, About, System Info,
-close confirm, Work Review, Settings, while any of those opened over the
-palette closes it), and upstream's `secondary-shift-p` is
-Pane Overview in this fork. The Workspaces rail's empty state names it beside `Open folder`.
-The list is a `ListBox` of `ListBoxOption` rows carrying `aria_selected` and
-a label of the description plus its chord, per 7.2.
+There is no command palette (removed in issue #844): every context-free
+action already has a default chord, and Settings ▸ Keyboard Shortcuts is the
+searchable list of them. Upstream's `secondary-shift-p` is Pane Overview in
+this fork, and `secondary-shift-o` has no default.
 
-Repository cloning happens in a terminal with `gh repo clone` or `git clone`.
-The sidebar empty state offers New workspace, the command palette, and recent
-folders; there is no clone modal or clone action in the palette.
+Repository cloning happens in a terminal with `gh repo clone` or `git clone`;
+there is no clone modal or clone action. The sidebar empty state offers only
+`Open folder` (5.2).
 
 ### 5.8 Feedback
 
@@ -947,7 +941,6 @@ a chord or a menu item, and MUST NOT rely on a surface that has neither.
 | Pane overview | `secondary-shift-p` |
 | Work review | `secondary-shift-u` |
 | Primary sidebar | `secondary-alt-b` |
-| Command palette | `secondary-shift-o` |
 | Jump to next waiting agent | `secondary-shift-j` |
 | Copy, paste (Terminal) | `cmd-c` / `cmd-v`, plus `ctrl-shift-c` / `ctrl-shift-v` |
 | Clear scrollback, reset terminal | `secondary-shift-k` and `cmd-k`; `secondary-shift-r` |
