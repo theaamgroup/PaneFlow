@@ -23,4 +23,4 @@ The full reference, including types, defaults, and per-key notes, is on
 the [schema page](configuration/schema.md).
 
 The [runtime walkthrough](configuration/runtime.md) describes hot reload,
-key recording, review state, sidebar metadata, and session handoff.
+key recording, review state, and sidebar metadata.

@@ -212,28 +212,6 @@ Hermes, Openclaw, DeepSeek Harness, Muse Code, Factory's Droid, or anything else
 them per thread, so one thread can plan with Codex while another
 implements with Claude Code, side by side in the same project.
 
-When one agent's window closes on you - a Claude usage cap, say - the
-work does not have to stop with it. Right-click a row in the Agent
-sessions sidebar for **Resume**, **Copy summary**, or **Continue in ▸**,
-which lists every other enabled agent. Picking one opens a new tab in
-that session's directory, starts the agent, and prefills a short handoff
-block in its prompt (never submitted - press Enter when you are ready):
-
-```
-Continue this work from a prior Claude Code session.
-Session: <id>
-Cwd: <directory>
-Branch: <branch, when known>
-Summary:
-<the session's title or first message, capped at 4 KiB>
-```
-
-The handoff also includes a bounded repository snapshot: current revision,
-branch, uncommitted-change status, and changed paths. PaneFlow does not copy
-file contents or run tests while preparing it; the prompt states that limitation.
-If Git inspection fails, the summary still transfers with an explicit note.
-The prompt remains editable and is never submitted automatically.
-
 ## System Info
 
 **Help ▸ System Info…** opens a small dialog with the environment block a

@@ -737,7 +737,6 @@ impl PaneFlowApp {
                 sessions_group_show_all: [false; crate::agent_sessions::SESSION_AGENT_COUNT],
                 sessions_scanning: [false; crate::agent_sessions::SESSION_AGENT_COUNT],
                 sessions_filter_input,
-                sessions_menu_open: None,
             },
             toast: None,
             toast_queue: std::collections::VecDeque::new(),
