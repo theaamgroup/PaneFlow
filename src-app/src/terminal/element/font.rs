@@ -137,6 +137,26 @@ fn expand_paneflow_alias(name: &str) -> &str {
 static INSTALLED_MONO_FONTS: LazyLock<HashSet<String>> =
     LazyLock::new(|| crate::fonts::load_mono_fonts().into_iter().collect());
 
+/// Warning kind for a configured `font_family` that falls back to the default.
+const FONT_FAMILY_WARNING: &str = "font_family";
+
+/// Configured font values this process has already warned about, keyed by
+/// warning kind and value. The Settings Terminal tab resolves `font_family`
+/// on every render (#867), so an unsupported value would otherwise log one
+/// line per frame while the tab is open.
+static WARNED_FONT_VALUES: LazyLock<std::sync::Mutex<HashSet<(&'static str, String)>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+
+/// `true` the first time this process sees `value` under `kind`, `false` on
+/// every later call. Callers log only on `true`; what they resolve to never
+/// depends on the answer.
+fn first_font_warning(kind: &'static str, value: &str) -> bool {
+    WARNED_FONT_VALUES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert((kind, value.to_string()))
+}
+
 // ---------------------------------------------------------------------------
 // Font config cache - avoids load_config() on every base_font()/font_size() call
 // ---------------------------------------------------------------------------
@@ -269,7 +289,7 @@ static FONT_CONFIG_CACHE: std::sync::Mutex<Option<CachedFontConfig>> = std::sync
 /// Users can still override with any system font via
 /// `paneflow.json#font_family` - `resolve_font_family` validates the
 /// override against the installed-mono registry (when populated) and
-/// degrades back to this default with a warning otherwise.
+/// degrades back to this default otherwise, warning once per value.
 pub(crate) fn default_font_family() -> &'static str {
     EMBEDDED_MONO_FAMILY
 }
@@ -318,9 +338,11 @@ fn resolve_font_family_with_registry<'a>(
     let retired_family = is_retired_font_family(candidate);
     if (!installed.is_empty() || retired_family) && !installed.contains(candidate) {
         let fallback = default_font_family();
-        log::warn!(
-            "font_family '{candidate}' is not an installed monospace family; using default '{fallback}'"
-        );
+        if first_font_warning(FONT_FAMILY_WARNING, candidate) {
+            log::warn!(
+                "font_family '{candidate}' is not an installed monospace family; using default '{fallback}'"
+            );
+        }
         return fallback.to_string();
     }
 
@@ -1354,6 +1376,41 @@ mod tests {
                 family,
             );
         }
+    }
+
+    // ─── once-per-value font warnings (#867) ──────────────────────────
+    // The warned set is process-wide and tests share one process, so each
+    // test uses keys no other test touches.
+
+    #[test]
+    fn first_font_warning_reports_a_key_once() {
+        assert!(first_font_warning("test-867-once", "Some Family"));
+        assert!(!first_font_warning("test-867-once", "Some Family"));
+        assert!(!first_font_warning("test-867-once", "Some Family"));
+    }
+
+    #[test]
+    fn first_font_warning_tracks_each_kind_and_value_separately() {
+        assert!(first_font_warning("test-867-kind-a", "Shared"));
+        assert!(first_font_warning("test-867-kind-a", "Other"));
+        assert!(first_font_warning("test-867-kind-b", "Shared"));
+        assert!(!first_font_warning("test-867-kind-a", "Shared"));
+        assert!(!first_font_warning("test-867-kind-a", "Other"));
+        assert!(!first_font_warning("test-867-kind-b", "Shared"));
+    }
+
+    #[test]
+    fn unsupported_font_family_falls_back_on_every_call_and_warns_once() {
+        let family = "PaneFlow 867 Uninstalled Family";
+        let installed = HashSet::from(["Menlo".to_string()]);
+        for _ in 0..3 {
+            assert_eq!(
+                resolve_font_family_with_registry(Some(family), &installed),
+                EMBEDDED_MONO_FAMILY,
+            );
+        }
+        // The first resolve recorded the value, so later renders stay silent.
+        assert!(!first_font_warning(FONT_FAMILY_WARNING, family));
     }
 
     #[test]
