@@ -735,10 +735,9 @@ impl TerminalView {
             .terminal
             .unwrap_or_default()
             .resolved_scrollback_lines_for_profile(params.profile);
-        let (mut terminal, pending) = TerminalState::new_pending_with_profile_and_shell_quoting(
+        let (mut terminal, pending) = TerminalState::new_pending_with_shell_quoting(
             params.cols,
             params.rows,
-            params.profile,
             params.shell_quoting,
         );
         terminal.set_spawn_osc52_mode(osc52_mode);
@@ -756,7 +755,7 @@ impl TerminalView {
         // background-spawned child still gets correct Ctrl-C / Ctrl-Z (US-012).
         let signal_mask = crate::terminal::pty_session::capture_foreground_signal_mask();
 
-        let view = Self::from_terminal_state(workspace_id, terminal, cx);
+        let view = Self::from_terminal_state(terminal, cx);
 
         let executor = cx.background_executor().clone();
         cx.spawn(
@@ -808,11 +807,7 @@ impl TerminalView {
         view
     }
 
-    fn from_terminal_state(
-        _workspace_id: u64,
-        mut terminal: TerminalState,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn from_terminal_state(mut terminal: TerminalState, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
 
         // Find bar input - same widget as the sidebar filter. Observe it
@@ -1037,7 +1032,7 @@ impl TerminalView {
     }
 
     #[cfg(test)]
-    pub(crate) fn display_only_for_test(workspace_id: u64, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn display_only_for_test(_workspace_id: u64, cx: &mut Context<Self>) -> Self {
         let mut terminal = TerminalState::new_display_only(24, 80);
         // Drop the engine event channel before the view wires its coalescing
         // task to it. The display runtime owns a real OS thread, and GPUI's
@@ -1046,7 +1041,7 @@ impl TerminalView {
         // surface, never its output, so an event stream that stays pending is
         // exactly what they want.
         drop(terminal.take_backend_events());
-        Self::from_terminal_state(workspace_id, terminal, cx)
+        Self::from_terminal_state(terminal, cx)
     }
 }
 

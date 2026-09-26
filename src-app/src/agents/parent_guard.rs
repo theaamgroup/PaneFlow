@@ -7,12 +7,11 @@
 //! members, and discovers every live process group in the terminal session
 //! before owning the complete TERM-to-KILL ladder.
 //!
-//! [`install_process_job`] returns [`ParentGuardStatus::Unsupported`]
-//! because there is no process-wide Unix equivalent to a kill-on-close
-//! job object in this app layer. Shim-wrapped agent CLIs are covered
-//! separately: `paneflow-shim` installs a parent-death watcher on macOS
-//! before it waits on the real agent binary. Raw PTY shells are covered
-//! by tiny per-PTY watcher processes launched through [`spawn_pty_guard`].
+//! There is no process-wide guard: each child class carries its own.
+//! Shim-wrapped agent CLIs are covered by `paneflow-shim`, which installs a
+//! parent-death watcher on macOS before it waits on the real agent binary.
+//! Raw PTY shells are covered by tiny per-PTY watcher processes launched
+//! through [`spawn_pty_guard`].
 
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -38,10 +37,9 @@ pub const INHERITED_AGENT_SESSION_ENV: &[&str] = &[
 ];
 
 /// Remove inherited agent-session markers from the process environment before
-/// any worker thread or PTY backend starts. Alacritty 0.26 inherits the parent
-/// environment and does not expose arbitrary `env_remove` entries, so this
-/// process-level guard remains necessary until that spawn boundary can own the
-/// exclusion directly.
+/// any worker thread or PTY backend starts. The PTY spawn already calls
+/// `env_remove` for each key, but this scrub covers the whole process: every
+/// other child and in-process reader of these variables sees them unset too.
 ///
 /// Must be called from the very first lines of `main()`, before any
 /// `std::thread::spawn`, `tokio::runtime::Builder::build`, or smol
@@ -80,22 +78,6 @@ pub const PTY_GUARD_SUBCOMMAND: &str = "__paneflow-pty-guard";
 #[cfg(unix)]
 pub struct PtyGuardHandle {
     _stdin: ChildStdin,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum ParentGuardStatus {
-    Installed,
-    Unsupported,
-}
-
-/// Install the process-wide kill-on-parent-death guard. Call once,
-/// early in `fn main()`, before any agent CLI or PTY is spawned.
-/// Currently always returns [`ParentGuardStatus::Unsupported`].
-pub fn install_process_job() -> Result<ParentGuardStatus, Box<dyn std::error::Error>> {
-    // Unix has no process-wide equivalent to a Windows Job Object; PTY
-    // shells and shim-wrapped agents install per-child guards instead.
-    Ok(ParentGuardStatus::Unsupported)
 }
 
 /// Whether teardown may signal process group `-pid`.
@@ -1067,27 +1049,6 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-    }
-
-    /// The call must NOT panic. The unsupported shim short-circuits cleanly.
-    /// The production call site already logs the error and proceeds without
-    /// blocking startup.
-    #[test]
-    fn install_process_job_does_not_panic() {
-        // Calling twice is also safe -- both calls are no-ops.
-        let _ = install_process_job();
-        let _ = install_process_job();
-    }
-
-    /// Contract: the call must report unsupported explicitly. The behavioural
-    /// assertion is that we did not silently fall through to a panic or to a
-    /// `unimplemented!()`.
-    #[test]
-    fn unix_install_is_documented_unsupported() {
-        assert_eq!(
-            install_process_job().unwrap(),
-            ParentGuardStatus::Unsupported
-        );
     }
 
     #[cfg(unix)]

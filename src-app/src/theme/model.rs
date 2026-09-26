@@ -4,9 +4,9 @@ use gpui::{Hsla, Rgba};
 
 use crate::terminal::element::{MIN_APCA_CONTRAST, ensure_minimum_contrast};
 
-/// Terminal color theme with an optional app-wide UI palette plus 36 terminal slots:
-/// 5 base + cursor + selection + selection_foreground + scrollbar_thumb +
-/// link_text + 2 title bar + 24 ANSI (8 hues x 3 intensities).
+/// Terminal color theme with an optional app-wide UI palette plus 26 terminal slots:
+/// 3 base + cursor + selection + selection_foreground + scrollbar_thumb +
+/// link_text + 2 title bar + 16 ANSI (8 hues x 2 intensities).
 #[derive(Clone, Copy)]
 pub struct TerminalTheme {
     /// Optional app-wide UI palette. Legacy themes derive their chrome colors
@@ -15,8 +15,6 @@ pub struct TerminalTheme {
     pub ui: Option<UiColors>,
     pub background: Hsla,
     pub foreground: Hsla,
-    pub bright_foreground: Hsla,
-    pub dim_foreground: Hsla,
     pub ansi_background: Hsla,
     pub cursor: Hsla,
     pub selection: Hsla,
@@ -32,7 +30,7 @@ pub struct TerminalTheme {
     pub link_text: Hsla,
     pub title_bar_background: Hsla,
     pub title_bar_inactive_background: Hsla,
-    // 8 hues x 3 intensities = 24 ANSI colors
+    // 8 hues x 2 intensities = 16 ANSI colors
     pub black: Hsla,
     pub red: Hsla,
     pub green: Hsla,
@@ -49,14 +47,6 @@ pub struct TerminalTheme {
     pub bright_magenta: Hsla,
     pub bright_cyan: Hsla,
     pub bright_white: Hsla,
-    pub dim_black: Hsla,
-    pub dim_red: Hsla,
-    pub dim_green: Hsla,
-    pub dim_yellow: Hsla,
-    pub dim_blue: Hsla,
-    pub dim_magenta: Hsla,
-    pub dim_cyan: Hsla,
-    pub dim_white: Hsla,
     /// Per-language syntax-highlighting colors for the diff view
     /// (prd-diff-syntax-palette-2026-Q3.md, EP-001). A dedicated semantic
     /// palette - NOT the 8-hue ANSI set above - so diff syntax can mirror the
@@ -504,8 +494,6 @@ pub(super) fn apply_surface_overrides(mut theme: TerminalTheme) -> TerminalTheme
     theme.background = terminal_bg;
     theme.ansi_background = terminal_bg;
     theme.foreground = h(0xf0f3f7);
-    theme.bright_foreground = h(0xffffff);
-    theme.dim_foreground = h(0x9ca7b5);
     theme.selection = ha(0x5aa6ff, 0.22);
     theme.scrollbar_thumb = ha(0x9aa8bd, 0.30);
     theme.link_text = h(0x57d5c4);

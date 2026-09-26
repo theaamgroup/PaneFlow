@@ -197,8 +197,6 @@ impl TerminalSessionBackend {
     pub(crate) fn render_content(
         &self,
         window_size: TerminalWindowSize,
-        first_visible_row: i32,
-        last_visible_row: i32,
         clear_on_resize: bool,
     ) -> (Content, bool) {
         // The render thread pays for this call once per pane per frame, and the
@@ -208,12 +206,7 @@ impl TerminalSessionBackend {
         let snapshot_started_at = RENDER_CONTENT_TIMING_ENABLED
             .with(|enabled| enabled.get())
             .then(std::time::Instant::now);
-        let rendered = self.ghostty.render_content(
-            window_size,
-            first_visible_row,
-            last_visible_row,
-            clear_on_resize,
-        );
+        let rendered = self.ghostty.render_content(window_size, clear_on_resize);
         #[cfg(test)]
         if let Some(snapshot_started_at) = snapshot_started_at {
             RENDER_CONTENT_LOCK_DURATIONS
@@ -490,10 +483,6 @@ pub struct GhosttyBuildDiagnostics {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "mirrors the engine's failure phases in full; not every phase is reachable on macOS"
-)]
 pub enum TerminalBackendFailurePhase {
     Initialization,
     OpenPty,
@@ -519,10 +508,6 @@ pub struct TerminalBackendFailureDiagnostics {
     pub os_error: Option<i32>,
 }
 
-#[allow(
-    dead_code,
-    reason = "mirrors the engine's reason codes in full; not every code is reachable on macOS"
-)]
 impl TerminalBackendFailureDiagnostics {
     pub(super) const GHOSTTY_INITIALIZATION_FAILED: &'static str = "ghostty_initialization_failed";
     pub(super) const GHOSTTY_OPEN_PTY_FAILED: &'static str = "ghostty_open_pty_failed";
@@ -1165,12 +1150,8 @@ impl TerminalState {
             &paneflow_config::loader::load_config(),
         );
         let max_scrollback = resolved_scrollback_lines(params.profile);
-        let (mut state, pending) = Self::new_pending_with_profile_and_shell_quoting(
-            params.cols,
-            params.rows,
-            params.profile,
-            params.shell_quoting,
-        );
+        let (mut state, pending) =
+            Self::new_pending_with_shell_quoting(params.cols, params.rows, params.shell_quoting);
         state.set_spawn_osc52_mode(Osc52Mode::from_config(
             &paneflow_config::loader::load_config(),
         ));
@@ -1289,27 +1270,12 @@ impl TerminalState {
     /// opaque pending handle is what [`GhosttySession::start`] consumes.
     #[cfg(test)]
     pub(super) fn new_pending(cols: usize, rows: usize) -> (Self, PendingTerminalBackend) {
-        Self::new_pending_with_profile(cols, rows, TerminalSurfaceProfile::Normal)
+        Self::new_pending_with_shell_quoting(cols, rows, ShellQuoting::default_for_platform())
     }
 
-    #[cfg(test)]
-    pub(super) fn new_pending_with_profile(
+    pub(super) fn new_pending_with_shell_quoting(
         cols: usize,
         rows: usize,
-        profile: TerminalSurfaceProfile,
-    ) -> (Self, PendingTerminalBackend) {
-        Self::new_pending_with_profile_and_shell_quoting(
-            cols,
-            rows,
-            profile,
-            ShellQuoting::default_for_platform(),
-        )
-    }
-
-    pub(super) fn new_pending_with_profile_and_shell_quoting(
-        cols: usize,
-        rows: usize,
-        _profile: TerminalSurfaceProfile,
         shell_quoting: ShellQuoting,
     ) -> (Self, PendingTerminalBackend) {
         Self::build_display_only(cols, rows, shell_quoting)
@@ -2702,61 +2668,6 @@ pub(super) fn strip_partial_ansi_tail(text: &mut String) {
             // Other ESC sequences (SS2, SS3, …) are two bytes - complete as-is.
         }
     }
-}
-
-/// True when `pid` is still the leader of its own process group. This holds
-/// both for the PTY session leader portable-pty spawns (`setsid()`) and for a
-/// foreground job-control group leader. After a leader exits the kernel can
-/// recycle `pid` onto an unrelated leader, so callers must also require the
-/// pinned process start ([`crate::agents::parent_guard::may_signal_group`]).
-#[cfg(all(unix, test))]
-fn is_process_group_leader(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    // SAFETY: getpgid is a pure query; it returns the pgid, or -1 (ESRCH) when
-    // no such process exists - neither equals our positive `pid` unless `pid`
-    // is genuinely its own group leader.
-    unsafe { libc::getpgid(pid) == pid }
-}
-
-#[cfg(all(unix, test))]
-fn may_signal_own_session(pid: i32, pinned_start: Option<u64>) -> bool {
-    crate::agents::parent_guard::may_signal_group(
-        pid,
-        pinned_start,
-        child_pid_start_time(pid as u32),
-        is_process_group_leader(pid),
-    )
-}
-
-/// Resolve a distinct PTY foreground job-control group while the duplicated
-/// master fd is still open. `tcgetpgrp` alone is not ownership evidence: a
-/// stale/recycled PGID must also still belong to the shell's terminal session
-/// and have at least one live member whose process start we can pin. Pinning
-/// members rather than the numeric leader keeps ordinary pipelines killable
-/// after the process that originally supplied their PGID has exited.
-#[cfg(all(target_os = "macos", test))]
-fn foreground_process_group(
-    pty_master_fd: i32,
-    shell_pid: u32,
-) -> Option<crate::agents::parent_guard::PinnedProcessGroup> {
-    crate::agents::parent_guard::pin_foreground_process_group(pty_master_fd, shell_pid)
-}
-
-/// Send SIGTERM to the child's process group, guarded by leader + start-time
-/// identity so a dead or recycled `pid` is a harmless no-op. Returns true if
-/// SIGTERM was delivered. Factored out of `Drop` so the graceful-shutdown
-/// step is unit-testable.
-#[cfg(all(unix, test))]
-fn terminate_process_group(pid: i32, pinned_start: Option<u64>) -> bool {
-    if !may_signal_own_session(pid, pinned_start) {
-        return false;
-    }
-    // SAFETY: kill(-pid, SIGTERM) signals every member of the group; FFI-safe
-    // with the positive `pid` we just confirmed is our session leader with a
-    // matching spawn-time pin.
-    unsafe { libc::kill(-pid, libc::SIGTERM) == 0 }
 }
 
 impl Drop for TerminalState {
@@ -4302,8 +4213,7 @@ mod tests {
             !restored.contains('\x1b') && !restored.contains('\x07'),
             "no VT introducer may land in the grid as text; got {restored:?}"
         );
-        let (content, _) =
-            backend.render_content(TerminalWindowSize::new(80, 6, 8, 16), 0, 5, false);
+        let (content, _) = backend.render_content(TerminalWindowSize::new(80, 6, 8, 16), false);
         let red = content
             .cells
             .iter()
@@ -4547,8 +4457,11 @@ mod tests {
         // SAFETY: signal 0 proves the leaderless group still contains worker.
         assert_eq!(unsafe { libc::kill(-foreground_pgid, 0) }, 0);
 
-        let foreground = foreground_process_group(master.as_raw_fd(), shell_pid as u32)
-            .expect("distinct owned foreground group");
+        let foreground = crate::agents::parent_guard::pin_foreground_process_group(
+            master.as_raw_fd(),
+            shell_pid as u32,
+        )
+        .expect("distinct owned foreground group");
         assert_eq!(foreground.pgid, foreground_pgid as u32);
         assert_ne!(foreground.pgid, shell_pid as u32);
         assert!(
@@ -4577,148 +4490,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         drop(cleanup);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn terminate_process_group_delivers_sigterm_and_is_honored() {
-        // the process group receives SIGTERM (not a hard SIGKILL).
-        // The child is its own session/group leader (setsid) and traps SIGTERM
-        // to exit 42; a SIGKILL would instead show signal 9 with no exit code.
-        // Proving the trap ran proves SIGTERM was delivered to the group - and
-        // by construction `Drop` sends it synchronously *before* scheduling the
-        // 100ms-grace SIGKILL.
-        use std::io::{BufRead, BufReader};
-        use std::os::unix::process::{CommandExt, ExitStatusExt};
-        use std::process::{Command, Stdio};
-        use std::time::{Duration, Instant};
-
-        // `sleep 30 &` + `wait` (not a foreground sleep): POSIX requires the
-        // `wait` builtin to be interrupted by a trapped signal, so the trap
-        // runs promptly even if the group SIGTERM races `sleep`'s fork→exec
-        // window (where an inherited blocked mask can leave it alive - a
-        // foreground sleep then pins the shell for its full 30s before the
-        // trap fires, which is exactly the aarch64-CI hang this replaces).
-        // `echo ready` is the readiness handshake: once the parent reads it,
-        // setsid + trap + background spawn are all done - no blind warmup.
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "trap 'exit 42' TERM; sleep 30 & echo ready; wait"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        // SAFETY: setsid() runs in the forked child before exec; it detaches
-        // the child into its own session/group so kill(-pid, ...) targets
-        // exactly this group, with no shared-state hazard.
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-
-        let mut child = cmd.spawn().expect("spawn test child");
-        let pid = child.id() as i32;
-
-        let mut ready = String::new();
-        BufReader::new(child.stdout.take().expect("piped stdout"))
-            .read_line(&mut ready)
-            .expect("read readiness line");
-        assert_eq!(ready.trim_end(), "ready", "handshake line");
-
-        let pinned_start = child_pid_start_time(pid as u32);
-        assert!(
-            terminate_process_group(pid, pinned_start),
-            "SIGTERM must be delivered to the live process group"
-        );
-
-        // The trap exits 42 well within the 100ms grace window; poll for exit
-        // with a generous ceiling - the suite runs fully parallel on 4-core CI
-        // runners and a 5s deadline has flaked under that load (same class as
-        // the v0.3.9 stdout_cap deflake). A regression still fails, just slower.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let status = loop {
-            if let Some(status) = child.try_wait().expect("try_wait child") {
-                break status;
-            }
-            if Instant::now() > deadline {
-                let _ = child.kill();
-                panic!("child did not exit after SIGTERM within 30s");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-
-        assert_eq!(
-            status.code(),
-            Some(42),
-            "child must exit via its SIGTERM handler (42), not be SIGKILLed (signal={:?})",
-            status.signal()
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn terminate_process_group_is_noop_for_dead_or_invalid_group() {
-        // AC (unhappy path): an empty/invalid group must be a harmless
-        // no-op guarded by the `getpgid(pid) == pid` identity check - no panic,
-        // returns false.
-        assert!(
-            !terminate_process_group(0, None),
-            "pid 0 must be rejected (would signal the caller's own group)"
-        );
-        assert!(
-            !terminate_process_group(-5, None),
-            "negative pid must be rejected"
-        );
-        // A very high pid is almost certainly not its own live group leader;
-        // getpgid returns ESRCH (≠ pid) so SIGTERM is never sent.
-        assert!(
-            !terminate_process_group(0x7FFF_FFF0, Some(1)),
-            "non-existent group must be a no-op, not a panic"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn terminate_process_group_is_noop_for_mismatched_start_pin() {
-        // A live setsid leader with a non-matching spawn pin must not be
-        // signaled: that is the recycled-session-leader window.
-        use std::io::{BufRead, BufReader};
-        use std::os::unix::process::CommandExt;
-        use std::process::{Command, Stdio};
-
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "echo ready; exec sleep 30"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        // SAFETY: setsid() runs in the forked child before exec.
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-        let mut child = cmd.spawn().expect("spawn test child");
-        let pid = child.id() as i32;
-
-        let mut ready = String::new();
-        BufReader::new(child.stdout.take().expect("piped stdout"))
-            .read_line(&mut ready)
-            .expect("read readiness line");
-        assert_eq!(ready.trim_end(), "ready", "handshake line");
-
-        let live_start = child_pid_start_time(pid as u32);
-        let bogus_pin = Some(live_start.map(|s| s.wrapping_add(1)).unwrap_or(1));
-        assert!(
-            !terminate_process_group(pid, bogus_pin),
-            "mismatched start pin must not SIGTERM a live session leader"
-        );
-        assert!(
-            child.try_wait().expect("try_wait").is_none(),
-            "child must still be running after the mismatched-pin no-op"
-        );
-        let _ = child.kill();
-        let _ = child.wait();
     }
 
     #[test]

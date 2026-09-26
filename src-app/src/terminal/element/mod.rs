@@ -928,9 +928,8 @@ impl TerminalElement {
             .max(1.0) as usize;
 
         // Viewport culling range from the content mask - the only remaining
-        // Window dependency. Computing it before the terminal snapshot lets the
-        // seam skip offscreen scrollback rows instead of allocating them and
-        // dropping them later.
+        // Window dependency. The backend snapshot below is not culled; layout
+        // skips the rows outside this range.
         let content_mask = window.content_mask();
         let visible_top = content_mask.bounds.origin.y;
         let visible_bottom = visible_top + content_mask.bounds.size.height;
@@ -963,12 +962,8 @@ impl TerminalElement {
         let clear_on_resize = self
             .needs_initial_clear
             .load(std::sync::atomic::Ordering::Relaxed);
-        let (content, initial_clear_consumed): (Content, bool) = self.backend.render_content(
-            window_size,
-            first_visible_row,
-            last_visible_row,
-            clear_on_resize,
-        );
+        let (content, initial_clear_consumed): (Content, bool) =
+            self.backend.render_content(window_size, clear_on_resize);
         if initial_clear_consumed {
             self.needs_initial_clear
                 .store(false, std::sync::atomic::Ordering::Relaxed);
