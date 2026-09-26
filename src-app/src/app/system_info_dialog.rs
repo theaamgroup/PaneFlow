@@ -14,7 +14,7 @@
 use gpui::{
     AnyElement, AppContext as _, AsyncApp, ClickEvent, ClipboardItem, Context, CursorStyle,
     FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
-    Styled, WeakEntity, Window, deferred, div, hsla, prelude::*, px, svg,
+    SharedString, Styled, WeakEntity, Window, deferred, div, hsla, prelude::*, px, svg,
 };
 
 use crate::PaneFlowApp;
@@ -210,6 +210,12 @@ impl PaneFlowApp {
                 .text_color(ui.muted)
                 .child("Collecting..."),
             SystemInfoDialog::Ready(report) => {
+                // Monospace: these are identifiers, versions and driver
+                // strings, and a proportional font makes a build number
+                // harder to read back. Name the bundled mono family: a
+                // family GPUI cannot load resolves to a proportional face.
+                let value_font =
+                    SharedString::from(crate::terminal::element::resolve_font_family(None));
                 let mut rows = div()
                     .flex()
                     .flex_col()
@@ -236,13 +242,10 @@ impl PaneFlowApp {
                                     .child(label),
                             )
                             .child(
-                                // Monospace: these are identifiers, versions
-                                // and driver strings, and a proportional font
-                                // makes a build number harder to read back.
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .font_family("monospace")
+                                    .font_family(value_font.clone())
                                     .text_size(BODY)
                                     .line_height(ROW_LINE_HEIGHT)
                                     .text_color(ui.text)
@@ -453,6 +456,47 @@ mod tests {
         assert!(
             close.contains("self.restore_focus_after_close_confirm(window, cx)"),
             "dismissing System Info must hand focus back to the workspace: {close}"
+        );
+    }
+
+    /// Issue #849: the value column names the bundled mono family. GPUI has no
+    /// generic-family lookup: a family it cannot load falls through GPUI's
+    /// global font stack, and with no bundled file behind that stack's first
+    /// two entries, it lands on proportional Helvetica.
+    #[test]
+    fn system_info_values_render_in_the_bundled_mono_family() {
+        use crate::source_probe::source_slice;
+
+        let src = include_str!("system_info_dialog.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of system_info_dialog.rs");
+        let ready = source_slice(src, "SystemInfoDialog::Ready(report) => {", "\n        };");
+        assert_eq!(
+            ready.matches(".font_family(").count(),
+            1,
+            "the report rows set exactly one family, on the value column: {ready}"
+        );
+        let offset = |needle: &str| {
+            ready
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} is missing from the report rows: {ready}"))
+        };
+        let label_at = offset(".child(label)");
+        let font_at = offset(".font_family(value_font.clone())");
+        let value_at = offset(".child(value)");
+        // The value div is the only one built between the label child and the
+        // value child, so this order puts the family on the value column, not
+        // on the label column or the row container.
+        assert!(
+            label_at < font_at && font_at < value_at,
+            "`value_font` must be set on the value column, after `.child(label)` \
+             and before `.child(value)`: {ready}"
+        );
+        let binding = source_slice(ready, "let value_font =", ";");
+        assert!(
+            binding.contains("crate::terminal::element::resolve_font_family(None)"),
+            "`value_font` must be the bundled mono family: {binding}"
         );
     }
 
