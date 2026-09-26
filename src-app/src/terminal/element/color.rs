@@ -481,19 +481,7 @@ mod tests {
                 theme.bright_cyan,
                 theme.bright_white,
             ];
-            let mut foregrounds = vec![
-                theme.foreground,
-                theme.bright_foreground,
-                theme.dim_foreground,
-                theme.dim_black,
-                theme.dim_red,
-                theme.dim_green,
-                theme.dim_yellow,
-                theme.dim_blue,
-                theme.dim_magenta,
-                theme.dim_cyan,
-                theme.dim_white,
-            ];
+            let mut foregrounds = vec![theme.foreground];
             foregrounds.extend(ansi);
             let mut backgrounds = vec![theme.background, theme.ansi_background, theme.selection];
             backgrounds.extend(ansi);

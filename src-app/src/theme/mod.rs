@@ -1,5 +1,4 @@
-//! Terminal theming with 36 color slots (see [`model::TerminalTheme`]),
-//! compatible with Zed's terminal theme format.
+//! Terminal theming with 26 color slots (see [`model::TerminalTheme`]).
 
 mod builtin;
 mod model;

@@ -6,7 +6,6 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkKind {
@@ -19,19 +18,12 @@ pub enum MarkKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawMark {
     pub kind: MarkKind,
-    pub exit_code: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct CommandMark {
     pub kind: MarkKind,
-    /// Retained for OSC 133 exit-dot rendering and structured command export.
-    #[allow(dead_code)]
-    pub exit_code: Option<i32>,
     pub abs_line: i64,
-    /// Retained for command duration rendering and structured command export.
-    #[allow(dead_code)]
-    pub at: Instant,
 }
 
 pub const MAX_MARKS: usize = 1_000;
@@ -67,12 +59,6 @@ impl MarkRing {
 
     pub fn retain_at_or_below(&mut self, max_abs_line: i64) {
         self.marks.retain(|mark| mark.abs_line <= max_abs_line);
-    }
-
-    /// Exposes complete marks to OSC 133 exit-dot rendering and command export.
-    #[allow(dead_code)]
-    pub fn iter(&self) -> impl Iterator<Item = &CommandMark> {
-        self.marks.iter()
     }
 
     pub fn prompt_before(&self, abs_line: i64) -> Option<i64> {
@@ -237,24 +223,17 @@ fn find_escape(bytes: &[u8]) -> Option<usize> {
         .map(|offset| tail_start + offset)
 }
 
+/// Only the kind byte is read. Anything after it, such as the exit code in
+/// `D;<code>`, is ignored.
 fn parse_payload(payload: &[u8]) -> Option<RawMark> {
-    let (kind, rest) = payload.split_first()?;
-    let kind = match kind {
+    let kind = match payload.first()? {
         b'A' => MarkKind::PromptStart,
         b'B' => MarkKind::CommandStart,
         b'C' => MarkKind::OutputStart,
         b'D' => MarkKind::CommandFinished,
         _ => return None,
     };
-    let exit_code = if kind == MarkKind::CommandFinished {
-        rest.strip_prefix(b";").and_then(|code| {
-            let code = code.split(|byte| *byte == b';').next().unwrap_or(code);
-            std::str::from_utf8(code).ok()?.parse::<i32>().ok()
-        })
-    } else {
-        None
-    };
-    Some(RawMark { kind, exit_code })
+    Some(RawMark { kind })
 }
 
 #[cfg(test)]
@@ -278,19 +257,15 @@ mod tests {
             vec![
                 RawMark {
                     kind: MarkKind::PromptStart,
-                    exit_code: None
                 },
                 RawMark {
                     kind: MarkKind::CommandStart,
-                    exit_code: None
                 },
                 RawMark {
                     kind: MarkKind::OutputStart,
-                    exit_code: None
                 },
                 RawMark {
                     kind: MarkKind::CommandFinished,
-                    exit_code: Some(7)
                 },
             ]
         );
@@ -304,7 +279,6 @@ mod tests {
                 scan(&[&sequence[..split], &sequence[split..]]),
                 vec![RawMark {
                     kind: MarkKind::CommandFinished,
-                    exit_code: Some(127)
                 }],
                 "split at {split}"
             );
@@ -319,7 +293,6 @@ mod tests {
             marks,
             vec![RawMark {
                 kind: MarkKind::PromptStart,
-                exit_code: None
             }]
         );
     }
@@ -330,12 +303,10 @@ mod tests {
         for line in 0..MAX_MARKS + 10 {
             ring.push(CommandMark {
                 kind: MarkKind::PromptStart,
-                exit_code: None,
                 abs_line: line as i64,
-                at: Instant::now(),
             });
         }
-        assert_eq!(ring.iter().count(), MAX_MARKS);
+        assert_eq!(ring.marks.len(), MAX_MARKS);
         assert_eq!(ring.prompt_before(20), Some(19));
         assert_eq!(ring.prompt_after(20), Some(21));
     }

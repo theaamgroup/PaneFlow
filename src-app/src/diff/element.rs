@@ -405,7 +405,6 @@ impl DiffElement {
         origin: Point<Pixels>,
         width: Pixels,
         row_h: Pixels,
-        _collapsed: bool,
         sticky: bool,
         quads: &mut Vec<Quad>,
         images: &mut Vec<ImagePaint>,
@@ -779,7 +778,6 @@ impl DiffElement {
         origin: Point<Pixels>,
         width: Pixels,
         row_h: Pixels,
-        collapsed: bool,
         h_offset: Pixels,
         quads: &mut Vec<Quad>,
         rounded_quads: &mut Vec<RoundedQuad>,
@@ -796,8 +794,7 @@ impl DiffElement {
                 // EP-002 US-006: structured header (icon + path + diffstat).
                 // Always present for header rows.
                 Some(parts) => self.paint_file_header(
-                    window, cx, parts, origin, width, row_h, collapsed, false, quads, images,
-                    glyphs,
+                    window, cx, parts, origin, width, row_h, false, quads, images, glyphs,
                 ),
                 // Defensive fallback for the impossible header-less case.
                 None => {
@@ -908,7 +905,6 @@ impl DiffElement {
         origin: Point<Pixels>,
         width: Pixels,
         row_h: Pixels,
-        collapsed: bool,
         h_offset_left: Pixels,
         h_offset_right: Pixels,
         quads: &mut Vec<Quad>,
@@ -925,8 +921,7 @@ impl DiffElement {
             // EP-002 US-006: same structured header as the unified view.
             SplitRow::Header(parts) => {
                 self.paint_file_header(
-                    window, cx, parts, origin, width, row_h, collapsed, false, quads, images,
-                    glyphs,
+                    window, cx, parts, origin, width, row_h, false, quads, images, glyphs,
                 );
             }
             SplitRow::Note(text) => {
@@ -1213,11 +1208,6 @@ impl Element for DiffElement {
                 for i in first..last {
                     let origin = point(bounds.origin.x, bounds.origin.y + px(offsets[i]));
                     let row_h = px(offsets[i + 1] - offsets[i]);
-                    // A file is folded when the row after its header is another
-                    // header (or EOF) - collapsed files emit a header-only row.
-                    let collapsed = rows
-                        .get(i + 1)
-                        .is_none_or(|r| r.kind == RowKind::FileHeader);
                     let h_offset = px(file_at_row(&spans, i)
                         .map(|f| {
                             file_side_offset(&spans, &h_offsets, f, false, false, f32::from(width))
@@ -1230,7 +1220,6 @@ impl Element for DiffElement {
                         origin,
                         width,
                         row_h,
-                        collapsed,
                         h_offset,
                         &mut quads,
                         &mut rounded_quads,
@@ -1269,7 +1258,6 @@ impl Element for DiffElement {
                             point(bounds.origin.x, sticky_y),
                             width,
                             px(STICKY_HEADER_HEIGHT),
-                            false,
                             true,
                             &mut sticky_quads,
                             &mut sticky_images,
@@ -1283,9 +1271,6 @@ impl Element for DiffElement {
                 for i in first..last {
                     let origin = point(bounds.origin.x, bounds.origin.y + px(offsets[i]));
                     let row_h = px(offsets[i + 1] - offsets[i]);
-                    let collapsed = rows
-                        .get(i + 1)
-                        .is_none_or(|r| matches!(r, SplitRow::Header(_)));
                     let (h_offset_left, h_offset_right) = file_at_row(&spans, i)
                         .map(|f| {
                             (
@@ -1315,7 +1300,6 @@ impl Element for DiffElement {
                         origin,
                         width,
                         row_h,
-                        collapsed,
                         h_offset_left,
                         h_offset_right,
                         &mut quads,
@@ -1353,7 +1337,6 @@ impl Element for DiffElement {
                             point(bounds.origin.x, sticky_y),
                             width,
                             px(STICKY_HEADER_HEIGHT),
-                            false,
                             true,
                             &mut sticky_quads,
                             &mut sticky_images,
