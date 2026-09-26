@@ -36,4 +36,4 @@ another instance.
 
 ## Crash reporting
 
-`crash_reporting` defaults to enabled for GUI launches and is read at startup; changing it requires a restart. CLI, hooks, and MCP commands never initialize Sentry. Reports disable default PII, use the fixed server name `paneflow`, and redact home-directory paths in free-text messages. The controls and implementation are in `main.rs` and the configuration schema.
+`crash_reporting` defaults to enabled for GUI launches and is read at startup; changing it requires a restart. CLI and hooks commands never initialize Sentry. Reports disable default PII, use the fixed server name `paneflow`, and redact home-directory paths in free-text messages. The controls and implementation are in `main.rs` and the configuration schema.

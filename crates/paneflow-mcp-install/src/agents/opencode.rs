@@ -1,61 +1,38 @@
-//! opencode writer (EP-003 US-010).
+//! opencode writer.
 //!
 //! opencode's schema diverges from every other agent:
 //! - the container key is **`mcp`**, not `mcpServers`;
-//! - the entry is `{type: "local", command: [<path>], enabled: true}` -
+//! - PaneFlow's entry was `{type: "local", command: [<path>], enabled: true}` -
 //!   `command` is an **array**, with the binary path as its first element.
 //!
-//! Config lives in opencode's global config path, preferring JSONC when an
-//! existing `opencode.jsonc` is present. No CLI mutates server config, so this
-//! is always a direct merge - preserving `$schema` and sibling `mcp.*` entries.
-//! JSONC comments / trailing commas are preserved by `support::json_install`.
-//!
-//! **Volatility:** opencode's config schema is young; re-verify the `mcp`
-//! key, `type: "local"`, and array `command` if registration regresses.
+//! opencode reads a global `opencode.jsonc` and `opencode.json` (or the one
+//! file `OPENCODE_CONFIG` names). The cleanup makes one writer per candidate
+//! file and probes each, so an entry is found whichever file holds it; a
+//! candidate that does not exist is simply nothing to remove. Removal is a
+//! surgical splice, so comments and trailing commas survive byte for byte.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde_json::json;
 
-use crate::agents::{support, AgentConfigWriter, InstallOutcome, StatusOutcome, UninstallOutcome};
-use crate::detect::{self, Presence};
+use crate::agents::{support, AgentConfigWriter, StatusOutcome, UninstallOutcome};
 
-const CLI: &str = "opencode";
 const CONTAINER: &str = "mcp";
 
 pub struct OpenCode {
-    config_paths: Vec<PathBuf>,
+    config_path: PathBuf,
 }
 
 impl OpenCode {
+    /// A writer for the one candidate config at `config_path`.
     #[must_use]
-    pub fn new() -> Self {
-        Self {
-            config_paths: support::opencode_configs(),
-        }
+    pub fn new(config_path: PathBuf) -> Self {
+        Self { config_path }
     }
 
-    fn path(&self) -> Result<&Path> {
-        // An existing file wins, and candidates list `opencode.jsonc` first so
-        // a config the user already has stays selected. A fresh install must
-        // create `opencode.json`: writing `opencode.jsonc` makes the shim
-        // refuse its status plugin (issue #699).
-        self.config_paths
-            .iter()
-            .find(|path| path.exists())
-            .or_else(|| {
-                self.config_paths.iter().find(|path| {
-                    path.file_name().and_then(|name| name.to_str()) == Some("opencode.json")
-                })
-            })
-            .map(PathBuf::as_path)
-            .ok_or_else(|| anyhow!("cannot resolve opencode config path"))
-    }
-
+    /// The entry PaneFlow wrote, so `status` can tell it from a hand edit.
     fn entry(bridge: &str) -> serde_json::Value {
-        // `command` is an ARRAY for opencode; `type: "local"` marks a stdio
-        // child process; `enabled: true` activates it.
         json!({ "type": "local", "command": [bridge], "enabled": true })
     }
 
@@ -73,12 +50,6 @@ impl OpenCode {
     }
 }
 
-impl Default for OpenCode {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl AgentConfigWriter for OpenCode {
     fn id(&self) -> &'static str {
         "opencode"
@@ -87,22 +58,13 @@ impl AgentConfigWriter for OpenCode {
         "opencode"
     }
 
-    fn presence(&self) -> Presence {
-        detect::detect(Some(CLI), &self.config_paths)
-    }
-
-    fn install(&self, bridge: &Path) -> Result<InstallOutcome> {
-        let bridge_s = bridge.to_string_lossy().into_owned();
-        support::json_install(self.path()?, CONTAINER, Self::entry(&bridge_s))
-    }
-
     fn uninstall(&self) -> Result<UninstallOutcome> {
-        support::json_uninstall(self.path()?, CONTAINER)
+        // opencode stores `command` as an array → use the array extractor.
+        support::json_uninstall(&self.config_path, CONTAINER, support::array_command)
     }
 
     fn status(&self, bridge: Option<&Path>) -> Result<StatusOutcome> {
-        // opencode stores `command` as an array → use the array extractor.
-        support::json_status(self.path()?, CONTAINER, bridge, Self::validate_entry)
+        support::json_status(&self.config_path, CONTAINER, bridge, Self::validate_entry)
     }
 }
 
@@ -110,65 +72,19 @@ impl AgentConfigWriter for OpenCode {
 mod tests {
     use super::*;
 
-    fn test_writer(path: PathBuf) -> OpenCode {
-        OpenCode {
-            config_paths: vec![path],
-        }
-    }
-
     #[test]
-    fn install_writes_local_array_entry_under_mcp() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("opencode.json");
-        let w = test_writer(p.clone());
-        assert_eq!(
-            w.install(Path::new("/data/paneflow-mcp")).unwrap(),
-            InstallOutcome::Installed
-        );
-        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-        let entry = &v["mcp"]["paneflow"];
-        assert_eq!(entry["type"], json!("local"));
-        assert_eq!(
-            entry["command"],
-            json!(["/data/paneflow-mcp"]),
-            "command is an array"
-        );
-        assert_eq!(entry["enabled"], json!(true));
-        // Must NOT land under mcpServers.
-        assert!(v.get("mcpServers").is_none());
-    }
-
-    #[test]
-    fn install_preserves_schema_and_sibling_mcp_entries() {
+    fn status_reads_array_command_and_flags_stale() {
         let dir = tempfile::TempDir::new().unwrap();
         let p = dir.path().join("opencode.json");
         std::fs::write(
             &p,
             serde_json::to_vec(&json!({
-                "$schema": "https://opencode.ai/config.json",
-                "mcp": { "weather": { "type": "local", "command": ["weather-mcp"], "enabled": true } }
+                "mcp": { "paneflow": OpenCode::entry("/old/paneflow-mcp") }
             }))
             .unwrap(),
         )
         .unwrap();
-        let w = test_writer(p.clone());
-        w.install(Path::new("/data/paneflow-mcp")).unwrap();
-
-        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-        assert_eq!(v["$schema"], json!("https://opencode.ai/config.json"));
-        assert_eq!(v["mcp"]["weather"]["command"], json!(["weather-mcp"]));
-        assert_eq!(
-            v["mcp"]["paneflow"]["command"],
-            json!(["/data/paneflow-mcp"])
-        );
-    }
-
-    #[test]
-    fn status_reads_array_command_and_flags_stale() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("opencode.json");
-        let w = test_writer(p);
-        w.install(Path::new("/old/paneflow-mcp")).unwrap();
+        let w = OpenCode::new(p);
         assert_eq!(
             w.status(Some(Path::new("/old/paneflow-mcp"))).unwrap(),
             StatusOutcome::Installed {
@@ -202,7 +118,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let w = test_writer(p);
+        let w = OpenCode::new(p);
 
         assert!(matches!(
             w.status(Some(Path::new("/data/paneflow-mcp"))).unwrap(),
@@ -210,75 +126,16 @@ mod tests {
         ));
     }
 
-    /// Issue #699: with no config on disk, install creates `opencode.json`.
-    /// `opencode.jsonc` would make the shim skip its status plugin.
     #[test]
-    fn fresh_opencode_install_creates_json_not_jsonc() {
+    fn a_missing_candidate_is_nothing_to_remove_and_is_not_created() {
+        // Covers `OPENCODE_CONFIG` naming a file that does not exist.
         let dir = tempfile::TempDir::new().unwrap();
-        let jsonc = dir.path().join("opencode.jsonc");
-        let json = dir.path().join("opencode.json");
-        let writer = OpenCode {
-            config_paths: vec![jsonc.clone(), json.clone()],
-        };
+        let missing = dir.path().join("custom").join("my-opencode.jsonc");
+        let w = OpenCode::new(missing.clone());
 
-        assert_eq!(
-            writer.install(Path::new("/data/paneflow-mcp")).unwrap(),
-            InstallOutcome::Installed
-        );
-        assert!(json.is_file(), "fresh install must create opencode.json");
-        assert!(
-            !jsonc.exists(),
-            "fresh install must not create opencode.jsonc"
-        );
-    }
-
-    #[test]
-    fn install_updates_existing_jsonc_candidate() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let jsonc = dir.path().join("opencode.jsonc");
-        let json = dir.path().join("opencode.json");
-        std::fs::write(
-            &jsonc,
-            br#"
-{
-  // keep this file selected
-  "mcp": {
-    "weather": { "type": "local", "command": ["weather-mcp"], "enabled": true },
-  },
-}
-"#,
-        )
-        .unwrap();
-        let w = OpenCode {
-            config_paths: vec![jsonc.clone(), json.clone()],
-        };
-
-        assert_eq!(
-            w.install(Path::new("/data/paneflow-mcp")).unwrap(),
-            InstallOutcome::Installed
-        );
-        assert!(jsonc.exists());
-        assert!(!json.exists());
-        let raw = std::fs::read_to_string(&jsonc).unwrap();
-        assert!(
-            raw.contains("// keep this file selected"),
-            "JSONC comments must survive install:\n{raw}"
-        );
-        assert!(
-            serde_json::from_str::<serde_json::Value>(&raw).is_err(),
-            "must remain JSONC, not rewritten as JSON"
-        );
-        let v = crate::merge::read_json_or_default(&jsonc).unwrap();
-        assert_eq!(
-            v["mcp"]["paneflow"]["command"],
-            json!(["/data/paneflow-mcp"])
-        );
-        assert_eq!(v["mcp"]["weather"]["command"], json!(["weather-mcp"]));
-        assert_eq!(
-            w.install(Path::new("/data/paneflow-mcp")).unwrap(),
-            InstallOutcome::AlreadyCurrent
-        );
-        assert_eq!(std::fs::read_to_string(&jsonc).unwrap(), raw);
+        assert_eq!(w.status(None).unwrap(), StatusOutcome::NotInstalled);
+        assert_eq!(w.uninstall().unwrap(), UninstallOutcome::NothingToRemove);
+        assert!(!missing.exists() && !missing.parent().unwrap().exists());
     }
 
     #[test]
@@ -298,18 +155,17 @@ mod tests {
 "#,
         )
         .unwrap();
-        let w = test_writer(jsonc.clone());
-        assert_eq!(w.uninstall().unwrap(), UninstallOutcome::Removed);
+        let w = OpenCode::new(jsonc.clone());
+        assert!(matches!(
+            w.uninstall().unwrap(),
+            UninstallOutcome::Removed { .. }
+        ));
         let raw = std::fs::read_to_string(&jsonc).unwrap();
         assert!(
             raw.contains("// keep this file selected"),
             "JSONC comments must survive uninstall:\n{raw}"
         );
-        assert!(
-            serde_json::from_str::<serde_json::Value>(&raw).is_err(),
-            "must remain JSONC, not rewritten as JSON"
-        );
-        let v = crate::merge::read_json_or_default(&jsonc).unwrap();
+        let v = crate::merge::parse_json_family(&jsonc, &raw).unwrap();
         assert!(v["mcp"].get("paneflow").is_none());
         assert_eq!(v["mcp"]["weather"]["command"], json!(["weather-mcp"]));
     }
@@ -319,7 +175,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let p = dir.path().join("opencode.json");
         std::fs::write(&p, b"{ broken").unwrap();
-        let w = test_writer(p.clone());
+        let w = OpenCode::new(p.clone());
 
         assert!(w.uninstall().is_err());
         assert_eq!(std::fs::read(&p).unwrap(), b"{ broken");

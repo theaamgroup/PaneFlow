@@ -405,7 +405,7 @@ pub fn start_server() -> (mpsc::Receiver<IpcRequest>, IpcStatus) {
                         // never the panicking `thread::spawn`. Under
                         // RLIMIT_NPROC / EAGAIN the latter panics and unwinds
                         // this accept thread, silently killing the IPC server
-                        // (AI-hook status + MCP bridge go dark while the status
+                        // (AI-hook status + CLI/scripts go dark while the status
                         // flag still reads Online). On the `Err` path the moved
                         // `guard` and `stream` are dropped here -- the count is
                         // restored and the connection closed -- and the loop
@@ -703,7 +703,7 @@ fn detect_existing_instance(socket_path: &std::path::Path) -> Option<String> {
         };
 
         // US-022: bound the probe at the OS level (`set_recv_timeout`, same
-        // mechanism as the bridge client) instead of a scratch thread that
+        // mechanism as the IPC client crate) instead of a scratch thread that
         // leaked on every timeout. 300 ms is generous for a stateless
         // socket-thread handler; a live but unresponsive process within that
         // budget is functionally indistinguishable from "no peer" and we

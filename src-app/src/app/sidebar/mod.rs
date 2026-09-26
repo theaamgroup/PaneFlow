@@ -11,7 +11,6 @@ mod branches;
 pub(crate) use branches::TerminalBranch;
 pub(crate) mod context_menu;
 pub(crate) mod customize_menu;
-pub(crate) mod mcp_callout;
 
 use crate::ui_primitives::TooltipDelayExt;
 use gpui::{

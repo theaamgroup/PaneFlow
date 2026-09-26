@@ -159,7 +159,7 @@ fonts come from the user's system, with a bundled Nerd Font as the default.
 | Main panel | The inset card that holds the pane grid (Agents or Review) or a Settings page | Inset 4 on right and bottom, and on the left only when the sidebar is hidden; radius 10; four corner masks painted in the shell color. There is no top inset — a spacer the height of the title bar reserves the strip | `app/constants.rs:25-27`, `main.rs:872,1983,2425,2435-2438,2471-2506` |
 | Pane grid | **N-ary** `LayoutTree { Leaf, Container }` of pane cards; one grid per workspace tab in Agents, one global grid of diff panes in Review | Gutter 8, divider hit area 7, minimum pane 80; `MAX_PANES` 32, `MAX_WORKSPACES` 32, `MAX_TABS_PER_WORKSPACE` 32, Review caps at `MAX_REVIEW_PANES` 6 | `layout/tree.rs:62-67`, `layout/mod.rs:34,39`, `workspace/mod.rs:53,59`, `app/review/mod.rs:21` |
 | Right rail | Sessions rail | Width 300 | `app/sessions_sidebar.rs:37` |
-| Footer | IPC offline banner, MCP bridge callout, then the Agents / Review mode strip | Persistent primary navigation. **No Settings gear** (issue #105) and **no update banner** | `app/sidebar_actions_menu.rs:21-60,62-178,254-299` |
+| Footer | IPC offline banner, then the Agents / Review mode strip | Persistent primary navigation. **No Settings gear** (issue #105) and **no update banner** | `app/sidebar_actions_menu.rs` (`render_sidebar_ipc_banner`, `render_sidebar_settings_footer`) |
 
 The window is 800 by 500 at minimum, and a surface MUST hold there with the
 primary sidebar hidden and a right rail open at the same time.
@@ -332,7 +332,6 @@ to the surfaces named:
 | `0x89b4facc` on `0x1e1e2e` | Terminal copy-mode `COPY` badge | **Migration**: a leftover Catppuccin pair, `terminal/view.rs:1935-1936` |
 | `0x383838` | Dark terminal panel ground (`codex_panel_background_for_terminal`) | **Migration**: the light arm already uses `subtle`, `terminal/element/mod.rs:230-236` |
 | `0x2fd7f2` | Settings ▸ Terminal, the "uses theme" scheme chip | **Migration**: should be `accent`, `settings/tabs/terminal.rs:593-598` |
-| `0xE0_6C_75` | Settings danger text: the MCP failure recap | **Migration**: a fixed One Dark red standing in for a danger role `UiColors` does not have, so it does not follow the theme. `settings/tabs/mcp.rs:356-360`. Note the literal is written with underscores, so a `0xE06C75` search misses it |
 
 The sidebar's drop affordances are **not** blue. Only the pane split preview
 is; the swap preview, the sidebar placeholder, and the reorder line are all
@@ -621,17 +620,15 @@ existing completion marks; it adds no sidebar adornment.
 
 **The footer stacks, top to bottom**: the IPC offline banner when the socket is
 disabled (mx 6, mb 2, px 8, py 6, radius 6, 1 px `border` on `subtle`, a 14 px
-alert glyph and `IPC offline` at 12 px Medium); the MCP bridge callout (issue
-#443) with its accent `Install MCP bridge` button and a 10 px dismiss; then the
-mode row, `Agents` and `Review` as two flexible 30 px squircle-14 buttons at
-small text Medium with a 3 px gap. The active segment takes the active row
-tint and carries no click handler; the other takes the hover tint.
+alert glyph and `IPC offline` at 12 px Medium); then the mode row, `Agents`
+and `Review` as two flexible 30 px squircle-14 buttons at small text Medium
+with a 3 px gap. The active segment takes the active row tint and carries no
+click handler; the other takes the hover tint.
 
 There is **no Settings gear** and **no update banner**. The whole mode strip is
 dropped when `review_enabled` is off, and the footer collapses to an empty div
-when banner, callout, and strip are all absent. The Review Workspaces rail
-renders the same footer, so the mode switch and the IPC banner exist in both
-modes.
+when banner and strip are both absent. The Review Workspaces rail renders the
+same footer, so the mode switch and the IPC banner exist in both modes.
 
 ### 5.3 Pane card
 
@@ -740,7 +737,7 @@ gutter. There is no minimap.
 Navigation reuses the sidebar width: a 36 px `Back to the app` row, the shared
 `filter_pill` search field, and three groups labeled **Personal** (General,
 Appearance, Keyboard Shortcuts), **Terminal** (Terminal, Workspaces), and
-**Integrations** (AI Agent, MCP Servers). Group eyebrows are 11 px Semibold;
+**Integrations** (AI Agent). Group eyebrows are 11 px Semibold;
 in-page eyebrows are 11 px Normal `muted`.
 
 Pages are a centered column with a 26 px Semibold heading and cards that share
@@ -891,7 +888,7 @@ separately from agent status, and exited previews are dimmed. Status text uses
 the shared contrast floor. Card accessible names include both states.
 
 Filtering matches **metadata only** — pane, workspace, and tab titles, the
-agent name, the cwd basename — because terminal content is searched in the pane find bar or through MCP.
+agent name, the cwd basename — because terminal content is searched in the pane find bar or through `surface.search`.
 Left and right move by one in flat order and never wrap; up and down preserve
 the visual column across workspace boundaries. Enter or a click teleports to
 the surface, re-resolving it by id so a pane closed since render is a clean
@@ -1055,9 +1052,8 @@ repair path: it searches lightness, then desaturation, then black or white.
 for large fluent text under ARC Bronze Simple Mode. It is enforced at every
 observation point where a color meets a wash the theme did not choose: per-cell
 terminal text, the search-hit wash, the selection foreground, the exit banner
-and IME preedit, the Settings shortcuts accent label, and the MCP button label
-shared with the sidebar callout. The About dialog holds a **higher** floor of
-60.0 for body text, with 45.0 for secondary text.
+and IME preedit, and the Settings shortcuts accent label. The About dialog
+holds a **higher** floor of 60.0 for body text, with 45.0 for secondary text.
 
 Any new surface that paints text on a computed or themed wash MUST either route
 through `ensure_minimum_contrast` or ship a test that walks all eight bundled

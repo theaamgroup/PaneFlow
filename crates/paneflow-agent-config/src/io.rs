@@ -99,8 +99,8 @@ pub fn write_text_atomic(path: &Path, content: &str) -> Result<()> {
 /// updates the target without silently breaking a dotfile-manager (stow,
 /// chezmoi, yadm) link. A dangling link is refused: replacing it would change
 /// the user's path policy. Mirrors `config_write_target` in
-/// `src-app/src/config_writer.rs`; duplicated here because this crate stays
-/// GPU-free and `src-app` does not depend on it.
+/// `src-app/src/config_writer.rs`; duplicated here because that helper is
+/// private to the app and this crate must not depend on `src-app`.
 pub fn write_target(path: &Path) -> Result<std::path::PathBuf> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path),

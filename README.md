@@ -54,12 +54,9 @@ your test runner.
   grid, switch between unified and split views, and navigate change by
   change. **Review with agent** opens an agent in a workspace tab with a
   prepared prompt; you press Enter to submit it.
-- **Share context between agents.** The optional MCP bridge lets agents
-  read and search other panes in their workspace, and ask which pane they
-  are running in.
-- **Script pane workflows.** Inspect panes and agent state through the
-  MCP bridge or the JSON-RPC socket, and use the CLI to send text behind an
-  explicit write gate.
+- **Script pane workflows.** Scripts and agents read and search panes,
+  inspect agent state, and ask which pane they run in over the JSON-RPC
+  socket. The CLI sends text behind an explicit write gate.
 
 ## Everyday shortcuts
 
@@ -93,9 +90,8 @@ paneflow key reviewer ctrl-c                       # Send one keystroke
 ```
 
 Replace `reviewer` with a pane name or surface ID. Both verbs require
-scripting access on the running app. Agents read pane output through the
-[MCP bridge](#let-agents-read-other-panes), and scripts call the JSON-RPC
-socket directly.
+scripting access on the running app. Scripts and agents read pane output
+by calling the JSON-RPC socket directly.
 
 The [scripting guide](docs/user/scripting.md) explains prompt delivery,
 submission controls, and pane reads.
@@ -103,26 +99,6 @@ submission controls, and pane reads.
 From an external terminal, use the installed binary's full path or
 [add it to your PATH](docs/user/installation/macos.md#put-the-cli-on-your-path).
 For a local debug build, use `./target/debug/paneflow` from the repository root.
-
-### Let agents read other panes
-
-From a PaneFlow pane, run:
-
-```bash
-paneflow mcp install
-```
-
-This registers the bundled **Model Context Protocol (MCP)** bridge with
-supported agents detected on your machine. It updates each agent's MCP
-configuration and backs up the previous configuration.
-
-The bridge lets agents list panes, read output, and search text in their
-workspace, and report the calling pane's own identity. It is read-only
-and cannot type into terminals. Peer terminal output is marked as
-untrusted data.
-
-See the [MCP setup guide](docs/mcp-bridge.md) for supported agents,
-installation details, and the pane identity contract.
 
 ## Settings and configuration
 
@@ -162,7 +138,6 @@ For the code structure and runtime design, see [ARCHITECTURE.md](ARCHITECTURE.md
 - [User guide](docs/user/index.md) — features, layouts, themes, and settings
 - [Troubleshooting](docs/user/troubleshooting.md) — help with common problems
 - [CLI and automation](docs/user/scripting.md) — commands and pane reads
-- [MCP bridge](docs/mcp-bridge.md) — connect agents to pane output
 - [Architecture](ARCHITECTURE.md) — how the application is built
 
 ## License

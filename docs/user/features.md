@@ -99,13 +99,13 @@ Express, Flask, and Django to Axum and Spring get a labeled port. The
 OS-side scan is authoritative: a banner match for a port the socket
 scan did not classify is downgraded to a plain labeled port.
 
-## Headless scripting (CLI, MCP and JSON-RPC)
+## Headless scripting (CLI and JSON-RPC)
 
 Drive PaneFlow from outside the GUI: the `paneflow` binary is also a
 CLI over a local JSON-RPC IPC socket. Scripts can list panes, read and
 search scrollback, inspect agent state, and stage prompts behind an explicit write gate. Use
-headless agents in separate git worktrees. A read-only MCP bridge exposes pane reads to
-agents, so an assistant can inspect another pane without copy-paste.
+headless agents in separate git worktrees. An agent can read another pane through the
+same socket, so it can inspect that pane's output without copy-paste.
 The guide and command reference live on the [scripting and automation page](scripting.md).
 
 ## Opening a file

@@ -1,7 +1,8 @@
 //! Shared, dependency-light coding-agent configuration primitives.
 //!
-//! Both the long-lived installer and the size-constrained shim depend on this
-//! crate, so cross-process locking and Claude hook shapes have one canonical
+//! The app (its `paneflow hooks` writer and lease sweep), the one-time MCP
+//! bridge cleanup, and the size-constrained shim all depend on this crate, so
+//! cross-process locking and Claude hook shapes have one canonical
 //! implementation.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]

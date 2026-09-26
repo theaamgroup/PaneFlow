@@ -62,7 +62,6 @@ fn test_serialization_roundtrip() {
         terminal: None,
         agent_panel: None,
         external_editor: None,
-        mcp_bridge_prompt_dismissed: Vec::new(),
     };
 
     let json = serde_json::to_string_pretty(&config).unwrap();

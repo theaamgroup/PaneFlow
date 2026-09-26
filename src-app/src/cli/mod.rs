@@ -3,7 +3,7 @@
 //! Talks to a RUNNING Paneflow instance over the existing IPC JSON-RPC socket
 //! (`paneflow-ipc-client`) and exits before any GPUI init. `main.rs` dispatches
 //! here only when `argv[1]` names a known verb ([`is_cli_verb`]) - mirroring the
-//! `paneflow mcp …` intercept - so every other invocation (no args, unknown
+//! `paneflow hooks …` intercept - so every other invocation (no args, unknown
 //! args, `--help`/`--version`) is left untouched and the GUI
 //! launch path is preserved. clap therefore never has to own the "no subcommand
 //! => launch the GUI" default, and never eats the manually-parsed top-level
@@ -26,9 +26,8 @@ pub const EXIT_TARGET: i32 = 3;
 /// manual `--help`/`--version` scans) on membership here so the GUI launch
 /// path stays byte-for-byte unchanged for any other `argv[1]`.
 ///
-/// Pane reads are not CLI verbs (issue #811): agents read panes through the
-/// MCP bridge, and scripts call the `surface.*` / `fleet.list` / `agent.whoami`
-/// JSON-RPC methods on the socket directly.
+/// Pane reads are not CLI verbs (issue #811): scripts call the `surface.*` /
+/// `fleet.list` / `agent.whoami` JSON-RPC methods on the socket directly.
 pub(crate) const VERBS: &[&str] = &["send", "key"];
 
 /// Verbs shown in `paneflow --help`, one row per [`VERBS`] entry.
@@ -37,13 +36,11 @@ pub(crate) const HELP_VERBS: &[(&str, &str)] = &[
     ("key", "Send a named keystroke to a pane"),
 ];
 
-/// Offline intercepts handled in `main.rs` before clap (`mcp`, `hooks`).
+/// Offline intercepts handled in `main.rs` before clap (`hooks`).
 /// Not in [`VERBS`]; still listed next to the verbs so unknown-verb errors
 /// that point at `paneflow --help` actually show a complete command index.
-pub(crate) const HELP_OFFLINE_COMMANDS: &[(&str, &str)] = &[
-    ("mcp", "Install, status, or uninstall the MCP bridge"),
-    ("hooks", "Install persistent agent-notification hooks"),
-];
+pub(crate) const HELP_OFFLINE_COMMANDS: &[(&str, &str)] =
+    &[("hooks", "Install persistent agent-notification hooks")];
 
 /// One padded row per [`HELP_VERBS`] entry, then [`HELP_OFFLINE_COMMANDS`].
 pub(crate) fn format_help_commands() -> String {
@@ -67,7 +64,7 @@ pub fn is_cli_verb(arg: Option<&str>) -> bool {
 
 /// True when `argv[1]` is shaped like a subcommand (present, non-empty, and not
 /// a `-`/`--` flag) but is NOT one this CLI owns. `main.rs` calls this only
-/// AFTER the `mcp`/`hooks`/known-verb intercepts have each had their chance and
+/// AFTER the `hooks`/known-verb intercepts have each had their chance and
 /// exited, so a `true` here is an unmistakable typo (`paneflow blah`, a
 /// mistyped `paneflow searh`): it prints an actionable "unknown verb" error and
 /// exits non-zero instead of falling through to the GUI launch, which would
@@ -383,6 +380,21 @@ mod tests {
                     .any(|line| line.trim_start().starts_with(&format!("{verb} ")))
             );
         }
+    }
+
+    /// Issue #857: the `paneflow mcp` intercept is gone, so `mcp` is an
+    /// ordinary unknown verb (exit 2) that help no longer lists.
+    #[test]
+    fn removed_mcp_is_unknown_and_absent_from_help() {
+        assert!(!VERBS.contains(&"mcp"));
+        assert!(!HELP_VERBS.iter().any(|(name, _)| *name == "mcp"));
+        assert!(!HELP_OFFLINE_COMMANDS.iter().any(|(name, _)| *name == "mcp"));
+        assert!(looks_like_unknown_verb(Some("mcp")));
+        assert!(
+            !format_help_commands()
+                .lines()
+                .any(|line| line.trim_start().starts_with("mcp "))
+        );
     }
 
     #[test]

@@ -1,259 +1,163 @@
-//! No-clobber config-merge primitives (EP-002 US-006).
+//! No-clobber config parse and entry-removal primitives.
 //!
-//! Two formats, two rules:
-//! - **JSON** (Claude Code, Gemini) is merged via `serde_json::Value`, so
-//!   unknown keys and sibling MCP servers are preserved semantically.
-//! - **JSONC** (opencode) is parsed here and surgically edited through
-//!   `paneflow_agent_config::jsonc`. The splice is pretty-printed to the
-//!   surrounding style and asserted equal to the semantic merge so comments,
-//!   trailing commas, and sibling keys stay.
+//! Two families, two rules:
+//! - **JSON and JSONC** (Claude Code, Gemini, opencode) are all parsed as
+//!   JSONC and edited by `paneflow_agent_config::jsonc`'s surgical splice, so
+//!   comments, trailing commas, number spellings, key order, and every byte
+//!   outside the removed member stay as they were - whatever the file's
+//!   extension. A `settings.json` with comments is common.
 //! - **TOML** (Codex) is edited via `toml_edit::DocumentMut`, which
-//!   preserves comments and key order. Only `command` / `args` under
-//!   `[<table>.paneflow]` are upserted; unknown keys in that table stay.
+//!   preserves comments and key order.
 //!
-//! Both `read_*_or_default` helpers treat a **missing** file as an empty
-//! skeleton (so a fresh install creates it) but a **present-but-invalid**
-//! file as an error (so we never overwrite a config we could not parse -
-//! the user repairs it by hand). This is the no-clobber guarantee.
+//! A present-but-invalid file is an error, so we never overwrite a config we
+//! could not parse - the user repairs it by hand. This is the no-clobber
+//! guarantee.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use paneflow_agent_config::jsonc;
 
-// ---------------------------------------------------------------------------
-// JSON
-// ---------------------------------------------------------------------------
-
-/// Read + parse a JSON config. Missing file → empty object skeleton.
-/// Present but unparseable → `Err` (caller must abort, never clobber).
-pub fn read_json_or_default(path: &Path) -> Result<serde_json::Value> {
-    match paneflow_agent_config::read_optional_text(path)
-        .with_context(|| format!("read {} failed", path.display()))?
-    {
-        Some(text) => parse_json_or_jsonc(path, text.as_bytes()),
-        None => Ok(serde_json::Value::Object(serde_json::Map::new())),
-    }
+/// Parse `text`, read from `path`, as JSONC (a superset of JSON).
+/// Unparseable → `Err` naming the file.
+pub(crate) fn parse_json_family(path: &Path, text: &str) -> Result<serde_json::Value> {
+    jsonc::parse(text).with_context(|| {
+        format!(
+            "{} is not valid JSON or JSONC - refusing to overwrite it; \
+             fix or remove it, then re-run",
+            path.display()
+        )
+    })
 }
 
-fn parse_json_or_jsonc(path: &Path, bytes: &[u8]) -> Result<serde_json::Value> {
-    match serde_json::from_slice(bytes) {
-        Ok(value) => Ok(value),
-        Err(_json_error) if path.extension().and_then(|e| e.to_str()) == Some("jsonc") => {
-            let text = std::str::from_utf8(bytes).with_context(|| {
-                format!(
-                    "{} is not valid UTF-8 JSONC - refusing to overwrite it; fix or remove it, then re-run",
-                    path.display()
-                )
-            })?;
-            jsonc::parse(text).with_context(|| {
-                format!(
-                    "{} is not valid JSONC - refusing to overwrite it; fix or remove it, then re-run",
-                    path.display()
-                )
-            })
-        }
-        Err(json_error) => Err(json_error).with_context(|| {
-            format!(
-                "{} is not valid JSON - refusing to overwrite it; \
-                 fix or remove it, then re-run",
-                path.display()
-            )
-        }),
-    }
-}
-
-/// Upsert `root[container_key][entry_name] = entry_value`, creating the
-/// container object if needed. Returns `true` iff the document changed
-/// (the entry was absent or differed); `false` is a no-op (idempotent).
-///
-/// Sibling entries under `container_key`, and every other top-level key,
-/// are left untouched. Errors only if `root` (or an existing
-/// `container_key`) is present but not a JSON object - overwriting a
-/// non-object there would be a clobber.
-pub fn merge_json_entry(
-    root: &mut serde_json::Value,
+/// Remove `container_key.entry_name` from JSON or JSONC `text` without
+/// reserializing it. `None` when the entry is absent.
+pub(crate) fn remove_json_family_entry(
+    path: &Path,
+    text: &str,
     container_key: &str,
     entry_name: &str,
-    entry_value: serde_json::Value,
-) -> Result<bool> {
-    let obj = root
-        .as_object_mut()
-        .context("config root is not a JSON object - refusing to overwrite")?;
-
-    let container = obj
-        .entry(container_key)
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    let container = container.as_object_mut().with_context(|| {
-        format!("config key `{container_key}` is not an object - refusing to overwrite")
-    })?;
-
-    if container.get(entry_name) == Some(&entry_value) {
-        return Ok(false);
-    }
-    container.insert(entry_name.to_string(), entry_value);
-    Ok(true)
+) -> Result<Option<String>> {
+    jsonc::remove_entry(text, container_key, entry_name)
+        .with_context(|| format!("edit {} failed", path.display()))
 }
 
-/// Remove `root[container_key][entry_name]`. Returns `true` iff something
-/// was removed. Leaves siblings and the container itself in place.
-pub fn remove_json_entry(
-    root: &mut serde_json::Value,
-    container_key: &str,
-    entry_name: &str,
-) -> bool {
-    root.as_object_mut()
-        .and_then(|obj| obj.get_mut(container_key))
-        .and_then(serde_json::Value::as_object_mut)
-        .is_some_and(|container| container.remove(entry_name).is_some())
-}
-
-/// Serialize a JSON config back to bytes: pretty-printed, trailing newline
-/// (matches what editors and `claude mcp add` leave behind).
-///
-/// US-038: returns `Result` and propagates a serialization error instead of
-/// the old `unwrap_or_else(|_| "{}")` fallback, which would have silently
-/// written an empty object over the user's real MCP servers (a no-clobber
-/// violation) if a parsed `Value` ever failed to re-serialize.
-pub fn json_to_bytes(root: &serde_json::Value) -> Result<Vec<u8>, serde_json::Error> {
-    let mut s = serde_json::to_string_pretty(root)?;
-    s.push('\n');
-    Ok(s.into_bytes())
-}
-
-// ---------------------------------------------------------------------------
-// TOML
-// ---------------------------------------------------------------------------
-
-/// Read + parse a TOML config. Missing file → empty document. Present but
-/// unparseable → `Err` (no-clobber).
-pub fn read_toml_or_default(path: &Path) -> Result<toml_edit::DocumentMut> {
-    match paneflow_agent_config::read_optional_text(path)
-        .with_context(|| format!("read {} failed", path.display()))?
-    {
-        Some(text) => text.parse::<toml_edit::DocumentMut>().with_context(|| {
-            format!(
-                "{} is not valid TOML - refusing to overwrite it; \
-                 fix or remove it, then re-run",
-                path.display()
-            )
-        }),
-        None => Ok(toml_edit::DocumentMut::new()),
-    }
-}
-
-/// Upsert `command` and `args` under `[<table_path>.<name>]`.
-///
-/// An existing table (or inline table) is updated in place so unknown keys
-/// (`env`, `cwd`, timeouts, `enabled`, ...) and their comments stay. A
-/// missing entry is created as a standard table with only `command` /
-/// `args`. Sibling tables, parent comments, and key order are left
-/// untouched. Returns `true` iff the serialized document changed.
-pub fn upsert_toml_entry(
-    doc: &mut toml_edit::DocumentMut,
-    table_path: &str,
-    name: &str,
-    command: &str,
-    args: &[&str],
-) -> Result<bool> {
-    use toml_edit::{Item, Table};
-
-    let before = doc.to_string();
-
-    // Auto-vivify the parent table only when absent; an existing parent is
-    // reused untouched so we never strip a user's `[mcp_servers]` header or
-    // its other entries.
-    let parent = match doc.entry(table_path) {
-        toml_edit::Entry::Vacant(v) => {
-            let mut t = Table::new();
-            // Render as `[mcp_servers.paneflow]` rather than emitting a
-            // bare `[mcp_servers]` header for a freshly created parent.
-            t.set_implicit(true);
-            v.insert(Item::Table(t))
-        }
-        toml_edit::Entry::Occupied(o) => o.into_mut(),
-    };
-    let parent = parent
-        .as_table_mut()
-        .with_context(|| format!("`{table_path}` is not a TOML table - refusing to overwrite"))?;
-
-    match parent.get_mut(name) {
-        Some(existing) => {
-            if let Some(table) = existing.as_table_like_mut() {
-                write_toml_command_args(table, command, args);
-            } else {
-                // Managed key, but not a table: replace with the managed shape.
-                *existing = Item::Table(new_toml_command_args_table(command, args));
-            }
-        }
-        None => {
-            parent[name] = Item::Table(new_toml_command_args_table(command, args));
-        }
-    }
-
-    Ok(doc.to_string() != before)
-}
-
-fn new_toml_command_args_table(command: &str, args: &[&str]) -> toml_edit::Table {
-    let mut entry = toml_edit::Table::new();
-    write_toml_command_args(&mut entry, command, args);
-    entry
-}
-
-/// Set `command` / `args` on an existing table without touching other keys.
-/// Skips a key whose value already matches so user formatting is preserved
-/// when the managed contract is already satisfied.
-fn write_toml_command_args(table: &mut dyn toml_edit::TableLike, command: &str, args: &[&str]) {
-    use toml_edit::{value, Array, Value};
-
-    if table.get("command").and_then(|c| c.as_str()) != Some(command) {
-        set_toml_item(table, "command", value(command));
-    }
-    let args_ok = table
-        .get("args")
-        .and_then(|a| a.as_array())
-        .is_some_and(|arr| {
-            arr.len() == args.len()
-                && arr
-                    .iter()
-                    .zip(args)
-                    .all(|(item, expected)| item.as_str() == Some(*expected))
-        });
-    if !args_ok {
-        let mut arr = Array::new();
-        for a in args {
-            arr.push(Value::from(*a));
-        }
-        set_toml_item(table, "args", value(arr));
-    }
-}
-
-fn set_toml_item(table: &mut dyn toml_edit::TableLike, key: &str, item: toml_edit::Item) {
-    match table.entry(key) {
-        toml_edit::Entry::Vacant(v) => {
-            v.insert(item);
-        }
-        toml_edit::Entry::Occupied(mut o) => {
-            *o.get_mut() = item;
-        }
-    }
+/// Parse `text`, read from `path`, as TOML. Unparseable → `Err` naming the
+/// file.
+pub(crate) fn parse_toml(path: &Path, text: &str) -> Result<toml_edit::DocumentMut> {
+    text.parse::<toml_edit::DocumentMut>().with_context(|| {
+        format!(
+            "{} is not valid TOML - refusing to overwrite it; \
+             fix or remove it, then re-run",
+            path.display()
+        )
+    })
 }
 
 /// Remove `[<table_path>.<name>]`. Returns `true` iff the document changed.
-pub fn remove_toml_entry(doc: &mut toml_edit::DocumentMut, table_path: &str, name: &str) -> bool {
+///
+/// `toml_edit` stores the comment and blank lines above a table header in
+/// that header's decor prefix, so a plain removal would also drop a comment
+/// that ends the previous table (`# env = …` below its last key) and a note
+/// written above the removed header. When that prefix holds a comment, it
+/// moves to the next header's prefix, or to the document's trailing text when
+/// the removed table was the last one, so the comments stay where they were
+/// in the file. A prefix of blank lines only is the removed table's own
+/// separator and goes with it.
+pub(crate) fn remove_toml_entry(
+    doc: &mut toml_edit::DocumentMut,
+    table_path: &str,
+    name: &str,
+) -> bool {
     let Some(parent) = doc
         .get_mut(table_path)
         .and_then(toml_edit::Item::as_table_mut)
     else {
         return false;
     };
-    parent.remove(name).is_some()
+    let Some(removed) = parent.remove(name) else {
+        return false;
+    };
+    if let Some(table) = removed.as_table() {
+        let prefix = table
+            .decor()
+            .prefix()
+            .and_then(toml_edit::RawString::as_str)
+            .unwrap_or_default();
+        if prefix.contains(|c: char| !c.is_whitespace()) {
+            carry_prefix(doc, table.position(), prefix);
+        }
+    }
+    true
 }
 
-/// Serialize a TOML document back to bytes.
-#[must_use]
-pub fn toml_to_bytes(doc: &toml_edit::DocumentMut) -> Vec<u8> {
-    doc.to_string().into_bytes()
+/// Prepend `prefix` to the first header after document position `after`,
+/// or to the document's trailing text when there is none.
+fn carry_prefix(doc: &mut toml_edit::DocumentMut, after: Option<isize>, prefix: &str) {
+    let next = after.and_then(|after| next_header_position(doc.as_table(), after, None));
+    if let Some(position) = next {
+        if prepend_to_header(doc.as_table_mut(), position, prefix) {
+            return;
+        }
+    }
+    let trailing = doc.trailing().as_str().unwrap_or_default().to_string();
+    doc.set_trailing(format!("{prefix}{trailing}"));
+}
+
+/// Tables rendered with their own `[header]`: not implicit, not dotted.
+fn has_header(table: &toml_edit::Table) -> bool {
+    !table.is_implicit() && !table.is_dotted()
+}
+
+/// The smallest header position greater than `after` under `table`.
+fn next_header_position(
+    table: &toml_edit::Table,
+    after: isize,
+    mut best: Option<isize>,
+) -> Option<isize> {
+    for (_, item) in table.iter() {
+        let children: Vec<&toml_edit::Table> = match item {
+            toml_edit::Item::Table(child) => vec![child],
+            toml_edit::Item::ArrayOfTables(array) => array.iter().collect(),
+            _ => continue,
+        };
+        for child in children {
+            if has_header(child) {
+                if let Some(position) = child.position().filter(|p| *p > after) {
+                    best = Some(best.map_or(position, |b| b.min(position)));
+                }
+            }
+            best = next_header_position(child, after, best);
+        }
+    }
+    best
+}
+
+/// Prepend `prefix` to the header at `position`. `false` when none matched.
+fn prepend_to_header(table: &mut toml_edit::Table, position: isize, prefix: &str) -> bool {
+    for (_, item) in table.iter_mut() {
+        let children: Vec<&mut toml_edit::Table> = match item {
+            toml_edit::Item::Table(child) => vec![child],
+            toml_edit::Item::ArrayOfTables(array) => array.iter_mut().collect(),
+            _ => continue,
+        };
+        for child in children {
+            if has_header(child) && child.position() == Some(position) {
+                let existing = child
+                    .decor()
+                    .prefix()
+                    .and_then(toml_edit::RawString::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                child.decor_mut().set_prefix(format!("{prefix}{existing}"));
+                return true;
+            }
+            if prepend_to_header(child, position, prefix) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -265,272 +169,39 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn paneflow_entry() -> serde_json::Value {
-        json!({ "command": "/data/bin/paneflow-mcp", "args": [] })
-    }
-
     #[test]
-    fn oversized_configs_are_refused_without_mutation() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config");
-        let bytes = vec![b' '; (1 << 20) + 1];
-        std::fs::write(&path, &bytes).unwrap();
-        assert!(read_json_or_default(&path).is_err());
-        assert!(read_toml_or_default(&path).is_err());
-        assert!(crate::io::write_if_changed(&path, b"{}").is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        assert!(!dir.path().join("config.bak").exists());
-    }
-
-    #[test]
-    fn mcp_fifo_is_refused_without_a_writer() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("blocked");
-        assert!(std::process::Command::new("/usr/bin/mkfifo")
-            .arg(&path)
-            .status()
+    fn json_removal_keeps_every_other_byte_including_float_digits_and_key_order() {
+        // serde_json would round `0.1234567890123456789` to an f64 and
+        // reprint it; the splice leaves the spelling alone.
+        let input = "{\n  \"zeta\": 0.1234567890123456789,\n  \"mcpServers\": {\n    \"b\": { \"command\": \"b\" },\n    \"paneflow\": { \"command\": \"/x/paneflow-mcp\" },\n    \"a\": { \"command\": \"a\" }\n  },\n  \"big\": 12345678901234567890123,\n  \"alpha\": 1e3\n}\n";
+        let out = remove_json_family_entry(Path::new("c.json"), input, "mcpServers", "paneflow")
             .unwrap()
-            .success());
-        let (tx, rx) = std::sync::mpsc::channel();
-        let probe = path.clone();
-        let worker = std::thread::spawn(move || {
-            tx.send(read_json_or_default(&probe).is_err() && read_toml_or_default(&probe).is_err())
-                .unwrap()
-        });
-        let early = rx.recv_timeout(std::time::Duration::from_secs(1));
-        if early.is_err() {
-            use std::os::unix::fs::OpenOptionsExt;
-            // Unblock a regressed reader so a failed assertion cannot strand it.
-            drop(
-                std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .custom_flags(4)
-                    .open(&path)
-                    .unwrap(),
-            );
-        }
-        assert!(early.unwrap());
-        worker.join().unwrap();
+            .unwrap();
+        assert_eq!(
+            out,
+            "{\n  \"zeta\": 0.1234567890123456789,\n  \"mcpServers\": {\n    \"b\": { \"command\": \"b\" },\n    \"a\": { \"command\": \"a\" }\n  },\n  \"big\": 12345678901234567890123,\n  \"alpha\": 1e3\n}\n"
+        );
     }
 
     #[test]
-    fn merge_json_inserts_without_touching_siblings() {
-        let mut root = json!({
-            "mcpServers": { "other": { "command": "x" } },
-            "theme": "dark"
-        });
-        let changed =
-            merge_json_entry(&mut root, "mcpServers", "paneflow", paneflow_entry()).unwrap();
-        assert!(changed);
-        // Sibling server and unrelated top-level key preserved.
-        assert_eq!(root["mcpServers"]["other"]["command"], json!("x"));
-        assert_eq!(root["theme"], json!("dark"));
-        assert_eq!(root["mcpServers"]["paneflow"], paneflow_entry());
-    }
-
-    #[test]
-    fn merge_json_is_noop_when_identical() {
-        let mut root = json!({ "mcpServers": { "paneflow": paneflow_entry() } });
-        let changed =
-            merge_json_entry(&mut root, "mcpServers", "paneflow", paneflow_entry()).unwrap();
-        assert!(!changed, "identical entry must be a no-op");
-    }
-
-    #[test]
-    fn merge_json_creates_container_when_absent() {
-        let mut root = json!({});
-        let changed = merge_json_entry(&mut root, "mcp", "paneflow", paneflow_entry()).unwrap();
-        assert!(changed);
-        assert_eq!(root["mcp"]["paneflow"], paneflow_entry());
-    }
-
-    #[test]
-    fn merge_json_errors_on_non_object_root() {
-        let mut root = json!([1, 2, 3]);
-        assert!(merge_json_entry(&mut root, "mcpServers", "paneflow", paneflow_entry()).is_err());
-    }
-
-    #[test]
-    fn remove_json_only_removes_target() {
-        let mut root = json!({
-            "mcpServers": { "paneflow": paneflow_entry(), "other": { "command": "x" } }
-        });
-        assert!(remove_json_entry(&mut root, "mcpServers", "paneflow"));
-        assert!(root["mcpServers"].get("paneflow").is_none());
-        assert_eq!(root["mcpServers"]["other"]["command"], json!("x"));
-        // Removing again is a no-op.
-        assert!(!remove_json_entry(&mut root, "mcpServers", "paneflow"));
-    }
-
-    #[test]
-    fn read_json_missing_is_empty_object() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let v = read_json_or_default(&dir.path().join("nope.json")).unwrap();
-        assert!(v.is_object() && v.as_object().unwrap().is_empty());
-    }
-
-    #[test]
-    fn read_json_invalid_is_error() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("broken.json");
-        std::fs::write(&p, b"{ not json").unwrap();
-        let err = read_json_or_default(&p).unwrap_err();
-        assert!(err.to_string().contains("not valid JSON"));
-    }
-
-    #[test]
-    fn read_jsonc_allows_comments_and_trailing_commas() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("opencode.jsonc");
-        std::fs::write(
-            &p,
-            br#"
-{
-  // user comment
-  "mcp": {
-    "paneflow": {
-      "command": ["/p"], // trailing comment
-    },
-  },
-  "url": "https://example.com/path//kept"
-}
-"#,
+    fn a_json_file_with_comments_and_trailing_commas_parses() {
+        let v = parse_json_family(
+            Path::new("settings.json"),
+            "{\n  // user comment\n  \"mcpServers\": { \"paneflow\": { \"command\": [\"/p\"], }, },\n  \"url\": \"https://example.com/path//kept\"\n}\n",
         )
         .unwrap();
-
-        let v = read_json_or_default(&p).unwrap();
-        assert_eq!(v["mcp"]["paneflow"]["command"], json!(["/p"]));
+        assert_eq!(v["mcpServers"]["paneflow"]["command"], json!(["/p"]));
         assert_eq!(v["url"], json!("https://example.com/path//kept"));
     }
 
     #[test]
-    fn upsert_toml_preserves_comments_and_siblings() {
-        let input = "\
-# top comment
-[mcp_servers.existing]
-command = \"keepme\"
-args = []
-";
-        let mut doc = input.parse::<toml_edit::DocumentMut>().unwrap();
-        let changed = upsert_toml_entry(
-            &mut doc,
-            "mcp_servers",
-            "paneflow",
-            "/data/bin/paneflow-mcp",
-            &[],
-        )
-        .unwrap();
-        assert!(changed);
-        let out = doc.to_string();
-        assert!(out.contains("# top comment"), "comment preserved");
-        assert!(out.contains("keepme"), "sibling entry preserved");
-        assert!(out.contains("paneflow"), "new entry written");
-        assert!(out.contains("/data/bin/paneflow-mcp"));
-    }
-
-    #[test]
-    fn upsert_toml_is_noop_when_identical() {
-        let mut doc = toml_edit::DocumentMut::new();
-        upsert_toml_entry(&mut doc, "mcp_servers", "paneflow", "/p", &[]).unwrap();
-        let changed = upsert_toml_entry(&mut doc, "mcp_servers", "paneflow", "/p", &[]).unwrap();
-        assert!(!changed, "re-upsert of identical entry must be a no-op");
-    }
-
-    #[test]
-    fn upsert_toml_updates_changed_path() {
-        let mut doc = toml_edit::DocumentMut::new();
-        upsert_toml_entry(&mut doc, "mcp_servers", "paneflow", "/old", &[]).unwrap();
-        let changed = upsert_toml_entry(&mut doc, "mcp_servers", "paneflow", "/new", &[]).unwrap();
-        assert!(changed);
-        assert!(doc.to_string().contains("/new"));
-        assert!(!doc.to_string().contains("/old"));
-    }
-
-    #[test]
-    fn upsert_toml_preserves_unknown_keys_on_path_update() {
-        let input = "\
-[mcp_servers.paneflow]
-command = \"/old\"
-args = []
-# keep this timeout
-startup_timeout_sec = 60
-env = { FOO = \"bar\" }
-cwd = \"/tmp\"
-tool_timeout_sec = 30
-enabled = true
-";
-        let mut doc = input.parse::<toml_edit::DocumentMut>().unwrap();
-        let changed = upsert_toml_entry(&mut doc, "mcp_servers", "paneflow", "/new", &[]).unwrap();
-        assert!(changed);
-        let out = doc.to_string();
-        assert!(out.contains("command = \"/new\""));
-        assert!(!out.contains("/old"));
+    fn invalid_json_is_an_error_naming_the_file() {
+        let err = parse_json_family(Path::new("/cfg/broken.json"), "{ not json").unwrap_err();
+        let msg = format!("{err:#}");
         assert!(
-            out.contains("# keep this timeout"),
-            "comment on extra key preserved"
+            msg.contains("/cfg/broken.json") && msg.contains("not valid JSON"),
+            "{msg}"
         );
-        assert!(out.contains("startup_timeout_sec = 60"));
-        assert!(out.contains("FOO"));
-        assert!(out.contains("bar"));
-        assert!(out.contains("cwd = \"/tmp\""));
-        assert!(out.contains("tool_timeout_sec = 30"));
-        assert!(out.contains("enabled = true"));
-    }
-
-    #[test]
-    fn upsert_toml_is_noop_when_identical_with_unknown_keys() {
-        let input = "\
-[mcp_servers.paneflow]
-command = \"/p\"
-args = []
-startup_timeout_sec = 60
-env = { FOO = \"bar\" }
-";
-        let mut doc = input.parse::<toml_edit::DocumentMut>().unwrap();
-        let changed = upsert_toml_entry(&mut doc, "mcp_servers", "paneflow", "/p", &[]).unwrap();
-        assert!(!changed, "matching command/args must not rewrite extras");
-        let out = doc.to_string();
-        assert!(out.contains("startup_timeout_sec = 60"));
-        assert!(out.contains("FOO"));
-        assert!(out.contains("bar"));
-    }
-
-    #[test]
-    fn upsert_toml_leaves_enabled_false_in_place() {
-        // Merge does not strip `enabled = false`. Status treats that as
-        // NeedsRepair (the managed contract) without treating other extra
-        // keys as a repair signal.
-        let input = "\
-[mcp_servers.paneflow]
-command = \"/old\"
-args = []
-enabled = false
-startup_timeout_sec = 60
-";
-        let mut doc = input.parse::<toml_edit::DocumentMut>().unwrap();
-        upsert_toml_entry(&mut doc, "mcp_servers", "paneflow", "/new", &[]).unwrap();
-        let out = doc.to_string();
-        assert!(out.contains("command = \"/new\""));
-        assert!(out.contains("enabled = false"));
-        assert!(out.contains("startup_timeout_sec = 60"));
-    }
-
-    #[test]
-    fn upsert_toml_preserves_inline_table_unknown_keys() {
-        let input = "\
-[mcp_servers]
-paneflow = { command = \"/old\", args = [], env = { FOO = \"bar\" }, startup_timeout_sec = 60 }
-";
-        let mut doc = input.parse::<toml_edit::DocumentMut>().unwrap();
-        let changed = upsert_toml_entry(&mut doc, "mcp_servers", "paneflow", "/new", &[]).unwrap();
-        assert!(changed);
-        let out = doc.to_string();
-        assert!(out.contains("/new"));
-        assert!(!out.contains("/old"));
-        assert!(out.contains("FOO"));
-        assert!(out.contains("bar"));
-        assert!(out.contains("startup_timeout_sec"));
     }
 
     #[test]
@@ -552,50 +223,31 @@ args = []
     }
 
     #[test]
-    fn read_toml_invalid_is_error() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let p = dir.path().join("broken.toml");
-        std::fs::write(&p, b"this = = invalid").unwrap();
-        let err = read_toml_or_default(&p).unwrap_err();
-        assert!(err.to_string().contains("not valid TOML"));
-    }
+    fn removing_a_table_keeps_the_comments_around_its_header() {
+        let head = "# codex config\n[mcp_servers.github]\ncommand = \"gh-mcp\"\n";
+        let around =
+            "# env = { GH_TOKEN = \"...\" }\n\n# PaneFlow bridge, added by paneflow mcp install\n";
+        let entry = "[mcp_servers.paneflow]\ncommand = \"/x/paneflow-mcp\"\nargs = []\n\n[mcp_servers.paneflow.env]\nA = \"1\"\n";
+        let tail = "\n# profiles below\n[profiles.fast]\nmodel = \"gpt-5-mini\"\n";
+        let mut doc = format!("{head}{around}{entry}{tail}")
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert!(remove_toml_entry(&mut doc, "mcp_servers", "paneflow"));
+        assert_eq!(doc.to_string(), format!("{head}{around}{tail}"));
 
-    fn jsonc_entry() -> serde_json::Value {
-        json!({ "type": "local", "command": ["/p"], "enabled": true })
+        // The removed table was the last header: its comments move to the
+        // document's trailing text.
+        let mut doc = format!("{head}{around}{entry}")
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert!(remove_toml_entry(&mut doc, "mcp_servers", "paneflow"));
+        assert_eq!(doc.to_string(), format!("{head}{around}"));
     }
 
     #[test]
-    fn upsert_jsonc_preserves_comments_and_trailing_commas() {
-        let input = r#"
-{
-  // keep this file selected
-  "mcp": {
-    /* sibling block */
-    "weather": { "type": "local", "command": ["weather-mcp"], "enabled": true }, // trailing
-  },
-  "url": "https://example.com/path//kept"
-}
-"#;
-        let out = jsonc::upsert_entry(input, "mcp", "paneflow", &jsonc_entry())
-            .unwrap()
-            .expect("insert should write");
-        assert!(
-            out.contains("// keep this file selected"),
-            "top comment preserved:\n{out}"
-        );
-        assert!(
-            out.contains("/* sibling block */"),
-            "block comment preserved"
-        );
-        assert!(out.contains("// trailing"), "same-line comment preserved");
-        assert!(
-            serde_json::from_str::<serde_json::Value>(&out).is_err(),
-            "must remain JSONC, not rewritten as JSON"
-        );
-        let v = jsonc::parse(&out).unwrap();
-        assert_eq!(v["mcp"]["paneflow"], jsonc_entry());
-        assert_eq!(v["mcp"]["weather"]["command"], json!(["weather-mcp"]));
-        assert_eq!(v["url"], json!("https://example.com/path//kept"));
+    fn invalid_toml_is_an_error() {
+        let err = parse_toml(Path::new("broken.toml"), "this = = invalid").unwrap_err();
+        assert!(err.to_string().contains("not valid TOML"));
     }
 
     #[test]
@@ -608,7 +260,7 @@ args = []
   }
 }
 "#;
-        let out = jsonc::remove_entry(input, "mcp", "paneflow")
+        let out = remove_json_family_entry(Path::new("o.jsonc"), input, "mcp", "paneflow")
             .unwrap()
             .expect("remove should write");
         assert!(out.contains("// keep"), "comment preserved:\n{out}");
@@ -619,8 +271,10 @@ args = []
         let v = jsonc::parse(&out).unwrap();
         assert!(v["mcp"].get("paneflow").is_none());
         assert_eq!(v["mcp"]["weather"]["command"], json!(["weather-mcp"]));
-        assert!(jsonc::remove_entry(&out, "mcp", "paneflow")
-            .unwrap()
-            .is_none());
+        assert!(
+            remove_json_family_entry(Path::new("o.jsonc"), &out, "mcp", "paneflow")
+                .unwrap()
+                .is_none()
+        );
     }
 }

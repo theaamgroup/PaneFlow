@@ -729,7 +729,7 @@ pub struct TerminalState {
     /// or the child exits.
     pub progress: Option<paneflow_terminal_ghostty::ProgressReport>,
     /// User-assigned custom name (US-013). When `Some`, it overrides the
-    /// auto-derived surface name in `surface.list` / MCP / the sidebar, and is
+    /// auto-derived surface name in `surface.list` / the sidebar, and is
     /// persisted to `session.json`. `None` falls back to derivation.
     pub custom_name: Option<String>,
     /// EP-005 US-013: agent CLI detected in this terminal's PTY subtree by
@@ -2342,7 +2342,7 @@ fn assemble_pty_env(
     surface_id: u64,
     user_env: Option<std::collections::HashMap<String, String>>,
 ) -> std::collections::HashMap<String, String> {
-    // PaneFlow identity vars (AI-hook + MCP bridge integration).
+    // PaneFlow identity vars (AI-hook, shim, and IPC socket clients).
     // `0` is reserved for detached terminals such as discovered worktree Review
     // terminals. Do not advertise a fake workspace id to the IPC hook.
     if workspace_id != 0 {
@@ -2413,9 +2413,9 @@ fn assemble_pty_env(
 
     // Merge user-supplied env on top, EXCEPT the protected keys PaneFlow owns:
     // TERM/COLORTERM/TERM_PROGRAM drive capability detection; SHLVL is reset so
-    // shells start fresh; the PANEFLOW_* identity vars are how the MCP bridge
-    // and the AI-hook shim find PaneFlow - letting a user clobber them would
-    // silently break those features.
+    // shells start fresh; the PANEFLOW_* identity vars are how the AI-hook shim
+    // and scripts calling the IPC socket find PaneFlow - letting a user clobber
+    // them would silently break those features.
     if let Some(user_vars) = user_env {
         const PROTECTED: &[&str] = &[
             "TERM",

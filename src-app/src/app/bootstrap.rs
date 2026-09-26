@@ -83,6 +83,10 @@ impl PaneFlowApp {
             .detach();
         let (ipc_rx, ipc_status) = ipc::start_server();
         crate::startup_trace::mark("ipc_server_started");
+        // Issue #857: uninstall the retired MCP bridge from agent configs.
+        // After the singleton guard above, so an instance that exits there
+        // never starts editing them. Issue #868 deletes this call.
+        crate::legacy_bridge::spawn_cleanup();
 
         // US-006 - install the shared cursor-blink phase as a GPUI global
         // before any `TerminalView` is constructed. Each `TerminalView`
@@ -668,10 +672,6 @@ impl PaneFlowApp {
             terminal_dropdown: None,
             general_dropdown: None,
             new_tab_branch_dropdown: None,
-            mcp_status: None,
-            mcp_install: None,
-            mcp_busy: false,
-            mcp_probe_generation: 0,
             sidebar_scroll: gpui::ScrollHandle::new(),
             effective_shortcuts,
             recording_shortcut_idx: None,
@@ -759,13 +759,6 @@ impl PaneFlowApp {
         // Hydrate the motion switch from the config: it gates the
         // `AnimatedHover` transitions and the primary sidebar slide.
         crate::ui_primitives::set_reduce_motion(app.cached_config.reduce_motion_enabled());
-
-        // Issue #443: the sidebar's "Install MCP bridge" callout reads the
-        // same status cache Settings does, so warm it once here instead of
-        // waiting for the Settings page to open. One off-thread probe; the
-        // pane scan re-probes when a pane resolves an agent the cache does
-        // not know about.
-        app.refresh_mcp_status(cx);
 
         // Issue #518 (upstream df375ba5): warm the installed-agent cache
         // off-thread so the first pane palette frame never walks PATH on

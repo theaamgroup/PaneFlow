@@ -347,27 +347,21 @@ fn test_legacy_windows_material_and_backend_keys_still_load() {
 }
 
 #[test]
-fn a_malformed_mcp_bridge_prompt_dismissed_value_loads_as_empty() {
-    // Issue #443: the dismissal list is written by the sidebar callout, but a
-    // hand edit can leave a string or a number there. Either must load as
-    // "nothing dismissed" without discarding the valid siblings.
-    for bad in [r#""codex""#, "7", "true", r#"{"codex": true}"#] {
-        let json = format!(r#"{{"theme": "One Dark", "mcp_bridge_prompt_dismissed": {bad}}}"#);
+fn leftover_mcp_bridge_prompt_dismissed_key_still_loads() {
+    // Issue #857: the sidebar MCP-bridge callout that wrote this list is gone
+    // with the bridge. An older paneflow.json that still carries the key, in
+    // any shape, loads, the rest of the file applies, and the key does not
+    // round-trip back out.
+    for value in [r#"["codex", "claude-code"]"#, r#""codex""#, "7", "[]"] {
+        let json = format!(r#"{{"theme": "One Dark", "mcp_bridge_prompt_dismissed": {value}}}"#);
         let config = parse_and_validate(&json);
+        assert_eq!(config.theme.as_deref(), Some("One Dark"), "{value}");
+        let out = serde_json::to_value(&config).unwrap();
         assert!(
-            config.mcp_bridge_prompt_dismissed.is_empty(),
-            "{bad} must load as the empty list"
+            out.get("mcp_bridge_prompt_dismissed").is_none(),
+            "{value} round-tripped: {out}"
         );
-        assert_eq!(config.theme.as_deref(), Some("One Dark"));
     }
-
-    let config = parse_and_validate(r#"{"mcp_bridge_prompt_dismissed": ["codex", "claude-code"]}"#);
-    assert_eq!(config.mcp_bridge_prompt_dismissed, ["codex", "claude-code"]);
-
-    // An absent key serializes as no key at all, so a config that never
-    // dismissed anything does not grow an empty array on every save.
-    let json = serde_json::to_string(&PaneFlowConfig::default()).unwrap();
-    assert!(!json.contains("mcp_bridge_prompt_dismissed"));
 }
 
 /// Issue #241: `open(O_RDONLY)` on a FIFO with no writer blocks forever, so the

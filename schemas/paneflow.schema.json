@@ -184,7 +184,7 @@
     },
     "crash_reporting": {
       "type": ["boolean", "null"],
-      "description": "Master switch for Sentry crash reporting. null/true = enabled (default): a GUI launch initializes crash reporting at startup, with send_default_pii disabled so reports never carry default PII. false = crash reporting is never initialized. Read once at startup; requires a restart. CLI invocations (paneflow mcp/hooks/<verb>) never initialize crash reporting regardless of this value.",
+      "description": "Master switch for Sentry crash reporting. null/true = enabled (default): a GUI launch initializes crash reporting at startup, with send_default_pii disabled so reports never carry default PII. false = crash reporting is never initialized. Read once at startup; requires a restart. CLI invocations (paneflow hooks/<verb>) never initialize crash reporting regardless of this value.",
       "default": true
     },
     "review_enabled": {
@@ -199,9 +199,9 @@
     },
     "mcp_bridge_prompt_dismissed": {
       "type": "array",
-      "items": { "type": "string" },
-      "description": "MCP-install agent ids (claude-code, codex, gemini, opencode) whose sidebar 'Install MCP bridge' callout was dismissed. The callout offers the bridge once per agent when a pane runs that agent without a paneflow MCP entry; a listed id never shows it again. Written by the callout's dismiss button; a malformed value loads as the empty list.",
-      "default": []
+      "deprecated": true,
+      "description": "Retired sidebar install-offer dismissals. Accepted and ignored: the offer was removed with the pane-reading MCP server (issue #857), and PaneFlow no longer reads or writes this list.",
+      "items": {}
     },
     "review_prefill_delay_ms": {
       "type": ["integer", "null"],

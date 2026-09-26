@@ -8,7 +8,7 @@ terminal emulation is provided by a vendored
 [`libghostty-vt`](https://github.com/ghostty-org/ghostty) static archive
 (Ghostty `f2d5758f`, wrapped by the `paneflow-terminal-ghostty` crate; issue
 #184). Paneflow owns the PTY through `portable-pty`, rendering, and
-integration with agent tracking, IPC, and the MCP bridge.
+integration with agent tracking and IPC.
 
 This fork is **macOS only**. Metal, AppKit, Unix-socket IPC, a signed and
 notarized `.app` bundle. Fork decisions, the upstream leak register, and a
@@ -100,7 +100,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── settings/                          ← embedded Codex-style settings (inline, not a window)
 │   ├── chrome.rs                      ← grouped nav rail + content panel (impl PaneFlowApp)
 │   ├── components.rs / nav_header.rs  ← shared cards/toggles/section headers
-│   └── tabs/                          ← general, appearance, shortcuts, terminal, ai_agent, mcp,
+│   └── tabs/                          ← general, appearance, shortcuts, terminal, ai_agent,
 │                                        workspaces. shortcuts is the one virtualized tab
 │                                        (gpui::list, owns its scroll): ~80 rows × ~8 nodes
 │                                        rebuilt every frame made the whole settings surface lag
@@ -108,7 +108,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │                                         per-pane base + unified/split display, no embedded terminals or scope/sync layer
 ├── text_sanitize.rs                   ← strip bidi and zero-width characters from untrusted labels
 ├── agents/                            ← agent process supervision, notifications
-├── ai_hooks/                          ← ai.* hook payload extraction
+├── ai_hooks/                          ← ai.* hook payload extraction; claude_hooks.rs runs `paneflow hooks`
 ├── {claude,codex,opencode,pi,command}_sessions.rs ← per-agent session-file readers
 ├── agent_launcher.rs / agent_sessions.rs ← spawn agents through the PATH shim
 ├── widgets/                           ← text_input, scrollbar, callout
@@ -121,7 +121,8 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── limits.rs                          ← centralized ingress/egress size caps
 ├── release_notes.rs                   ← `last-launched-version` cache marker (hand-parsed x.y.z); first launch of a newer version raises the sticky release-notes toast (#526)
 ├── runtime_paths.rs                   ← runtime/data/config path helpers + sun_path guard
-├── login_shell_env.rs                 ← adopt the login shell's PATH (GUI launch has none)
+├── login_shell_env.rs                 ← adopt the login shell's PATH (GUI launch has none); read, never export, the agent-config vars the bridge cleanup probes
+├── legacy_bridge.rs                   ← one-time MCP bridge cleanup spawn (#857; #868 deletes it)
 ├── config_writer.rs                   ← read-modify-write paneflow.json
 ├── window_state.rs / editor.rs / external_open.rs
 ├── sidebar_title.rs                   ← sidebar label cleanup
@@ -140,8 +141,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 | `paneflow-app` | `src-app/` | Binary | GPUI application: all UI, PTY, IPC, CLI |
 | `paneflow-config` | `crates/paneflow-config/` | Library | Config schema, JSON loader, file watcher |
 | `paneflow-ipc-client` | `crates/paneflow-ipc-client/` | Library | Blocking JSON-RPC client for the local socket |
-| `paneflow-mcp` | `crates/paneflow-mcp/` | Binary | Read-only stdio MCP server (see below) |
-| `paneflow-mcp-install` | `crates/paneflow-mcp-install/` | Library | GPU-free per-agent MCP config merge engine |
+| `paneflow-mcp-install` | `crates/paneflow-mcp-install/` | Library | **Uninstall-only and temporary.** `cleanup.rs::remove_legacy_bridge` removes the `paneflow` MCP entries the retired bridge installed, and a later launch that finds none deletes its extracted binary (see below). #868 deletes the crate once the cleanup has shipped in two releases |
 | `paneflow-shim` | `crates/paneflow-shim/` | Binary | PATH shim wrapping 18 agent CLIs |
 | `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | Binary | Hook binary agents invoke to report lifecycle events |
 | `paneflow-process` | `crates/paneflow-process/` | Library | Bounded subprocess execution (deadline + stdout cap) |
@@ -303,22 +303,39 @@ The default loop is human-in-the-loop: Paneflow pre-fills prompts into real PTY
 sessions and the user submits them. Auto-submit exists only as an explicit,
 gated scripting path.
 
-## IPC and the MCP bridge
+## IPC
 
-A JSON-RPC 2.0 endpoint on a Unix socket exposes `system.*`, `workspace.*`,
-`surface.*`, `fleet.*`, and `ai.*` namespaces: enough to script
-workspace creation, read panes, and send text behind the scripting gate.
+A JSON-RPC 2.0 endpoint on a Unix socket exposes the `system.*`, `surface.*`,
+`fleet.*`, and `ai.*` namespaces plus `agent.whoami`: enough to list, read,
+and search panes and send text behind the scripting gate.
 The `paneflow` CLI uses the same socket. The socket path
 is resolved by `src-app/src/runtime_paths.rs`, which on macOS lands under
 `$TMPDIR` and enforces the 104-byte `sun_path` ceiling.
 
-The MCP bridge re-exposes a read-only slice of this to agents themselves:
-`paneflow mcp install` registers a stdio MCP server with Claude Code, Codex,
-Gemini CLI and opencode, giving any agent the ability to *read* (never write)
-other panes' scrollback. An agent debugging a failing dev server can read the
-server pane's output directly instead of asking you to paste it. The bridge
-binary ships embedded in the main binary and is extracted to a stable path at
-launch, so there is nothing extra to install.
+Agents read other panes over the same socket (`surface.read`,
+`surface.search`, `agent.whoami`); PaneFlow no longer ships an MCP server.
+Earlier builds installed a stdio MCP bridge into Claude Code, Codex, Gemini
+CLI and opencode and extracted its binary to
+`runtime_paths::bridge_binary_path()` on every launch. Until #868,
+`PaneFlowApp::new` calls `legacy_bridge::spawn_cleanup` right after the IPC
+singleton guard. It `stat`s that path, and only while the extracted binary
+still exists does it spawn a background thread that runs
+`paneflow_mcp_install::remove_legacy_bridge`. The pass always probes each
+agent's default config under the home directory, plus the locations the
+process environment names and the `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+`OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR` and `XDG_CONFIG_HOME` values
+`login_shell_env` captured on a Dock or Finder launch without exporting them.
+It removes only the `paneflow` entries whose command is a `paneflow-mcp`
+binary at any path, under the config lock and with a re-read before the
+rename; a JSON-family config loses only that entry's text. It backs each
+changed file up first, to `<file>.bak` if that name is free, otherwise
+`<file>.paneflow-bak`, then `<file>.paneflow-bak.1`, `.2`, …, never
+overwriting an existing file, and deletes that backup again when the write is
+refused. Deleting the binary takes a second pass: a launch that finds any
+entry keeps it, and only a later launch that finds none deletes it, which
+also catches an agent that wrote an old config back. After that, launches
+cost the one `stat`. Debug builds without `PANEFLOW_ALLOW_DEBUG_MCP_INSTALL=1`
+and runs with `PANEFLOW_HOME` set never edit agent configs.
 
 Ingress is treated as untrusted: session and config files are validated
 structurally (layout budgets, ratio clamps, id alphabets) before they touch
@@ -412,7 +429,7 @@ both.
 Every pane's `PANEFLOW_BIN_DIR` (`~/Library/Caches/paneflow/bin/<version>/`)
 holds the 18 agent shims, `paneflow-ai-hook`, and a `paneflow` symlink to the
 running executable (`ai_hooks/extract.rs::link_cli_into`, #440), so `paneflow
-send` / `paneflow mcp install` work inside a pane without the user linking the
+send` / `paneflow hooks` work inside a pane without the user linking the
 bundle binary onto their login PATH. The link is re-pointed at launch when
 `current_exe()` moves.
 

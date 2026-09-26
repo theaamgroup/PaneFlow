@@ -5,11 +5,12 @@ use std::collections::HashMap;
 /// Top-level PaneFlow configuration.
 ///
 /// Unknown keys are ignored. Retired keys such as `commands` (issue #607),
-/// `custom_buttons` (issue #608), `new_tabs_on_main`, `ai_injection_fence` and
-/// `agent_button_visibility_defaults_migrated` (issue #850) therefore still
-/// load from an older file without a field here; the published schema keeps a
-/// deprecated stub for `commands` and the three #850 keys so editors do not
-/// flag them (issue #817).
+/// `custom_buttons` (issue #608), `new_tabs_on_main`, `ai_injection_fence`,
+/// `agent_button_visibility_defaults_migrated` (issue #850) and
+/// `mcp_bridge_prompt_dismissed` (issue #857) therefore still load from an
+/// older file without a field here; the published schema keeps a deprecated
+/// stub for `commands`, the three #850 keys and the #857 key so editors do
+/// not flag them (issue #817).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PaneFlowConfig {
@@ -125,8 +126,8 @@ pub struct PaneFlowConfig {
     /// startup, with `send_default_pii` disabled so reports never carry
     /// default PII. `false` = crash reporting is never initialized. Read
     /// once at startup, so changing it requires a restart; CLI invocations
-    /// (`paneflow mcp|hooks|<verb>`) never initialize crash reporting
-    /// regardless of this value.
+    /// (`paneflow hooks|<verb>`) never initialize crash reporting regardless
+    /// of this value.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub crash_reporting: Option<bool>,
     /// Master switch for the Review surface. `None`/`true` = enabled
@@ -292,18 +293,6 @@ pub struct PaneFlowConfig {
     /// `"agent_panel": { ... }`.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub agent_panel: Option<AgentPanelConfig>,
-    /// MCP-install agent ids (`"claude-code"`, `"codex"`, `"gemini"`,
-    /// `"opencode"`) whose sidebar "Install MCP bridge" callout the user
-    /// dismissed (issue #443). The callout offers the bridge once per agent
-    /// when a pane runs that agent without a `paneflow` MCP entry; an id
-    /// listed here never shows it again. A malformed value loads as the
-    /// empty list.
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        deserialize_with = "lenient_value_or_default"
-    )]
-    pub mcp_bridge_prompt_dismissed: Vec<String>,
 }
 
 /// What the workspaces rail shows beyond a row's name and its activity.

@@ -18,10 +18,9 @@
 //! wedge the caller). The server's peer-UID check passes because the client
 //! runs as the same user that launched Paneflow.
 //!
-//! Shared crate (no GPUI / `src-app` dependency): consumed both by the MCP
-//! bridge (`paneflow-mcp`) and the `paneflow` CLI subcommands.
+//! Shared crate (no GPUI / `src-app` dependency): consumed by the `paneflow`
+//! CLI subcommands and, through [`ai_hook`], the `paneflow-ai-hook` callback.
 
-pub mod agent_context;
 pub mod ai_hook;
 
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -60,8 +59,8 @@ const IPC_RETRY_DELAYS: [Duration; 4] = [
 const MAX_RESPONSE_LEN: u64 = MAX_FRAME_BYTES as u64;
 
 /// Abstraction over "send a JSON-RPC request to Paneflow, get the `result`".
-/// Lets callers (MCP layer, CLI) be unit-tested against a fake transport with
-/// no live socket.
+/// Lets callers (the CLI) be unit-tested against a fake transport with no live
+/// socket.
 pub trait IpcTransport {
     /// Call a Paneflow IPC method. Returns the `result` value on success, or
     /// `Err(message)` on transport failure or a JSON-RPC `error` envelope.
@@ -231,9 +230,9 @@ fn jsonrpc_error_message_from_value(value: &Value) -> Option<String> {
 /// send/recv timeouts. The previous scratch-thread + `recv_timeout`
 /// pattern leaked one OS thread
 /// and one socket FD on every timeout - the spawned reader owned `stream` and
-/// stayed blocked in `read_line` forever (no deadline ever reached it), so an
-/// agent retrying `read_pane` against a wedged Paneflow exhausted the
-/// long-lived bridge's threads/FDs. With an OS deadline, `read_line` returns
+/// stayed blocked in `read_line` forever (no deadline ever reached it), so a
+/// long-lived caller retrying against a wedged Paneflow exhausted its
+/// threads/FDs. With an OS deadline, `read_line` returns
 /// the error itself, the owning `BufReader` drops, and the FD is released.
 /// Collapse an `ErrorKind::Unsupported` result to `Ok(())` - used only for
 /// optional Unix socket-deadline setters. Any other error is forwarded

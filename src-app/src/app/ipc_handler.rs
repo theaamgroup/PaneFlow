@@ -725,9 +725,8 @@ fn requested_workspace_id(params: &serde_json::Value) -> Result<Option<u64>, Jso
 /// `surface.read` and `surface.search` used to coerce a string, float,
 /// negative, or `null` to the default and clamp `0` or `4001` into range, so
 /// an orchestrator that sent a typo'd `lines` over JSON-RPC got a 200-line page
-/// and believed it was the requested window. The MCP bridge rejects the
-/// same inputs (`validate_limit` in `paneflow-mcp`); this mirrors it so the
-/// two contracts agree (issue #281).
+/// and believed it was the requested window. Such a value is now rejected as
+/// invalid params (issue #281).
 fn requested_bounded(
     params: &serde_json::Value,
     key: &str,
@@ -892,13 +891,10 @@ fn truncate_ipc_text(text: String, returned: usize) -> (String, usize, bool) {
 // ---------------------------------------------------------------------------
 // EP-003 US-011 (agent-control-plane): anti-injection fence for `surface.read`.
 //
-// The fence trio below is replicated VERBATIM from the MCP bridge
-// (`crates/paneflow-mcp/src/tools.rs`: `fence_id` / `neutralize_sentinel` /
-// `wrap_untrusted`). That crate is a binary with no library target, so the
-// functions cannot be imported across the crate boundary. Keep the two copies
-// byte-for-byte identical: the fence is a security boundary, and any divergence
-// between the MCP path and the CLI/IPC path would reopen the very inter-agent
-// injection vector US-011 closes. A change here MUST be mirrored there.
+// The fence trio below (`fence_id` / `neutralize_sentinel` / `wrap_untrusted`)
+// is a security boundary against inter-agent injection: pane text returned over
+// the socket cannot close the fence early and pose as instructions to the agent
+// reading it.
 // ---------------------------------------------------------------------------
 
 /// Per-call unguessable fence id (16-char hex `u64` from the OS-seeded
@@ -1428,9 +1424,9 @@ impl PaneFlowApp {
     }
 
     /// Resolve a readable surface and enforce an optional stable workspace
-    /// identity in the same GPUI request. This keeps the MCP scope check in the
-    /// canonical owner of workspace membership instead of doing a racy
-    /// `surface.list` check followed by an unrestricted read in the bridge.
+    /// identity in the same GPUI request. This keeps a caller's scope check in
+    /// the canonical owner of workspace membership instead of a racy
+    /// `surface.list` check followed by an unrestricted read on the caller's side.
     pub(super) fn resolve_readable_surface(
         &self,
         params: &serde_json::Value,
@@ -1851,9 +1847,9 @@ impl PaneFlowApp {
             "surface.list" => {
                 // US-002: additive enrichment - keep the legacy root fields
                 // (`pane_count`, `workspace`) for back-compat and add a
-                // per-surface `surfaces` array with disambiguated names. MCP
-                // callers pass the stable PTY workspace_id so filtering is
-                // owned by the same layer that owns workspace membership. The
+                // per-surface `surfaces` array with disambiguated names. A
+                // scoped caller passes the stable PTY workspace_id so filtering
+                // is owned by the same layer that owns workspace membership. The
                 // root fields follow the same filter, so they describe the
                 // workspace `surfaces` was scoped to, not the active one.
                 let requested_workspace_id = match requested_workspace_id(params) {
@@ -1886,8 +1882,8 @@ impl PaneFlowApp {
                 };
                 const DEFAULT_LINES: usize = 200;
                 // Issue #281: wrong-typed or out-of-range pagination params
-                // are -32602, matching the MCP `read_pane` tool, never
-                // coerced to the default or clamped into range.
+                // are -32602, never coerced to the default or clamped into
+                // range.
                 let lines = match requested_bounded(
                     params,
                     "lines",
@@ -1912,12 +1908,8 @@ impl PaneFlowApp {
                 let sid = terminal.entity_id().as_u64();
                 // EP-003 US-011 (agent-control-plane): wrap the returned text as
                 // untrusted so a malicious peer pane cannot hijack an orchestrator
-                // reading it. Fenced by default; a caller can override per call
-                // with `fenced: false`. The in-repo consumer that parses raw
-                // output (the MCP bridge, `crates/paneflow-mcp/src/bridge.rs`,
-                // which re-fences itself) passes `fenced:false`, so the default
-                // covers the raw IPC read path an orchestrator uses directly,
-                // mirroring the MCP fence.
+                // reading it. Fenced by default; a caller that parses raw
+                // output can opt out per call with `fenced: false`.
                 let fenced = fenced.unwrap_or(true);
                 // Issue #363: the extract parks on the runtime's reply for up
                 // to a second, and this runs on the 50 ms GPUI automation tick
@@ -3451,9 +3443,9 @@ mod tests {
     use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, mpsc};
 
-    /// Issue #281: `surface.read` / `surface.search` pagination params follow
-    /// the MCP `read_pane` / `search_pane` rules - absent is the default, a
-    /// valid integer in range is honoured, and everything else is -32602.
+    /// Issue #281: `surface.read` / `surface.search` pagination params are
+    /// strict - absent is the default, a valid integer in range is honoured,
+    /// and everything else is -32602.
     #[test]
     fn requested_bounded_absent_is_none_and_in_range_is_honoured() {
         let max = crate::limits::MAX_SCROLLBACK_EXTRACT_LINES;
@@ -3479,7 +3471,7 @@ mod tests {
     fn requested_bounded_rejects_wrong_type_and_out_of_range_instead_of_coercing() {
         // Each of these used to become the default (`unwrap_or`) or be
         // clamped into range, so a typo'd `lines` returned a 200-line page
-        // that looked like the requested window. MCP rejects them all.
+        // that looked like the requested window. Each is now -32602.
         let max = crate::limits::MAX_SCROLLBACK_EXTRACT_LINES;
         for malformed in [
             serde_json::json!({"lines": "lots"}),
@@ -4345,7 +4337,7 @@ mod tests {
     #[test]
     fn fence_id_is_unguessable_per_call() {
         // The id differs every call, so untrusted pane content cannot predict
-        // the closing sentinel to break out (parity with the MCP fence).
+        // the closing sentinel to break out.
         assert_ne!(
             super::wrap_untrusted("source=\"x\"", "b"),
             super::wrap_untrusted("source=\"x\"", "b"),

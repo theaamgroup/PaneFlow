@@ -64,19 +64,6 @@
       "note": "wall-clock median across launches of the time between this mark and the previous one"
     },
     {
-      "metric": "fresh_step_bridge_extracted",
-      "unit": "ns",
-      "direction": "lower_is_better",
-      "available": true,
-      "value": 2257000.0,
-      "p95": 2281000.0,
-      "mean": 2266300.0,
-      "alloc_bytes_per_iter": null,
-      "allocs_per_iter": null,
-      "iters": 10,
-      "note": "wall-clock median across launches of the time between this mark and the previous one"
-    },
-    {
       "metric": "fresh_step_ai_hook_extracted",
       "unit": "ns",
       "direction": "lower_is_better",
@@ -331,19 +318,6 @@
       "value": 335000.0,
       "p95": 347000.0,
       "mean": 338900.0,
-      "alloc_bytes_per_iter": null,
-      "allocs_per_iter": null,
-      "iters": 10,
-      "note": "wall-clock median across launches of the time between this mark and the previous one"
-    },
-    {
-      "metric": "restore3_step_bridge_extracted",
-      "unit": "ns",
-      "direction": "lower_is_better",
-      "available": true,
-      "value": 2253000.0,
-      "p95": 2262000.0,
-      "mean": 2257400.0,
       "alloc_bytes_per_iter": null,
       "allocs_per_iter": null,
       "iters": 10,

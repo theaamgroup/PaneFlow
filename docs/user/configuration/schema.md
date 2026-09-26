@@ -79,7 +79,7 @@ That strictness is an editor-side aid only; it never affects loading.
 | `crash_reporting` | boolean or null | `true` | Master switch for Sentry crash reporting. `false` never initializes it. Reports are sent without default PII (`send_default_pii` is off), only a GUI launch initializes reporting (CLI subcommands never do), and the switch is read once at startup, so it requires a restart. |
 | `review_enabled` | boolean or null | `true` | Master switch for the Review surface. `false` hides the Review view and its sidebar tab, makes the Review shortcut a no-op, and reopens a Review-mode session in the terminal view. |
 | `new_pane_shows_sessions` | boolean or null | `false` | When true, a Tab-placement New pane picker also opens the Agent sessions sidebar, scoped to the workspace cwd, so a listed session can be resumed into the new pane. Split-placement pickers leave the sidebar alone. |
-| `mcp_bridge_prompt_dismissed` | array of strings | `[]` | MCP-install agent ids (`claude-code`, `codex`, `gemini`, `opencode`) whose sidebar "Install MCP bridge" callout was dismissed. When a pane runs one of those agents and its MCP config has no `paneflow` entry, the sidebar footer offers the bridge once; the callout's `×` writes the agent id here so it never asks again for that agent. Remove an id to see the offer again. A malformed value loads as the empty list. |
+| `mcp_bridge_prompt_dismissed` | array | none | Retired: accepted and ignored. It recorded which agents' sidebar install offer was dismissed; the offer was removed with the pane-reading MCP server (issue #857). |
 | `review_prefill_delay_ms` | integer or null | `2000` | Delay before Review pre-fills a freshly launched CLI. Clamped to `250` to `10000`. |
 | `submit_paste_delay_ms` | integer or null | `70` | Minimum delay between bracketed paste and submit carriage return. Clamped to `10` to `5000`. |
 | `external_editor` | string or null | `auto` | Editor command (quoted paths and flags supported, without a shell), tried before `$VISUAL` and `$EDITOR`. `auto`/null starts with those variables, then probes the GUI CLIs `code`, `cursor`, `zed`, `subl`, `code-insiders`, and `windsurf`, then the macOS handler. Terminal editors (`hx`, `nvim`, `vim`, `emacs`) are not launched from that detached fallback, because a GUI launch has no TTY; set `external_editor`, `$VISUAL`, or `$EDITOR` to use one. Failed file-link commands fall through. `system` uses only the macOS handler, without line/column positioning. The workspace **Open in editor** action (`Ctrl+Alt+Z`) launches this same command in the workspace directory. |
@@ -268,7 +268,7 @@ flag the key. Repeatable layouts come from session restore.
 ```
 
 `agent_context` on a surface stores the session-owned pane UUID that `agent.whoami`
-reports; see [Pane identity](../../mcp-bridge.md#pane-identity-whoami) for the contract.
+reports; see [Pane identity](../scripting/reference.md#pane-identity) for the contract.
 A `task` key left by older builds is ignored.
 
 Legacy `window_decorations` values are accepted and ignored by the loader.

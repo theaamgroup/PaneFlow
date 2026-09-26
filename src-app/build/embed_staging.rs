@@ -3,7 +3,7 @@
 //! A build without `cfg(debug_assertions)` (release, `release-min`) keeps
 //! fat-LTO `release-min` so `EMBED_SIZE_LIMIT_BYTES` still measures shipped
 //! Mach-O sizes. A build with it (dev, test) uses `dev` so a debug
-//! `cargo build` does not fat-LTO the shim, hook, and MCP binaries.
+//! `cargo build` does not fat-LTO the shim and hook binaries.
 //!
 //! Staged bytes are isolated per rust-embed ingest slot (`debug` vs
 //! `release`) so a debug restage cannot overwrite the helpers a later
@@ -11,6 +11,7 @@
 //! `target/embed/<slot>/bin` under the matching `cfg(debug_assertions)`,
 //! and the build script picks the slot from that same cfg.
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 /// Nested cargo profile used to stage embedded helpers.
@@ -70,14 +71,45 @@ pub fn cargo_profile_dir(profile: &str) -> &str {
 /// Byte cap for the staged helpers of a nested profile.
 ///
 /// `release-min` keeps the shipped-size budget. `dev` helpers are not
-/// stripped or LTO'd (measured 2026-09-15 on aarch64-apple-darwin:
-/// shim 2_973_616 B + ai-hook 1_353_680 B + mcp 2_494_224 B = 6_821_520 B)
-/// and every launch writes one shim copy per agent, so they get a looser
-/// but still bounded cap instead of none.
+/// stripped or LTO'd (see `EMBED_SIZE_LIMIT_DEBUG_BYTES` in `build.rs` for
+/// the measured sizes) and every launch writes one shim copy per agent, so
+/// they get a looser but still bounded cap instead of none.
 pub fn embed_size_limit_for(embed_profile: &str, release_limit: u64, debug_limit: u64) -> u64 {
     if embed_profile == "release-min" {
         release_limit
     } else {
         debug_limit
     }
+}
+
+/// Remove every top-level entry of `embed_dir` whose name is not in `keep`,
+/// returning the removed names, sorted.
+///
+/// rust-embed ingests every file in the staging folder and the size budget
+/// sums every top-level file, but a restage only overwrites the helpers it
+/// builds. Without this, a helper an older build staged (the retired
+/// `paneflow-mcp`, issue #857) stays embedded forever and counts against the
+/// cap. A missing folder is nothing to prune.
+pub fn prune_unlisted_helpers(embed_dir: &Path, keep: &[&str]) -> io::Result<Vec<String>> {
+    let entries = match std::fs::read_dir(embed_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut removed = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if keep.contains(&name.as_str()) {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
+        }
+        removed.push(name);
+    }
+    removed.sort();
+    Ok(removed)
 }

@@ -4717,15 +4717,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "paneflow-mcp"
-version = "0.7.2"
-dependencies = [
- "paneflow-ipc-client",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "paneflow-mcp-install"
 version = "0.7.2"
 dependencies = [
@@ -4736,7 +4727,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml_edit 0.25.9+spec-1.1.0",
- "which 8.0.2",
 ]
 
 [[package]]

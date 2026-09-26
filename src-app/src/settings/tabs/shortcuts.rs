@@ -289,8 +289,8 @@ fn backup_config_before_reset(path: &Path) -> std::io::Result<Option<PathBuf>> {
 
 /// The confirming click's writer: back the config up, then erase the
 /// bindings through the checked writer. `config_writer` has no backup helper
-/// of its own (the `.bak` one in `paneflow-mcp-install` is for agent configs),
-/// so the copy lives here, next to the only caller that needs it.
+/// of its own (the `.bak` one in `ai_hooks::claude_hooks` is for Claude's
+/// settings), so the copy lives here, next to the only caller that needs it.
 fn reset_shortcuts_with_backup() -> bool {
     if let Some(path) = paneflow_config::loader::config_path() {
         match backup_config_before_reset(&path) {

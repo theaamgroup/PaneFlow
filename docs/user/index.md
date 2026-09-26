@@ -38,7 +38,7 @@ There is no Homebrew tap. For source builds, see [INSTALL.md](../../INSTALL.md).
 
 **Automating it**
 
-* [scripting](scripting.md) - CLI, JSON-RPC, MCP, hooks.
+* [scripting](scripting.md) - CLI, JSON-RPC, hooks.
 * [scripting/reference](scripting/reference.md) - the exact surface to quote.
 
 ## What runs on the inside
