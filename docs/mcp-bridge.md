@@ -143,14 +143,17 @@ itself honours.
 `paneflow` entry exists but is disabled or no longer matches PaneFlow's managed
 schema. `status` never extracts or writes the bridge binary.
 
-> Where each agent's entry lands: Claude Code: `~/.claude.json`
-> (`mcpServers.paneflow`, backed up before `claude mcp add -s user`); Codex:
-> `$CODEX_HOME/config.toml` when `CODEX_HOME` is set, otherwise
-> `~/.codex/config.toml` (`[mcp_servers.paneflow]`, backed up before
-> `codex mcp add`); Gemini CLI: `~/.gemini/settings.json`
-> (`mcpServers.paneflow`, `trust: true`); opencode: `OPENCODE_CONFIG`, or
-> `OPENCODE_CONFIG_DIR`, or the global `opencode.jsonc` / `opencode.json`
-> config (key `mcp`, `command` as an array, `type: "local"`).
+> Where each agent's entry lands: Claude Code: `~/.claude.json`, or
+> `$CLAUDE_CONFIG_DIR/.claude.json` when `CLAUDE_CONFIG_DIR` is set
+> (`mcpServers.paneflow`); Codex: `$CODEX_HOME/config.toml` when `CODEX_HOME`
+> is set, otherwise `~/.codex/config.toml` (`[mcp_servers.paneflow]`); Gemini
+> CLI: `~/.gemini/settings.json` (`mcpServers.paneflow`, `trust: true`);
+> opencode: `OPENCODE_CONFIG`, or `OPENCODE_CONFIG_DIR`, or the global
+> `opencode.jsonc` / `opencode.json` config (key `mcp`, `command` as an array,
+> `type: "local"`). PaneFlow writes every entry by editing that file directly
+> under its config lock; it never runs `claude mcp add` or `codex mcp add`.
+> Before each write that changes the file, the old contents are copied to
+> `<file>.bak`.
 
 ### Not supported: aider
 

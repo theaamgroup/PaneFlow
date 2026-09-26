@@ -25,15 +25,12 @@ toml_edit = "0.25"
 which.workspace = true
 dirs.workspace = true
 anyhow.workspace = true
-# Surfaces shell-out failures (e.g. `claude mcp add` non-zero exit) to
-# stderr via the host's env_logger before the direct-merge fallback runs.
+# Reports config repairs the Codex writer makes (re-enabling a disabled
+# entry, dropping static PaneFlow env overrides) via the host's env_logger.
 log.workspace = true
 # Used by `io::write_atomic` for same-dir temp file + atomic rename (not
 # test-only), so it lives in [dependencies], not [dev-dependencies].
 tempfile.workspace = true
-# EP-002 (prd-ultron-remediation, U-032): bound `claude mcp add` / `codex mcp
-# add` shell-outs with a wall-clock deadline. std-only, no transitive build.
-paneflow-process = { workspace = true }
 # Shared cross-process config lock (OS advisory, crash-safe), atomic writes,
 # and the JSONC surgical editor. Supersedes this crate's private lock.
 paneflow-agent-config.workspace = true
