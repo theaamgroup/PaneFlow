@@ -13,6 +13,11 @@ working directory. Move focus structurally across the tree with
 [built-in presets](layouts.md) - even horizontal, even vertical,
 main vertical, and tiled.
 
+`Cmd+Shift+P` opens Pane Overview, every terminal pane across your
+workspaces and tabs. Dismissing Pane Overview or the New pane palette
+returns you to the pane you opened it from. **Settings > Keyboard
+Shortcuts** lists every bindable action with its live chord, and rebinds it.
+
 ## Agent-first panes
 
 Launch Claude Code, Codex, OpenCode, or any CLI agent as a first-class
@@ -58,22 +63,6 @@ When Review is enabled and a commit exists, Review diff opens against the
 inspected base. Arrow keys select rows; Enter opens the task and R opens its diff.
 GitHub information uses your existing `gh` authentication. Local repository
 information remains available if GitHub cannot be reached.
-
-## Command palette
-
-`Cmd+Shift+O` opens a palette listing every registered context-free action
-(split, tabs, workspaces, layouts, the overlays) with the binding it currently
-answers to, including your overrides from `paneflow.json`. Type to filter on
-words in any order, move with the arrow keys, and press Enter to run the
-highlighted action; Escape closes it. Actions scoped to a surface (terminal
-copy, diff navigation) are not listed, and the palette never lists itself.
-Opening it over another overlay folds that overlay first, and the action lands
-on the pane you were in before it opened. The one exception is a New pane
-picker on a workspace's only tab: it has nowhere to fold to, so the palette
-opens over it. Dismissing Pane Overview or the pane palette also returns
-you to the pane you opened it from.
-With no workspace open, the sidebar's empty state also carries a
-**Command palette** row.
 
 ## Clone a repository
 

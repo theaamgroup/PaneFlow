@@ -25,7 +25,7 @@ without Electron.
 ```
 PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── app/                               ← PaneFlowApp impl, split across modules
-│   ├── actions.rs                     ← 75 GPUI action types (paneflow namespace)
+│   ├── actions.rs                     ← 74 GPUI action types (paneflow namespace)
 │   ├── bootstrap.rs                   ← app init, window creation, GPUI setup, poll loops
 │   ├── event_handlers.rs              ← title-bar/pane/terminal event subscribers + stale-PID sweep
 │   ├── ipc_handler.rs                 ← JSON-RPC handler + process_automation_tick (50 ms)
@@ -47,8 +47,6 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │                                         workspace in a compact grid; tabs stay adjacent with
 │                                         split-pane labels and eight-row previews (rows.rs: packing/navigation)
 │   ├── system_info_dialog.rs          ← Help ▸ System Info… modal + Copy button (report from system_info.rs)
-│   ├── command_palette.rs             ← Cmd+Shift+O palette: every context-free registry action with its live
-│   │                                     binding, whole-word filter, Enter dispatches, never lists itself (#523)
 │   ├── tab_worktree.rs                ← per-tab worktree binding (#347): cached checkout git state, branch/worktree
 │   │                                     listings, bind_tab_to_branch (prepare_branch_checkout off-thread)
 │   └── workspace_ops/                 ← create/close/select/rename/reveal, focus, layout, tab
