@@ -1531,22 +1531,6 @@ struct PaneFlowApp {
     /// `JumpNextWaiting`, so repeated presses cycle through the waiting
     /// agents instead of bouncing on the first one.
     jump_cursor: Option<u64>,
-    /// Source pane for swap mode, or `None` if not in swap mode.
-    ///
-    /// Issue #471: weak, like `swap_armed_panes` below. Arming a swap must not
-    /// give the app a second owner of any pane.
-    swap_source: Option<WeakEntity<crate::pane::Pane>>,
-    /// Panes whose terminals `set_swap_source` armed for Escape, so the same
-    /// set is disarmed even if the layout changed meanwhile (issue #299).
-    ///
-    /// Issue #471: this is EVERY leaf pane in the app, so holding it strongly
-    /// made an armed swap an owner of the whole workspace list. Nothing in any
-    /// close path disarms - not pane close, not tab close, not workspace
-    /// close - so a pane closed while armed was kept alive here, and a `Pane`
-    /// that is never dropped is a `TerminalState::Drop` that never runs: the
-    /// child is never signalled and `live_terminal_session_ids` can no longer
-    /// see it.
-    swap_armed_panes: Vec<WeakEntity<crate::pane::Pane>>,
     /// LIFO stack of recently closed panes for undo-close (US-014).
     /// Issues #83 and #111 widened it to whole tabs and workspaces, so one
     /// `Cmd+Shift+T` restores whichever kind was closed most recently.
@@ -2156,7 +2140,6 @@ impl Render for PaneFlowApp {
             .on_action(cx.listener(Self::handle_layout_main_v))
             .on_action(cx.listener(Self::handle_layout_tiled))
             .on_action(cx.listener(Self::handle_split_equalize))
-            .on_action(cx.listener(Self::handle_swap_pane))
             .on_action(cx.listener(Self::handle_undo_close_pane))
             .on_action(cx.listener(Self::handle_open_diff_view))
             .on_action(cx.listener(Self::handle_ws1))

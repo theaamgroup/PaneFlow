@@ -360,11 +360,6 @@ pub struct TerminalView {
     pub(super) minimum_contrast: f32,
     /// Whether copy mode (keyboard-driven selection) is active
     pub(super) copy_mode_active: bool,
-    /// Issue #299: a pane swap is armed in this view's tab, so Escape cancels
-    /// swap mode instead of reaching the PTY. Set by
-    /// `PaneFlowApp::set_swap_source` on every terminal of the active tab, so
-    /// swap state has one owner and no process-global mirror.
-    pub(super) swap_mode_armed: bool,
     /// Copy mode cursor position in grid coordinates
     pub(super) copy_cursor: Point,
     /// Display offset frozen at copy mode entry to prevent auto-scroll
@@ -634,19 +629,6 @@ impl TerminalView {
             self.minimum_contrast = minimum_contrast;
             cx.notify();
         }
-    }
-
-    /// Issue #299: arm or disarm swap-mode Escape interception on this view.
-    pub(crate) fn set_swap_mode_armed(&mut self, armed: bool, cx: &mut Context<Self>) {
-        if self.swap_mode_armed != armed {
-            self.swap_mode_armed = armed;
-            cx.notify();
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn swap_mode_armed(&self) -> bool {
-        self.swap_mode_armed
     }
 
     pub(crate) fn set_cursor_color_override(
@@ -1017,7 +999,6 @@ impl TerminalView {
             color_emoji_enabled,
             minimum_contrast,
             copy_mode_active: false,
-            swap_mode_armed: false,
             copy_cursor: Point::new(0, 0),
             copy_mode_frozen_offset: 0,
             was_focused: false,
@@ -1396,8 +1377,6 @@ pub enum TerminalEvent {
     /// A server/service was detected in PTY output (e.g. "Listening on :3000").
     /// Enriches the bare port from the OS port scan with label and URL.
     ServiceDetected(ServiceInfo),
-    /// Escape pressed while swap mode is active - requests cancellation.
-    CancelSwapMode,
     /// A mouse selection was auto-copied to the clipboard on mouse release.
     /// Consumed by `PaneFlowApp` to surface a "Copied" toast.
     SelectionCopied,

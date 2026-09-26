@@ -63,7 +63,7 @@ load. `+` and `-` both parse as separators.
 
 ## Default binding reference
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 76 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in CLAUDE.md drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 75 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in CLAUDE.md drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 
@@ -80,7 +80,7 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 76 ac
 | `Ctrl+Tab` | Next workspace | Global |
 | `Cmd+1`-`Cmd+9` | Select workspace | Global |
 | `Cmd+Alt+1`-`4` | Layout preset: even-h, even-v, main-vertical, tiled | Global |
-| `Cmd+Shift+=` / `Cmd+Shift+S` | Equalize splits / swap pane | Global |
+| `Cmd+Shift+=` | Equalize splits | Global |
 | `Cmd+Shift+Z` | Toggle zoom | Global |
 | `Cmd+Shift+J` | Jump to next waiting agent, including background tabs | Global |
 | `Cmd+Shift+P` | Pane overview (every terminal pane, all workspaces and tabs) | Global |
@@ -107,6 +107,9 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 76 ac
 the terminal. Their registry contexts and exclusive chord ownership are
 covered by `cmd_shift_k_and_cmd_k_clear_scrollback` in `keybindings/apply.rs`.
 `Cmd+Shift+A` is unassigned after removal of the waiting-agent list overlay.
+`Cmd+Shift+S` is unassigned since the keyboard swap mode was removed; drag a
+pane header onto another pane's center to swap the two panes. A `swap_pane`
+entry in `shortcuts` is skipped with a warning.
 
 Next-workspace is `ctrl-tab`, not the upstream `secondary-tab` (Cmd+Tab): macOS reserves Cmd+Tab for the application switcher and never delivers it to the app (issue #10; a synthetic Cmd+Tab on 2026-08-27 moved focus to another app while Cmd+1/Cmd+2 through the same path switched workspaces). A test in `keybindings/apply.rs` fails if any default binds `secondary-tab` again.
 

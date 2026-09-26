@@ -942,7 +942,7 @@ a chord or a menu item, and MUST NOT rely on a surface that has neither.
 | Next workspace | `ctrl-tab` |
 | Workspaces 1 to 9 | `secondary-1` to `secondary-9` |
 | Layout presets | `secondary-alt-1` to `secondary-alt-4` |
-| Zoom, equalize, swap | `secondary-shift-z`, `secondary-shift-=`, `secondary-shift-s` |
+| Zoom, equalize | `secondary-shift-z`, `secondary-shift-=` |
 | Review | `secondary-shift-g` |
 | Pane overview | `secondary-shift-p` |
 | Work review | `secondary-shift-u` |
@@ -980,8 +980,9 @@ Hover reveals destructive or secondary controls (the pane close chip, sidebar
 row actions) rather than showing them at rest; the primary pane actions stay
 visible.
 
-Five drag payloads exist: `PaneDrag` (pane header into a pane edge, or into the
-sidebar to become a new tab), `SessionDrag` (sessions rail into a pane),
+Five drag payloads exist: `PaneDrag` (pane header into a pane edge, onto
+another pane's center to swap the two, or into the sidebar to become a new
+tab), `SessionDrag` (sessions rail into a pane),
 `ReviewSubjectDrag` (fork-only, the Review rail into a pane edge or center),
 `TabDrag` (between workspaces), and `WorkspaceDrag` (rail reorder, suppressed
 under auto-sort). Finder folders arrive as `ExternalPaths` on the sidebar and
@@ -1126,6 +1127,9 @@ These are real and MUST NOT be described as solved:
    no key handler; its rows are click-only and the sole dismissal is an outside
    mouse press (`pane/review.rs`). It does not meet the Escape floor above, and
    it is the one live overlay that does not.
+7. **Swapping two panes is mouse-only.** The keyboard swap mode is gone; the
+   only path is dragging a pane header onto another pane's center
+   (`PaneEvent::DropPaneMove` with no edge, `app/event_handlers.rs`).
 
 ## 8. Platform Material
 
@@ -1251,7 +1255,7 @@ behavior.
 - `window_backdrop` is read once at startup.
 - `reduce_motion` reaches only four animations (4.8) and does not follow the
   macOS system setting.
-- The six accessibility gaps in 7.5, of which the missing focus ring is the
+- The seven accessibility gaps in 7.5, of which the missing focus ring is the
   most consequential.
 - The About dialog is **Migration** in shape only: issue #273 moved its colors
   onto `UiColors`, but it still paints a plain 10 px round with a shadow
