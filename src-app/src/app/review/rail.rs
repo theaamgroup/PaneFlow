@@ -3,8 +3,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     AnyElement, AppContext, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::*, px,
-    svg,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, div, prelude::*, px, svg,
 };
 
 use super::{REVIEW_WORKSPACES_RAIL_WIDTH, ReviewRailMenu};
@@ -197,13 +196,8 @@ impl PaneFlowApp {
         workspaces
     }
 
-    pub(crate) fn render_review_workspaces_rail(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(crate) fn render_review_workspaces_rail(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let ui = crate::theme::ui_colors();
-        let theme = crate::theme::active_theme();
         let workspaces = self.review_workspaces();
         let focused = self.review_focused_subject(cx);
         let in_grid = self.review_grid_subjects(cx);
@@ -250,11 +244,6 @@ impl PaneFlowApp {
             .w(px(REVIEW_WORKSPACES_RAIL_WIDTH))
             .flex_shrink_0()
             .h_full()
-            .bg(crate::app::constants::cockpit_chrome_background(
-                theme.title_bar_background,
-                window.is_window_active(),
-                self.cached_config.macos_chrome_material_enabled(),
-            ))
             .flex()
             .flex_col()
             .child(

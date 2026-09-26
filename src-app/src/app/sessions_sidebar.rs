@@ -180,13 +180,8 @@ impl PaneFlowApp {
 
     /// Render the docked sessions sidebar (right edge of the root `flex_row`).
     /// Only called while the sidebar is open or animating closed.
-    pub(crate) fn render_sessions_sidebar(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(crate) fn render_sessions_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let ui = crate::theme::ui_colors();
-        let theme = crate::theme::active_theme();
         // Issue #333: the type-to-filter field sits under the header. It is
         // pointless without a cwd to scan, so the "could not detect" state
         // keeps the header alone.
@@ -204,12 +199,6 @@ impl PaneFlowApp {
             .h_full()
             .track_focus(&self.agent_sessions.sessions_focus)
             .on_key_down(cx.listener(Self::handle_sessions_sidebar_key_down))
-            // Match the app's other navigation rails.
-            .bg(crate::app::constants::cockpit_chrome_background(
-                theme.title_bar_background,
-                window.is_window_active(),
-                self.cached_config.macos_chrome_material_enabled(),
-            ))
             .child(self.sessions_sidebar_header(ui, cx))
             .children(filter_row)
             .child(self.sessions_sidebar_body(ui, cx))
@@ -746,20 +735,9 @@ impl PaneFlowApp {
             self.show_toast("Could not resume session - invalid session id", cx);
             return;
         };
-        let active_tab_id = self
-            .agent_sessions
-            .sessions_bound_palette
-            .and_then(|(ws_id, _)| {
-                self.workspaces
-                    .iter()
-                    .find(|ws| ws.id == ws_id)
-                    .map(|ws| ws.active_tab().id)
-            })
-            .unwrap_or(0);
-        if let Some((ws_id, tab_id)) = crate::app::pane_palette::palette_resume_target_tab(
-            self.agent_sessions.sessions_bound_palette,
-            active_tab_id,
-        ) {
+        // A palette-bound sidebar fills the stored picker tab, even when
+        // another tab is now active.
+        if let Some((ws_id, tab_id)) = self.agent_sessions.sessions_bound_palette {
             let Some(ws_idx) = self.workspaces.iter().position(|ws| ws.id == ws_id) else {
                 self.show_toast(
                     "Could not resume session - this project is no longer open",

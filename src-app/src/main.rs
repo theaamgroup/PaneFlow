@@ -2061,22 +2061,9 @@ impl Render for PaneFlowApp {
                 )
                 .into_any_element()
         };
-        // Update title bar with current workspace name.
-        let ws_name = if self.settings_section.is_some() {
-            // Settings open: the title-bar center is left empty (the section
-            // title lives in the content panel), matching the Codex reference.
-            None
-        } else {
-            self.active_workspace().map(|ws| ws.title.clone())
-        };
         self.title_bar.update(cx, |tb, _| {
-            tb.workspace_name = ws_name;
             tb.sidebar_visible = self.primary_sidebar_visible;
             tb.left_rail_width = title_bar_rail_width;
-            tb.ipc_state = self.ipc_status.state();
-            // Cockpit chrome (#141414 + no divider) for both Cli and Diff.
-            tb.cockpit = true;
-            tb.cockpit_material_active = chrome_material_active;
         });
 
         // The inner app content (title bar + sidebar + main). UI tree
@@ -2315,7 +2302,7 @@ impl Render for PaneFlowApp {
                                 // first workspace card sits below the floating
                                 // window controls (mirrors the Agents rail).
                                 .pt(title_bar_h)
-                                .child(self.render_sidebar(window, cx))
+                                .child(self.render_sidebar(cx))
                                 .into_any_element(),
                         })
                     })
@@ -2432,7 +2419,7 @@ impl Render for PaneFlowApp {
                                 // Keep the right rail below the full-width
                                 // title bar, aligned with the main panel.
                                 .pt(title_bar_h)
-                                .child(self.render_sessions_sidebar(window, cx))
+                                .child(self.render_sessions_sidebar(cx))
                                 .into_any_element(),
                         )
                     }),

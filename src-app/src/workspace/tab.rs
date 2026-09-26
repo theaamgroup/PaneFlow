@@ -152,9 +152,10 @@ impl Tab {
     /// Whether this tab can take one more pane.
     ///
     /// US-003 (prd-cli-tab-hierarchy): `MAX_PANES` bounds a *tab*, not a
-    /// workspace. Every create site - keyboard split, drop-to-split, launch
-    /// pad - gates on this single predicate so the cap
-    /// cannot drift between them.
+    /// workspace. Every create site - keyboard split, the pane header's
+    /// split, drop-to-split, the preset palette's split, and closed-pane
+    /// restore - gates on this single predicate so the cap cannot drift
+    /// between them.
     pub fn can_add_pane(&self) -> bool {
         self.pane_count() < crate::layout::MAX_PANES
     }

@@ -111,8 +111,8 @@ pub(crate) fn collect_cards(
         let active_tab_idx = ws.active_tab_idx();
         // The one pane that is "current": only the active workspace's active
         // tab can hold focus, so resolve it once per workspace and only
-        // there. `None` when focus sits in chrome, in a markdown or diff
-        // pane, or on the empty-workspace placeholder.
+        // there. `None` when focus sits in chrome, in a diff pane, or on
+        // the empty-workspace placeholder.
         let focused_pane = if ws_is_active {
             ws.active_tab()
                 .root
@@ -135,7 +135,7 @@ pub(crate) fn collect_cards(
             let tab_pane_count = panes.len();
             for (tab_pane_index, pane) in panes.into_iter().enumerate() {
                 let pane_ref = pane.read(cx);
-                // Terminals only: markdown and diff panes are omitted.
+                // Terminals only: diff panes are omitted.
                 let Some(terminal) = pane_ref.active_terminal_opt() else {
                     continue;
                 };

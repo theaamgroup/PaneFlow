@@ -735,7 +735,7 @@ const PREVIEW_NEW: [PreviewLine; 3] = [
     ],
 ];
 
-/// Live sample under the mode tiles, painted as the split diff the Review dock
+/// Live sample under the mode tiles, painted as the split diff a diff pane
 /// renders: same `RowPalette`, same 18px rows at 12px mono, same bar + gutter
 /// geometry. Every color comes from the active theme, so switching a mode or a
 /// preset repaints it in place - this is the surface the theme's syntax palette

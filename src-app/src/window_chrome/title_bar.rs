@@ -14,33 +14,19 @@ use crate::{
 
 pub struct TitleBar {
     should_move: bool,
-    pub workspace_name: Option<String>,
     pub sidebar_visible: bool,
     /// Stable expanded width of the active left rail. The body can animate to
     /// zero independently, while title-bar controls remain stationary and
     /// align with the open rail in CLI, Diff, and Settings.
     pub left_rail_width: f32,
-    pub ipc_state: crate::ipc::IpcState,
-    /// Cockpit chrome: paint the rail `#141414` and drop the bottom divider so
-    /// the title bar + sidebar read as one continuous surface. PUSHED by
-    /// `PaneFlowApp::render`; `TitleBar` never reads `AppMode`.
-    pub cockpit: bool,
-    /// Whether cockpit chrome should let the native material show through.
-    /// Pushed by `PaneFlowApp::render` so the Appearance switch can
-    /// control title bar transparency independently from terminal cells.
-    pub cockpit_material_active: bool,
 }
 
 impl TitleBar {
     pub fn new(_cx: &mut Context<Self>) -> Self {
         Self {
             should_move: false,
-            workspace_name: None,
             sidebar_visible: true,
             left_rail_width: SIDEBAR_WIDTH,
-            ipc_state: crate::ipc::IpcState::Online,
-            cockpit: false,
-            cockpit_material_active: true,
         }
     }
 }
@@ -53,22 +39,7 @@ impl EventEmitter<TitleBarEvent> for TitleBar {}
 
 impl Render for TitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let supported = window.window_controls();
         let height = (1.75 * window.rem_size()).max(TITLE_BAR_MIN_HEIGHT);
-        // The parent window shell owns the active/inactive tint. This child is
-        // transparent so the native material is composed once.
-        let theme = crate::theme::active_theme();
-        let is_window_active = window.is_window_active();
-        let bg_color = if is_window_active {
-            theme.title_bar_background
-        } else {
-            theme.title_bar_inactive_background
-        };
-        let chrome_bg = crate::app::constants::cockpit_chrome_background(
-            bg_color,
-            is_window_active,
-            self.cockpit_material_active,
-        );
 
         // --- Left section: brand slot, fixed width aligned with sidebar ---
         let ui = crate::theme::ui_colors();
@@ -160,81 +131,10 @@ impl Render for TitleBar {
             .overflow_x_hidden()
             .child(brand);
 
-        // --- Center section: workspace name breadcrumb (muted) ---
-        // Takes the remaining flex space and centers the current workspace
-        // name. Acts as drag area when the workspace is unnamed / unset.
-        // Cockpit (Cli): the breadcrumb is dropped - the workspace name already
-        // anchors the sidebar, so the title bar centre stays a clean drag area.
-        // Diff keeps it.
-        let mut content = div()
-            .flex_1()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .px(px(12.))
-            .min_w_0();
-        if !self.cockpit
-            && let Some(name) = self.workspace_name.as_ref()
-        {
-            content = content.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.))
-                    .min_w_0()
-                    .child(
-                        div()
-                            .w(px(3.))
-                            .h(px(3.))
-                            .rounded_full()
-                            .bg(ui.muted)
-                            .flex_none(),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(ui.muted)
-                            .truncate()
-                            .child(name.clone()),
-                    ),
-            );
-        }
-
-        // Cockpit modes: the bar is a rail-confined overlay, so the IPC
-        // notice lives in the sidebar (`render_sidebar_ipc_banner`). Diff
-        // keeps the title-bar pill.
-        let chrome_pill_visible = !self.cockpit;
-        let ipc_pill = (chrome_pill_visible && self.ipc_state == crate::ipc::IpcState::Disabled)
-            .then(|| {
-                div()
-                    .id("ipc-offline-pill")
-                    .mr_2()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(5.))
-                    .px(px(8.))
-                    .h(px(24.))
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(ui.border)
-                    .bg(ui.subtle)
-                    .text_color(ui.text)
-                    .text_size(px(11.))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(
-                        svg()
-                            .size(px(11.))
-                            .flex_none()
-                            .path("icons/triangle-alert.svg")
-                            .text_color(ui.muted),
-                    )
-                    .child("IPC offline")
-            });
+        // --- Center section: an empty drag area ---
+        // Takes the remaining flex space. The workspace name already anchors
+        // the sidebar, so the title-bar centre stays a clean drag area.
+        let content = div().flex_1().min_w_0();
 
         let bar = div()
             .id("title-bar")
@@ -245,9 +145,8 @@ impl Render for TitleBar {
             .items_center()
             .w_full()
             .h(height)
-            // The transparent fill reveals either the themed shell or the
-            // platform material selected by the parent window.
-            .bg(chrome_bg)
+            // No fill: the parent window shell owns the active/inactive tint,
+            // so the themed shell or the native material is composed once.
             .pr(TITLE_BAR_EDGE_INSET);
 
         bar
@@ -278,28 +177,8 @@ impl Render for TitleBar {
                     window.zoom_window();
                 }
             })
-            // Right-click opens the DE's native window menu
-            .when(supported.window_menu, |bar| {
-                bar.on_mouse_down(MouseButton::Right, |ev, window, _| {
-                    window.show_window_menu(ev.position);
-                })
-            })
             .child(left_rail)
             .child(content)
-            .children(ipc_pill)
-            .when(!self.cockpit, |this| {
-                // Cockpit chrome drops the bottom divider so the title bar
-                // and sidebar read as one surface; non-cockpit keeps it.
-                this.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom_0()
-                        .h(px(1.))
-                        .bg(ui.border),
-                )
-            })
     }
 }
 
@@ -407,5 +286,37 @@ mod tests {
             !main.contains("profile-menu"),
             "the title-bar avatar menu must not be mounted from main.rs"
         );
+    }
+
+    /// Issue #852: `main.rs` pinned the bar to cockpit chrome on every frame,
+    /// so the breadcrumb, the IPC pill and the bottom divider behind
+    /// `!cockpit` never rendered, and macOS has no native window menu for a
+    /// right-click to show. All of it was removed; keep it from coming back.
+    #[test]
+    fn title_bar_carries_no_dead_cockpit_branches() {
+        let title_bar = include_str!("title_bar.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production title bar source");
+        for removed in [
+            "cockpit",
+            "workspace_name",
+            "ipc_state",
+            "ipc-offline-pill",
+            "show_window_menu",
+            "window_controls()",
+        ] {
+            assert!(
+                !title_bar.contains(removed),
+                "title bar still carries removed dead chrome `{removed}`"
+            );
+        }
+        let main = include_str!("../main.rs");
+        for removed in ["tb.cockpit", "tb.workspace_name", "tb.ipc_state"] {
+            assert!(
+                !main.contains(removed),
+                "main.rs still pushes removed title-bar state `{removed}`"
+            );
+        }
     }
 }

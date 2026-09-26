@@ -56,9 +56,9 @@ impl GitDiffStats {
     /// ("stats unavailable") default.
     pub fn from_cwd_within(cwd: &str, budget_until: std::time::Instant) -> Self {
         let deadline_at = budget_until.min(std::time::Instant::now() + GIT_DIFF_STAT_DEADLINE);
-        // Same scope as compute_head_diff: the worktree root (`--show-toplevel`),
-        // not the nested cwd and not resolve_repo_root (that is the main checkout
-        // for a linked worktree). Non-repos and exhausted budgets stay empty.
+        // Scope is the worktree root (`--show-toplevel`), not the nested cwd
+        // and not resolve_repo_root (that is the main checkout for a linked
+        // worktree). Non-repos and exhausted budgets stay empty.
         let Some(toplevel_out) = git_stdout(cwd, &["rev-parse", "--show-toplevel"], deadline_at)
         else {
             return Self::default();

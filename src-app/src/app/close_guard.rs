@@ -6,8 +6,8 @@
 //! process signaling. Everything here is a plain data → plain data function
 //! so it can be unit-tested without a window, a PTY, or a real agent CLI.
 //! The wiring lives next door in [`crate::app::close_confirm`]: the modal, the
-//! request/confirm/cancel entry points, and the inline arm-then-confirm
-//! buttons.
+//! request/confirm/cancel entry points, and the pane header X's inline
+//! arm-then-confirm state.
 
 use std::time::{Duration, Instant};
 
@@ -113,7 +113,7 @@ pub(crate) enum CloseTarget {
 
 /// Which UI a pending close should surface: a full modal ([`Cmd+W`][cmd_w] and
 /// the tab context menu's Close) or the inline arm-then-confirm affordance
-/// (the two X buttons).
+/// (the pane header's X).
 ///
 /// [cmd_w]: crate::app::actions
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,25 +144,6 @@ pub(crate) struct PendingClose {
 }
 
 impl PendingClose {
-    pub(crate) fn targets_workspace(&self, workspace_id: u64) -> bool {
-        matches!(
-            &self.target,
-            CloseTarget::Workspace { workspace_id: w } if *w == workspace_id
-        )
-    }
-
-    /// True when `self` is the pending close for this exact tab, so a
-    /// button can render its armed state.
-    pub(crate) fn targets_tab(&self, workspace_id: u64, tab_id: u64) -> bool {
-        matches!(
-            &self.target,
-            CloseTarget::Tab {
-                workspace_id: w,
-                tab_id: t,
-            } if *w == workspace_id && *t == tab_id
-        )
-    }
-
     /// True when `self` is the pending close for this exact pane, so a
     /// button can render its armed state.
     ///
@@ -176,9 +157,8 @@ impl PendingClose {
         )
     }
 
-    /// [`Self::targets_pane`] for a handle that is already weak - what the two
-    /// click sites hold, having built a [`CloseTarget`] from the pane they
-    /// were clicked on.
+    /// [`Self::targets_pane`] for a handle that is already weak - what the pane
+    /// header's click site holds for the pane it was clicked on.
     fn targets_weak_pane(&self, pane: &gpui::WeakEntity<crate::pane::Pane>) -> bool {
         matches!(
             &self.target,
@@ -201,8 +181,8 @@ pub(crate) enum ClickOutcome {
 ///
 /// A double-click delivers BOTH clicks to the button's listener, so without
 /// this the second one confirms a kill behind an armed state that was painted
-/// for a single frame - imperceptible, and on the two most-clicked close
-/// controls in the app. 350 ms clears the macOS double-click interval while
+/// for a single frame - imperceptible, and on the most-clicked close control
+/// in the app. 350 ms clears the macOS double-click interval while
 /// staying under a deliberate second click.
 pub(crate) const ARM_SETTLE: Duration = Duration::from_millis(350);
 
@@ -231,17 +211,17 @@ pub(crate) fn arm_has_expired(pending: &PendingClose, now: Instant) -> bool {
     pending.style == ConfirmStyle::Inline && now.duration_since(pending.armed_at) >= ARM_EXPIRY
 }
 
-/// Decide whether a click on the X for `this_target` arms a confirmation or
-/// confirms the one already pending.
+/// Decide whether a click on the pane header's X for `pane` arms a
+/// confirmation or confirms the one already pending.
 ///
-/// Pure on purpose - the two call sites (the sidebar rail row's X and the pane
-/// header's X) are both deep inside GPUI closures where nothing is testable,
-/// so the whole decision lives here instead.
+/// Pure on purpose - the one call site (the pane header's X) is deep inside a
+/// GPUI subscription where nothing is testable, so the whole decision lives
+/// here instead.
 ///
-/// A click on the SAME target inside [`ARM_SETTLE`] re-arms rather than
-/// confirming: both inline X buttons receive both clicks of a double-click, so
-/// the settle delay is what makes the armed state a perception gate instead of
-/// a single unperceivable frame.
+/// A click on the SAME pane inside [`ARM_SETTLE`] re-arms rather than
+/// confirming: the inline X receives both clicks of a double-click, so the
+/// settle delay is what makes the armed state a perception gate instead of a
+/// single unperceivable frame.
 ///
 /// A pending close in [`ConfirmStyle::Modal`] never confirms from here: the
 /// modal owns its own Confirm button and its own `Enter`, and a click that
@@ -252,10 +232,10 @@ pub(crate) fn arm_has_expired(pending: &PendingClose, now: Instant) -> bool {
 ///
 /// Defensive, not reachable: `render_close_confirm_dialog` defers a full-screen
 /// `.occlude()`d backdrop above every other overlay, so while a modal is up no
-/// click reaches either X.
+/// click reaches the X.
 pub(crate) fn click_outcome(
     pending: Option<&PendingClose>,
-    this_target: &CloseTarget,
+    pane: &gpui::WeakEntity<crate::pane::Pane>,
     now: Instant,
 ) -> ClickOutcome {
     let Some(pending) = pending else {
@@ -264,14 +244,7 @@ pub(crate) fn click_outcome(
     if pending.style != ConfirmStyle::Inline {
         return ClickOutcome::Arm;
     }
-    let same_target = match this_target {
-        CloseTarget::Workspace { workspace_id } => pending.targets_workspace(*workspace_id),
-        CloseTarget::Tab {
-            workspace_id,
-            tab_id,
-        } => pending.targets_tab(*workspace_id, *tab_id),
-        CloseTarget::Pane { pane } => pending.targets_weak_pane(pane),
-    };
+    let same_target = pending.targets_weak_pane(pane);
     // An arm past [`ARM_EXPIRY`] is not a decision waiting to be finished, it
     // is a decision the user walked away from. Re-arm instead, so a click on a
     // stale red X costs a second click rather than an agent. The sweep in
@@ -342,13 +315,23 @@ mod tests {
         pending.armed_at + ARM_SETTLE
     }
 
-    #[test]
-    fn an_arm_expires_and_a_click_on_the_stale_button_re_arms_instead_of_closing() {
-        let pending = inline_pending(tab_target(1, 2));
+    fn pane_target(pane: &gpui::Entity<crate::pane::Pane>) -> CloseTarget {
+        CloseTarget::Pane {
+            pane: pane.downgrade(),
+        }
+    }
+
+    #[gpui::test]
+    fn an_arm_expires_and_a_click_on_the_stale_button_re_arms_instead_of_closing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let pane = test_pane(cx, 1);
+        let pending = inline_pending(pane_target(&pane));
         let stale = pending.armed_at + ARM_EXPIRY;
         assert!(arm_has_expired(&pending, stale));
         assert_eq!(
-            click_outcome(Some(&pending), &tab_target(1, 2), stale),
+            click_outcome(Some(&pending), &pane.downgrade(), stale),
             ClickOutcome::Arm,
             "an arm the user walked away from must cost a second click, not an agent"
         );
@@ -357,14 +340,16 @@ mod tests {
     /// The window between the two bounds is the only one that confirms, so
     /// both edges are pinned: shorten `ARM_EXPIRY` past `ARM_SETTLE` and
     /// confirming becomes impossible, which no other test would catch.
-    #[test]
-    fn a_click_inside_the_live_window_still_confirms() {
-        let pending = inline_pending(tab_target(1, 2));
+    #[gpui::test]
+    fn a_click_inside_the_live_window_still_confirms(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let pane = test_pane(cx, 1);
+        let pending = inline_pending(pane_target(&pane));
         assert!(ARM_SETTLE < ARM_EXPIRY, "the live window must be non-empty");
         let live = pending.armed_at + ARM_EXPIRY - Duration::from_millis(1);
         assert!(!arm_has_expired(&pending, live));
         assert_eq!(
-            click_outcome(Some(&pending), &tab_target(1, 2), live),
+            click_outcome(Some(&pending), &pane.downgrade(), live),
             ClickOutcome::Confirm
         );
     }
@@ -400,40 +385,47 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_click_with_nothing_pending_arms() {
+    #[gpui::test]
+    fn a_click_with_nothing_pending_arms(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let pane = test_pane(cx, 1);
         assert_eq!(
-            click_outcome(None, &tab_target(1, 2), Instant::now()),
+            click_outcome(None, &pane.downgrade(), Instant::now()),
             ClickOutcome::Arm
         );
     }
 
-    #[test]
-    fn a_second_click_on_the_same_inline_target_confirms() {
-        let pending = inline_pending(tab_target(1, 2));
+    #[gpui::test]
+    fn a_second_click_on_the_same_inline_target_confirms(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let pane = test_pane(cx, 1);
+        let pending = inline_pending(pane_target(&pane));
         assert_eq!(
-            click_outcome(Some(&pending), &tab_target(1, 2), settled(&pending)),
+            click_outcome(Some(&pending), &pane.downgrade(), settled(&pending)),
             ClickOutcome::Confirm
         );
     }
 
-    /// The reason [`ARM_SETTLE`] exists. Both of the inline X buttons receive
-    /// BOTH clicks of a double-click, so without a settle delay the second one
+    /// The reason [`ARM_SETTLE`] exists. The pane header's X receives BOTH
+    /// clicks of a double-click, so without a settle delay the second one
     /// confirms a kill behind an armed state that was painted for a single
-    /// frame - imperceptible, on the two most-clicked close controls in the
-    /// app, and not recoverable by undo (the tab comes back, the agent does
-    /// not).
-    #[test]
-    fn a_second_click_inside_the_settle_delay_re_arms_instead_of_confirming() {
+    /// frame - imperceptible, on the most-clicked close control in the app,
+    /// and not recoverable by undo (the pane comes back, the agent does not).
+    #[gpui::test]
+    fn a_second_click_inside_the_settle_delay_re_arms_instead_of_confirming(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let pane = test_pane(cx, 1);
         let armed_at = Instant::now();
-        let pending = inline_pending_armed_at(tab_target(1, 2), armed_at);
+        let pending = inline_pending_armed_at(pane_target(&pane), armed_at);
         for early in [
             Duration::from_millis(0),
             Duration::from_millis(100),
             ARM_SETTLE - Duration::from_millis(1),
         ] {
             assert_eq!(
-                click_outcome(Some(&pending), &tab_target(1, 2), armed_at + early),
+                click_outcome(Some(&pending), &pane.downgrade(), armed_at + early),
                 ClickOutcome::Arm,
                 "a click {early:?} after the arm is the tail of a double-click, not a decision"
             );
@@ -442,31 +434,39 @@ mod tests {
         // read, so the second click means what it says.
         for late in [ARM_SETTLE, Duration::from_millis(500)] {
             assert_eq!(
-                click_outcome(Some(&pending), &tab_target(1, 2), armed_at + late),
+                click_outcome(Some(&pending), &pane.downgrade(), armed_at + late),
                 ClickOutcome::Confirm,
                 "a deliberate second click {late:?} after the arm must still confirm"
             );
         }
     }
 
-    #[test]
-    fn a_click_on_a_different_inline_target_re_arms_instead_of_confirming() {
-        let pending = inline_pending(tab_target(1, 2));
+    #[gpui::test]
+    fn a_click_on_a_different_inline_target_re_arms_instead_of_confirming(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let armed = test_pane(cx, 1);
+        let sibling = test_pane(cx, 1);
+        let elsewhere = test_pane(cx, 9);
+        let pending = inline_pending(pane_target(&armed));
         let now = settled(&pending);
-        // Same workspace, different tab.
+        // Same workspace, different pane.
         assert_eq!(
-            click_outcome(Some(&pending), &tab_target(1, 3), now),
+            click_outcome(Some(&pending), &sibling.downgrade(), now),
             ClickOutcome::Arm
         );
-        // Same tab id, different workspace.
+        // A pane in another workspace.
         assert_eq!(
-            click_outcome(Some(&pending), &tab_target(9, 2), now),
+            click_outcome(Some(&pending), &elsewhere.downgrade(), now),
             ClickOutcome::Arm
         );
     }
 
-    #[test]
-    fn a_click_under_a_modal_on_the_same_target_arms_rather_than_confirming() {
+    #[gpui::test]
+    fn a_click_under_a_modal_on_the_same_target_arms_rather_than_confirming(
+        cx: &mut gpui::TestAppContext,
+    ) {
         // The modal owns its own Confirm button and its own Enter key, so a
         // click on the X behind it is a fresh gesture, not the second half of
         // an inline arm. Arming replaces the modal with an inline arm - a
@@ -474,18 +474,14 @@ mod tests {
         // confirm a kill through a dialog that is still asking the question.
         // Defensive either way: the modal's occluding backdrop means no click
         // reaches the X while it is up.
-        let mut pending = inline_pending(tab_target(1, 2));
+        let cx = cx.add_empty_window();
+        let pane = test_pane(cx, 1);
+        let mut pending = inline_pending(pane_target(&pane));
         pending.style = ConfirmStyle::Modal;
         assert_eq!(
-            click_outcome(Some(&pending), &tab_target(1, 2), settled(&pending)),
+            click_outcome(Some(&pending), &pane.downgrade(), settled(&pending)),
             ClickOutcome::Arm
         );
-    }
-
-    fn pane_target(pane: &gpui::Entity<crate::pane::Pane>) -> CloseTarget {
-        CloseTarget::Pane {
-            pane: pane.downgrade(),
-        }
     }
 
     #[gpui::test]
@@ -497,21 +493,17 @@ mod tests {
         let pending = inline_pending(pane_target(&a));
         let now = settled(&pending);
         assert_eq!(
-            click_outcome(Some(&pending), &pane_target(&a), now),
+            click_outcome(Some(&pending), &a.downgrade(), now),
             ClickOutcome::Confirm
         );
         assert_eq!(
-            click_outcome(Some(&pending), &pane_target(&b), now),
+            click_outcome(Some(&pending), &b.downgrade(), now),
             ClickOutcome::Arm
         );
-        // A pane click never confirms a pending TAB close, and vice versa.
+        // A pane click never confirms a pending TAB close.
         let tab_pending = inline_pending(tab_target(1, 2));
         assert_eq!(
-            click_outcome(Some(&tab_pending), &pane_target(&a), now),
-            ClickOutcome::Arm
-        );
-        assert_eq!(
-            click_outcome(Some(&pending), &tab_target(1, 2), now),
+            click_outcome(Some(&tab_pending), &a.downgrade(), now),
             ClickOutcome::Arm
         );
     }
@@ -658,24 +650,6 @@ mod tests {
             ),
         ];
         assert_eq!(agents_needing_confirmation_count(&states, now), 3);
-    }
-
-    #[test]
-    fn targets_tab_discriminates() {
-        let pending = PendingClose {
-            target: CloseTarget::Tab {
-                workspace_id: 1,
-                tab_id: 2,
-            },
-            style: ConfirmStyle::Modal,
-            agent: Some(TerminalAgent::ClaudeCode),
-            extra_agents: 0,
-            label: "Fix the bug".into(),
-            armed_at: Instant::now(),
-        };
-        assert!(pending.targets_tab(1, 2));
-        assert!(!pending.targets_tab(1, 3));
-        assert!(!pending.targets_tab(9, 2));
     }
 
     fn test_pane(

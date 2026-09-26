@@ -49,7 +49,7 @@ pub(crate) struct CardMeta {
     /// The card's workspace is the active workspace. Lifted onto
     /// `WorkspaceGroup::is_active` by `group_cards`; kept separate from
     /// `is_active` so the header still marks the active workspace when its
-    /// focused pane is a markdown or diff pane.
+    /// focused pane is a diff pane.
     pub ws_is_active: bool,
     /// `Workspace::git_branch`, empty when the workspace is not a checkout.
     pub ws_branch: String,
@@ -99,7 +99,7 @@ pub(crate) struct WorkspaceGroup {
 /// index, then layout traversal); grouping is stable and never re-sorts, so
 /// the on-screen order matches `flat_order`.
 ///
-/// A workspace with no card - empty, or holding only markdown / diff panes -
+/// A workspace with no card - empty, or holding only diff panes -
 /// never gets a group: a group is created by the first card that lands in it.
 /// That is the product decision pinned by
 /// `group_cards_omits_workspaces_with_no_terminal_cards`, not an accident of
@@ -225,7 +225,7 @@ pub(crate) fn move_vertical(rows: &[GridRow<'_>], selected: usize, down: bool) -
 /// pane's card (the focused pane of the active tab of the active workspace),
 /// so Esc then Enter is a no-op round trip. Falls back to the first card when
 /// `current` is `None` or not in `order` - no focused terminal, or the focused
-/// pane is a markdown / diff pane the overlay does not list.
+/// pane is a diff pane the overlay does not list.
 pub(crate) fn initial_selection(order: &[u64], current: Option<u64>) -> usize {
     current
         .and_then(|sid| order.iter().position(|id| *id == sid))
@@ -378,7 +378,7 @@ mod tests {
     }
 
     /// Product decision (2026-09-03, spec §7.5): a workspace with no card -
-    /// empty, or holding only markdown / diff panes - gets no section and no
+    /// empty, or holding only diff panes - gets no section and no
     /// header. Grouping does this as a side effect (a group only exists once
     /// a card lands in it); this test makes it a decision, not an accident.
     #[test]
@@ -471,7 +471,7 @@ mod tests {
         assert_eq!(initial_selection(&order, Some(10)), 0);
     }
 
-    /// No focused terminal (or the focused pane is a markdown / diff pane):
+    /// No focused terminal (or the focused pane is a diff pane):
     /// fall back to the first card rather than guessing.
     #[test]
     fn initial_selection_falls_back_to_the_first_card() {

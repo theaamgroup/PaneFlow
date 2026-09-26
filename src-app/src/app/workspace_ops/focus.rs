@@ -118,12 +118,11 @@ impl PaneFlowApp {
     }
 
     /// EP-005 US-015: the teleport body of `handle_jump_next_waiting`,
-    /// parametrized by the state predicate so the Fleet Bar's waiting AND
-    /// errored chips reuse the exact same stable order + cursor cycling
-    /// (`next_in_cycle`). The cursor is shared across predicates: switching
-    /// chip kinds simply restarts the cycle at the first match (the cursor
-    /// no longer appears in the new order), which is the existing
-    /// stale-cursor behavior.
+    /// parametrized by the state predicate (its one caller matches
+    /// `WaitingForInput`). Matching panes are visited in a stable order with
+    /// cursor cycling (`next_in_cycle`); a cursor that no longer appears in
+    /// the order simply restarts the cycle at the first match, which is the
+    /// existing stale-cursor behavior.
     pub(crate) fn jump_next_session_where(
         &mut self,
         state_matches: impl Fn(&crate::ai_types::AgentState) -> bool,
