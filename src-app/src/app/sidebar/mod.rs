@@ -43,14 +43,6 @@ pub(crate) struct SidebarOrderCache {
     order: Vec<usize>,
 }
 
-/// Debug-only render budget guard for the CLI sidebar. Mirrors the Agents
-/// sidebar canary so projection or card regressions show up during profiling
-/// without adding user-facing log noise.
-struct SidebarRenderTimeCanary {
-    start: std::time::Instant,
-    workspace_count: usize,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SidebarAgentState {
     NeedsInput,
@@ -613,29 +605,6 @@ fn agent_status_sentence(count: usize, singular_state: &str, plural_state: &str)
     }
 }
 
-impl SidebarRenderTimeCanary {
-    fn new(workspace_count: usize) -> Self {
-        Self {
-            start: std::time::Instant::now(),
-            workspace_count,
-        }
-    }
-}
-
-impl Drop for SidebarRenderTimeCanary {
-    fn drop(&mut self) {
-        let elapsed = self.start.elapsed();
-        if elapsed > std::time::Duration::from_millis(16) {
-            tracing::debug!(
-                target: "paneflow_app::sidebar",
-                "render_sidebar exceeded 16ms frame budget: {:.2}ms across {} workspaces",
-                elapsed.as_secs_f64() * 1000.0,
-                self.workspace_count
-            );
-        }
-    }
-}
-
 fn visible_service_ports(
     active_ports: &[u16],
     service_labels: &std::collections::HashMap<u16, crate::terminal::ServiceInfo>,
@@ -1162,28 +1131,16 @@ impl PaneFlowApp {
         self.sidebar_order_cache.borrow().order.clone()
     }
 
-    pub(crate) fn render_sidebar(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let _render_canary = SidebarRenderTimeCanary::new(self.workspaces.len());
+    pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = crate::theme::ui_colors();
-        let theme = crate::theme::active_theme();
         let mut sidebar = div()
             .relative()
             .w(px(SIDEBAR_WIDTH))
             .flex_shrink_0()
             .h_full()
-            // Cockpit rail (#141414). The
-            // border-right is gone: the rail and the #181818 content gutter
-            // separate by a luminance step, not a drawn divider (the OpenAI
-            // surface system - separation by luminance, not borders).
-            .bg(crate::app::constants::cockpit_chrome_background(
-                theme.title_bar_background,
-                window.is_window_active(),
-                self.cached_config.macos_chrome_material_enabled(),
-            ))
+            // No fill and no border-right: the rail shows the window shell and
+            // separates from the content gutter by a luminance step, not a
+            // drawn divider.
             .flex()
             .flex_col();
 
@@ -1568,18 +1525,10 @@ impl PaneFlowApp {
                 }
             }))
             .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
-                // M1: this `f2` branch is structurally unreachable, and is
-                // kept only so the handler reads as a whole. A row is on
-                // GPUI's dispatch path only while it tracks
-                // `sidebar_rename_focus`, and it tracks it only while its own
-                // rename is ALREADY live - precisely the case this branch
-                // excludes. Nothing to fix here: making `f2` start a rename
-                // needs a focus handle per row, not a change to this branch.
+                // A row is on GPUI's dispatch path only while it tracks
+                // `sidebar_rename_focus`, which it does only while its own
+                // rename is live, so any other key event is a stale one.
                 if this.renaming_idx != Some(idx) {
-                    if e.keystroke.key.as_str() == "f2" {
-                        this.begin_workspace_rename(idx, window, cx);
-                        cx.stop_propagation();
-                    }
                     return;
                 }
                 // Issue #79: stop every key the editor consumes. Escape in
@@ -2151,18 +2100,9 @@ impl PaneFlowApp {
                 }
             }))
             .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
-                // M1: this `f2` branch is structurally unreachable, and is
-                // kept only so the handler reads as a whole. A row is on
-                // GPUI's dispatch path only while it tracks
-                // `sidebar_rename_focus`, and it tracks it only while its own
-                // rename is ALREADY live - precisely the case this branch
-                // excludes. Nothing to fix here: making `f2` start a rename
-                // needs a focus handle per row, not a change to this branch.
+                // Same as the folder row: only the row whose rename is live
+                // tracks the focus handle that puts it on the dispatch path.
                 if this.renaming_tab != Some((ws_idx, tab_idx)) {
-                    if e.keystroke.key.as_str() == "f2" {
-                        this.begin_tab_rename(ws_idx, tab_idx, window, cx);
-                        cx.stop_propagation();
-                    }
                     return;
                 }
                 match rename_key_action(
@@ -4199,6 +4139,13 @@ mod tests {
             assert!(
                 body.contains("restore_focus_after_rename(window, cx)"),
                 "{label} must hand focus back when its rename ends"
+            );
+            // Issue #852: a row reaches its `on_key_down` only while its own
+            // rename is live, so an F2 branch that STARTS a rename there can
+            // never fire. It was removed; do not bring it back.
+            assert!(
+                !body.contains("\"f2\""),
+                "{label} must not grow an unreachable F2 rename-start branch"
             );
         }
     }

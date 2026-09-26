@@ -1120,9 +1120,10 @@ impl TerminalView {
     }
 
     /// [`Self::declare_agent`] for a launch command whose agent is only known
-    /// as text (a local IPC `up` payload, a configured command button). A
-    /// command that names no known agent leaves the surface untouched, so the
-    /// scan stays the only source of identity there.
+    /// as text (a preset-palette launch into its own tab or a split, a
+    /// sessions-sidebar resume). A command that names no known agent leaves
+    /// the surface untouched, so the scan stays the only source of identity
+    /// there.
     pub fn declare_agent_from_command(&mut self, command: &str) {
         if let Some(agent) = crate::agent_launcher::TerminalAgent::from_launch_command(command) {
             self.declare_agent(agent);
@@ -1130,7 +1131,8 @@ impl TerminalView {
     }
 
     /// Send a shell command to the PTY and execute it (appends `\r`).
-    /// Used by tab-bar command buttons.
+    /// Used to start a preset-palette launch, a session resume (sessions
+    /// sidebar or a dropped session), and Review's agent tab.
     pub fn send_command(&self, command: &str) {
         let mut bytes = command.as_bytes().to_vec();
         bytes.push(b'\r');
@@ -1781,7 +1783,7 @@ impl Render for TerminalView {
         // down replaced the whole `Terminal` context and killed all 15
         // Terminal-scoped bindings (Cmd+C/Cmd+V, copy mode, prompt-mark jumps, font
         // zoom, and Ctrl+Shift+F itself, which then could not close the bar it
-        // opened). Build one context and set it once, as `markdown/view.rs` does.
+        // opened). Build one context and set it once.
         let mut key_ctx = self.dispatch_context();
         if search_active {
             key_ctx.add("Search");

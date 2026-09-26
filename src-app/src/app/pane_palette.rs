@@ -258,15 +258,6 @@ pub(crate) fn palette_bound_sessions_survives_activation(
     }
 }
 
-/// Resume from a palette-bound sidebar fills the stored picker tab, even
-/// when another tab is now active.
-pub(crate) fn palette_resume_target_tab(
-    bound_palette: Option<(u64, u64)>,
-    _active_tab_id: u64,
-) -> Option<(u64, u64)> {
-    bound_palette
-}
-
 /// Whether a `prepare_branch_checkout` error means git could not resolve the
 /// configured new-tab branch (issue #549). Other failures (path collisions,
 /// a blocked worktree add) stay hard errors so a tab is not opened anyway.
@@ -1471,18 +1462,6 @@ mod tests {
             bound,
             Some((1, 99))
         ));
-    }
-
-    #[test]
-    fn palette_resume_fills_the_bound_tab_not_the_active_tab() {
-        let bound = Some((10u64, 20u64));
-        let active_tab_id = 99u64;
-        assert_eq!(
-            palette_resume_target_tab(bound, active_tab_id),
-            Some((10, 20)),
-            "sidebar is window-global: switching tabs must not fill the active empty tab"
-        );
-        assert_eq!(palette_resume_target_tab(None, active_tab_id), None);
     }
 
     #[test]

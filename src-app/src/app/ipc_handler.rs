@@ -440,7 +440,8 @@ fn submit_echo_tick(
 }
 
 /// Find the first terminal in a layout tree (for default routing).
-/// US-020: skips markdown leaves - recurses past them when searching containers.
+/// US-020: skips non-terminal (diff) leaves - recurses past them when
+/// searching containers.
 pub(crate) fn find_first_terminal(
     node: &LayoutTree,
     cx: &App,
@@ -1022,7 +1023,7 @@ fn build_fleet_rows(
                     // EP-002 US-006: the row exists only because the /proc scan
                     // saw the binary; no hook ever fired, so events/state are
                     // unavailable. `no_hook` tells the orchestrator to fall back
-                    // (the agent was likely launched outside workspace templates).
+                    // (the agent likely runs without PaneFlow's hooks installed).
                     "reason": "no_hook",
                     "surface_id": serde_json::Value::Null,
                     "surface_name": serde_json::Value::Null,
@@ -1596,9 +1597,10 @@ impl PaneFlowApp {
 
     /// US-017 (orchestration-v2): resolve which surface (pane terminal) a
     /// session's PID lives in, by walking the process ancestor chain to a
-    /// known `terminal.child_pid`. Direct children (agents launched by
-    /// workspace templates) hit the fast path synchronously; deeper chains walk
-    /// `/proc`/libproc OFF the render thread and deposit the result back.
+    /// known `terminal.child_pid`. An agent that IS the pane's PTY child hits
+    /// the fast path synchronously; deeper chains (an agent started from the
+    /// pane's shell) walk `/proc`/libproc OFF the render thread and deposit
+    /// the result back.
     /// Exited overlays and spawn-pin mismatches are skipped; deposit
     /// re-reads the live terminal and requires pid+start to still match.
     /// A synthetic session key (legacy no-pid frames) or an unresolvable
@@ -1656,7 +1658,7 @@ impl PaneFlowApp {
                 }
             }
         }
-        // Fast path: the agent IS the pane's direct child (`up`-launched).
+        // Fast path: the agent IS the pane's PTY child.
         if let Some(&sid) = candidates.get(&session_key) {
             let pin = pins.get(&session_key).copied().flatten();
             self.bind_session_surface_if_child_current(
@@ -2111,7 +2113,7 @@ impl PaneFlowApp {
                 // vanished pane is an error, never a partial send). With no
                 // surface_id the active workspace's first terminal is used - the
                 // same default routing as `surface.send_keystroke`
-                // (`find_first_terminal` skips markdown leaves).
+                // (`find_first_terminal` skips diff leaves).
                 let target: Option<Entity<TerminalView>> = if let Some(sid) =
                     params.get("surface_id").and_then(|s| s.as_u64())
                 {
@@ -5291,9 +5293,9 @@ mod tests {
 
     #[test]
     fn spawn_labels_dedup_and_blank_names_clear() {
-        // EP-004 US-012 AC3: two identical labels in one workspace templates batch
-        // resolve to distinct stable names (the second gets a `-2` suffix),
-        // reusing the shared suffix algorithm the handler calls.
+        // EP-004 US-012 AC3: two identical labels resolve to distinct stable
+        // names (the second gets a `-2` suffix) through `claim_unique`, the
+        // suffix algorithm query-time surface-name resolution uses.
         use crate::workspace::surface_naming::claim_unique;
         use std::collections::HashSet;
         let mut taken: HashSet<String> = HashSet::new();
@@ -5816,7 +5818,8 @@ mod tests {
         let before = leaf_ids(&ws, 0);
 
         // `can_add_pane` is the shared guard every create site consults - the
-        // keyboard split, drop-to-split, and workspace templates.
+        // keyboard split, drop-to-split, the preset palette's split, and
+        // closed-pane restore.
         assert!(!ws.tabs()[0].can_add_pane(), "the saturated tab refuses");
         let extra = new_pane(cx);
         if ws.tabs()[0].can_add_pane() {

@@ -331,7 +331,7 @@ impl TerminalView {
     ) {
         // The find bar owns keyboard input via its focused `TextInput` entity
         // (typing, IME, selection, clipboard); search-scoped action bindings
-        // (SearchNext / SearchPrev / DismissSearch / regex / fleet) are
+        // (SearchNext / SearchPrev / DismissSearch / ToggleSearchRegex) are
         // dispatched by GPUI before this handler. The terminal must not also
         // forward these keys to the PTY, so bail out while the overlay is open.
         if self.search_active {

@@ -138,10 +138,9 @@ tree-sitter-ruby = "0.23" # US-005: P2
 # QueryCursor::captures returns a StreamingIterator (tree-sitter >= 0.25), not
 # a std Iterator.
 streaming-iterator = "0.1"
-# Re-added as a direct dep: forced per-thread Claude session IDs
-# (`claude --session-id <uuid>`) so a live Agents thread maps 1:1 to its
-# on-disk session file and can adopt the LLM `ai-title` for its sidebar
-# row. `v4` only.
+# Random per-surface IDs: each terminal's agent-context `pane_id` and its
+# `terminal_session_id` (`terminal/view.rs`), plus the `pane_id` format check
+# in `app/agent_context.rs`. `v4` only.
 uuid.workspace = true
 # Resolve the default shell and agent CLIs on $PATH (`terminal/shell.rs`).
 which.workspace = true

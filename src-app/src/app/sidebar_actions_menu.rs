@@ -15,9 +15,8 @@ use gpui::{
 use crate::PaneFlowApp;
 
 impl PaneFlowApp {
-    /// "IPC offline" notice at the bottom of the sidebar - the cockpit home
-    /// of the title-bar IPC pill. Purely informational, like the original
-    /// pill: no click handler. `None` while the IPC server is up.
+    /// "IPC offline" notice at the bottom of the sidebar. Purely
+    /// informational: no click handler. `None` while the IPC server is up.
     pub(crate) fn render_sidebar_ipc_banner(&self, _cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.ipc_status.state() != crate::ipc::IpcState::Disabled {
             return None;
@@ -273,10 +272,10 @@ impl PaneFlowApp {
                 .into_any_element()
         });
 
-        // Cockpit home of the old title-bar IPC pill, above the mode strip and
-        // shared by both modes. It is independent of the strip: the socket can
-        // be down whether or not Review is enabled, so the banner still needs a
-        // footer to live in when the strip is gone.
+        // The IPC offline banner sits above the mode strip and is shared by
+        // both modes. It is independent of the strip: the socket can be down
+        // whether or not Review is enabled, so the banner still needs a footer
+        // to live in when the strip is gone.
         let banner = self.render_sidebar_ipc_banner(cx);
         // The MCP bridge offer (issue #443) lives here for the same reason.
         let callout = self.render_sidebar_mcp_callout(cx);

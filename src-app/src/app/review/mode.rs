@@ -102,7 +102,7 @@ impl PaneFlowApp {
             .h_full()
             .w(px(Self::review_rails_width()))
             .flex_shrink_0()
-            .child(self.render_review_workspaces_rail(window, cx))
+            .child(self.render_review_workspaces_rail(cx))
             .child(self.render_review_changes_rail(window, cx))
             .into_any_element()
     }

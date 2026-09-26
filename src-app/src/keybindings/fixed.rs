@@ -31,7 +31,6 @@ pub(super) const FIXED: &[(&str, &str)] = &[
     ("cmd-v", "Text field · paste"),
     ("cmd-x", "Text field · cut"),
     ("ctrl-cmd-space", "Text field · emoji and symbols"),
-    ("f2", "Sidebar · rename focused workspace or tab"),
     ("enter", "Sidebar rename · confirm"),
     ("escape", "Sidebar rename · cancel"),
     ("left", "Pane overview · select pane to the left"),
@@ -169,6 +168,20 @@ mod tests {
             .filter(|(_, description)| description.starts_with("Theme picker"))
             .collect();
         assert!(stale.is_empty(), "stale Theme picker rows: {stale:?}");
+    }
+
+    #[test]
+    fn fixed_rows_do_not_document_an_f2_sidebar_rename() {
+        // Issue #852: a sidebar row reaches its key handler only while its own
+        // rename is already live, so F2 never started a rename. The row was
+        // removed; the shortcut reference must not advertise it again.
+        let stale: Vec<_> = FIXED
+            .iter()
+            .filter(|(key, description)| {
+                key.eq_ignore_ascii_case("f2") || description.contains("rename focused")
+            })
+            .collect();
+        assert!(stale.is_empty(), "stale F2 rename rows: {stale:?}");
     }
 
     #[test]

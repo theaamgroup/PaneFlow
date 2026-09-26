@@ -133,25 +133,14 @@ pub(crate) fn macos_sidebar_material_enabled(config_value: Option<&str>) -> bool
     )
 }
 
-/// Fill used by chrome children inside the window shell.
-///
-/// The child stays transparent and the rounded shell owns the tint, avoiding
-/// rectangular paint outside GPUI's corner mask.
-pub(crate) fn cockpit_chrome_background(
-    background: Hsla,
-    is_window_active: bool,
-    material_active: bool,
-) -> Hsla {
-    let _ = (background, is_window_active, material_active);
-    gpui::transparent_black()
-}
-
 /// Window-level backdrop behind the application chrome.
 ///
 /// This is what the rounded panel corners reveal in their clip notch, so it MUST
-/// show through the transparent rail ([`cockpit_chrome_background`]) - otherwise
-/// the corner exposes a different surface and the radius reads as a square patch.
-/// Native semantic materials remain raw on macOS.
+/// show through the rail - the title bar and the side rails paint no fill of
+/// their own, which leaves the tint to the rounded shell and avoids rectangular
+/// paint outside GPUI's corner mask. Otherwise the corner exposes a different
+/// surface and the radius reads as a square patch. Native semantic materials
+/// remain raw on macOS.
 pub(crate) fn cockpit_backdrop_background(
     background: Hsla,
     is_window_active: bool,
@@ -263,16 +252,16 @@ mod material_tests {
     use super::*;
 
     #[test]
-    fn cockpit_children_stay_transparent_over_an_opaque_shell() {
+    fn cockpit_backdrop_paints_the_shell_only_without_material() {
         let background = Hsla::from(gpui::rgb(0x141414));
 
         assert_eq!(
-            cockpit_chrome_background(background, true, false),
-            gpui::transparent_black()
-        );
-        assert_eq!(
             cockpit_backdrop_background(background, true, false),
             background
+        );
+        assert_eq!(
+            cockpit_backdrop_background(background, true, true),
+            gpui::transparent_black()
         );
     }
 

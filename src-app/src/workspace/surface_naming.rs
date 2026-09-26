@@ -254,9 +254,9 @@ pub fn resolve_surface_names(entries: &[(Option<String>, String, Option<String>)
 }
 
 /// Claim `name`, appending `-2`, `-3`, … until the result is unique within
-/// `taken`. Records the chosen string in `taken`. `pub(crate)` so the
-/// spawn-time label de-dup (workspace templates, EP-004 US-012) shares the exact
-/// same suffix algorithm as this query-time surface-name resolution.
+/// `taken`. Records the chosen string in `taken`. The live caller is this
+/// module's query-time surface-name resolution; `pub(crate)` only for the
+/// suffix-contract test in `app/ipc_handler.rs`.
 pub(crate) fn claim_unique(taken: &mut std::collections::HashSet<String>, name: &str) -> String {
     if taken.insert(name.to_string()) {
         return name.to_string();

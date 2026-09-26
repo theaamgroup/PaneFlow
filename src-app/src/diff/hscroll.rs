@@ -5,9 +5,9 @@
 //! [`super::element::DiffElement`]. This restores it as shared geometry:
 //! unified view keeps one horizontal offset per file, while split view keeps
 //! detached left/right offsets per file, each bounded by [`max_h_scroll`]. The
-//! element offsets each file side's code by its own slot; the two hosts (Agents
-//! dock and Review column) clamp the wheel/drag against the same bound, and
-//! render the scrollbar.
+//! element offsets each file side's code by its own slot and paints the
+//! scrollbar; its host, the diff pane's `DiffView` (`view/scroller.rs`),
+//! routes the wheel and drag through the same bound.
 //!
 //! The cell-advance estimate is intentionally coarse - it only *bounds* the
 //! scroll, never lays out glyphs - so a few px of slop just lets a sliver of

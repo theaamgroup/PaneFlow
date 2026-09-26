@@ -29,18 +29,12 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ui = crate::theme::ui_colors();
-        let theme = crate::theme::active_theme();
 
         div()
             .relative()
             .w(px(REVIEW_CHANGES_RAIL_WIDTH))
             .flex_shrink_0()
             .h_full()
-            .bg(crate::app::constants::cockpit_chrome_background(
-                theme.title_bar_background,
-                window.is_window_active(),
-                self.cached_config.macos_chrome_material_enabled(),
-            ))
             .border_l_1()
             .border_color(ui.text.opacity(0.06))
             .flex()

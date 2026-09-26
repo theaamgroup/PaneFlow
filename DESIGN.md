@@ -61,11 +61,11 @@ title bar that is almost empty, rails that appear only when review
 or sessions are needed, and a footer switch between the two modes that matter,
 **Agents** and **Review**.
 
-The code calls this shell the cockpit (`cockpit_chrome_background`,
-`cockpit_backdrop_background` in `src-app/src/app/constants.rs`). Keep that
-scene in mind when adding a surface: instruments in front, switches on the
-rail, a thin canopy frame around it. Nothing on the rail competes with the
-instruments.
+The code calls this shell the cockpit (`cockpit_backdrop_background` in
+`src-app/src/app/constants.rs`); the title bar and the rails paint no fill of
+their own, so the shell shows through them. Keep that scene in mind when
+adding a surface: instruments in front, switches on the rail, a thin canopy
+frame around it. Nothing on the rail competes with the instruments.
 
 ### 2.2 Lineage
 
@@ -154,7 +154,7 @@ fonts come from the user's system, with a bundled Nerd Font as the default.
 | Region | Role | Geometry | Source |
 | --- | --- | --- | --- |
 | Window | Native macOS decorations and traffic lights | Default 1200 by 800, minimum 800 by 500; no client inset, synthetic border, shadow, or resize handles. Restored size is clamped to 3840 by 2160 when no display size is known | `window_state.rs`, `window_chrome/shell.rs`, `main.rs` |
-| Title bar | Drag region, sidebar toggle, caption controls. Nothing else. | Height `max(1.75 rem, 36 px)`; control size 20; edge inset 8; 80 px of brand padding for the traffic lights, dropping to the 8 px edge inset in fullscreen | `app/constants.rs:17-23`, `window_chrome/title_bar.rs:75,154-160,190` |
+| Title bar | Drag region, sidebar toggle, caption controls. Nothing else. | Height `max(1.75 rem, 36 px)`; control size 20; edge inset 8; 80 px of brand padding for the traffic lights, dropping to the 8 px edge inset in fullscreen | `app/constants.rs:17-23`, `window_chrome/title_bar.rs:42,46-58,124-132` |
 | Primary sidebar | Workspaces rail in Agents mode; the Workspaces and Changes rails side by side in Review; navigation in Settings | Width 300, **520 in Review** (220 + 300); slides in 280 ms | `app/constants.rs:15`, `app/review/mod.rs:22-23`, `app/review/mode.rs:90-92`, `main.rs:352`, `settings/chrome.rs:35` |
 | Main panel | The inset card that holds the pane grid (Agents or Review) or a Settings page | Inset 4 on right and bottom, and on the left only when the sidebar is hidden; radius 10; four corner masks painted in the shell color. There is no top inset — a spacer the height of the title bar reserves the strip | `app/constants.rs:25-27`, `main.rs:872,1983,2425,2435-2438,2471-2506` |
 | Pane grid | **N-ary** `LayoutTree { Leaf, Container }` of pane cards; one grid per workspace tab in Agents, one global grid of diff panes in Review | Gutter 8, divider hit area 7, minimum pane 80; `MAX_PANES` 32, `MAX_WORKSPACES` 32, `MAX_TABS_PER_WORKSPACE` 32, Review caps at `MAX_REVIEW_PANES` 6 | `layout/tree.rs:62-67`, `layout/mod.rs:34,39`, `workspace/mod.rs:53,59`, `app/review/mod.rs:21` |
@@ -521,11 +521,11 @@ removed, only its interpolation.
 
 ### 5.1 Title bar
 
-Full width, drag region, double-click zooms, right-click shows the native
-window menu. **The left rail carries exactly one control**: the sidebar toggle
-(20 px, radius 5, resting tint when the sidebar is hidden, a 14 px
-`icons/sidebar.svg` in `muted`, a `Role::Button` with an accessible name and a
-delayed `Show sidebar` / `Hide sidebar` tooltip).
+Full width, drag region, double-click zooms; right-click does nothing (macOS
+has no native window menu to show). **The left rail carries exactly one
+control**: the sidebar toggle (20 px, radius 5, resting tint when the sidebar
+is hidden, a 14 px `icons/sidebar.svg` in `muted`, a `Role::Button` with an
+accessible name and a delayed `Show sidebar` / `Hide sidebar` tooltip).
 
 There are no Files or Help menus in the title bar, and no avatar. Settings
 and About stay on the PaneFlow menu; themes stay in Settings → Appearance.
@@ -534,12 +534,9 @@ files (`title_bar_files_and_help_popovers_are_removed_end_to_end`,
 `window_chrome/title_bar.rs`). Help lives on the native macOS menu bar,
 whose four menus are PaneFlow, Edit, Window, and Help.
 
-The workspace-name breadcrumb (a 3 px `muted` dot plus the name at 12 px
-Medium) and the IPC pill still exist in `title_bar.rs`, both gated on
-`!self.cockpit`, and `main.rs:2142` sets `cockpit = true` unconditionally — so
-neither ever renders. That code is **Migration**; the sidebar footer owns the
-IPC banner, and there is no update pill anywhere because Sparkle 2 owns
-updates.
+The title-bar centre is an empty drag area: no workspace-name breadcrumb and
+no IPC pill. The sidebar footer owns the IPC banner, and there is no update
+pill anywhere because Sparkle 2 owns updates.
 
 The traffic lights get 80 px of brand padding, dropping to the 8 px edge inset
 in fullscreen. The bar is an absolutely positioned overlay at top 0 above the
@@ -1145,11 +1142,10 @@ Rules that follow:
    reading on their own.
 2. Anything drawn over the material MUST be `transparent_black` where the
    material should show and the opaque shell color where it should not. The
-   helpers in `constants.rs` decide — and they are stronger than they look:
-   `cockpit_chrome_background` returns `transparent_black()` unconditionally,
-   discarding its arguments, while `cockpit_backdrop_background` returns
-   transparent only when the material is active. Do not branch on `target_os`
-   in render code.
+   title bar and the rail children (primary sidebar, sessions sidebar, Review
+   rails, Settings navigation) paint no fill at all, so the shell decides:
+   `cockpit_backdrop_background` in `constants.rs` returns transparent only
+   when the material is active. Do not branch on `target_os` in render code.
 3. `windows_chrome_material` and `windows_terminal_material` are gone from the
    struct and the published schema. The loader still accepts them as ignored
    no-ops so existing `paneflow.json` files keep loading, and a test pins that.
@@ -1254,8 +1250,6 @@ behavior.
   onto `UiColors`, but it still paints a plain 10 px round with a shadow
   instead of the squircle card that System Info already uses. Its CRT credit
   plate keeps its own fixed hexes on purpose and is **Contextual**.
-- The title bar still carries dead breadcrumb and IPC-pill code behind
-  `!cockpit`. Both are **Migration**; delete rather than revive.
 - The app's own context menus use plain 4 px and 7 px rounds instead of
   `ROW_RADIUS`, and there is no `menu_item` primitive to unify them.
 - The traffic-light brand padding is an inline `px(80.0)` literal rather than a

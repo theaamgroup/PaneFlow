@@ -166,7 +166,6 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let ui = crate::theme::ui_colors();
-        let theme = crate::theme::active_theme();
         let active = self.settings_section.unwrap_or(SettingsSection::General);
         let query = self.settings_search_input.read(cx).value().to_lowercase();
         // One tint for both states: the open section rests on exactly the fill
@@ -297,13 +296,6 @@ impl PaneFlowApp {
             .flex_shrink_0()
             .flex()
             .flex_col()
-            // Same rail treatment as the Agents / Review sidebars.
-            // Keeps the settings rail visually identical to the other rails.
-            .bg(crate::app::constants::cockpit_chrome_background(
-                theme.title_bar_background,
-                window.is_window_active(),
-                self.cached_config.macos_chrome_material_enabled(),
-            ))
             .child(self.render_settings_nav_header(ui, cx))
             .child(div().mx(px(8.)).mt(px(4.)).child(search))
             .child(list)

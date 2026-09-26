@@ -34,17 +34,12 @@ fn context_menu_divider(ui: crate::theme::UiColors) -> gpui::Div {
         .bg(menu_divider_color(ui))
 }
 
-/// Fixed rows are pin/unpin, reveal, copy path, mute/unmute, and close,
-/// plus an optional Mark as read row. `visible_editor_rows` is the single
-/// Open in editor row (always 1). The divider before Reveal exists only
-/// when that row does.
-fn workspace_context_menu_counts(
-    visible_editor_rows: usize,
-    service_rows: usize,
-    has_unread: bool,
-) -> (usize, usize) {
-    let menu_rows = visible_editor_rows + 5 + service_rows + usize::from(has_unread);
-    let separator_rows = 3 + usize::from(service_rows > 0) + usize::from(visible_editor_rows > 0);
+/// Fixed rows are pin/unpin, open in editor, reveal, copy path, mute/unmute,
+/// and close, plus one row per detected service and an optional Mark as read
+/// row. Four dividers always draw; the service section adds one more.
+fn workspace_context_menu_counts(service_rows: usize, has_unread: bool) -> (usize, usize) {
+    let menu_rows = 6 + service_rows + usize::from(has_unread);
+    let separator_rows = 4 + usize::from(service_rows > 0);
     (menu_rows, separator_rows)
 }
 
@@ -182,7 +177,6 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let idx = menu.idx;
-        let can_close = !self.workspaces.is_empty();
         let services: Vec<_> = self
             .workspaces
             .get(idx)
@@ -207,11 +201,7 @@ impl PaneFlowApp {
             .is_unread();
         let muted = self.workspaces[idx].muted;
         let service_rows = services.len();
-        // One row. The editor is `external_editor`, so there is nothing to
-        // filter by which CLI happens to be installed.
-        let visible_editor_rows = 1;
-        let (menu_rows, separator_rows) =
-            workspace_context_menu_counts(visible_editor_rows, service_rows, has_unread);
+        let (menu_rows, separator_rows) = workspace_context_menu_counts(service_rows, has_unread);
         let menu_height = px(8. + menu_rows as f32 * 28. + separator_rows as f32 * 9.);
         let menu_pos = clamped_context_menu_position(menu.position, px(248.), menu_height, window);
 
@@ -358,17 +348,13 @@ impl PaneFlowApp {
         ));
         context_menu = context_menu.child(context_menu_divider(ui));
 
-        // Close workspace (conditionally disabled)
+        // Close workspace (always enabled): the caller renders this menu only
+        // for an index inside `self.workspaces`, so there is always a target.
         let close_shortcut = self
             .shortcut_for_action("close_workspace")
             .map(|s| SharedString::from(s.to_string()));
         context_menu = context_menu.child({
             let hover_bg = with_alpha(ui.text, 0.05);
-            let target_bg = if can_close {
-                hover_bg
-            } else {
-                hover_bg.opacity(0.0)
-            };
             div()
                 .id("workspace-context-close")
                 .h(px(28.))
@@ -379,22 +365,16 @@ impl PaneFlowApp {
                 .items_center()
                 .gap(px(8.))
                 .text_size(px(12.))
-                .text_color(ui.muted)
-                .when(can_close, |d| d.text_color(ui.text))
-                .animated_hover_bg(hover_bg.opacity(0.0), target_bg)
+                .text_color(ui.text)
+                .animated_hover_bg(hover_bg.opacity(0.0), hover_bg)
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     cx.stop_propagation();
-                    if can_close {
-                        this.request_close_workspace(
-                            idx,
-                            crate::app::close_guard::ConfirmStyle::Modal,
-                            window,
-                            cx,
-                        );
-                    } else {
-                        this.workspace_menu_open = None;
-                        cx.notify();
-                    }
+                    this.request_close_workspace(
+                        idx,
+                        crate::app::close_guard::ConfirmStyle::Modal,
+                        window,
+                        cx,
+                    );
                 }))
                 .child(
                     div()
@@ -1003,16 +983,16 @@ mod tests {
     }
 
     #[test]
-    fn workspace_menu_geometry_uses_filtered_editor_rows() {
-        assert_eq!(workspace_context_menu_counts(4, 0, false), (9, 4));
-        assert_eq!(workspace_context_menu_counts(2, 0, false), (7, 4));
-        assert_eq!(workspace_context_menu_counts(0, 0, false), (5, 3));
+    fn workspace_menu_geometry_counts_the_fixed_rows() {
+        // Pin, Open in editor, Reveal, Copy path, Mute and Close, with the
+        // four dividers that always draw between them.
+        assert_eq!(workspace_context_menu_counts(0, false), (6, 4));
     }
 
     #[test]
-    fn workspace_menu_geometry_counts_service_and_editor_dividers_independently() {
-        assert_eq!(workspace_context_menu_counts(4, 2, false), (11, 5));
-        assert_eq!(workspace_context_menu_counts(0, 2, false), (7, 4));
+    fn workspace_menu_geometry_adds_one_divider_for_the_service_section() {
+        assert_eq!(workspace_context_menu_counts(1, false), (7, 5));
+        assert_eq!(workspace_context_menu_counts(2, false), (8, 5));
     }
     #[test]
     fn workspace_notification_menu_routes_are_separate_from_tab_badges() {
@@ -1022,9 +1002,7 @@ mod tests {
         let menu = &src[src
             .find("pub(crate) fn render_workspace_context_menu(")
             .unwrap()
-            ..src
-                .find("// Close workspace (conditionally disabled)")
-                .unwrap()];
+            ..src.find("// Close workspace (always enabled)").unwrap()];
         assert!(menu.contains("this.mark_workspace_read(idx, cx)"));
         assert!(menu.contains("this.toggle_workspace_muted(idx, cx)"));
         assert!(menu.contains("if has_unread {"));
@@ -1034,9 +1012,9 @@ mod tests {
 
     #[test]
     fn workspace_menu_geometry_adds_only_one_row_for_unread_completions() {
-        for (editors, services) in [(0, 0), (2, 0), (4, 2)] {
-            let read = workspace_context_menu_counts(editors, services, false);
-            let unread = workspace_context_menu_counts(editors, services, true);
+        for services in [0, 2] {
+            let read = workspace_context_menu_counts(services, false);
+            let unread = workspace_context_menu_counts(services, true);
             assert_eq!(unread, (read.0 + 1, read.1));
         }
     }

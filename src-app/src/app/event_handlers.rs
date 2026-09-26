@@ -12,7 +12,7 @@ use notify::Watcher;
 use paneflow_config::schema::TerminalSurfaceProfile;
 
 use crate::agents::parent_guard::{pid_is_alive, pid_start_time};
-use crate::app::close_guard::{ClickOutcome, CloseTarget, ConfirmStyle, click_outcome};
+use crate::app::close_guard::{ClickOutcome, ConfirmStyle, click_outcome};
 use crate::layout::{LayoutTree, MAX_PANES};
 use crate::pane::{self, Pane};
 use crate::pane_drag::DropEdge;
@@ -594,12 +594,9 @@ impl PaneFlowApp {
                 // click on that same button closes. `request_close_pane`
                 // still closes instantly when nothing live would die, so a
                 // plain shell keeps today's one-click behaviour.
-                let target = CloseTarget::Pane {
-                    pane: pane.downgrade(),
-                };
                 match click_outcome(
                     self.pending_close.as_ref(),
-                    &target,
+                    &pane.downgrade(),
                     std::time::Instant::now(),
                 ) {
                     // `confirm_pending_close_pane` is the `Window`-free half

@@ -502,7 +502,7 @@ pub(crate) const MENU_RADIUS: Pixels = px(18.);
 /// The silhouette is a pair of `squircle` paths rather than `bg()` + `rounded()`
 /// because GPUI resolves `corner_radii` with a circular-arc SDF and exposes no
 /// corner smoothing - the rest of the app's chrome is drawn as a superellipse
-/// (rail rows, dock chrome), and a menu answering that with a quarter circle
+/// (rail rows, pane cards), and a menu answering that with a quarter circle
 /// reads as a different material. Both layers are added *before* the caller's
 /// content: GPUI paints children in declaration order and does not clip them to
 /// a parent radius, so a fill added afterwards would paint over the rows.
