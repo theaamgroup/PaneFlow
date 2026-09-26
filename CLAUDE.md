@@ -24,7 +24,7 @@ dependency sources, and command examples. Use [keybindings](docs/user/keybinding
 and [configuration runtime behavior](docs/user/configuration/runtime.md) for their
 reference tables. Read [DESIGN.md](DESIGN.md) before UI changes and update it in the same PR.
 
-The registry currently declares **75 GPUI action types**, **75 actions total**.
+The registry currently declares **74 GPUI action types**, **74 actions total**.
 Update both counts when changing `app/actions.rs`; its drift test reads this file.
 
 Settings and About are reached only from the macOS menu bar (**PaneFlow ▸

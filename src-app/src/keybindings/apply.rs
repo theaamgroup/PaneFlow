@@ -343,44 +343,68 @@ mod tests {
         );
     }
 
-    /// Issue #523: the command palette is `secondary-shift-o`, not upstream's
-    /// `secondary-shift-p` (Pane Overview here, #339). Both chords must keep
-    /// exactly one claimant, and the palette's action must stay context-free,
-    /// or it could not open from a focused terminal - the only place it is
-    /// useful.
+    /// Issue #339: Pane Overview is `secondary-shift-p`. The chord must keep
+    /// exactly one claimant, and the action must stay context-free, or it
+    /// could not open from a focused terminal - where the focus sits nearly
+    /// all the time.
     #[test]
-    fn command_palette_is_cmd_shift_o_and_pane_overview_keeps_cmd_shift_p() {
+    fn pane_overview_keeps_cmd_shift_p() {
         use super::super::defaults::{DEFAULTS, MACOS_ONLY_DEFAULTS};
 
-        let claimants = |key: &str| -> Vec<(&'static str, Option<&'static str>)> {
-            DEFAULTS
-                .iter()
-                .chain(MACOS_ONLY_DEFAULTS.iter())
-                .filter(|d| keystrokes_conflict(d.key, key))
-                .map(|d| (d.action_name, d.context))
-                .collect()
-        };
+        let (key, action_name) = ("secondary-shift-p", "open_pane_overview");
+        let claimants: Vec<(&'static str, Option<&'static str>)> = DEFAULTS
+            .iter()
+            .chain(MACOS_ONLY_DEFAULTS.iter())
+            .filter(|d| keystrokes_conflict(d.key, key))
+            .map(|d| (d.action_name, d.context))
+            .collect();
 
-        for (key, action_name) in [
-            ("secondary-shift-o", "open_command_palette"),
-            ("secondary-shift-p", "open_pane_overview"),
-        ] {
-            assert_eq!(
-                context_for_action(action_name),
-                None,
-                "{action_name} must be context-free"
-            );
-            let action = action_from_name(action_name).expect("registered action");
-            assert!(
-                make_binding(key, action, None).is_some(),
-                "{key} must parse into a valid KeyBinding"
-            );
-            assert_eq!(
-                claimants(key),
-                vec![(action_name, None)],
-                "{key} must be claimed by {action_name} and nothing else"
-            );
-        }
+        assert_eq!(
+            context_for_action(action_name),
+            None,
+            "{action_name} must be context-free"
+        );
+        let action = action_from_name(action_name).expect("registered action");
+        assert!(
+            make_binding(key, action, None).is_some(),
+            "{key} must parse into a valid KeyBinding"
+        );
+        assert_eq!(
+            claimants,
+            vec![(action_name, None)],
+            "{key} must be claimed by {action_name} and nothing else"
+        );
+    }
+
+    /// Issue #844: the command palette is gone, chord and action both. No
+    /// default on either table may claim `secondary-shift-o` again, and the
+    /// action name must be gone from the registry, not merely unbound, so a
+    /// leftover user `shortcuts` entry is skipped with a warning. The name is
+    /// built at runtime so this test's own source never matches a grep for
+    /// the removed action.
+    #[test]
+    fn the_command_palette_chord_and_action_stay_removed() {
+        use super::super::defaults::{DEFAULTS, MACOS_ONLY_DEFAULTS};
+
+        let removed = ["open", "command", "palette"].join("_");
+        let claimants: Vec<&str> = DEFAULTS
+            .iter()
+            .chain(MACOS_ONLY_DEFAULTS.iter())
+            .filter(|d| {
+                keystrokes_conflict(d.key, "secondary-shift-o")
+                    || keystrokes_conflict(d.key, "cmd-shift-o")
+                    || d.action_name == removed
+            })
+            .map(|d| d.action_name)
+            .collect();
+        assert!(
+            claimants.is_empty(),
+            "issue #844 removed the command palette; secondary-shift-o is bound to: {claimants:?}"
+        );
+        assert!(
+            action_from_name(&removed).is_none(),
+            "{removed} must be gone from the registry, not merely unbound"
+        );
     }
 
     /// Issue #105: Settings gained a menu-bar item but deliberately did NOT

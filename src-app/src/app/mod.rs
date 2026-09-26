@@ -9,7 +9,6 @@ pub(crate) mod agent_status;
 pub mod bootstrap;
 pub mod close_confirm;
 pub mod close_guard;
-pub mod command_palette;
 pub mod constants;
 pub mod diff_sidebar;
 pub mod drag;

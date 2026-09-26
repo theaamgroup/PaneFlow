@@ -1283,6 +1283,10 @@ impl PaneFlowApp {
                         let hover_bg = crate::app::constants::sidebar_tab_active_background();
                         div()
                             .id("empty-new-ws")
+                            // Issue #340: a clickable row is a button to
+                            // AccessKit (DESIGN.md 7.2).
+                            .role(Role::Button)
+                            .aria_label("Open folder")
                             .flex()
                             .flex_row()
                             .items_center()
@@ -1306,50 +1310,6 @@ impl PaneFlowApp {
                                     .text_color(ui.muted),
                             )
                             .child("Open folder")
-                    })
-                    // Issue #523: the command palette is the one overlay that
-                    // reaches every global action, so the empty state names it
-                    // next to Open folder (#520's welcome screen was dropped,
-                    // so this rail is where a first launch finds it).
-                    .child({
-                        let hover_bg = crate::app::constants::sidebar_tab_active_background();
-                        let chord = self
-                            .shortcut_for_action(
-                                crate::app::command_palette::OPEN_COMMAND_PALETTE_ACTION,
-                            )
-                            .map(|key| SharedString::from(key.to_string()));
-                        div()
-                            .id("empty-command-palette")
-                            // Issue #340: a clickable row is a button to
-                            // AccessKit.
-                            .role(Role::Button)
-                            .aria_label("Command palette")
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.))
-                            .px(px(10.))
-                            .py(px(5.))
-                            .rounded(px(6.))
-                            .bg(ui.subtle)
-                            .text_color(ui.text)
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .hover(move |style| style.bg(hover_bg))
-                            .on_click(cx.listener(|this, _: &ClickEvent, w, cx| {
-                                this.open_command_palette(w, cx);
-                            }))
-                            .child("Command palette")
-                            .when_some(chord, |row, key| {
-                                row.child(
-                                    div()
-                                        .flex_none()
-                                        .text_size(px(10.))
-                                        .font_weight(FontWeight::NORMAL)
-                                        .text_color(ui.muted)
-                                        .child(key),
-                                )
-                            })
                     }),
             );
         }
@@ -4269,9 +4229,9 @@ mod tests {
     }
 
     /// Issue #813: the recent-folders list (#521) is gone. The empty state
-    /// keeps its `Open folder` button, and nothing in the production sidebar
-    /// or the crate root may bring back the `Open recent` rows or the
-    /// `recents` module behind them.
+    /// keeps its `Open folder` button as its only button (#844), and nothing
+    /// in the production sidebar or the crate root may bring back the
+    /// `Open recent` rows or the `recents` module behind them.
     #[test]
     fn the_empty_state_has_no_recent_folders_list() {
         let full = include_str!("mod.rs");
@@ -4286,6 +4246,17 @@ mod tests {
         assert!(
             empty_state.contains("\"empty-new-ws\""),
             "the empty state must keep its Open folder button"
+        );
+        assert_eq!(
+            empty_state.matches(".on_click(").count(),
+            1,
+            "Open folder is the empty state's only button: {empty_state}"
+        );
+        let open_folder = source_slice(empty_state, ".id(\"empty-new-ws\")", ".on_click(");
+        assert!(
+            open_folder.contains(".role(Role::Button)")
+                && open_folder.contains(".aria_label(\"Open folder\")"),
+            "DESIGN.md 7.2: the Open folder row is a named button to AccessKit: {open_folder}"
         );
         for gone in [
             "render_empty_state_recents",

@@ -748,14 +748,6 @@ impl PaneFlowApp {
             about_dialog_focus: cx.focus_handle(),
             system_info_dialog: None,
             system_info_dialog_focus: cx.focus_handle(),
-            // Issue #523: command palette closed.
-            command_palette_open: false,
-            command_palette_query: String::new(),
-            command_palette_selected: 0,
-            command_palette_focus: cx.focus_handle(),
-            command_palette_scroll: gpui::ScrollHandle::new(),
-            command_palette_return_pane: None,
-            command_palette_return_focus: None,
             overlay_origins: Default::default(),
             // Issue #339: Pane Overview closed.
             pane_overview: None,
