@@ -455,8 +455,8 @@ impl PaneFlowApp {
         self.commit_rename(cx);
         self.dismiss_transient_surfaces();
         let restore_focus = window.focused(cx);
-        // Issue #584: a command palette that folds the picker returns a
-        // dispatched action to the pane it was opened from.
+        // Issue #584: closing the picker hands the focus back to the pane it
+        // was opened from.
         self.remember_overlay_origin(OverlayKind::PanePalette, window, cx);
 
         let mut tab = crate::workspace::Tab::new(PALETTE_TAB_TITLE, None);

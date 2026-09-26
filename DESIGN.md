@@ -544,9 +544,10 @@ icon buttons on the right: the Customize Sidebar menu behind
 is deliberately **no new-workspace button** (issue #105); a guard test
 (`the_workspaces_header_carries_no_new_workspace_button`) fails if one returns.
 New Workspace is `secondary-shift-n`, the Window menu, and the empty state's
-`Open folder` button. The empty state carries only `Open folder` and
-`Command palette`; the `Open recent` list was removed (issue #813), and a
-guard test (`the_empty_state_has_no_recent_folders_list`) fails if it returns.
+`Open folder` button. The empty state carries only an `Open a project folder`
+line and that button; the `Open recent` list (issue #813) and the `Command
+palette` button (issue #844) were removed, and a guard test
+(`the_empty_state_has_no_recent_folders_list`) fails if either returns.
 With no workspace open, `⌘1`-`⌘9` do nothing.
 
 A workspace is a folder row; its tabs are child rows with inline rename, hover
@@ -810,31 +811,14 @@ put and the user picks a preset or closes the workspace instead. Split placement
 renders no branch row and never opens the sessions rail; Tab placement may, when
 `new_pane_shows_sessions` is on.
 
-**The command palette** (`secondary-shift-o`, issue #523) is the theme
-picker's shell: the menu surface of 5.6, 544 wide, docked 96 from the top of
-the window over a 0.4 black scrim. A 13 px query line reading `Execute a
-command…` sits over a hairline, then one `select_item` row per action that
-carries no key context, each showing the Settings description and its live
-binding at 11 px muted on the trailing edge (no chord, no trailing text).
-Typing filters on whole words in any order; arrows move and scroll the
-selection into view; Enter or a click closes the palette, hands focus back to
-the pane, then dispatches; Escape and an outside click close it the same way.
-It never lists itself, opening it folds any other open overlay first (the
-pane palette included, except the §5.7 last-surface case: a pane palette on
-the workspace's sole paneless tab cannot close, so the command palette opens
-over it and hands the keyboard back to it when it closes; the dispatched
-action lands on the pane the outermost folded overlay was opened from; the
-chord is inert while a modal
-dialog or the Settings surface is open, About, System Info,
-close confirm, Work Review, Settings, while any of those opened over the
-palette closes it), and upstream's `secondary-shift-p` is
-Pane Overview in this fork. The Workspaces rail's empty state names it beside `Open folder`.
-The list is a `ListBox` of `ListBoxOption` rows carrying `aria_selected` and
-a label of the description plus its chord, per 7.2.
+There is no command palette (removed in issue #844): every context-free
+action already has a default chord, and Settings ▸ Keyboard Shortcuts is the
+searchable list of them. Upstream's `secondary-shift-p` is Pane Overview in
+this fork, and `secondary-shift-o` has no default.
 
-Repository cloning happens in a terminal with `gh repo clone` or `git clone`.
-The sidebar empty state offers New workspace, the command palette, and recent
-folders; there is no clone modal or clone action in the palette.
+Repository cloning happens in a terminal with `gh repo clone` or `git clone`;
+there is no clone modal or clone action. The sidebar empty state offers only
+`Open folder` (5.2).
 
 ### 5.8 Feedback
 
@@ -947,7 +931,6 @@ a chord or a menu item, and MUST NOT rely on a surface that has neither.
 | Pane overview | `secondary-shift-p` |
 | Work review | `secondary-shift-u` |
 | Primary sidebar | `secondary-alt-b` |
-| Command palette | `secondary-shift-o` |
 | Jump to next waiting agent | `secondary-shift-j` |
 | Copy, paste (Terminal) | `cmd-c` / `cmd-v`, plus `ctrl-shift-c` / `ctrl-shift-v` |
 | Clear scrollback, reset terminal | `secondary-shift-k` and `cmd-k`; `secondary-shift-r` |

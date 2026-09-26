@@ -105,10 +105,6 @@ actions!(
         // does not grow an Unassigned row. Opens this fork's GitHub new-issue
         // form in the default browser.
         ReportIssue,
-        // Issue #523 (upstream 9aa03d09 part 4): the command palette, every
-        // context-free action with its live binding. `secondary-shift-o` here;
-        // upstream's `secondary-shift-p` is Pane Overview in this fork (#339).
-        OpenCommandPalette,
         // Toggle the Review rails and pane grid.
         OpenDiffView,
         // US-003 of tasks/prd-ai-in-diff-2026-Q3.md - copy the hunk under the
@@ -151,7 +147,7 @@ mod tests {
     #[test]
     fn claude_md_action_count_matches_the_actions_macro() {
         let declared = actions_macro_entries(include_str!("actions.rs"));
-        assert_eq!(declared, 75, "review action surface is pinned");
+        assert_eq!(declared, 74, "review action surface is pinned");
 
         let claude_md = include_str!("../../../CLAUDE.md");
         for phrase in ["GPUI action types", "actions total"] {

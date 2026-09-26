@@ -6,14 +6,11 @@
 //! - its own close hands focus back to that pane, not to the first leaf;
 //! - an inner overlay closed over an outer one (pane palette from pane B,
 //!   then Pane Overview, then Escape) takes only its own entry, so the outer
-//!   overlay's origin survives for its close or for a command palette fold;
-//! - the command palette, which folds every open overlay before it captures
-//!   its own return pane (#523), reads the outermost origin: the pane the
-//!   user was in before any overlay opened.
+//!   overlay's origin survives for its own close.
 //!
 //! `PaneFlowApp` cannot be built in a unit test, so the stack itself and the
 //! focus step are free of it and tested here; the wiring is pinned by source
-//! assertions like the #523 guard in `command_palette.rs`.
+//! assertions (`every_overlay_remembers_and_restores_its_own_origin`).
 
 use gpui::{App, Entity, Focusable as _, WeakEntity, Window};
 
@@ -62,18 +59,6 @@ impl OverlayOrigins {
         self.stack.last().map(|(_, pane)| pane.clone())
     }
 
-    /// The first recorded origin among the kinds `open` admits, upgraded:
-    /// the pane the user was in before any of those overlays opened.
-    pub(crate) fn outermost(
-        &self,
-        mut open: impl FnMut(OverlayKind) -> bool,
-    ) -> Option<Entity<Pane>> {
-        self.stack
-            .iter()
-            .find(|(kind, _)| open(*kind))
-            .and_then(|(_, pane)| pane.upgrade())
-    }
-
     /// Whether `kind` recorded an origin at all: a pane owned the focus when
     /// it opened. `false` when the focus sat outside every pane (the sidebar,
     /// the placeholder), which records nothing.
@@ -111,6 +96,23 @@ pub(crate) fn focus_origin_leaf(
     }
 }
 
+/// The leaf of `root` that owns the focus right now: the pane whose handle is
+/// focused *or contains* the focused element (`contains_focused`), so a pane
+/// whose find bar holds focus still counts as the user's pane. Containment is
+/// read from the last rendered frame.
+fn leaf_owning_focus(root: &LayoutTree, window: &Window, cx: &App) -> Option<Entity<Pane>> {
+    let mut owner = None;
+    root.any_leaf(&mut |pane| {
+        if pane.read(cx).focus_handle(cx).contains_focused(window, cx) {
+            owner = Some(pane.clone());
+            true
+        } else {
+            false
+        }
+    });
+    owner
+}
+
 impl PaneFlowApp {
     /// Whether `kind`'s overlay is open right now.
     pub(crate) fn overlay_is_open(&self, kind: OverlayKind) -> bool {
@@ -130,7 +132,9 @@ impl PaneFlowApp {
     }
 
     /// Record the pane `kind` is being opened from. Called BEFORE the overlay
-    /// takes the focus, while the pane still owns it. When no pane owns the
+    /// takes the focus, while the pane still owns it; the owner is looked up
+    /// in the tree the focus returns to (the active workspace's visible tab,
+    /// or the Review grid). When no pane owns the
     /// focus because another overlay does, the new entry inherits that
     /// overlay's origin, so each open overlay carries the pane the user was
     /// in before the first of them opened.
@@ -138,7 +142,8 @@ impl PaneFlowApp {
         let open = self.open_overlay_kinds();
         self.overlay_origins.retain_open(|k| open.contains(&k));
         let pane = self
-            .pane_owning_focus(window, cx)
+            .focus_return_root()
+            .and_then(|root| leaf_owning_focus(root, window, cx))
             .map(|pane| pane.downgrade())
             .or_else(|| self.overlay_origins.innermost());
         self.overlay_origins.remember(kind, pane);
@@ -152,8 +157,7 @@ impl PaneFlowApp {
     }
 
     /// Drop `kind`'s origin without touching the focus: the close is landing
-    /// the focus somewhere else on purpose (a teleport, a freshly split pane,
-    /// a command palette fold).
+    /// the focus somewhere else on purpose (a teleport, a freshly split pane).
     pub(crate) fn forget_overlay_origin(&mut self, kind: OverlayKind) {
         let _ = self.overlay_origins.take(kind);
     }
@@ -171,14 +175,13 @@ impl PaneFlowApp {
     pub(crate) fn take_live_overlay_origin(&mut self, kind: OverlayKind) -> Option<Entity<Pane>> {
         self.overlay_origins
             .take(kind)
-            .filter(|pane| self.command_palette_pane_is_live(pane))
+            .filter(|pane| self.pane_is_in_focus_return_tree(pane))
     }
 
-    /// The outermost origin among the overlays that are open: what the
-    /// command palette returns a dispatched action to after folding them.
-    pub(crate) fn outermost_open_overlay_origin(&self) -> Option<Entity<Pane>> {
-        self.overlay_origins
-            .outermost(|kind| self.overlay_is_open(kind))
+    /// Whether `pane` is still a leaf of the tree the focus would return to.
+    fn pane_is_in_focus_return_tree(&self, pane: &Entity<Pane>) -> bool {
+        self.focus_return_root()
+            .is_some_and(|root| root.contains_leaf(pane))
     }
 
     /// Close path for an overlay closing on its own (Escape, an outside
@@ -256,8 +259,7 @@ mod tests {
 
     /// Issue #584 case 1: an outer overlay from pane B, then Pane Overview
     /// over it, then Escape on Pane Overview. The inner close takes only its
-    /// own entry; the outer overlay's origin, and the palette's outermost
-    /// read, still name B.
+    /// own entry; the outer overlay's origin still names B.
     #[gpui::test]
     fn an_inner_close_leaves_the_outer_origin_in_place(cx: &mut gpui::TestAppContext) {
         let cx = cx.add_empty_window();
@@ -280,30 +282,26 @@ mod tests {
             vec![OverlayKind::PanePalette],
             "Escape on Pane Overview must not clear the pane palette's origin"
         );
-        assert_eq!(
-            origins.outermost(|_| true),
-            Some(b.clone()),
-            "a palette command after that still targets pane B"
-        );
         assert_eq!(origins.take(OverlayKind::PanePalette), Some(b));
         assert!(origins.kinds().is_empty());
         assert_eq!(origins.take(OverlayKind::PanePalette), None);
     }
 
     #[gpui::test]
-    fn the_outermost_origin_is_the_pane_before_any_overlay(cx: &mut gpui::TestAppContext) {
+    fn origins_keep_their_order_and_drop_closed_overlays(cx: &mut gpui::TestAppContext) {
         let cx = cx.add_empty_window();
         let a = make_pane(cx);
         let b = make_pane(cx);
         let mut origins = OverlayOrigins::default();
         origins.remember(OverlayKind::PaneOverview, Some(b.downgrade()));
         origins.remember(OverlayKind::PanePalette, Some(a.downgrade()));
-        assert_eq!(origins.outermost(|_| true), Some(b.clone()));
-        // Only open overlays count: a stale bottom entry never wins.
         assert_eq!(
-            origins.outermost(|kind| kind == OverlayKind::PanePalette),
-            Some(a.clone())
+            origins.kinds(),
+            vec![OverlayKind::PaneOverview, OverlayKind::PanePalette],
+            "origins are kept in the order the overlays opened"
         );
+        assert_eq!(origins.innermost(), Some(a.downgrade()));
+        // Only open overlays count: a stale bottom entry is dropped.
         origins.retain_open(|kind| kind == OverlayKind::PanePalette);
         assert_eq!(origins.kinds(), vec![OverlayKind::PanePalette]);
         // Re-opening replaces the kind's own entry and nothing else.
@@ -327,6 +325,76 @@ mod tests {
         // The only strong handle is out of scope; the weak one is dead.
         assert_eq!(origins.take(OverlayKind::PaneOverview), None);
         assert!(origins.kinds().is_empty());
+    }
+
+    /// Renders each pane's focus handle, with a child handle inside pane B's,
+    /// so `contains_focused` has a frame to read.
+    struct FocusHarness {
+        panes: Option<(gpui::FocusHandle, gpui::FocusHandle)>,
+        inside_b: gpui::FocusHandle,
+    }
+
+    impl gpui::Render for FocusHarness {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{InteractiveElement as _, ParentElement as _, div};
+            let inside_b = self.inside_b.clone();
+            let mut root = div();
+            if let Some((a, b)) = &self.panes {
+                root = root
+                    .child(div().track_focus(a))
+                    .child(div().track_focus(b).child(div().track_focus(&inside_b)));
+            }
+            root
+        }
+    }
+
+    /// The pane an overlay records as its origin is the one that *contains*
+    /// the focus, not only the one whose own handle holds it: a find bar or
+    /// other child element of pane B focused means B is the user's pane.
+    #[gpui::test]
+    fn the_pane_containing_the_focus_owns_it(cx: &mut gpui::TestAppContext) {
+        let (harness, cx) = cx.add_window_view(|_, cx| FocusHarness {
+            panes: None,
+            inside_b: cx.focus_handle(),
+        });
+        let a = make_pane(cx);
+        let b = make_pane(cx);
+        let root = LayoutTree::from_panes_equal(
+            crate::layout::SplitDirection::Vertical,
+            vec![a.clone(), b.clone()],
+        )
+        .expect("two panes make a container");
+        harness.update(cx, |harness, cx| {
+            harness.panes = Some((a.read(cx).focus_handle(cx), b.read(cx).focus_handle(cx)));
+            cx.notify();
+        });
+
+        cx.update(|window, cx| {
+            let inside_b = harness.read(cx).inside_b.clone();
+            window.focus(&inside_b, cx);
+            window.draw(cx).clear(cx);
+            assert!(
+                !b.read(cx).focus_handle(cx).is_focused(window),
+                "the focus sits on a child of B, not on B's own handle"
+            );
+            assert_eq!(leaf_owning_focus(&root, window, cx), Some(b.clone()));
+
+            window.focus(&a.read(cx).focus_handle(cx), cx);
+            window.draw(cx).clear(cx);
+            assert_eq!(leaf_owning_focus(&root, window, cx), Some(a.clone()));
+
+            window.blur();
+            window.draw(cx).clear(cx);
+            assert_eq!(
+                leaf_owning_focus(&root, window, cx),
+                None,
+                "no pane owns the focus when nothing is focused"
+            );
+        });
     }
 
     /// The focus step: the origin gets the focus while it is a leaf of the
@@ -364,7 +432,8 @@ mod tests {
 
     /// The wiring: every overlay records its origin under its own kind
     /// before taking the focus, and its Escape path restores through that
-    /// kind. Source-text assertions, the #523 precedent.
+    /// kind. Source-text assertions, because `PaneFlowApp` cannot be built in
+    /// a unit test.
     #[test]
     fn every_overlay_remembers_and_restores_its_own_origin() {
         // Split at the trailing test module, not the first `#[cfg(test)]`:
