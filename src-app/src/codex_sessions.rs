@@ -118,16 +118,16 @@ pub fn read_sessions_for_cwd(cwd: &str) -> Vec<SessionMeta> {
 pub fn read_sessions_for_cwd_with_omitted(cwd: &str) -> (Vec<SessionMeta>, usize) {
     read_sessions_for_cwd_inner(
         cwd,
-        Some(crate::agent_sessions::SIDEBAR_SESSION_RETAINED_PER_SOURCE),
+        crate::agent_sessions::SIDEBAR_SESSION_RETAINED_PER_SOURCE,
     )
 }
 
-fn read_sessions_for_cwd_inner(cwd: &str, cap: Option<usize>) -> (Vec<SessionMeta>, usize) {
+fn read_sessions_for_cwd_inner(cwd: &str, cap: usize) -> (Vec<SessionMeta>, usize) {
     let Some(root) = sessions_root() else {
         return (Vec::new(), 0);
     };
 
-    let cache_mtime = cap.is_some().then(|| jsonl_tree_mtime(&root)).flatten();
+    let cache_mtime = jsonl_tree_mtime(&root);
     if let Some(cache_mtime) = cache_mtime
         && let Some(cached) =
             crate::agent_sessions::cache::lookup_with_mtime(SessionAgent::Codex, cwd, cache_mtime)
@@ -135,31 +135,15 @@ fn read_sessions_for_cwd_inner(cwd: &str, cap: Option<usize>) -> (Vec<SessionMet
         return cached;
     }
 
-    let result = match cap {
-        Some(cap) => {
-            let mut collector = crate::agent_sessions::RecentSessionCollector::new(cap);
-            walk_jsonl_files(&root, &mut |path| {
-                if let Some(meta) = read_session_meta_inner(path, Some(cwd)) {
-                    collector.push(meta);
-                }
-            });
-            collector.finish()
+    let mut collector = crate::agent_sessions::RecentSessionCollector::new(cap);
+    walk_jsonl_files(&root, &mut |path| {
+        if let Some(meta) = read_session_meta_inner(path, Some(cwd)) {
+            collector.push(meta);
         }
-        None => {
-            let mut all = Vec::new();
-            walk_jsonl_files(&root, &mut |path| {
-                if let Some(meta) = read_session_meta_inner(path, Some(cwd)) {
-                    all.push(meta);
-                }
-            });
-            all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-            (all, 0)
-        }
-    };
+    });
+    let result = collector.finish();
 
-    if cap.is_some()
-        && let Some(cache_mtime) = cache_mtime
-    {
+    if let Some(cache_mtime) = cache_mtime {
         // #718: test seam. A write here is invisible to the scan above;
         // the cache key must stay the pre-scan fingerprint.
         #[cfg(test)]

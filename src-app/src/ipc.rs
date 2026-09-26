@@ -93,17 +93,11 @@ use serde_json::{Value, json};
 pub struct IpcRequest {
     pub method: String,
     pub params: Value,
-    pub _id: Value,
     pub response_tx: mpsc::Sender<Value>,
     /// Single CAS lifecycle (issue #38): `IPC_DISPATCH_QUEUED` → `STARTED`
     /// (GPUI, just before `handle_ipc`) or `CANCELLED` (socket 5 s timeout).
     /// Exactly one transition wins, so a timed-out mutation cannot still run after `-32002`.
     pub dispatch: Arc<AtomicU8>,
-    /// EP-003 US-010 (agent-control-plane): the socket peer's PID, captured
-    /// from `LOCAL_PEERCRED` once per connection (None when the kernel does
-    /// not expose a peer PID). Used only to trace writes
-    /// granted by AI free-access mode; never an authorization input.
-    pub caller_pid: Option<i64>,
 }
 
 /// Dispatch lifecycle for a GPUI-bound IPC request (issue #38).
@@ -808,20 +802,6 @@ fn reject_overloaded(mut stream: Stream) {
     write_overloaded_error(&mut stream, "server busy: too many concurrent connections");
 }
 
-/// EP-003 US-010 (agent-control-plane): the connected peer's PID, for tracing
-/// writes granted by AI free-access mode. On macOS `LOCAL_PEERCRED` carries
-/// no pid, so this returns `None` here. Best-effort and advisory only -
-/// never an authorization input (the peer-UID check in `auth::check_peer`
-/// is the security boundary).
-#[cfg(unix)]
-fn peer_pid(stream: &Stream) -> Option<i64> {
-    stream
-        .peer_creds()
-        .ok()
-        .and_then(|c| c.pid())
-        .map(|p| p as i64)
-}
-
 fn handle_connection(stream: Stream, request_tx: mpsc::SyncSender<IpcRequest>) {
     // `Stream::try_clone` is provided by `interprocess::TryClone`. One
     // handle reads, the other writes, so request/response flow does not
@@ -876,11 +856,6 @@ fn handle_connection(stream: Stream, request_tx: mpsc::SyncSender<IpcRequest>) {
             }
         }
     }
-
-    // EP-003 US-010: capture the peer PID once, while `stream` is still the
-    // bare socket (peer_creds is unreachable through the BufReader wrapper
-    // below). Threaded into each IpcRequest for the free-access write trace.
-    let caller_pid = peer_pid(&stream);
 
     // US-022 / EP-004: drop a peer that opens a connection and then goes mute,
     // so it can't pin this handler thread forever. Unix sockets use the OS
@@ -977,13 +952,7 @@ fn handle_connection(stream: Stream, request_tx: mpsc::SyncSender<IpcRequest>) {
                                     "protocol": "jsonrpc-2.0"
                                 }, "id": response_id})
                             }
-                            _ => dispatch_to_gpui(
-                                &request_tx,
-                                method,
-                                params,
-                                response_id,
-                                caller_pid,
-                            ),
+                            _ => dispatch_to_gpui(&request_tx, method, params, response_id),
                         }
                     }
                     None => {
@@ -1042,7 +1011,6 @@ fn dispatch_to_gpui(
     method: String,
     params: Value,
     id: Value,
-    caller_pid: Option<i64>,
 ) -> Value {
     if !supported_methods().contains(&method.as_str()) {
         return json!({"jsonrpc": "2.0", "error": {"code": -32601, "message": format!("Method not found: {method}")}, "id": id});
@@ -1052,10 +1020,8 @@ fn dispatch_to_gpui(
     let ipc_req = IpcRequest {
         method: method.clone(),
         params,
-        _id: id.clone(),
         response_tx: resp_tx,
         dispatch: Arc::clone(&dispatch),
-        caller_pid,
     };
 
     match request_tx.try_send(ipc_req) {
@@ -1607,10 +1573,8 @@ mod dispatch_tests {
         IpcRequest {
             method: "surface.read".to_string(),
             params: json!({}),
-            _id: json!(1),
             response_tx,
             dispatch: Arc::new(AtomicU8::new(IPC_DISPATCH_QUEUED)),
-            caller_pid: None,
         }
     }
 
@@ -1624,7 +1588,6 @@ mod dispatch_tests {
             "surface.read".to_string(),
             json!({ "surface_id": 1 }),
             json!("req-overload"),
-            None,
         );
 
         assert_eq!(resp["error"]["code"], -32000);
@@ -1642,7 +1605,6 @@ mod dispatch_tests {
             "surface.read".to_string(),
             json!({ "surface_id": 1 }),
             json!("req-closed"),
-            None,
         );
 
         assert_eq!(resp["error"]["code"], -32000);
@@ -1852,7 +1814,7 @@ mod removed_method_tests {
         ] {
             let method = format!("{namespace}.{verb}");
             assert!(!supported_methods().contains(&method.as_str()));
-            let response = dispatch_to_gpui(&tx, method, json!({}), json!(42), None);
+            let response = dispatch_to_gpui(&tx, method, json!({}), json!(42));
             assert_eq!(response["error"]["code"], -32601);
             assert_eq!(response["id"], 42);
             assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));

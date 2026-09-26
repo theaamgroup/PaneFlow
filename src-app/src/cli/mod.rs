@@ -249,26 +249,6 @@ pub(super) fn print_json(value: &Value) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Reject a server reply that carries a *legacy* application error.
-///
-/// A handful of server handlers signal cap/validation failures (split at
-/// `send_text` over the 64 KiB limit) with
-/// an ad-hoc `{"error": "<message>"}` payload that does NOT use the
-/// `_jsonrpc_error` sentinel. The dispatcher therefore promotes them under
-/// `result`, so the transport's `parse_response` returns `Ok` and the command
-/// would otherwise print the error and exit 0 - breaking the scriptability
-/// contract (US-005 AC4 "code non-zéro", US-006 AC3). Calling this on every
-/// `result` before printing maps that legacy shape to a non-zero `CliError`.
-///
-/// No `send` / `key` success envelope carries a top-level `error` string
-/// (`{sent,…}`), so the check can't false-positive on real data.
-pub(super) fn reject_legacy_error(result: Value) -> Result<Value, CliError> {
-    if let Some(message) = result.get("error").and_then(Value::as_str) {
-        return Err(CliError::runtime(message.to_string()));
-    }
-    Ok(result)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

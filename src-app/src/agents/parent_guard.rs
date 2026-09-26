@@ -80,13 +80,60 @@ pub struct PtyGuardHandle {
     _stdin: ChildStdin,
 }
 
+/// The one PID liveness probe: `kill(pid, 0)` with `ESRCH` semantics, so a
+/// process we may not signal (`EPERM`) still counts as alive. Pid 0 and pids
+/// above `i32::MAX` are dead: `kill` would read them as "this process group"
+/// or a negative group id, not as the process the caller named.
+///
+/// A probe, not a policy: the stale-session sweep (`pid_matches`) and the shim
+/// lease prune (`lock_holder_is_live`) each decide what an unpinnable live pid
+/// means, and destructive signaling goes through [`may_signal_group`].
+pub(crate) fn pid_is_alive(pid: u32) -> bool {
+    let Some(pid) = probe_pid(pid) else {
+        return false;
+    };
+    // SAFETY: `kill` with sig=0 performs error checking only and delivers no
+    // signal. It takes the pid by value and has no memory requirements.
+    if unsafe { libc::kill(pid, 0) } == -1 {
+        return std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+    }
+    true
+}
+
+/// The one PID start-time probe: the identity pin that session `proc_start`,
+/// terminal `child_proc_start` and the process-group member pins record and
+/// compare for equality. `EPERM` (SIP-protected targets), a dead-pid race,
+/// pid 0 and pids above `i32::MAX` all read `None`; read-only callers apply
+/// their own conservative rule to that, and [`may_signal_group`] refuses it.
+#[cfg(target_os = "macos")]
+pub(crate) fn pid_start_time(pid: u32) -> Option<u64> {
+    use libproc::libproc::bsd_info::BSDInfo;
+    use libproc::libproc::proc_pid::pidinfo;
+    let info = pidinfo::<BSDInfo>(probe_pid(pid)?, 0).ok()?;
+    Some(bsd_info_start_time(&info))
+}
+
+/// Encode a process's start time (`pbi_start_tvsec`/`pbi_start_tvusec`) as
+/// microseconds. Opaque: only ever compared for equality.
+#[cfg(target_os = "macos")]
+fn bsd_info_start_time(info: &libproc::libproc::bsd_info::BSDInfo) -> u64 {
+    info.pbi_start_tvsec
+        .wrapping_mul(1_000_000)
+        .wrapping_add(info.pbi_start_tvusec)
+}
+
+/// `pid` as a probe target: 1..=`i32::MAX`, else `None`.
+fn probe_pid(pid: u32) -> Option<i32> {
+    i32::try_from(pid).ok().filter(|&pid| pid > 0)
+}
+
 /// Whether teardown may signal process group `-pid`.
 ///
 /// `getpgid_is_leader` is the live `getpgid(pid) == pid` result (false on
-/// ESRCH / a recycled pid that is not a session leader). Start times use
-/// the same `pbi_start_tvsec`/`pbi_start_tvusec` encoding as session
-/// `proc_start` / `child_proc_start`. Unlike conservative UI liveness, a
-/// destructive signal requires both probes to exist and match exactly.
+/// ESRCH / a recycled pid that is not a session leader). Start times come
+/// from [`pid_start_time`], the same probe that pins session `proc_start` /
+/// `child_proc_start`. Unlike conservative UI liveness, a destructive signal
+/// requires both probes to exist and match exactly.
 pub(crate) fn may_signal_group(
     pid: i32,
     pinned_start: Option<u64>,
@@ -134,7 +181,7 @@ fn pinned_process_group_is_current(group: &PinnedProcessGroup) -> bool {
         // moved, or recycled member fails one of these checks.
         let same_group_and_session =
             unsafe { libc::getpgid(pid_i32) == pgid && libc::getsid(pid_i32) == session_id };
-        same_group_and_session && current_process_start(pid) == Some(pinned_start)
+        same_group_and_session && pid_start_time(pid) == Some(pinned_start)
     })
 }
 
@@ -169,10 +216,7 @@ pub(crate) fn pin_process_group(pgid: u32, session_id: u32) -> Option<PinnedProc
         if current_session != session_id as i32 {
             return None;
         }
-        let start = info
-            .pbi_start_tvsec
-            .wrapping_mul(1_000_000)
-            .wrapping_add(info.pbi_start_tvusec);
+        let start = bsd_info_start_time(&info);
         if members.len() == MAX_PINNED_GROUP_MEMBERS {
             return None;
         }
@@ -269,10 +313,7 @@ fn pin_process_groups_in_session(session_id: u32) -> Option<Vec<PinnedProcessGro
         if !groups.contains_key(&pgid) && groups.len() == MAX_SESSION_GROUPS {
             return None;
         }
-        let start = info
-            .pbi_start_tvsec
-            .wrapping_mul(1_000_000)
-            .wrapping_add(info.pbi_start_tvusec);
+        let start = bsd_info_start_time(&info);
         groups.entry(pgid).or_default().push((pid, start));
     }
 
@@ -367,7 +408,7 @@ pub(crate) fn pin_leader_process_group(
         || !may_signal_group(
             pid,
             Some(pinned_start),
-            current_process_start(pgid),
+            pid_start_time(pgid),
             is_process_group_leader(pid),
         )
     {
@@ -586,7 +627,7 @@ pub fn spawn_pty_guard(
     child_proc_start: Option<u64>,
     pty_master_fd: i32,
 ) -> Option<PtyGuardHandle> {
-    let pinned_start = child_proc_start.or_else(|| current_process_start(child_pgid));
+    let pinned_start = child_proc_start.or_else(|| pid_start_time(child_pgid));
     let group = pin_session_process_group(child_pgid, pinned_start)?;
     spawn_process_group_guard_with_mode(group, Some(pty_master_fd))
 }
@@ -678,11 +719,6 @@ fn spawn_process_group_guard_with_mode(
 fn parent_still_attached(parent_pid: u32) -> bool {
     // SAFETY: getppid has no preconditions.
     unsafe { libc::getppid() as u32 == parent_pid }
-}
-
-#[cfg(unix)]
-fn current_process_start(pid: u32) -> Option<u64> {
-    crate::app::event_handlers::pid_start_time(pid)
 }
 
 #[cfg(unix)]
@@ -1138,7 +1174,7 @@ mod tests {
             .expect("read readiness line");
         assert_eq!(ready.trim_end(), "ready");
 
-        let pinned_start = current_process_start(pgid).expect("pin child start time");
+        let pinned_start = pid_start_time(pgid).expect("pin child start time");
         let group =
             pin_leader_process_group(pgid, Some(pinned_start)).expect("pin child process group");
         shutdown_guard_targets(&group, &PtyGuardMode::Frozen, &[]);
@@ -1209,7 +1245,7 @@ mod tests {
             .expect("read readiness line");
         assert_eq!(ready.trim_end(), "ready");
 
-        let pinned_start = current_process_start(pgid).expect("pin shell start time");
+        let pinned_start = pid_start_time(pgid).expect("pin shell start time");
         let group = pin_session_process_group(pgid, Some(pinned_start))
             .expect("pin shell and same-PGID descendant");
         assert!(
@@ -1282,7 +1318,7 @@ mod tests {
 
         // This is exactly the immutable identity the production guard receives
         // at PTY spawn: the later descendant does not exist yet.
-        let shell_start = current_process_start(shell_pid).expect("shell start pin");
+        let shell_start = pid_start_time(shell_pid).expect("shell start pin");
         let origin = pin_session_process_group(shell_pid, Some(shell_start))
             .expect("initial shell-only identity");
         assert_eq!(origin.members, vec![(shell_pid, shell_start)]);
@@ -1469,7 +1505,7 @@ mod tests {
             })
             .expect("parse stopped background PGID");
 
-        let shell_start = current_process_start(shell_pid).expect("shell start pin");
+        let shell_start = pid_start_time(shell_pid).expect("shell start pin");
         let origin = pin_session_process_group(shell_pid, Some(shell_start))
             .expect("pin hard-death shell identity");
         let foreground = pin_foreground_process_group(master.as_raw_fd(), shell_pid)
@@ -1571,6 +1607,21 @@ mod tests {
             !may_signal_group(42, None, None, true),
             "two missing probes are not proof of process-group identity"
         );
+    }
+
+    /// `kill(0, 0)` probes the caller's own process group and a pid above
+    /// `i32::MAX` wraps negative, so neither may reach the syscalls.
+    #[test]
+    fn pid_probes_reject_pid_zero_and_pids_above_i32_max() {
+        for pid in [0, i32::MAX as u32 + 1, u32::MAX] {
+            assert!(!pid_is_alive(pid), "pid {pid} must read as dead");
+            assert_eq!(pid_start_time(pid), None, "pid {pid} has no start pin");
+        }
+        // Control: both probes answer for a real process, so the refusals
+        // above are the range check, not a probe that never succeeds.
+        let own = std::process::id();
+        assert!(pid_is_alive(own));
+        assert!(pid_start_time(own).is_some());
     }
 
     // Hardcoded independently of `INHERITED_AGENT_SESSION_ENV` so shrinking

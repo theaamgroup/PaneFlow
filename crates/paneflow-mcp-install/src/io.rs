@@ -1,6 +1,7 @@
 //! Safe-write primitives (EP-002 US-006).
 //!
-//! Every agent-config writer goes through [`write_if_changed`], which is:
+//! Every agent-config writer goes through `write_if_changed_unlocked` under
+//! the config lock ([`with_config_lock`]), which is:
 //! - **idempotent** - a write only happens when the bytes actually differ,
 //!   so a re-run of `paneflow mcp install` produces zero disk churn (no
 //!   mtime bump, no backup spam);
@@ -72,18 +73,21 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// [`write_if_changed_unlocked`] under the config lock for `path`. Test-only:
+/// production writers take the lock themselves ([`with_config_lock`]) and
+/// call [`write_if_changed_unlocked`] inside it.
+#[cfg(test)]
+pub(crate) fn write_if_changed(path: &Path, contents: &[u8]) -> Result<bool> {
+    with_config_lock(path, || write_if_changed_unlocked(path, contents))
+}
+
 /// Backup-then-atomic-write `contents` to `path`, **only if** the bytes
-/// differ from what is already on disk.
+/// differ from what is already on disk. Assumes the caller already holds
+/// [`ConfigLock`] for `path`.
 ///
 /// Returns `true` when a write happened, `false` when the on-disk bytes
 /// already matched (a no-op - no backup, no rename, no mtime change). This
 /// is the idempotency knob every writer relies on.
-pub fn write_if_changed(path: &Path, contents: &[u8]) -> Result<bool> {
-    with_config_lock(path, || write_if_changed_unlocked(path, contents))
-}
-
-/// Same as [`write_if_changed`], but assumes the caller already holds
-/// [`ConfigLock`] for `path`.
 pub(crate) fn write_if_changed_unlocked(path: &Path, contents: &[u8]) -> Result<bool> {
     // Only a missing file may proceed to the write; any other read failure
     // (permission, I/O, not a regular file) must not be mistaken for "the
