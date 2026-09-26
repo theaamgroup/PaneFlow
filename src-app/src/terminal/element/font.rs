@@ -1401,6 +1401,7 @@ mod tests {
 
     #[test]
     fn unsupported_font_family_falls_back_on_every_call_and_warns_once() {
+        crate::diff::capture_logs();
         let family = "PaneFlow 867 Uninstalled Family";
         let installed = HashSet::from(["Menlo".to_string()]);
         for _ in 0..3 {
@@ -1409,6 +1410,12 @@ mod tests {
                 EMBEDDED_MONO_FAMILY,
             );
         }
+        // Three renders, one emitted warning. The needle names this test's
+        // family, so warnings from parallel tests are not counted.
+        assert_eq!(
+            crate::diff::captured_logs_count(&format!("font_family '{family}'")),
+            1,
+        );
         // The first resolve recorded the value, so later renders stay silent.
         assert!(!first_font_warning(FONT_FAMILY_WARNING, family));
     }
