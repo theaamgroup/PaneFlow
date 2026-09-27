@@ -269,7 +269,9 @@ impl PaneFlowApp {
         // poll: a row that names a branch only after half a minute reads as
         // broken.
         if let Some(path) = worktree {
-            Self::spawn_initial_git_stats(ws_id, path.to_string_lossy().into_owned(), cx);
+            if !checkout_probes_suppressed() {
+                Self::spawn_initial_git_stats(ws_id, path.to_string_lossy().into_owned(), cx);
+            }
         }
         // The git surfaces follow the tab's checkout: Diff mode is rebuilt
         // when the tab is the one on screen - switching tab already does
@@ -466,7 +468,9 @@ impl PaneFlowApp {
         if self.worktree_states.binding_generation(tab_id) != binding_at_start {
             // The user already chose another binding. Refresh what the picker
             // offers; the new directory is still there. Do not touch the tab.
-            self.spawn_worktree_listing(ws_idx, cx);
+            if !checkout_probes_suppressed() {
+                self.spawn_worktree_listing(ws_idx, cx);
+            }
             return;
         }
         if path.as_path() == repo_root {
@@ -476,7 +480,9 @@ impl PaneFlowApp {
             // the directory git resolved the branch to still exists.
             self.bind_tab_to_checkout(ws_idx, tab_idx, path, cx);
         }
-        self.spawn_worktree_listing(ws_idx, cx);
+        if !checkout_probes_suppressed() {
+            self.spawn_worktree_listing(ws_idx, cx);
+        }
     }
 
     /// Locate a tab by the ids that survive an await, unlike its indices.
@@ -795,9 +801,47 @@ fn remove_validated_checkout(
     Ok(())
 }
 
+// A probe still running on smol's pool when a test returns is dropped off
+// the GPUI test thread, and the scheduler aborts the suite.
+#[cfg(test)]
+thread_local! {
+    static SUPPRESS_CHECKOUT_PROBES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn checkout_probes_suppressed() -> bool {
+    #[cfg(test)]
+    {
+        SUPPRESS_CHECKOUT_PROBES.with(|flag| flag.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+struct SuppressCheckoutProbes;
+
+#[cfg(test)]
+impl SuppressCheckoutProbes {
+    fn arm() -> Self {
+        SUPPRESS_CHECKOUT_PROBES.with(|flag| flag.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SuppressCheckoutProbes {
+    fn drop(&mut self) {
+        SUPPRESS_CHECKOUT_PROBES.with(|flag| flag.set(false));
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CheckoutGit, WorktreeStates, removal_refusal, remove_checkout};
+    use super::{
+        CheckoutGit, SuppressCheckoutProbes, WorktreeStates, removal_refusal, remove_checkout,
+    };
     use crate::workspace::GitDiffStats;
     use gpui::AppContext;
     use std::path::{Path, PathBuf};
@@ -1157,6 +1201,9 @@ mod tests {
         let newer = tempfile::tempdir().expect("newer checkout");
         let late = tempfile::tempdir().expect("late checkout");
         let root = tempfile::tempdir().expect("workspace root");
+        // Binding starts git probes on smol threads. The test scheduler
+        // panics if one of those tasks is still running when this returns.
+        let _probes = SuppressCheckoutProbes::arm();
         let window = cx.add_empty_window();
         let app = window.new(blank_paneflow_app);
         app.update(window, |app, cx| {
