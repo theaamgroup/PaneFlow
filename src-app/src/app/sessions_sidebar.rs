@@ -118,10 +118,10 @@ impl PaneFlowApp {
         if let Some(cwd) = cwd {
             // Parallel scans. Each supported agent owns a documented native
             // contract (JSONL store or CLI list command) and writes to its own
-            // Vec on the main thread. The sidebar may be closed or re-targeted
-            // against a different cwd before any scan finishes, so stale
-            // results are dropped by checking the target cwd and scan
-            // generation before applying.
+            // Vec on the main thread. A scan already running for the same
+            // agent and directory is reused; a different directory still
+            // starts. The sidebar may be closed or re-targeted before a scan
+            // finishes, so a result from an older generation is dropped.
             //
             // Scans for agents the user has hidden in Settings → AI Agent are
             // skipped: with no UI to surface them the disk read would just be
@@ -142,13 +142,19 @@ impl PaneFlowApp {
     ) {
         let idx = agent_index(agent);
         self.agent_sessions.sessions_scanning[idx] = true;
+        // Issue #907: a workspace switch re-enters this path while a list
+        // command for the same directory is still inside its deadline. Reuse
+        // that scan. Its stored generation moves forward with this open, so
+        // the result still applies when this generation is current, and a
+        // later generation (another directory, or a close) still discards it.
+        if !try_begin_sessions_scan(agent, &cwd, generation) {
+            return;
+        }
         cx.spawn(async move |this, cx| {
             let scan_cwd = cwd.clone();
             let started = std::time::Instant::now();
-            let (sessions, omitted) = smol::unblock(move || {
-                crate::agent_sessions::read_sessions_for_cwd_with_omitted(agent, &scan_cwd)
-            })
-            .await;
+            let (sessions, omitted, generation) =
+                smol::unblock(move || complete_sessions_scan(agent, &scan_cwd)).await;
             let elapsed = started.elapsed();
             let retained = sessions.len();
             log::debug!(
@@ -1078,6 +1084,226 @@ impl PaneFlowApp {
     }
 }
 
+/// One in-flight sidebar scan per `(agent, cwd)`. The value is the generation
+/// a newer open for that same directory wants the result applied under.
+type InFlightSessionScans = std::collections::HashMap<(SessionAgent, String), u64>;
+
+static IN_FLIGHT_SESSION_SCANS: std::sync::LazyLock<std::sync::Mutex<InFlightSessionScans>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(InFlightSessionScans::new()));
+
+type InFlightSessionScanLock = std::sync::MutexGuard<'static, InFlightSessionScans>;
+
+fn in_flight_session_scans() -> InFlightSessionScanLock {
+    IN_FLIGHT_SESSION_SCANS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn sessions_scan_key(agent: SessionAgent, cwd: &str) -> (SessionAgent, String) {
+    (agent, cwd.to_string())
+}
+
+/// Claim `generation` for `(agent, cwd)`. Returns `false` when a scan is
+/// already running: that scan adopts `generation` and the caller must not
+/// start another body.
+fn try_begin_sessions_scan(agent: SessionAgent, cwd: &str, generation: u64) -> bool {
+    let mut scans = in_flight_session_scans();
+    let key = sessions_scan_key(agent, cwd);
+    if let Some(current) = scans.get_mut(&key) {
+        *current = generation;
+        return false;
+    }
+    scans.insert(key, generation);
+    true
+}
+
+/// Remove the in-flight claim and return the generation it should apply as.
+fn finish_sessions_scan(agent: SessionAgent, cwd: &str) -> u64 {
+    in_flight_session_scans()
+        .remove(&sessions_scan_key(agent, cwd))
+        .unwrap_or(0)
+}
+
+/// Releases the in-flight claim if the body panics before `finish`.
+struct SessionsScanFinish {
+    agent: SessionAgent,
+    cwd: String,
+    finished: bool,
+}
+
+impl SessionsScanFinish {
+    fn finish(mut self) -> u64 {
+        self.finished = true;
+        finish_sessions_scan(self.agent, &self.cwd)
+    }
+}
+
+impl Drop for SessionsScanFinish {
+    fn drop(&mut self) {
+        if !self.finished {
+            finish_sessions_scan(self.agent, &self.cwd);
+        }
+    }
+}
+
+fn complete_sessions_scan(agent: SessionAgent, cwd: &str) -> (Vec<SessionMeta>, usize, u64) {
+    let finish = SessionsScanFinish {
+        agent,
+        cwd: cwd.to_string(),
+        finished: false,
+    };
+    let (sessions, omitted) = sessions_scan_body(agent, cwd);
+    (sessions, omitted, finish.finish())
+}
+
+fn sessions_scan_body(agent: SessionAgent, cwd: &str) -> (Vec<SessionMeta>, usize) {
+    #[cfg(test)]
+    if let Some(gate) = sessions_scan_test_gate(agent, cwd) {
+        return gate.enter();
+    }
+    crate::agent_sessions::read_sessions_for_cwd_with_omitted(agent, cwd)
+}
+
+/// Synchronous claim-and-run used by the in-flight reuse test. `None` means
+/// an in-flight scan for this agent and directory was reused.
+#[cfg(test)]
+fn run_sessions_scan(
+    agent: SessionAgent,
+    cwd: &str,
+    generation: u64,
+) -> Option<(Vec<SessionMeta>, usize, u64)> {
+    if !try_begin_sessions_scan(agent, cwd, generation) {
+        return None;
+    }
+    Some(complete_sessions_scan(agent, cwd))
+}
+
+/// Test stand-in for a vendor list command. The first body can block until
+/// [`SessionsScanGate::release`]; later bodies only count, so a missing reuse
+/// check fails the assertion instead of deadlocking the test.
+#[cfg(test)]
+struct SessionsScanGate {
+    block_first: bool,
+    entered: std::sync::atomic::AtomicUsize,
+    started: std::sync::Mutex<bool>,
+    started_cv: std::sync::Condvar,
+    release: std::sync::Mutex<bool>,
+    release_cv: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl SessionsScanGate {
+    fn new(block_first: bool) -> Self {
+        Self {
+            block_first,
+            entered: std::sync::atomic::AtomicUsize::new(0),
+            started: std::sync::Mutex::new(false),
+            started_cv: std::sync::Condvar::new(),
+            release: std::sync::Mutex::new(false),
+            release_cv: std::sync::Condvar::new(),
+        }
+    }
+
+    fn enter(&self) -> (Vec<SessionMeta>, usize) {
+        let n = self
+            .entered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if self.block_first && n == 1 {
+            {
+                let mut started = self
+                    .started
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *started = true;
+                self.started_cv.notify_all();
+            }
+            let release = self
+                .release
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _release = self
+                .release_cv
+                .wait_while(release, |release| !*release)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        (Vec::new(), 0)
+    }
+
+    fn wait_until_entered(&self) {
+        let started = self
+            .started
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (started, timeout) = self
+            .started_cv
+            .wait_timeout_while(started, std::time::Duration::from_secs(5), |started| {
+                !*started
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            *started && !timeout.timed_out(),
+            "the in-flight scan body did not start"
+        );
+    }
+
+    fn release(&self) {
+        let mut release = self
+            .release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *release = true;
+        self.release_cv.notify_all();
+    }
+
+    fn body_count(&self) -> usize {
+        self.entered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+static SESSIONS_SCAN_GATES: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<(SessionAgent, String), std::sync::Arc<SessionsScanGate>>,
+    >,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+fn sessions_scan_gates() -> std::sync::MutexGuard<
+    'static,
+    std::collections::HashMap<(SessionAgent, String), std::sync::Arc<SessionsScanGate>>,
+> {
+    SESSIONS_SCAN_GATES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+fn sessions_scan_test_gate(
+    agent: SessionAgent,
+    cwd: &str,
+) -> Option<std::sync::Arc<SessionsScanGate>> {
+    sessions_scan_gates()
+        .get(&sessions_scan_key(agent, cwd))
+        .cloned()
+}
+
+#[cfg(test)]
+fn register_sessions_scan_gate(
+    agent: SessionAgent,
+    cwd: &str,
+    block_first: bool,
+) -> std::sync::Arc<SessionsScanGate> {
+    let gate = std::sync::Arc::new(SessionsScanGate::new(block_first));
+    sessions_scan_gates().insert(sessions_scan_key(agent, cwd), std::sync::Arc::clone(&gate));
+    gate
+}
+
+#[cfg(test)]
+fn unregister_sessions_scan_gate(agent: SessionAgent, cwd: &str) {
+    sessions_scan_gates().remove(&sessions_scan_key(agent, cwd));
+}
+
 /// Default per-group row cap before "Show more" (US-005).
 const CAP: usize = 5;
 
@@ -1573,5 +1799,101 @@ mod tests {
         assert_eq!(compact_cwd_label("/home/arthur/paneflow/"), "paneflow");
         assert_eq!(compact_cwd_label(r"C:\dev\paneflow"), "paneflow");
         assert_eq!(compact_cwd_label("/"), "/");
+    }
+
+    /// Releases the blocked scan if an assertion fails before the explicit join.
+    struct InFlightScanTest {
+        agent: SessionAgent,
+        same: String,
+        other: String,
+        gate: std::sync::Arc<SessionsScanGate>,
+        other_gate: std::sync::Arc<SessionsScanGate>,
+        worker: Option<std::thread::JoinHandle<Option<(Vec<SessionMeta>, usize, u64)>>>,
+    }
+
+    impl Drop for InFlightScanTest {
+        fn drop(&mut self) {
+            self.gate.release();
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+            unregister_sessions_scan_gate(self.agent, &self.same);
+            unregister_sessions_scan_gate(self.agent, &self.other);
+        }
+    }
+
+    /// Issue #907: two scans for one agent and directory share a single body
+    /// while the first is blocked. A different directory still runs its own.
+    #[test]
+    fn sessions_sidebar_reuses_an_in_flight_scan_for_the_same_directory() {
+        let agent = SessionAgent::Cursor;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let same = format!("/paneflow-sessions-scan-reuse/{nonce}/repo");
+        let other = format!("/paneflow-sessions-scan-reuse/{nonce}/other");
+        let gate = register_sessions_scan_gate(agent, &same, true);
+        let other_gate = register_sessions_scan_gate(agent, &other, false);
+
+        let worker_cwd = same.clone();
+        let worker = std::thread::spawn(move || run_sessions_scan(agent, &worker_cwd, 1));
+        let mut running = InFlightScanTest {
+            agent,
+            same: same.clone(),
+            other: other.clone(),
+            gate,
+            other_gate,
+            worker: Some(worker),
+        };
+        running.gate.wait_until_entered();
+
+        let second = run_sessions_scan(agent, &same, 2);
+        assert!(
+            second.is_none(),
+            "a second scan for the same directory must reuse the in-flight one"
+        );
+        assert_eq!(
+            running.gate.body_count(),
+            1,
+            "only one scan body runs for the same directory"
+        );
+
+        let third = run_sessions_scan(agent, &other, 3).map(|(_, _, generation)| generation);
+        assert_eq!(
+            third,
+            Some(3),
+            "a different directory must start its own scan"
+        );
+        assert_eq!(running.other_gate.body_count(), 1);
+        assert_eq!(
+            running.gate.body_count(),
+            1,
+            "the other directory must not run the blocked scan again"
+        );
+
+        running.gate.release();
+        let first = running
+            .worker
+            .take()
+            .expect("worker")
+            .join()
+            .expect("scan thread");
+        let generation = first
+            .map(|(_, _, generation)| generation)
+            .expect("the owner must run the scan body");
+        assert_eq!(
+            generation, 2,
+            "the in-flight scan adopts the generation of the same-directory reuse"
+        );
+        assert!(
+            should_apply_scan_result(true, Some(same.as_str()), same.as_str(), 2, generation),
+            "the sidebar shows the result while that generation is current"
+        );
+        assert!(
+            !should_apply_scan_result(true, Some(same.as_str()), same.as_str(), 3, generation),
+            "a result from an older generation is still discarded"
+        );
+        assert_eq!(running.gate.body_count(), 1);
     }
 }
