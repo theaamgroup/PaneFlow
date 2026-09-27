@@ -538,6 +538,51 @@ pub fn run_pty_guard_from_args(args: &[String]) -> i32 {
     run_pty_guard(parent_pid, group, mode, true)
 }
 
+/// Liveness poll. Parent death, shell-group death, and the control pipe stay
+/// on this cadence. It does not walk the process table.
+#[cfg(unix)]
+const GUARD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Minimum gap between full process-table walks while a long-lived guard is
+/// idle. A new session group is noticed within this bound. Shutdown does not
+/// wait for it: it re-pins the foreground group and every live session group
+/// before signaling.
+#[cfg(unix)]
+const SESSION_SNAPSHOT_REFRESH: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Throttles `ProcFilter::All` session snapshots in the long-lived PTY guard.
+///
+/// Foreground pinning stays inside the session snapshot (and runs again on
+/// shutdown). A failed snapshot keeps the previous groups but still consumes
+/// the interval, so a walk that returns nothing cannot retry on the next
+/// 500 ms tick.
+#[cfg(unix)]
+struct SessionSnapshotRefresh {
+    last_full_scan: Option<std::time::Instant>,
+}
+
+#[cfg(unix)]
+impl SessionSnapshotRefresh {
+    fn on_tick(
+        &mut self,
+        now: std::time::Instant,
+        observed_groups: &mut Vec<PinnedProcessGroup>,
+        snapshot: impl FnOnce() -> Option<Vec<PinnedProcessGroup>>,
+    ) {
+        if let Some(last) = self.last_full_scan
+            && now.saturating_duration_since(last) < SESSION_SNAPSHOT_REFRESH
+        {
+            return;
+        }
+        // Record the caller's tick time, not the time after the walk, so a
+        // virtual clock and a slow enumeration both honor the same gap.
+        self.last_full_scan = Some(now);
+        if let Some(groups) = snapshot() {
+            *observed_groups = groups;
+        }
+    }
+}
+
 #[cfg(unix)]
 fn run_pty_guard(
     parent_pid: u32,
@@ -566,14 +611,19 @@ fn run_pty_guard_with_groups(
     if monitor_control_pipe {
         set_control_pipe_nonblocking();
     }
+    // The caller enumerated immediately before this loop. That walk starts
+    // the refresh interval, so the first liveness ticks do not scan again.
+    let mut session_refresh = SessionSnapshotRefresh {
+        last_full_scan: Some(std::time::Instant::now()),
+    };
     loop {
         if !parent_still_attached(parent_pid) {
             shutdown_guard_targets(&group, &mode, &observed_groups);
             return 0;
         }
-        if let Some(groups) = observe_session_groups(&group, &mode) {
-            observed_groups = groups;
-        }
+        session_refresh.on_tick(std::time::Instant::now(), &mut observed_groups, || {
+            observe_session_groups(&group, &mode)
+        });
         if !process_group_alive(&group)
             && !guard_session_still_authenticated(&group, &mode, &observed_groups)
         {
@@ -586,7 +636,7 @@ fn run_pty_guard_with_groups(
             shutdown_guard_targets(&group, &mode, &observed_groups);
             return 0;
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(GUARD_POLL_INTERVAL);
     }
 }
 
@@ -910,6 +960,85 @@ mod tests {
         assert_eq!(
             classify_failed_session_member_query(100, None, 100),
             FailSnapshot
+        );
+    }
+
+    /// Several 500 ms liveness ticks may enumerate the process table at most
+    /// once per [`SESSION_SNAPSHOT_REFRESH`]. Scanning on every tick fails.
+    #[cfg(unix)]
+    #[test]
+    fn guard_refresh_does_not_scan_all_processes_every_tick() {
+        use std::time::Instant;
+
+        assert!(
+            SESSION_SNAPSHOT_REFRESH > GUARD_POLL_INTERVAL,
+            "full session enumeration must not run on every liveness tick"
+        );
+        assert!(
+            SESSION_SNAPSHOT_REFRESH <= std::time::Duration::from_secs(5),
+            "a new session process group must be noticed within a few seconds"
+        );
+        let polls_per_refresh =
+            u32::try_from(SESSION_SNAPSHOT_REFRESH.as_nanos() / GUARD_POLL_INTERVAL.as_nanos())
+                .expect("refresh interval spans a countable number of polls");
+        assert!(
+            polls_per_refresh >= 2,
+            "refresh interval must cover more than one 500 ms tick"
+        );
+
+        let tick_count = polls_per_refresh * 2 + 1;
+        let start = Instant::now();
+        let mut refresh = SessionSnapshotRefresh {
+            last_full_scan: None,
+        };
+        let mut observed = Vec::new();
+        let mut scan_ticks = Vec::new();
+        for tick in 0..tick_count {
+            let now = start + GUARD_POLL_INTERVAL * tick;
+            refresh.on_tick(now, &mut observed, || {
+                scan_ticks.push(tick);
+                Some(Vec::new())
+            });
+        }
+
+        assert!(
+            scan_ticks
+                .windows(2)
+                .all(|pair| pair[1] - pair[0] >= polls_per_refresh),
+            "more than one full enumeration per {SESSION_SNAPSHOT_REFRESH:?} refresh interval: ticks {scan_ticks:?}"
+        );
+        let min_scans = 1 + (tick_count - 1) / polls_per_refresh;
+        assert!(
+            scan_ticks.len() >= min_scans as usize,
+            "expected a full enumeration at least once per {SESSION_SNAPSHOT_REFRESH:?}: ticks {scan_ticks:?}"
+        );
+        assert!(
+            scan_ticks.len() < tick_count as usize,
+            "snapshot ran on every 500 ms tick: {scan_ticks:?}"
+        );
+
+        // The running guard is armed from the snapshot taken just before the
+        // loop, so every liveness tick strictly inside that interval must
+        // not walk the process table again.
+        let armed = Instant::now();
+        let mut warm = SessionSnapshotRefresh {
+            last_full_scan: Some(armed),
+        };
+        let mut warm_scans = 0u32;
+        let mut warm_observed = Vec::new();
+        for tick in 0..polls_per_refresh {
+            warm.on_tick(
+                armed + GUARD_POLL_INTERVAL * tick,
+                &mut warm_observed,
+                || {
+                    warm_scans += 1;
+                    Some(Vec::new())
+                },
+            );
+        }
+        assert_eq!(
+            warm_scans, 0,
+            "armed guard enumerated every process on a 500 ms tick inside one refresh interval"
         );
     }
 
