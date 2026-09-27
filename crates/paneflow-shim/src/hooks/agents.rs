@@ -6,7 +6,8 @@ use super::{
     sweep_orphan_hook_config, HookInstall, HookInstallResult, HookInstallSkip, HookLease,
     InvalidJsonPolicy,
 };
-use paneflow_agent_config::home_dir;
+use paneflow_agent_config::jsonc;
+use paneflow_agent_config::{home_dir, read_optional_text, write_text_atomic};
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -36,28 +37,30 @@ pub(crate) fn remove_qoder_hooks(root: &mut serde_json::Value) {
     remove_matcher_hooks_for_events(root, QODER_HOOK_EVENTS);
 }
 
+fn gemini_managed_group(foreign: &str) -> serde_json::Value {
+    let canonical = GEMINI_HOOK_EVENTS
+        .iter()
+        .find_map(|(candidate, canonical)| (*candidate == foreign).then_some(*canonical))
+        .unwrap_or(foreign);
+    serde_json::json!({
+        "matcher": "*",
+        "hooks": [{
+            "name": "paneflow-status",
+            "type": "command",
+            "command": resolve_plain_hook_command(canonical),
+            "timeout": 5000,
+        }]
+    })
+}
+
 pub(crate) fn merge_gemini_hooks(root: &mut serde_json::Value) -> std::io::Result<()> {
     let events: Vec<&str> = GEMINI_HOOK_EVENTS
         .iter()
         .map(|(foreign, _)| *foreign)
         .collect();
-    reconcile_matcher_hooks_replacing_invalid_container(root, &events, |foreign| {
-        let canonical = GEMINI_HOOK_EVENTS
-            .iter()
-            .find_map(|(candidate, canonical)| (*candidate == foreign).then_some(*canonical))
-            .unwrap_or(foreign);
-        serde_json::json!({
-            "matcher": "*",
-            "hooks": [{
-                "name": "paneflow-status",
-                "type": "command",
-                "command": resolve_plain_hook_command(canonical),
-                "timeout": 5000,
-            }]
-        })
-    })
-    .map(|_| ())
-    .map_err(hook_config_error)
+    reconcile_matcher_hooks_replacing_invalid_container(root, &events, gemini_managed_group)
+        .map(|_| ())
+        .map_err(hook_config_error)
 }
 
 pub(crate) fn remove_gemini_hooks(root: &mut serde_json::Value) {
@@ -211,6 +214,8 @@ pub(crate) struct ManagedHookConfigGuard {
     created_file: bool,
     created_dir: bool,
     remove_fn: fn(&mut serde_json::Value),
+    /// Gemini `settings.json` was spliced as JSONC. Drop must not reserialize it.
+    jsonc: bool,
     lease: HookLease,
 }
 
@@ -272,7 +277,12 @@ impl ManagedHookConfigGuard {
         invalid_json_policy: InvalidJsonPolicy,
     ) -> HookInstallResult<Self> {
         if !paneflow_ipc_reachable() {
-            sweep_orphan_hook_config(&config_dir.join(spec.config_filename), spec.remove);
+            let path = config_dir.join(spec.config_filename);
+            if is_gemini_settings(&spec) {
+                sweep_gemini_config(&path);
+            } else {
+                sweep_orphan_hook_config(&path, spec.remove);
+            }
             return Ok(HookInstall::Skipped(HookInstallSkip::IpcUnavailable));
         }
         Self::install_at(config_dir, spec, invalid_json_policy).map(HookInstall::Installed)
@@ -283,19 +293,31 @@ impl ManagedHookConfigGuard {
         spec: ManagedHookSpec,
         invalid_json_policy: InvalidJsonPolicy,
     ) -> std::io::Result<Self> {
-        let installed = install_hook_config_file(
-            config_dir,
-            spec.config_filename,
-            spec.tool_label,
-            spec.merge,
-            invalid_json_policy,
-        )?;
+        let installed = if is_gemini_settings(&spec) {
+            super::install_hook_config_file_parsing_jsonc(
+                config_dir,
+                spec.config_filename,
+                spec.tool_label,
+                spec.merge,
+                invalid_json_policy,
+                gemini_jsonc_edit,
+            )?
+        } else {
+            install_hook_config_file(
+                config_dir,
+                spec.config_filename,
+                spec.tool_label,
+                spec.merge,
+                invalid_json_policy,
+            )?
+        };
         Ok(Self {
             settings_path: installed.path,
             config_dir: config_dir.to_path_buf(),
             created_file: installed.created_file,
             created_dir: installed.created_directory,
             remove_fn: spec.remove,
+            jsonc: installed.jsonc,
             lease: installed.lease,
         })
     }
@@ -303,15 +325,308 @@ impl ManagedHookConfigGuard {
 
 impl Drop for ManagedHookConfigGuard {
     fn drop(&mut self) {
-        cleanup_hook_config_file(
-            &self.settings_path,
-            &self.config_dir,
-            self.created_file,
-            self.created_dir,
-            self.remove_fn,
-            &mut self.lease,
+        if self.jsonc {
+            cleanup_jsonc_gemini(
+                &self.settings_path,
+                &self.config_dir,
+                self.created_file,
+                self.created_dir,
+                &mut self.lease,
+            );
+        } else {
+            cleanup_hook_config_file(
+                &self.settings_path,
+                &self.config_dir,
+                self.created_file,
+                self.created_dir,
+                self.remove_fn,
+                &mut self.lease,
+            );
+        }
+    }
+}
+
+fn is_gemini_settings(spec: &ManagedHookSpec) -> bool {
+    spec.directory_name == ".gemini" && spec.config_filename == "settings.json"
+}
+
+/// `Ok(None)` keeps the strict JSON installer. A commented (or otherwise
+/// JSONC) Gemini file is spliced; text that is neither is left for the
+/// strict path to refuse.
+fn gemini_jsonc_edit(existing: &str) -> std::io::Result<Option<String>> {
+    if existing.trim().is_empty() || serde_json::from_str::<serde_json::Value>(existing).is_ok() {
+        return Ok(None);
+    }
+    if jsonc::parse(existing).is_err() {
+        return Ok(None);
+    }
+    splice_gemini_install(existing).map(Some)
+}
+
+fn splice_gemini_install(existing: &str) -> std::io::Result<String> {
+    let root = jsonc::parse(existing).map_err(jsonc_io)?;
+    validate_gemini_object(&root)?;
+    let base = match remove_gemini_jsonc(existing)? {
+        Some(updated) => updated,
+        None => existing.to_string(),
+    };
+    let root = jsonc::parse(&base).map_err(jsonc_io)?;
+    validate_gemini_object(&root)?;
+    if root.get("hooks").is_none() {
+        return insert_gemini_hooks_object(&base);
+    }
+    let mut text = base;
+    for (foreign, _) in GEMINI_HOOK_EVENTS {
+        let group = gemini_managed_group(foreign);
+        let current = jsonc::parse(&text).map_err(jsonc_io)?;
+        match current.get("hooks").and_then(|hooks| hooks.get(*foreign)) {
+            None => {
+                text = jsonc::insert_entry(&text, &["hooks"], foreign, &serde_json::json!([group]))
+                    .map_err(jsonc_io)?;
+            }
+            Some(value) if value.is_array() => {
+                text = jsonc::append_array_element(&text, &["hooks", foreign], &group)
+                    .map_err(jsonc_io)?;
+            }
+            Some(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("hook event `{foreign}` must be an array"),
+                ));
+            }
+        }
+    }
+    Ok(text)
+}
+
+fn insert_gemini_hooks_object(text: &str) -> std::io::Result<String> {
+    let mut hooks = serde_json::Map::new();
+    for (foreign, _) in GEMINI_HOOK_EVENTS {
+        hooks.insert(
+            (*foreign).to_string(),
+            serde_json::json!([gemini_managed_group(foreign)]),
         );
     }
+    jsonc::insert_entry(text, &[], "hooks", &serde_json::Value::Object(hooks)).map_err(jsonc_io)
+}
+
+fn remove_gemini_jsonc(input: &str) -> std::io::Result<Option<String>> {
+    let root = match jsonc::parse(input) {
+        Ok(root) => root,
+        Err(_) => return Ok(None),
+    };
+    let Some(hooks) = root.get("hooks").and_then(serde_json::Value::as_object) else {
+        return Ok(None);
+    };
+    if hooks.is_empty() {
+        return Ok(None);
+    }
+    if hooks_are_only_managed(hooks)
+        && !jsonc::value_contains_comment(input, &["hooks"]).unwrap_or(true)
+    {
+        return jsonc::remove_at(input, &[], "hooks").map_err(jsonc_io);
+    }
+
+    let mut text = input.to_string();
+    let mut changed = false;
+    for (event, _) in GEMINI_HOOK_EVENTS {
+        if let Some(updated) =
+            jsonc::remove_array_elements(&text, &["hooks", event], is_wholly_managed_group)
+                .map_err(jsonc_io)?
+        {
+            text = updated;
+            changed = true;
+            if event_array_is_empty(&text, event)
+                && !jsonc::value_contains_comment(&text, &["hooks", event]).unwrap_or(true)
+            {
+                if let Some(updated) =
+                    jsonc::remove_at(&text, &["hooks"], event).map_err(jsonc_io)?
+                {
+                    text = updated;
+                }
+            }
+        }
+        if let Some(updated) = jsonc::remove_nested_array_elements(
+            &text,
+            &["hooks", event],
+            "hooks",
+            is_managed_handler,
+        )
+        .map_err(jsonc_io)?
+        {
+            text = updated;
+            changed = true;
+        }
+    }
+    if changed
+        && hooks_object_is_empty(&text)
+        && !jsonc::value_contains_comment(&text, &["hooks"]).unwrap_or(true)
+    {
+        if let Some(updated) = jsonc::remove_at(&text, &[], "hooks").map_err(jsonc_io)? {
+            text = updated;
+        }
+    }
+    if changed {
+        Ok(Some(text))
+    } else {
+        Ok(None)
+    }
+}
+
+fn hooks_are_only_managed(hooks: &serde_json::Map<String, serde_json::Value>) -> bool {
+    hooks.iter().all(|(key, value)| {
+        GEMINI_HOOK_EVENTS.iter().any(|(event, _)| event == key)
+            && value.as_array().is_some_and(|groups| {
+                !groups.is_empty() && groups.iter().all(is_wholly_managed_group)
+            })
+    })
+}
+
+fn is_wholly_managed_group(value: &serde_json::Value) -> bool {
+    let Some(hooks) = value.get("hooks").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    !hooks.is_empty() && hooks.iter().all(is_managed_handler)
+}
+
+fn is_managed_handler(value: &serde_json::Value) -> bool {
+    value
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(is_paneflow_hook_command)
+}
+
+fn event_array_is_empty(text: &str, event: &str) -> bool {
+    jsonc::parse(text)
+        .ok()
+        .and_then(|root| {
+            root.get("hooks")
+                .and_then(|hooks| hooks.get(event))
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::is_empty)
+        })
+        .unwrap_or(false)
+}
+
+fn hooks_object_is_empty(text: &str) -> bool {
+    jsonc::parse(text)
+        .ok()
+        .and_then(|root| {
+            root.get("hooks")
+                .and_then(serde_json::Value::as_object)
+                .map(serde_json::Map::is_empty)
+        })
+        .unwrap_or(false)
+}
+
+fn jsonc_text_is_empty_object(text: &str) -> bool {
+    jsonc::parse(text)
+        .ok()
+        .and_then(|value| value.as_object().map(serde_json::Map::is_empty))
+        .unwrap_or(false)
+}
+
+fn validate_gemini_object(root: &serde_json::Value) -> std::io::Result<()> {
+    if !root.is_object() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "config root must be a JSON object",
+        ));
+    }
+    let Some(hooks) = root.get("hooks") else {
+        return Ok(());
+    };
+    let Some(hooks) = hooks.as_object() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "config key `hooks` must be an object",
+        ));
+    };
+    for (event, _) in GEMINI_HOOK_EVENTS {
+        if hooks.get(*event).is_some_and(|value| !value.is_array()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("hook event `{event}` must be an array"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn jsonc_io(error: jsonc::JsoncError) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+}
+
+fn cleanup_jsonc_gemini(
+    path: &Path,
+    directory: &Path,
+    created_file: bool,
+    created_directory: bool,
+    lease: &mut HookLease,
+) {
+    let remove_directory = super::with_last_lease(path, lease, |lease_created_file| {
+        let Some(content) = read_optional_text(path)? else {
+            return Ok(false);
+        };
+        let Some(updated) = remove_gemini_jsonc(&content)? else {
+            return Ok(false);
+        };
+        if updated == content {
+            return Ok(false);
+        }
+        let empty = jsonc_text_is_empty_object(&updated);
+        let owned_file = created_file || lease_created_file;
+        if empty && owned_file {
+            std::fs::remove_file(path)?;
+        } else {
+            write_text_atomic(path, &updated)?;
+        }
+        Ok(empty && owned_file && created_directory)
+    })
+    .unwrap_or_else(|error| {
+        eprintln!(
+            "paneflow-shim: could not clean up {}: {error}",
+            super::safe_path_display(path)
+        );
+        None
+    })
+    .unwrap_or(false);
+    if remove_directory {
+        let _ = std::fs::remove_dir(directory);
+    }
+}
+
+fn sweep_gemini_config(path: &Path) {
+    if path.parent().is_some_and(super::config_dir_is_symlink) || super::config_dir_is_symlink(path)
+    {
+        return;
+    }
+    let Ok(Some(content)) = read_optional_text(path) else {
+        return;
+    };
+    if serde_json::from_str::<serde_json::Value>(&content).is_ok() {
+        super::sweep_orphan_hook_config(path, remove_gemini_hooks);
+        return;
+    }
+    if jsonc::parse(&content).is_err() {
+        return;
+    }
+    let _ = super::with_orphan_lease(path, path, |created_file| {
+        let Some(content) = read_optional_text(path)? else {
+            return Ok(());
+        };
+        let Some(updated) = remove_gemini_jsonc(&content)? else {
+            return Ok(());
+        };
+        if updated == content {
+            return Ok(());
+        }
+        if created_file && jsonc_text_is_empty_object(&updated) {
+            std::fs::remove_file(path)
+        } else {
+            write_text_atomic(path, &updated)
+        }
+    });
 }
 
 #[cfg(test)]
