@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use gpui::{Context, KeyDownEvent, Keystroke, ScrollHandle, Window};
 
+use crate::settings::tabs::terminal::{FontKeyEffect, apply_font_typeahead_key};
 use crate::widgets::scrollbar;
 use crate::{PaneFlowApp, SettingsSection, config_writer, keybindings};
 
@@ -56,6 +57,66 @@ pub(crate) fn is_font_block_key(nested: bool, key: &str) -> bool {
                 | "cell_width"
         ),
         true => key == "ligatures",
+    }
+}
+
+/// Open settings selects, in the order Escape folds them.
+///
+/// The Appearance Preset menu is the same kind of select as the Terminal,
+/// General, and New-tab menus. It folds before Settings itself closes.
+#[derive(Clone, Copy, PartialEq)]
+struct SettingsEscapeState {
+    section: Option<SettingsSection>,
+    theme_dropdown_open: bool,
+    terminal_dropdown_open: bool,
+    general_dropdown_open: bool,
+    new_tab_branch_dropdown_open: bool,
+}
+
+impl SettingsEscapeState {
+    fn from_app(app: &PaneFlowApp) -> Self {
+        Self {
+            section: app.settings_section,
+            theme_dropdown_open: app.theme_dropdown_open,
+            terminal_dropdown_open: app.terminal_dropdown.is_some(),
+            general_dropdown_open: app.general_dropdown.is_some(),
+            new_tab_branch_dropdown_open: app.new_tab_branch_dropdown.is_some(),
+        }
+    }
+
+    /// Escape folds the frontmost menu. With none open, Settings closes.
+    /// Any other key leaves the menus alone.
+    fn dispatch(&mut self, keystroke: &Keystroke) {
+        if keystroke.key != "escape" {
+            return;
+        }
+        if self.terminal_dropdown_open {
+            self.terminal_dropdown_open = false;
+        } else if self.general_dropdown_open {
+            self.general_dropdown_open = false;
+        } else if self.new_tab_branch_dropdown_open {
+            self.new_tab_branch_dropdown_open = false;
+        } else if self.theme_dropdown_open {
+            self.theme_dropdown_open = false;
+        } else {
+            self.section = None;
+        }
+    }
+
+    fn write_back(self, app: &mut PaneFlowApp, cx: &mut Context<PaneFlowApp>) {
+        if !self.terminal_dropdown_open {
+            app.terminal_dropdown = None;
+        }
+        if !self.general_dropdown_open {
+            app.general_dropdown = None;
+        }
+        if !self.new_tab_branch_dropdown_open {
+            app.new_tab_branch_dropdown = None;
+        }
+        app.theme_dropdown_open = self.theme_dropdown_open;
+        if self.section.is_none() {
+            app.close_settings(cx);
+        }
     }
 }
 
@@ -358,47 +419,36 @@ impl PaneFlowApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Font dropdown typeahead (Terminal page).
+        // Font dropdown typeahead (Terminal page). Enter commits the first
+        // matching row; control characters (Enter's "\n", Tab's "\t") are
+        // never inserted into the query.
         if self.font_dropdown_open {
-            let key = event.keystroke.key.as_str();
-            match key {
-                "escape" => {
-                    self.font_dropdown_open = false;
-                    self.font_search.clear();
-                    cx.notify();
-                }
-                "backspace" => {
-                    self.font_search.pop();
-                    cx.notify();
-                }
-                _ => {
-                    if let Some(ch) = &event.keystroke.key_char
-                        && !ch.is_empty()
-                        && !event.keystroke.modifiers.control
-                        && !event.keystroke.modifiers.platform
-                    {
-                        self.font_search.push_str(ch);
-                        cx.notify();
-                    }
+            let default_font = crate::terminal::element::resolve_font_family(None);
+            let effect = apply_font_typeahead_key(
+                &mut self.font_search,
+                &mut self.font_dropdown_open,
+                &event.keystroke,
+                &default_font,
+                &self.mono_font_names,
+            );
+            match effect {
+                FontKeyEffect::Ignored => {}
+                FontKeyEffect::Redraw => cx.notify(),
+                FontKeyEffect::Select(commit) => {
+                    self.persist_setting(false, "font_family", commit.config_value(), cx);
                 }
             }
             return;
         }
 
-        // Escape: close an open Terminal-page dropdown first, otherwise leave
-        // settings. Escape during shortcut recording or key capture never gets
-        // here - `intercept_shortcut_keystroke` consumes it upstream, before
-        // GPUI matches any binding.
+        // Escape folds an open settings select first. The Appearance Preset
+        // menu is one of those selects; with none open, Escape closes
+        // Settings. Shortcut recording and key capture consume Escape
+        // upstream, before GPUI matches any binding.
         if event.keystroke.key == "escape" && self.recording_shortcut_idx.is_none() {
-            if self.terminal_dropdown.is_some() {
-                self.terminal_dropdown = None;
-            } else if self.general_dropdown.is_some() {
-                self.general_dropdown = None;
-            } else if self.new_tab_branch_dropdown.is_some() {
-                self.new_tab_branch_dropdown = None;
-            } else {
-                self.close_settings(cx);
-            }
+            let mut menus = SettingsEscapeState::from_app(self);
+            menus.dispatch(&event.keystroke);
+            menus.write_back(self, cx);
             cx.notify();
         }
     }
@@ -654,7 +704,10 @@ mod tests {
         assert!(!super::is_font_block_key(false, "theme"));
     }
 
-    use super::{ShortcutKeyRoute, recorded_shortcut_key, route_shortcut_keystroke};
+    use super::{
+        SettingsEscapeState, ShortcutKeyRoute, recorded_shortcut_key, route_shortcut_keystroke,
+    };
+    use crate::SettingsSection;
     use gpui::Keystroke;
 
     /// The text of `name`'s body: from its `fn` line to `end`.
@@ -790,5 +843,37 @@ mod tests {
                 "`{chord}` lost its key through the record -> parse round trip (`{recorded}`)"
             );
         }
+    }
+
+    /// Issue #915: Escape with the Appearance Preset menu open folds that
+    /// menu and leaves Settings on the same page. A second Escape, with no
+    /// menu open, closes Settings.
+    #[test]
+    fn escape_closes_the_theme_preset_menu_before_settings() {
+        let mut settings = SettingsEscapeState {
+            section: Some(SettingsSection::Appearance),
+            theme_dropdown_open: true,
+            terminal_dropdown_open: false,
+            general_dropdown_open: false,
+            new_tab_branch_dropdown_open: false,
+        };
+        let escape = Keystroke::parse("escape").expect("escape parses");
+
+        settings.dispatch(&escape);
+
+        assert!(
+            !settings.theme_dropdown_open,
+            "escape must fold the open Preset menu"
+        );
+        assert!(
+            settings.section == Some(SettingsSection::Appearance),
+            "settings stays open"
+        );
+
+        settings.dispatch(&escape);
+        assert!(
+            settings.section.is_none(),
+            "escape with no menu open closes settings"
+        );
     }
 }
