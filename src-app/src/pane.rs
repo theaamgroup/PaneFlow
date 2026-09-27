@@ -606,6 +606,7 @@ impl Pane {
                 | TerminalEvent::ActivityBurst
                 | TerminalEvent::ServiceDetected(_)
                 | TerminalEvent::SelectionCopied
+                | TerminalEvent::PasteRefused
                 | TerminalEvent::OpenMarkdownPath(_)
                 | TerminalEvent::OpenCodePath { .. }
                 | TerminalEvent::FontZoomChanged
