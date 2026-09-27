@@ -336,9 +336,14 @@ const BRANCH_GIT_OUTPUT_CAP: u64 = 512 * 1024;
 
 /// Local branches of the repository at `cwd`, sorted and deduplicated. The
 /// tab worktree picker's branch reader (issue #347).
+///
+/// `%(refname:lstrip=2)` strips `refs/heads/` and keeps the branch name when
+/// a tag uses the same name. `%(refname:short)` would print `heads/<name>`
+/// in that case, and checkout would look up `refs/heads/heads/<name>`
+/// (issue #921).
 pub(crate) fn list_branches(cwd: &str) -> Result<Vec<String>, String> {
     let mut command = git_command();
-    git_subcommand(&mut command, &["branch", "--format=%(refname:short)"]);
+    git_subcommand(&mut command, &["branch", "--format=%(refname:lstrip=2)"]);
     command.current_dir(cwd).env("GIT_TERMINAL_PROMPT", "0");
 
     let output =
@@ -1972,5 +1977,43 @@ mod tests {
             logs_contain("failed to copy env file"),
             "copy failure should emit a warning"
         );
+    }
+
+    /// Issue #921: a tag that shares a branch's name must not rename the
+    /// picker row to `heads/<name>`, which `prepare_branch_checkout` rejects.
+    #[test]
+    fn list_branches_returns_the_bare_name_when_a_tag_shares_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        run_git(&repo, &["init", "-b", "main"], GIT_DEADLINE).expect("init");
+        run_git(
+            &repo,
+            &["config", "user.email", "paneflow-tests@example.invalid"],
+            GIT_DEADLINE,
+        )
+        .expect("email");
+        run_git(
+            &repo,
+            &["config", "user.name", "PaneFlow Tests"],
+            GIT_DEADLINE,
+        )
+        .expect("name");
+        std::fs::write(repo.join("f"), "a").expect("file");
+        run_git(&repo, &["add", "f"], GIT_DEADLINE).expect("add");
+        run_git(&repo, &["commit", "-m", "init"], GIT_DEADLINE).expect("commit");
+        run_git(&repo, &["branch", "rel"], GIT_DEADLINE).expect("branch");
+        run_git(&repo, &["tag", "rel"], GIT_DEADLINE).expect("tag");
+
+        let branches = list_branches(&repo.to_string_lossy()).expect("branches");
+        assert!(
+            branches.iter().any(|branch| branch == "rel"),
+            "bare name missing: {branches:?}"
+        );
+        assert!(
+            !branches.iter().any(|branch| branch == "heads/rel"),
+            "disambiguated name leaked: {branches:?}"
+        );
+        prepare_branch_checkout(&repo, "rel").expect("checkout accepts the bare name");
     }
 }
