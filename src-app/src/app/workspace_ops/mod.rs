@@ -1590,6 +1590,11 @@ impl PaneFlowApp {
 
         let tab = crate::workspace::Tab::restored(title.clone(), Some(root), bound_to)
             .with_automatic_title(title_is_automatic);
+        // Issue #936: the menu stores a tab index. Inserting at or before
+        // that slot shifts later tabs, so Close, Branch, Mark as read, or
+        // Remove worktree would act on a tab the user did not right-click.
+        // Dismiss before the insert; do not rekey the stored index.
+        self.tab_menu_open = None;
         let Some(ws) = self.workspaces.get_mut(ws_idx) else {
             // Unreachable: `ws_idx` was resolved above and the entity lease
             // stops `self.workspaces` changing under this body. Kept as a
@@ -4406,6 +4411,67 @@ mod tests {
                 assert_eq!(tabs[1].id, 0);
                 assert_eq!(tabs[1].title, "Renamed");
                 assert!(app.renaming_tab.is_none());
+            });
+        });
+    }
+
+    /// Issue #936: undo-close slides a tab back to a stored index. An open
+    /// tab menu keeps that index, so a restore at or before the clicked row
+    /// would retarget the menu onto a different tab.
+    ///
+    /// The record is a leafless split on purpose. `restore_closed_tab_record`
+    /// still inserts and slides through the real path; a pane leaf would
+    /// spawn a PTY, and the runtime thread aborts the GPUI test scheduler
+    /// when it wakes a task the scheduler did not spawn.
+    #[gpui::test]
+    fn undo_close_tab_dismisses_an_open_tab_menu(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let mut workspace = Workspace::empty_with_cwd_and_id(
+            7,
+            "Alpha",
+            std::path::PathBuf::from("/paneflow-936-undo-menu"),
+        );
+        assert!(workspace.open_tab(crate::workspace::Tab::new("Kept", None)));
+        assert!(workspace.open_tab(crate::workspace::Tab::new("Menu", None)));
+        let app = app_with_workspaces(cx, vec![workspace]);
+
+        let record = crate::ClosedTabRecord {
+            workspace_id: 7,
+            title: "Restored".to_string(),
+            title_is_automatic: false,
+            index: 0,
+            layout: LayoutNode::Split {
+                direction: "vertical".to_string(),
+                ratio: None,
+                ratios: None,
+                children: Vec::new(),
+            },
+            worktree: None,
+        };
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.tab_menu_open = Some(crate::TabContextMenu {
+                    ws_idx: 0,
+                    tab_idx: 1,
+                    position: gpui::point(gpui::px(4.0), gpui::px(8.0)),
+                });
+                assert_eq!(app.tab_menu_open.map(|menu| menu.tab_idx), Some(1));
+                app.restore_closed_tab_record(record, window, cx);
+                assert!(
+                    app.tab_menu_open.is_none(),
+                    "undo-close must dismiss the menu before the restored tab shifts its index"
+                );
+                let titles: Vec<_> = app.workspaces[0]
+                    .tabs()
+                    .iter()
+                    .map(|tab| tab.title.as_str())
+                    .collect();
+                assert_eq!(
+                    titles,
+                    vec!["Restored", "Kept", "Menu"],
+                    "the closed tab must land at slot 0, shifting the menu's old row"
+                );
             });
         });
     }
