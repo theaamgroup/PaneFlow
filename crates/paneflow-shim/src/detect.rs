@@ -63,7 +63,8 @@ pub(crate) fn candidate_names(tool: &str) -> Vec<String> {
 }
 
 /// Walk `$PATH` and return the first entry that contains a matching
-/// executable, skipping the shim's own directory AND any candidate
+/// executable, skipping the shim's own directory, any other PaneFlow bin
+/// directory (a sibling `paneflow-ai-hook`, issue #871), AND any candidate
 /// that is the shim binary itself by inode (US-017 hardlink defense).
 pub(crate) fn find_real_binary(tool: &str) -> Option<PathBuf> {
     let path_var = env::var_os("PATH")?;
@@ -107,6 +108,14 @@ where
 
     for dir in path_entries {
         if same_canonical_dir(&self_canon, &dir) {
+            continue;
+        }
+        // Issue #871: another PaneFlow bin dir is a separate copy of this
+        // shim (different inode), marked by a sibling `paneflow-ai-hook`.
+        // Skipping only this process's directory and its hardlinks lets the
+        // two shims exec each other until the process limit. A directory
+        // that merely contains the tool binary is the real install.
+        if dir.join("paneflow-ai-hook").is_file() {
             continue;
         }
         for name in &candidates {
