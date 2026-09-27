@@ -597,6 +597,44 @@ fn hermes_guard_installs_when_hooks_is_not_a_top_level_key() {
 }
 
 #[test]
+fn concurrent_hermes_guards_keep_approvals_until_last_drop() {
+    // Issue #1057: both sessions share one set of managed approvals, so the
+    // first exit must not revoke the consent the second session still uses.
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".hermes");
+    let config = dir.join("config.yaml");
+    let allowlist = dir.join("shell-hooks-allowlist.json");
+    let approvals = || -> Vec<serde_json::Value> {
+        let text = std::fs::read_to_string(&allowlist).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&text).unwrap();
+        root["approvals"].as_array().unwrap().clone()
+    };
+
+    let first = HermesHookConfigGuard::install_at(&dir).unwrap();
+    let managed = approvals();
+    assert_eq!(managed.len(), 5, "every managed hook is approved");
+    let second = HermesHookConfigGuard::install_at(&dir).unwrap();
+    assert_eq!(approvals(), managed, "a second grant must not duplicate");
+
+    drop(first);
+    assert_eq!(
+        approvals(),
+        managed,
+        "the live session keeps every managed approval"
+    );
+    assert!(std::fs::read_to_string(&config)
+        .unwrap()
+        .contains(HERMES_BLOCK_BEGIN));
+
+    drop(second);
+    assert!(
+        !allowlist.exists(),
+        "the last session removes the allowlist the first one created"
+    );
+    assert!(!config.exists());
+}
+
+#[test]
 fn hermes_guard_reinstall_is_idempotent_and_fresh_file_deleted() {
     let td = tempfile::TempDir::new().unwrap();
     let dir = td.path().join(".hermes");

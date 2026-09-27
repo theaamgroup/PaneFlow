@@ -90,7 +90,13 @@ fn approval_matches(item: &serde_json::Value, event: &str, command: &str) -> boo
 
 /// Record consent for the managed commands only. A user's other approvals
 /// stay. Hermes matches `event` + `command` exactly (`shell-hooks-allowlist.json`).
-fn grant_managed_approvals(path: &Path, granted: &[(String, String)]) -> std::io::Result<bool> {
+/// Idempotent, so every concurrent session can grant; `lease` records a
+/// file this call created for whichever session exits last.
+fn grant_managed_approvals(
+    path: &Path,
+    lease: &mut HookLease,
+    granted: &[(String, String)],
+) -> std::io::Result<()> {
     with_config_lock(path, || {
         let existing = read_optional_text(path)?;
         let created = existing.is_none();
@@ -129,62 +135,67 @@ fn grant_managed_approvals(path: &Path, granted: &[(String, String)]) -> std::io
             }
         }
         write_json_atomic(path, &root)?;
-        Ok(created)
+        if created {
+            lease.mark_created()?;
+        }
+        Ok(())
     })
 }
 
+/// Remove the managed approvals. The caller holds the config lock: this runs
+/// inside the allowlist's last-lease cleanup, which already took it.
 fn revoke_managed_approvals(
     path: &Path,
     created: bool,
     granted: &[(String, String)],
 ) -> std::io::Result<()> {
-    with_config_lock(path, || {
-        let Some(text) = read_optional_text(path)? else {
-            return Ok(());
-        };
-        if text.trim().is_empty() {
-            return Ok(());
+    let Some(text) = read_optional_text(path)? else {
+        return Ok(());
+    };
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let mut root: serde_json::Value = serde_json::from_str(&text).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Hermes allowlist is not JSON: {err}"),
+        )
+    })?;
+    let Some(list) = root
+        .get_mut("approvals")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return Ok(());
+    };
+    list.retain(|item| {
+        !granted
+            .iter()
+            .any(|(event, command)| approval_matches(item, event, command))
+    });
+    let only_empty_approvals = list.is_empty()
+        && root
+            .as_object()
+            .is_some_and(|object| object.len() == 1 && object.contains_key("approvals"));
+    if created && only_empty_approvals {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
         }
-        let mut root: serde_json::Value = serde_json::from_str(&text).map_err(|err| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Hermes allowlist is not JSON: {err}"),
-            )
-        })?;
-        let Some(list) = root
-            .get_mut("approvals")
-            .and_then(|value| value.as_array_mut())
-        else {
-            return Ok(());
-        };
-        list.retain(|item| {
-            !granted
-                .iter()
-                .any(|(event, command)| approval_matches(item, event, command))
-        });
-        let only_empty_approvals = list.is_empty()
-            && root
-                .as_object()
-                .is_some_and(|object| object.len() == 1 && object.contains_key("approvals"));
-        if created && only_empty_approvals {
-            match std::fs::remove_file(path) {
-                Ok(()) => Ok(()),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(err) => Err(err),
-            }
-        } else {
-            write_json_atomic(path, &root)
-        }
-    })
+    } else {
+        write_json_atomic(path, &root)
+    }
 }
 
 pub(crate) struct HermesHookConfigGuard {
     path: PathBuf,
     allowlist_path: PathBuf,
     created_file: bool,
-    created_allowlist: bool,
     granted: Vec<(String, String)>,
     lease: HookLease,
+    /// #1057: the approvals are shared by every session on this profile, so
+    /// they get their own lease and only the last holder revokes them.
+    allowlist_lease: HookLease,
 }
 
 impl HermesHookConfigGuard {
@@ -203,7 +214,11 @@ impl HermesHookConfigGuard {
         refuse_symlink(directory, "Hermes")?;
         std::fs::create_dir_all(directory)?;
         let path = directory.join("config.yaml");
+        let allowlist = allowlist_path(directory);
         let mut lease = HookLease::acquire(&path)?;
+        // Held before any grant, so a session exiting meanwhile sees this
+        // one as a live holder and leaves the approvals in place.
+        let allowlist_lease = HookLease::acquire(&allowlist)?;
         let created_file = with_config_lock(&path, || {
             let existing = read_optional_text(&path)?;
             let created = existing.is_none();
@@ -235,21 +250,20 @@ impl HermesHookConfigGuard {
             }
             Ok(created)
         })?;
-        let granted = hermes_managed_approvals();
-        let allowlist = allowlist_path(directory);
         let mut guard = Self {
             path,
-            allowlist_path: allowlist.clone(),
+            allowlist_path: allowlist,
             created_file,
-            created_allowlist: false,
-            granted,
+            granted: hermes_managed_approvals(),
             lease,
+            allowlist_lease,
         };
-        match grant_managed_approvals(&allowlist, &guard.granted) {
-            Ok(created_allowlist) => {
-                guard.created_allowlist = created_allowlist;
-                Ok(guard)
-            }
+        match grant_managed_approvals(
+            &guard.allowlist_path,
+            &mut guard.allowlist_lease,
+            &guard.granted,
+        ) {
+            Ok(()) => Ok(guard),
             Err(err) => {
                 // Drop strips the managed block. The allowlist write did not
                 // finish, so revoke is a no-op when the file is still absent.
@@ -279,8 +293,14 @@ impl HermesHookConfigGuard {
 
 impl Drop for HermesHookConfigGuard {
     fn drop(&mut self) {
-        let _ =
-            revoke_managed_approvals(&self.allowlist_path, self.created_allowlist, &self.granted);
+        let revoked = with_last_lease(
+            &self.allowlist_path,
+            &mut self.allowlist_lease,
+            |created_allowlist| {
+                revoke_managed_approvals(&self.allowlist_path, created_allowlist, &self.granted)
+            },
+        );
+        report_cleanup_failure(&self.allowlist_path, revoked.as_ref().err());
         let cleaned = with_last_lease(&self.path, &mut self.lease, |lease_created_file| {
             let Some(content) = read_optional_text(&self.path)? else {
                 return Ok(());
@@ -394,6 +414,28 @@ mod tests {
             "only the user approval remains: {value}"
         );
         assert_eq!(approvals[0]["command"], "/usr/bin/user-hook");
+    }
+
+    #[test]
+    fn next_last_holder_cleans_up_after_a_crashed_session() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join(".hermes");
+        std::fs::create_dir_all(&directory).unwrap();
+        let allowlist = allowlist_path(&directory);
+
+        // A session that died after granting: the kernel dropped its lease
+        // lock with the process, but its approvals and the durable
+        // created-file marker remain.
+        let mut crashed = HookLease::acquire(&allowlist).unwrap();
+        grant_managed_approvals(&allowlist, &mut crashed, &hermes_managed_approvals()).unwrap();
+        drop(crashed);
+
+        let guard = HermesHookConfigGuard::install_at(&directory).unwrap();
+        drop(guard);
+        assert!(
+            !allowlist.exists(),
+            "the next last holder removes the allowlist the crashed session created"
+        );
     }
 
     #[test]
