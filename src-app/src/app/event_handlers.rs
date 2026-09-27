@@ -1673,7 +1673,8 @@ impl PaneFlowApp {
     /// tab of the owning workspace: a pane that walks into another checkout
     /// gives its TAB an identity whether or not you are looking at it (issue
     /// #347), and a cwd change in a background tab still updates workspace git
-    /// tracking.
+    /// tracking. A probe applies only while that pane is still in the
+    /// directory it probed (issue #887).
     fn handle_cwd_change(
         &mut self,
         terminal: &Entity<TerminalView>,
@@ -1698,6 +1699,9 @@ impl PaneFlowApp {
         let Some((ws_idx, tab_idx)) = located else {
             return;
         };
+        // Read before the root early-return: that path has to retire a probe
+        // it does not replace (issue #887).
+        let tab_id = self.workspaces[ws_idx].tabs()[tab_idx].id;
 
         if self.workspaces[ws_idx].cwd == new_cwd {
             // Back at the workspace root: the pane has left whatever checkout
@@ -1720,6 +1724,9 @@ impl PaneFlowApp {
                 self.workspaces[ws_idx].git_dir.as_deref(),
                 root_git_dir.as_deref(),
             ) {
+                // No newer probe is started here. Bump the tab's generation
+                // so the one already in flight cannot land and rebind.
+                invalidate_cwd_probe(tab_id);
                 return;
             }
         }
@@ -1732,41 +1739,43 @@ impl PaneFlowApp {
         // Re-resolve the index by identity after the await - model:
         // `run_port_scan` / `spawn_initial_git_stats`. Same for the tab.
         let ws_id = self.workspaces[ws_idx].id;
-        let tab_id = self.workspaces[ws_idx].tabs()[tab_idx].id;
         let ws_repo_root = self.workspaces[ws_idx].repo_root.clone();
         let ws_worktree_root = self.workspaces[ws_idx].worktree_root.clone();
 
         let new_cwd_owned = new_cwd.to_string();
+        // This bump retires any probe already in flight for the tab. The
+        // token is what this probe must still match when it lands.
+        let token = begin_cwd_probe(tab_id, &new_cwd_owned);
+        let terminal = terminal.downgrade();
 
         // Run git probe off main thread
         cx.spawn({
             let new_cwd = new_cwd_owned.clone();
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-                let (git_dir, branch, is_repo, stats, checkout) = smol::unblock({
+                let ProbedCwd {
+                    git_dir,
+                    branch,
+                    is_repo,
+                    stats,
+                    checkout,
+                } = smol::unblock({
                     let cwd = new_cwd.clone();
-                    move || {
-                        let git_dir = crate::workspace::find_git_dir(&cwd);
-                        let (branch, is_repo) = crate::workspace::detect_branch(&cwd);
-                        let stats = crate::workspace::GitDiffStats::from_cwd(&cwd);
-                        // Which checkout of which repository the pane is now
-                        // in. All file reads under `.git`, no subprocess.
-                        let checkout = git_dir.as_deref().map(|dir| {
-                            let (repo_root, is_worktree) = crate::workspace::resolve_repo_root(dir);
-                            let root = crate::workspace::resolve_worktree_root(
-                                &cwd,
-                                Some(dir),
-                                repo_root.as_deref(),
-                                is_worktree,
-                            );
-                            (repo_root, root)
-                        });
-                        (git_dir, branch, is_repo, stats, checkout)
-                    }
+                    move || probe_cwd(&cwd)
                 })
                 .await;
 
                 let _ = cx.update(|cx| {
                     this.update(cx, |app: &mut Self, cx: &mut Context<Self>| {
+                        let pane_cwd = terminal
+                            .upgrade()
+                            .and_then(|view| view.read(cx).terminal.current_cwd.clone());
+                        // Issue #887: dropped whole, binding and git retarget.
+                        // The walk home bumps the generation and returns
+                        // without a replacement probe; a landing that still
+                        // observed the old cwd must not rebind.
+                        if !cwd_probe_is_current(&token, pane_cwd.as_deref()) {
+                            return;
+                        }
                         // Re-resolve by identity: the workspace may have been
                         // closed or reordered during the await.
                         let Some(ws_idx) = app.workspaces.iter().position(|ws| ws.id == ws_id)
@@ -1902,6 +1911,105 @@ impl PaneFlowApp {
     }
 }
 
+/// Git facts a cwd probe reads off the UI thread.
+struct ProbedCwd {
+    git_dir: Option<std::path::PathBuf>,
+    branch: String,
+    is_repo: bool,
+    stats: crate::workspace::GitDiffStats,
+    checkout: Option<(Option<std::path::PathBuf>, std::path::PathBuf)>,
+}
+
+/// Blocking git reads for one cwd. The checkout half is file reads under
+/// `.git`; branch and diff stats are the same subprocesses the landing
+/// already applied.
+fn probe_cwd(cwd: &str) -> ProbedCwd {
+    let git_dir = crate::workspace::find_git_dir(cwd);
+    let (branch, is_repo) = crate::workspace::detect_branch(cwd);
+    let stats = crate::workspace::GitDiffStats::from_cwd(cwd);
+    let checkout = git_dir.as_deref().map(|dir| {
+        let (repo_root, is_worktree) = crate::workspace::resolve_repo_root(dir);
+        let root = crate::workspace::resolve_worktree_root(
+            cwd,
+            Some(dir),
+            repo_root.as_deref(),
+            is_worktree,
+        );
+        (repo_root, root)
+    });
+    ProbedCwd {
+        git_dir,
+        branch,
+        is_repo,
+        stats,
+        checkout,
+    }
+}
+
+/// One cwd probe started for a tab. `generation` is that tab's counter at
+/// the start. A later [`begin_cwd_probe`] or [`invalidate_cwd_probe`] moves
+/// the counter, and the landing is dropped when it no longer matches.
+struct CwdProbeToken {
+    tab_id: u64,
+    generation: u64,
+    probed_cwd: String,
+}
+
+fn cwd_probe_generations() -> &'static std::sync::Mutex<std::collections::HashMap<u64, u64>> {
+    static GENERATIONS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, u64>>> =
+        std::sync::OnceLock::new();
+    GENERATIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn bump_cwd_probe_generation(tab_id: u64) -> u64 {
+    let mut generations = cwd_probe_generations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let next = generations
+        .get(&tab_id)
+        .copied()
+        .unwrap_or(0)
+        .wrapping_add(1);
+    generations.insert(tab_id, next);
+    next
+}
+
+fn cwd_probe_generation(tab_id: u64) -> u64 {
+    cwd_probe_generations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&tab_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Start the probe for `cwd`, retiring whatever probe this tab already has
+/// in flight.
+fn begin_cwd_probe(tab_id: u64, cwd: &str) -> CwdProbeToken {
+    CwdProbeToken {
+        tab_id,
+        generation: bump_cwd_probe_generation(tab_id),
+        probed_cwd: cwd.to_string(),
+    }
+}
+
+/// Retire an in-flight probe without starting another. The walk back to the
+/// workspace root takes this path: it unbinds and returns, so nothing newer
+/// would otherwise supersede the probe that is still running (issue #887).
+fn invalidate_cwd_probe(tab_id: u64) {
+    bump_cwd_probe_generation(tab_id);
+}
+
+/// The probe may bind and retarget only when it is still the tab's latest
+/// probe and the pane is still in the directory that was probed. Either
+/// signal alone is not enough: a bumped generation drops a landing that
+/// still observes the old cwd, and a cwd that has moved drops a landing
+/// whose generation was not bumped.
+fn cwd_probe_is_current(token: &CwdProbeToken, pane_cwd: Option<&str>) -> bool {
+    cwd_probe_generation(token.tab_id) == token.generation
+        && pane_cwd == Some(token.probed_cwd.as_str())
+}
+
 /// What a pane's new checkout means for its tab's binding (issue #347).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CwdBinding {
@@ -2033,7 +2141,8 @@ pub(crate) fn retarget_workspace_git_dir(
 #[cfg(test)]
 mod tests {
     use super::{
-        CwdBinding, retarget_workspace_git_dir, tab_binding_for_cwd, tracked_git_dir_is_root,
+        CwdBinding, begin_cwd_probe, cwd_probe_is_current, invalidate_cwd_probe, probe_cwd,
+        retarget_workspace_git_dir, tab_binding_for_cwd, tracked_git_dir_is_root,
     };
     use super::{
         announced_port_conflicts, child_identity_is_live, declaration_survives_scan,
@@ -2413,6 +2522,118 @@ mod tests {
         assert!(
             !handler.contains("apply_git_state_for_cwd("),
             "the landing must not file the probe with the keyed-only apply"
+        );
+    }
+
+    #[test]
+    fn a_stale_cwd_probe_does_not_rebind_a_tab_the_pane_left() {
+        // Issue #887: `cd` into a linked checkout and back to the workspace
+        // root while that checkout's probe is still running. The root path
+        // unbinds and returns without a newer probe; the stale result must
+        // not bind the tab to the checkout the pane has left.
+        fn git(cwd: &std::path::Path, args: &[&str]) {
+            let mut cmd = crate::workspace::worktree::git_command();
+            cmd.arg("-C").arg(cwd).args(args);
+            let out = cmd.output().expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        let wt = tmp.path().join("wt");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(
+            &repo,
+            &["config", "user.email", "paneflow-tests@example.invalid"],
+        );
+        git(&repo, &["config", "user.name", "PaneFlow Tests"]);
+        std::fs::write(repo.join("README.md"), "root\n").expect("tracked file");
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-q", "-m", "fixture"]);
+        let wt_cwd = wt.to_string_lossy().into_owned();
+        git(&repo, &["worktree", "add", "-q", "-b", "feature", &wt_cwd]);
+
+        let mut workspace = crate::workspace::Workspace::empty_with_cwd_and_id(1, "repo", repo);
+        let root_cwd = workspace.cwd.clone();
+        let repo_root = workspace.repo_root.clone();
+        let worktree_root = workspace.worktree_root.clone();
+        let tab_id = workspace.tabs()[0].id;
+        assert!(
+            workspace.tabs()[0].worktree.is_none(),
+            "the tab starts unbound"
+        );
+
+        // The pane is in `wt` and that probe is in flight.
+        let token = begin_cwd_probe(tab_id, &wt_cwd);
+        let binding = tab_binding_for_cwd(
+            probe_cwd(&wt_cwd).checkout,
+            repo_root.as_deref(),
+            &worktree_root,
+            false,
+        );
+        assert!(
+            matches!(binding, CwdBinding::Bind(_)),
+            "the wt probe is a real bind, got {binding:?} (repo {repo_root:?}, root {worktree_root:?})"
+        );
+        assert!(
+            cwd_probe_is_current(&token, Some(&wt_cwd)),
+            "the probe applies while the pane is still in wt"
+        );
+
+        // Back at the workspace root. That path clears the binding and
+        // invalidates the in-flight probe, then returns.
+        invalidate_cwd_probe(tab_id);
+        assert!(
+            !cwd_probe_is_current(&token, Some(&wt_cwd)),
+            "invalidating on the walk home drops the probe even if the landing still observes wt"
+        );
+        let tab = workspace.tab_mut(0).expect("the workspace's tab");
+        assert!(tab.worktree.is_none(), "coming home left the tab unbound");
+        if cwd_probe_is_current(&token, Some(root_cwd.as_str()))
+            && let CwdBinding::Bind(path) = binding
+        {
+            tab.worktree = Some(path);
+        }
+        assert!(
+            tab.worktree.is_none(),
+            "a stale wt probe must not rebind a tab the pane already left"
+        );
+
+        let src = include_str!("event_handlers.rs");
+        let handler = crate::source_probe::source_slice(
+            src,
+            "fn handle_cwd_change(",
+            "pub(crate) fn spawn_initial_git_stats(",
+        );
+        let early = crate::source_probe::source_slice(
+            handler,
+            "if self.workspaces[ws_idx].cwd == new_cwd {",
+            "let ws_id = self.workspaces[ws_idx].id;",
+        );
+        let invalidate_at = early
+            .find("invalidate_cwd_probe(tab_id);")
+            .expect("coming home must invalidate the in-flight probe");
+        let bail = early
+            .find("return;")
+            .expect("a matching git dir still returns");
+        assert!(
+            invalidate_at < bail,
+            "invalidate before the early return, which starts no newer probe: {early}"
+        );
+        let gate = handler
+            .find("if !cwd_probe_is_current(")
+            .expect("the landing must test the probe");
+        let bind = handler
+            .find("match tab_binding_for_cwd(")
+            .expect("binding match");
+        assert!(
+            gate < bind,
+            "a stale probe returns before it can bind the tab"
         );
     }
 
