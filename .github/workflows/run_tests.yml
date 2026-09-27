@@ -118,9 +118,15 @@ jobs:
               # Every file under the crates, not only `.rs`. Queries, fixtures,
               # golden images, embedded assets, and include_str! inputs are
               # compiled or read by cargo test (issue #700).
+              # src-app/tests/workflow_path_filter_policy.rs fails when an
+              # include_str!/include_bytes! target or a listed test input
+              # matches no filter that gates macos_check (issue #1055).
               - 'src-app/**'
               - 'crates/**'
               - 'CLAUDE.md'
+              # claude_md_action_count_matches_the_actions_macro compiles
+              # in its action-count phrase (issue #1055).
+              - 'ARCHITECTURE.md'
               - 'docs/fork/STATE.md'
               - '**/Cargo.toml'
               - 'Cargo.lock'
