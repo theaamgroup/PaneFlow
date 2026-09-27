@@ -75,6 +75,8 @@ impl Drop for SuppressDiffBootstrap {
 // palette and row height, so those are exposed crate-internally. Everything
 // else in the engine / git / rows pipeline stays behind `super::` paths.
 #[cfg(test)]
+pub(crate) use git::column_fingerprint;
+#[cfg(test)]
 pub(crate) use git::load_column;
 #[cfg(test)]
 pub(crate) use highlighter::{grammar_for_ext, markdown_inline_grammar};
