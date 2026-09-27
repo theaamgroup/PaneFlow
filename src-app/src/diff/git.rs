@@ -693,10 +693,10 @@ fn merge_base_within(
 /// Normalize text the way git's diff stats do for text files: repository blobs
 /// are LF-normalized, while a Windows worktree may contain CRLF due
 /// `core.autocrlf`. The renderer should not turn that checkout detail into a
-/// whole-file edit.
+/// whole-file edit. A lone CR stays inside the line.
 fn normalize_git_text(text: String) -> String {
     if text.as_bytes().contains(&b'\r') {
-        text.replace("\r\n", "\n").replace('\r', "\n")
+        text.replace("\r\n", "\n")
     } else {
         text
     }
@@ -1593,6 +1593,13 @@ pub(crate) mod tests {
         );
         let (_, bin) = classify(vec![0x00, 0x01, 0x02]);
         assert!(bin);
+    }
+
+    #[test]
+    fn classify_keeps_a_lone_carriage_return_on_its_line() {
+        let (text, _) = classify(b"a\rb\n".to_vec());
+        assert!(text.contains('\r'), "lone CR must stay in {text:?}");
+        assert_eq!(text.lines().count(), 1);
     }
 
     #[test]
