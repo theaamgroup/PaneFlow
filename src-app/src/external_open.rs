@@ -8,9 +8,14 @@ use gpui::{AppContext as _, Context};
 /// Launch Services and can block until the browser accepts the URL; tests hold
 /// that call without starting a browser.
 #[cfg(test)]
-static LAUNCH_SERVICES_OPEN_HOOK: std::sync::Mutex<
-    Option<Box<dyn FnOnce(&str) -> std::io::Result<()> + Send>>,
-> = std::sync::Mutex::new(None);
+type LaunchServicesOpenHook = Box<dyn FnOnce(&str) -> std::io::Result<()> + Send>;
+#[cfg(test)]
+type LaunchServicesHookSlot = std::sync::Mutex<Option<LaunchServicesOpenHook>>;
+#[cfg(test)]
+type LaunchServicesHookLock = std::sync::MutexGuard<'static, Option<LaunchServicesOpenHook>>;
+
+#[cfg(test)]
+static LAUNCH_SERVICES_OPEN_HOOK: LaunchServicesHookSlot = std::sync::Mutex::new(None);
 
 #[cfg(test)]
 struct LaunchServicesHookGuard;
@@ -23,17 +28,14 @@ impl Drop for LaunchServicesHookGuard {
 }
 
 #[cfg(test)]
-fn lock_launch_services_hook()
--> std::sync::MutexGuard<'static, Option<Box<dyn FnOnce(&str) -> std::io::Result<()> + Send>>> {
+fn lock_launch_services_hook() -> LaunchServicesHookLock {
     LAUNCH_SERVICES_OPEN_HOOK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
-fn install_launch_services_hook(
-    hook: Box<dyn FnOnce(&str) -> std::io::Result<()> + Send>,
-) -> LaunchServicesHookGuard {
+fn install_launch_services_hook(hook: LaunchServicesOpenHook) -> LaunchServicesHookGuard {
     *lock_launch_services_hook() = Some(hook);
     LaunchServicesHookGuard
 }
