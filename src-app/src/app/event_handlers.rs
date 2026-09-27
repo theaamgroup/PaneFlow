@@ -931,6 +931,12 @@ impl PaneFlowApp {
             terminal::TerminalEvent::SelectionCopied => {
                 self.show_toast("Copied", cx);
             }
+            terminal::TerminalEvent::PasteRefused => {
+                self.show_toast(
+                    "Could not paste multiple lines while bracketed paste is off",
+                    cx,
+                );
+            }
             terminal::TerminalEvent::OpenMarkdownPath(_)
             | terminal::TerminalEvent::OpenCodePath { .. } => {
                 let Some(open) = external_editor_open(event) else {
