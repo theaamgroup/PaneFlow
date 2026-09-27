@@ -2156,14 +2156,19 @@ pub(crate) mod tests {
             "a missing untracked component is never unchanged"
         );
 
-        let revalidate = include_str!("view/watcher.rs")
+        let watcher = include_str!("view/watcher.rs");
+        assert!(
+            watcher.contains("is_unchanged_against"),
+            "an unreadable diff fingerprint must not compare unchanged"
+        );
+        let revalidate = watcher
             .split("fn revalidate(")
             .nth(1)
             .and_then(|rest| rest.split("#[cfg(test)]").next())
             .expect("revalidate");
         assert!(
-            revalidate.contains("is_unchanged_against"),
-            "revalidate must treat an unreadable diff fingerprint as changed"
+            revalidate.contains("revalidation_for_fingerprint"),
+            "revalidate must decide from the fingerprint, which rejects an unreadable diff"
         );
     }
 
