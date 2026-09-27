@@ -422,7 +422,13 @@ impl PaneFlowApp {
                                 .cursor_pointer()
                                 .child(format!("PR #{} / checks", pr.number))
                                 .on_click(cx.listener(move |app, _: &ClickEvent, _, cx| {
-                                    if let Err(e) = crate::external_open::open_http_url(&url) {
+                                    if let Err(e) = crate::external_open::open_http_url_in(
+                                        &url,
+                                        cx,
+                                        |app, e, cx| {
+                                            app.show_toast(format!("Could not open PR: {e}"), cx);
+                                        },
+                                    ) {
                                         app.show_toast(format!("Could not open PR: {e}"), cx);
                                     }
                                     cx.stop_propagation();

@@ -2159,8 +2159,12 @@ impl Render for PaneFlowApp {
                 cx.dispatch_action(&TerminalSelectAll);
             }))
             .on_action(cx.listener(|_this: &mut Self, _: &OpenHelp, _window, _cx| {
-                if let Err(e) = crate::external_open::open_http_url(
+                if let Err(e) = crate::external_open::open_http_url_in(
                     "https://github.com/theaamgroup/paneflow#readme",
+                    _cx,
+                    |_app, err, _cx| {
+                        log::warn!("Help > PaneFlow Help: could not open browser: {err}");
+                    },
                 ) {
                     log::warn!("Help > PaneFlow Help: could not open browser: {e}");
                 }
@@ -2178,8 +2182,12 @@ impl Render for PaneFlowApp {
             // half of the pair.
             .on_action(
                 cx.listener(|_this: &mut Self, _: &ReportIssue, _window, _cx| {
-                    if let Err(e) = crate::external_open::open_http_url(
+                    if let Err(e) = crate::external_open::open_http_url_in(
                         "https://github.com/theaamgroup/paneflow/issues/new",
+                        _cx,
+                        |_app, err, _cx| {
+                            log::warn!("PaneFlow > Report an Issue: could not open browser: {err}");
+                        },
                     ) {
                         log::warn!("PaneFlow > Report an Issue: could not open browser: {e}");
                     }

@@ -231,9 +231,13 @@ impl PaneFlowApp {
                 style.border_color(lerp_color(credit_border, credit_border_hover, delta));
             })
             .on_click(cx.listener(|_this, _: &ClickEvent, _, cx| {
-                if let Err(e) =
-                    crate::external_open::open_http_url("https://github.com/evilchinesefood")
-                {
+                if let Err(e) = crate::external_open::open_http_url_in(
+                    "https://github.com/evilchinesefood",
+                    cx,
+                    |_app, err, _cx| {
+                        log::warn!("About: could not open the author's page: {err}");
+                    },
+                ) {
                     log::warn!("About: could not open the author's page: {e}");
                 }
                 // Deliberately leaves `show_about_dialog` alone: this is a
@@ -303,9 +307,13 @@ impl PaneFlowApp {
                 style.bg(lerp_color(chrome.button_bg, button_hover_bg, delta));
             })
             .on_click(cx.listener(|_this, _: &ClickEvent, _, cx| {
-                if let Err(e) =
-                    crate::external_open::open_http_url("https://github.com/theaamgroup/paneflow")
-                {
+                if let Err(e) = crate::external_open::open_http_url_in(
+                    "https://github.com/theaamgroup/paneflow",
+                    cx,
+                    |_app, err, _cx| {
+                        log::warn!("About: could not open GitHub: {err}");
+                    },
+                ) {
                     log::warn!("About: could not open GitHub: {e}");
                 }
                 cx.stop_propagation();
@@ -337,9 +345,13 @@ impl PaneFlowApp {
                 style.border_color(lerp_color(upstream_border, upstream_hover, delta));
             })
             .on_click(cx.listener(|_this, _: &ClickEvent, _, cx| {
-                if let Err(e) =
-                    crate::external_open::open_http_url("https://github.com/arthjean/paneflow")
-                {
+                if let Err(e) = crate::external_open::open_http_url_in(
+                    "https://github.com/arthjean/paneflow",
+                    cx,
+                    |_app, err, _cx| {
+                        log::warn!("About: could not open the original project: {err}");
+                    },
+                ) {
                     log::warn!("About: could not open the original project: {e}");
                 }
                 cx.stop_propagation();
