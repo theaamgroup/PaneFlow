@@ -7,7 +7,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui::Entity;
+use gpui::{App, Entity, Focusable, Window};
 
 use crate::pane::Pane;
 
@@ -64,6 +64,41 @@ pub(super) const DIVIDER_PX: f32 = 8.0;
 pub(super) const DIVIDER_HIT_PX: f32 = 7.0;
 /// Minimum pane size in pixels. No pane may be resized below this.
 pub(super) const MIN_PANE_SIZE: f32 = 80.0;
+/// One keyboard resize press, in pixels along the container's main axis.
+/// The drag path uses the same available-axis length (container minus dividers).
+pub(super) const KEYBOARD_RESIZE_STEP_PX: f32 = 40.0;
+
+/// Which way a keyboard resize moves the focused pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyboardResize {
+    GrowWidth,
+    ShrinkWidth,
+    GrowHeight,
+    ShrinkHeight,
+}
+
+impl KeyboardResize {
+    fn axis(self) -> SplitDirection {
+        match self {
+            KeyboardResize::GrowWidth | KeyboardResize::ShrinkWidth => SplitDirection::Vertical,
+            KeyboardResize::GrowHeight | KeyboardResize::ShrinkHeight => SplitDirection::Horizontal,
+        }
+    }
+
+    fn delta_px(self) -> f32 {
+        let step = KEYBOARD_RESIZE_STEP_PX;
+        match self {
+            KeyboardResize::GrowWidth | KeyboardResize::GrowHeight => step,
+            KeyboardResize::ShrinkWidth | KeyboardResize::ShrinkHeight => -step,
+        }
+    }
+}
+
+/// Pane-area length the ratios share. Dividers are fixed gaps, not ratio.
+fn available_main_axis_px(container_px: f32, child_count: usize) -> f32 {
+    let divider_px = DIVIDER_PX * child_count.saturating_sub(1) as f32;
+    (container_px - divider_px).max(0.0)
+}
 
 /// Re-normalize ratios so they sum to 1.0 (proportional scaling).
 pub(super) fn normalize_ratios(children: &[LayoutChild]) {
@@ -207,11 +242,121 @@ impl LayoutTree {
             }
         }
     }
+
+    /// Grow or shrink the focused leaf by [`KEYBOARD_RESIZE_STEP_PX`] on the
+    /// nearest ancestor container of that axis. Either side stops at its
+    /// subtree minimum, which is [`MIN_PANE_SIZE`] for a leaf. Returns whether
+    /// a ratio changed. No focus, no matching axis, or an unknown container
+    /// size leaves the tree alone.
+    pub(crate) fn resize_focused(&self, resize: KeyboardResize, window: &Window, cx: &App) -> bool {
+        match self.resize_focused_walk(resize, window, cx) {
+            ResizeWalk::Changed => true,
+            ResizeWalk::Absent | ResizeWalk::Found => false,
+        }
+    }
+
+    fn resize_focused_walk(&self, resize: KeyboardResize, window: &Window, cx: &App) -> ResizeWalk {
+        match self {
+            LayoutTree::Leaf(pane) => {
+                if pane.read(cx).focus_handle(cx).is_focused(window) {
+                    ResizeWalk::Found
+                } else {
+                    ResizeWalk::Absent
+                }
+            }
+            LayoutTree::Container {
+                direction,
+                children,
+                container_size,
+                ..
+            } => {
+                let mut found = None;
+                for (index, child) in children.iter().enumerate() {
+                    match child.node.resize_focused_walk(resize, window, cx) {
+                        ResizeWalk::Absent => {}
+                        other => {
+                            found = Some((index, other));
+                            break;
+                        }
+                    }
+                }
+                let Some((index, walk)) = found else {
+                    return ResizeWalk::Absent;
+                };
+                if matches!(walk, ResizeWalk::Changed) {
+                    return ResizeWalk::Changed;
+                }
+                if *direction != resize.axis() {
+                    return ResizeWalk::Found;
+                }
+                if apply_keyboard_step(children, index, resize, container_size.get()) {
+                    ResizeWalk::Changed
+                } else {
+                    // This container owns the axis. A no-op (at the minimum,
+                    // or size not captured yet) must not fall through to an
+                    // outer split on the same axis.
+                    ResizeWalk::Found
+                }
+            }
+        }
+    }
+}
+
+enum ResizeWalk {
+    Absent,
+    /// The focused leaf is in this subtree, and no matching container has
+    /// moved a divider yet.
+    Found,
+    Changed,
+}
+
+/// Trade `resize`'s step between `children[focused_idx]` and one neighbor.
+/// The following sibling is preferred so a middle pane grows into the next
+/// divider; the last pane grows into the previous one.
+fn apply_keyboard_step(
+    children: &[LayoutChild],
+    focused_idx: usize,
+    resize: KeyboardResize,
+    container_px: f32,
+) -> bool {
+    let neighbor = if focused_idx + 1 < children.len() {
+        focused_idx + 1
+    } else if focused_idx > 0 {
+        focused_idx - 1
+    } else {
+        return false;
+    };
+    let (before, after, delta) = if focused_idx < neighbor {
+        (focused_idx, neighbor, resize.delta_px())
+    } else {
+        (neighbor, focused_idx, -resize.delta_px())
+    };
+    let axis = resize.axis();
+    let available = available_main_axis_px(container_px, children.len());
+    let start_before = children[before].ratio.get();
+    let start_after = children[after].ratio.get();
+    let Some((new_before, new_after)) = resize_adjacent_ratios(
+        start_before,
+        start_after,
+        delta,
+        available,
+        children[before].node.min_main_axis_px(axis),
+        children[after].node.min_main_axis_px(axis),
+    ) else {
+        return false;
+    };
+    let changed = (new_before - start_before).abs() > f32::EPSILON
+        || (new_after - start_after).abs() > f32::EPSILON;
+    if changed {
+        children[before].ratio.set(new_before);
+        children[after].ratio.set(new_after);
+    }
+    changed
 }
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext, Entity, TestAppContext};
+    use gpui::{AppContext, Entity, Focusable, TestAppContext};
 
     use crate::pane::Pane;
     use crate::terminal::TerminalView;
@@ -299,5 +444,62 @@ mod tests {
         assert!(
             (tree.min_main_axis_px(SplitDirection::Horizontal) - expected).abs() < f32::EPSILON
         );
+    }
+
+    /// Issue #917: `pane_grow_width` on the focused pane of a vertical split.
+    #[gpui::test]
+    fn keyboard_resize_moves_the_focused_split_by_one_step(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let focused = test_pane(cx, 1);
+        let other = test_pane(cx, 1);
+        let focused_ratio = Rc::new(Cell::new(0.5));
+        let other_ratio = Rc::new(Cell::new(0.5));
+        let container_px = 800.0;
+        let tree = LayoutTree::Container {
+            direction: SplitDirection::Vertical,
+            children: vec![
+                LayoutChild {
+                    node: LayoutTree::Leaf(focused.clone()),
+                    ratio: focused_ratio.clone(),
+                },
+                LayoutChild {
+                    node: LayoutTree::Leaf(other),
+                    ratio: other_ratio.clone(),
+                },
+            ],
+            drag: Rc::new(Cell::new(None)),
+            container_size: Rc::new(Cell::new(container_px)),
+        };
+        let start_focused = focused_ratio.get();
+        let sum = start_focused + other_ratio.get();
+        // Same pane area the drag path and `resize_adjacent_ratios` share.
+        let available = (container_px - DIVIDER_PX).max(0.0);
+
+        cx.update(|window, cx| {
+            focused.read(cx).focus_handle(cx).focus(window, cx);
+            assert!(
+                focused.read(cx).focus_handle(cx).is_focused(window),
+                "the grow action resizes the focused pane"
+            );
+            // Dispatch pane_grow_width: one fixed step on the nearest vertical split.
+            assert!(
+                tree.resize_focused(KeyboardResize::GrowWidth, window, cx),
+                "removing the step leaves the focused ratio unchanged"
+            );
+        });
+
+        let grown = focused_ratio.get();
+        let shrunk = other_ratio.get();
+        let step_ratio = KEYBOARD_RESIZE_STEP_PX / available;
+        assert!(
+            (grown - (start_focused + step_ratio)).abs() < 1e-4,
+            "focused ratio {grown} did not grow by one step ({step_ratio}) from {start_focused}"
+        );
+        assert!(
+            (grown + shrunk - sum).abs() < 1e-4,
+            "the pair must keep its original total"
+        );
+        assert!(grown * available + 0.01 >= MIN_PANE_SIZE);
+        assert!(shrunk * available + 0.01 >= MIN_PANE_SIZE);
     }
 }

@@ -245,6 +245,28 @@ pub(super) const DEFAULTS: &[DefaultBinding] = &[
         action_name: "split_equalize",
         context: None,
     },
+    // Issue #917: resize the focused pane without a pointer. Cmd+Ctrl+Arrow
+    // stays off alt-arrow (focus) and off secondary-tab (the macOS app switcher).
+    DefaultBinding {
+        key: "secondary-ctrl-right",
+        action_name: "pane_grow_width",
+        context: None,
+    },
+    DefaultBinding {
+        key: "secondary-ctrl-left",
+        action_name: "pane_shrink_width",
+        context: None,
+    },
+    DefaultBinding {
+        key: "secondary-ctrl-down",
+        action_name: "pane_grow_height",
+        context: None,
+    },
+    DefaultBinding {
+        key: "secondary-ctrl-up",
+        action_name: "pane_shrink_height",
+        context: None,
+    },
     DefaultBinding {
         key: "ctrl-shift-x",
         action_name: "toggle_copy_mode",
@@ -412,6 +434,10 @@ mod tests {
             "toggle_copy_mode",
             "toggle_search",
             "split_equalize",
+            "pane_grow_width",
+            "pane_shrink_width",
+            "pane_grow_height",
+            "pane_shrink_height",
             "undo_close_pane",
             "toggle_primary_sidebar",
         ] {
