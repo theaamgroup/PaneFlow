@@ -16,7 +16,12 @@ pub struct SearchLine {
 pub struct SearchChunk {
     pub lines: Vec<SearchLine>,
     pub next_row: usize,
+    /// Rows in the grid when `lines` were labeled. Paired with [`Self::scrollback`].
     pub total_rows: usize,
+    /// Scrollback depth subtracted from each row to produce [`SearchLine::line`].
+    /// A later chunk with a different depth or [`Self::total_rows`] is a
+    /// different grid frame: output landed between the two reads.
+    pub scrollback: i32,
     pub cols: usize,
 }
 
@@ -164,7 +169,7 @@ impl crate::engine::DisplayTerminal {
             .min(geometry.total_rows.saturating_sub(start_row));
         let next_row = start_row.saturating_add(rows);
         let lines = self
-            .grid_lines(Some(start_row..next_row))?
+            .grid_lines_with_geometry(&geometry, Some(start_row..next_row))?
             .into_iter()
             .map(|line| SearchLine {
                 line: line.line,
@@ -176,6 +181,7 @@ impl crate::engine::DisplayTerminal {
             lines,
             next_row,
             total_rows: geometry.total_rows,
+            scrollback: geometry.scrollback,
             cols: geometry.cols,
         })
     }

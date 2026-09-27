@@ -418,6 +418,11 @@ struct SessionInner {
     /// before that copy is returned. Absent from production builds.
     #[cfg(test)]
     search_scrollback_hook: Mutex<Option<SearchScrollbackHook>>,
+    /// Runs on the caller after a search chunk is accepted and before the
+    /// next one is requested, so a test can land output in that window.
+    /// Absent from production builds.
+    #[cfg(test)]
+    search_chunk_hook: Mutex<Option<SearchScrollbackHook>>,
     resize: Mutex<ResizeState>,
     gesture: Mutex<GestureUpdateState>,
     marks: SharedMarkRing,
@@ -1023,6 +1028,8 @@ impl GhosttySession {
                 worker_crash_injected: AtomicBool::new(false),
                 #[cfg(test)]
                 search_scrollback_hook: Mutex::new(None),
+                #[cfg(test)]
+                search_chunk_hook: Mutex::new(None),
                 resize: Mutex::new(ResizeState {
                     requested: size,
                     submitted: None,
@@ -1664,15 +1671,18 @@ impl GhosttySession {
 
     /// The scan behind [`Self::search_with_cancel`], with the reason it
     /// stopped. The second element is `Some(reason)` only when the runtime
-    /// could not answer a `SearchChunk` or the engine failed one - never for
-    /// a cancel, a superseding search, or the cell budget, which are ordinary
-    /// truncation. Issue #362: a caller that has to tell a wedged runtime
-    /// from a finished-but-capped scan reads it; the UI search drops it.
+    /// could not answer a `SearchChunk`, the engine failed one, or the grid
+    /// kept moving between chunks - never for a cancel, a superseding search,
+    /// or the cell budget, which are ordinary truncation. Issue #362: a
+    /// caller that has to tell a wedged runtime from a finished-but-capped
+    /// scan reads it; the UI search drops it.
     ///
     /// `captured_lines`, when set, records each row's text the first time that
     /// line number is read. Scrollback search keeps those strings so it does
     /// not re-read the grid after the scan, when the same line number may
-    /// already be different output.
+    /// already be different output. Every chunk in one attempt shares the
+    /// scrollback and row count of its first chunk, so that line number is
+    /// still the row the text was copied from (issue #884).
     fn search_scan(
         &self,
         query: &str,
@@ -1680,22 +1690,10 @@ impl GhosttySession {
         cancelled: &AtomicBool,
         mut captured_lines: Option<&mut HashMap<i32, String>>,
     ) -> (crate::search::SearchResult, Option<String>) {
-        let mut search = match ghostty::SearchEngine::new(query, regex) {
-            Ok(search) => search,
-            Err(error) => {
-                return (
-                    crate::search::SearchResult {
-                        matches: Vec::new(),
-                        regex_error: Some(error.to_string()),
-                        truncated: false,
-                    },
-                    None,
-                );
-            }
+        let mut search = match fresh_search(query, regex) {
+            SearchStart::Ready(search) => search,
+            SearchStart::Finished(result, reason) => return (result, reason),
         };
-        if search.is_done() {
-            return (search_result_from_ghostty(search.finish(false)), None);
-        }
 
         let generation = self
             .inner
@@ -1704,6 +1702,12 @@ impl GhosttySession {
             .wrapping_add(1);
         let mut next_row = 0usize;
         let mut scanned_cells = 0usize;
+        let mut frame: Option<(i32, usize)> = None;
+        // Output between chunks moves scrollback, so a later row can reuse an
+        // earlier line number or fall out of the walk. Retry from the top a
+        // few times; a grid that never sits still is an error, not a finished
+        // scan with `truncated: false`.
+        let mut attempt = 1u8;
         loop {
             if cancelled.load(Ordering::Acquire)
                 || self.inner.search_generation.load(Ordering::Acquire) != generation
@@ -1735,6 +1739,28 @@ impl GhosttySession {
                     );
                 }
             };
+            let chunk_frame = (chunk.scrollback, chunk.total_rows);
+            if frame.is_some_and(|established| established != chunk_frame) {
+                if attempt == MAX_SEARCH_FRAME_ATTEMPTS {
+                    return (
+                        search_result_from_ghostty(search.finish(true)),
+                        Some("the grid changed while it was being scanned".to_owned()),
+                    );
+                }
+                attempt += 1;
+                search = match fresh_search(query, regex) {
+                    SearchStart::Ready(search) => search,
+                    SearchStart::Finished(result, reason) => return (result, reason),
+                };
+                if let Some(captured) = captured_lines.as_deref_mut() {
+                    captured.clear();
+                }
+                next_row = 0;
+                scanned_cells = 0;
+                frame = None;
+                continue;
+            }
+            frame = Some(chunk_frame);
             if chunk.next_row == next_row && chunk.next_row < chunk.total_rows {
                 return (
                     search_result_from_ghostty(search.finish(true)),
@@ -1756,6 +1782,8 @@ impl GhosttySession {
             if chunk.next_row >= chunk.total_rows {
                 return (search_result_from_ghostty(search.finish(false)), None);
             }
+            #[cfg(test)]
+            self.run_search_chunk_hook();
             next_row = chunk.next_row;
         }
     }
@@ -1808,11 +1836,35 @@ impl GhosttySession {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
     }
 
+    /// Install `hook` so a scrollback scan runs it after each accepted chunk
+    /// and before the next chunk request. `None` removes it.
+    #[cfg(test)]
+    pub(super) fn set_search_chunk_hook_for_test(&self, hook: Option<SearchScrollbackHook>) {
+        *self
+            .inner
+            .search_chunk_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+    }
+
     #[cfg(test)]
     fn run_search_scrollback_hook(&self) {
         let hook = self
             .inner
             .search_scrollback_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[cfg(test)]
+    fn run_search_chunk_hook(&self) {
+        let hook = self
+            .inner
+            .search_chunk_hook
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
@@ -1933,6 +1985,36 @@ impl GhosttySession {
 /// or no reply landed within the one-second budget.
 const RUNTIME_UNANSWERED: &str =
     "the runtime did not answer (mailbox full or closed, or no reply within 1 s)";
+
+/// Full passes over the grid when scrollback moves between chunks. One quiet
+/// pass returns the hits. A frame that is still moving on the last pass is
+/// an error, not a finished scan. Issue #884.
+const MAX_SEARCH_FRAME_ATTEMPTS: u8 = 4;
+
+enum SearchStart {
+    Ready(ghostty::SearchEngine),
+    Finished(crate::search::SearchResult, Option<String>),
+}
+
+fn fresh_search(query: &str, regex: bool) -> SearchStart {
+    let search = match ghostty::SearchEngine::new(query, regex) {
+        Ok(search) => search,
+        Err(error) => {
+            return SearchStart::Finished(
+                crate::search::SearchResult {
+                    matches: Vec::new(),
+                    regex_error: Some(error.to_string()),
+                    truncated: false,
+                },
+                None,
+            );
+        }
+    };
+    if search.is_done() {
+        return SearchStart::Finished(search_result_from_ghostty(search.finish(false)), None);
+    }
+    SearchStart::Ready(search)
+}
 
 fn search_result_from_ghostty(result: ghostty::SearchResult) -> crate::search::SearchResult {
     crate::search::SearchResult {
@@ -6784,6 +6866,81 @@ printf 'PANEFLOW_FINAL_LINE_%s\\n' MARKER; exit\n"
             group_error,
             Some(libc::ESRCH),
             "the whole process group must be gone after the SIGKILL escalation"
+        );
+    }
+
+    /// Issue #884: a line printed between search chunks moves scrollback, so
+    /// the next chunk would label a different row with a line number already
+    /// stored. The scan restarts on the new frame. Every returned string
+    /// contains the pattern, and every matching row is present.
+    #[test]
+    fn surface_search_text_matches_its_row_while_output_streams() {
+        let cols = 2_048;
+        let chunk_rows = ghostty::SEARCH_CHUNK_CELLS / cols;
+        let total_lines = chunk_rows + 8;
+        let (session, pending, _events) =
+            GhosttySession::pending(TerminalWindowSize::new(cols, 4, 8, 16));
+        session
+            .start_display(pending, 10_000)
+            .expect("display runtime");
+        let mut bytes = Vec::new();
+        let mut expected = Vec::new();
+        for index in 0..total_lines {
+            let marker = format!("{index:04}");
+            let needle = index + 1 != chunk_rows
+                && (index == chunk_rows || index % 10 == 0 || index + 1 == total_lines);
+            if needle {
+                expected.push(marker.clone());
+                bytes.extend(format!("needle-{marker}\r\n").into_bytes());
+            } else {
+                bytes.extend(format!("plain-{marker}\r\n").into_bytes());
+            }
+        }
+        session.write_output(&bytes);
+
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = session.clone();
+        let fired_hook = std::sync::Arc::clone(&fired);
+        session.set_search_chunk_hook_for_test(Some(std::sync::Arc::new(move || {
+            if fired_hook.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            writer.write_output(b"shifted\r\n");
+        })));
+
+        let scanned = session.search_scrollback("needle", 64);
+        session.set_search_chunk_hook_for_test(None);
+        session.shutdown();
+        let (found, hit_cap) = scanned.expect("scan completed");
+
+        assert!(
+            fired.load(Ordering::Acquire),
+            "the grid must cross a chunk boundary so output can land between chunks"
+        );
+        assert!(
+            !hit_cap,
+            "a finished scan of this grid is not truncated: {found:?}"
+        );
+
+        let mut seen_lines = HashSet::new();
+        let mut found_markers = Vec::new();
+        for (line, text) in &found {
+            assert!(
+                seen_lines.insert(*line),
+                "line {line} covers more than one row: {found:?}"
+            );
+            assert!(
+                text.starts_with("needle-"),
+                "line {line} was paired with another row's text: {text:?}"
+            );
+            let marker = text.strip_prefix("needle-").expect("prefix checked above");
+            found_markers.push(marker);
+        }
+        found_markers.sort_unstable();
+        assert_eq!(
+            found_markers,
+            expected.iter().map(String::as_str).collect::<Vec<_>>(),
+            "a matching row was skipped or merged: {found:?}"
         );
     }
 }
