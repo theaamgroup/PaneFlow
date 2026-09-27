@@ -592,6 +592,9 @@ impl DiffView {
     }
 
     fn bootstrap(&mut self, cx: &mut Context<Self>) {
+        if super::diff_bootstrap_suppressed() {
+            return;
+        }
         let probe = self.column.path.clone();
         let preset = self.base_ref.clone();
         cx.spawn(async move |this, cx| {

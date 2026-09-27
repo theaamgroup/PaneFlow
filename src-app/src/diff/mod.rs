@@ -34,6 +34,43 @@ pub(crate) use git::tests::{capture_logs, captured_logs_contain, captured_logs_c
 pub use git::FileChange;
 pub use view::{DiffView, DiffWorktree, FileEntry, FileListState, ReviewSubject};
 
+// A Review restore builds a diff pane, and that pane resolves its base on
+// smol's pool. A test that returns while that task is still running is
+// aborted by the GPUI scheduler.
+#[cfg(test)]
+thread_local! {
+    static SKIP_DIFF_BOOTSTRAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn diff_bootstrap_suppressed() -> bool {
+    #[cfg(test)]
+    {
+        SKIP_DIFF_BOOTSTRAP.with(|flag| flag.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct SuppressDiffBootstrap;
+
+#[cfg(test)]
+impl SuppressDiffBootstrap {
+    pub(crate) fn arm() -> Self {
+        SKIP_DIFF_BOOTSTRAP.with(|flag| flag.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SuppressDiffBootstrap {
+    fn drop(&mut self) {
+        SKIP_DIFF_BOOTSTRAP.with(|flag| flag.set(false));
+    }
+}
+
 // The Settings appearance preview paints sample diff rows with the Review
 // palette and row height, so those are exposed crate-internally. Everything
 // else in the engine / git / rows pipeline stays behind `super::` paths.

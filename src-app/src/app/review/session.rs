@@ -154,9 +154,19 @@ impl PaneFlowApp {
             return;
         }
         let workspace_for_path = |path: &PathBuf| {
+            // A root hit wins. Issue #933: a tab-bound checkout never equals
+            // the workspace root, so the root miss falls through to the first
+            // workspace whose tab is bound to that path.
+            if let Some(ws) = self.workspaces.iter().find(|ws| ws.worktree_root == *path) {
+                return Some(ws.id);
+            }
             self.workspaces
                 .iter()
-                .find(|ws| ws.worktree_root == *path)
+                .find(|ws| {
+                    ws.tabs()
+                        .iter()
+                        .any(|tab| tab.worktree.as_deref() == Some(path.as_path()))
+                })
                 .map(|ws| ws.id)
         };
         let subjects: Vec<Option<ReviewSubject>> = collect_pane_surfaces(&pruned)
@@ -332,6 +342,52 @@ mod tests {
             assert_eq!(app.mode, paneflow_config::schema::AppMode::Cli);
             let state = app.build_session_state(cx);
             assert_eq!(state.review_layout, Some(saved));
+        });
+    }
+
+    /// Issue #933: a Review subject on a checkout bound to a tab, not to
+    /// either workspace root, must come back with that tab's workspace.
+    /// Two workspaces share the repository; only the second binds the path.
+    #[gpui::test]
+    fn restored_review_subject_on_a_bound_tab_keeps_its_workspace(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let checkout = repo.join(".worktrees").join("feature");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let repo = repo.to_str().expect("utf8 temp path").to_string();
+        let checkout = checkout.to_str().expect("utf8 temp path").to_string();
+
+        let cx = cx.add_empty_window();
+        let app = cx.new(blank_paneflow_app);
+        app.update(cx, |app, cx| {
+            let mut first =
+                crate::workspace::Workspace::empty_with_cwd_and_id(1, "one", PathBuf::from(&repo));
+            let mut second =
+                crate::workspace::Workspace::empty_with_cwd_and_id(2, "two", PathBuf::from(&repo));
+            let shared_root = PathBuf::from(&repo);
+            first.repo_root = Some(shared_root.clone());
+            first.worktree_root = shared_root.clone();
+            second.repo_root = Some(shared_root.clone());
+            second.worktree_root = shared_root;
+            assert!(
+                first.tabs().iter().all(|tab| tab.worktree.is_none()),
+                "only the second workspace binds the checkout"
+            );
+            second
+                .tabs_mut()
+                .next()
+                .expect("a workspace keeps one tab")
+                .worktree = Some(PathBuf::from(&checkout));
+            let second_id = second.id;
+            app.workspaces = vec![first, second];
+
+            let _bootstrap = crate::diff::SuppressDiffBootstrap::arm();
+            app.restore_review_layout(&diff_pane(&repo, &checkout), cx);
+
+            let subjects = app.review_grid_subjects(cx);
+            assert_eq!(subjects.len(), 1, "the bound checkout must survive restore");
+            assert_eq!(subjects[0].worktree.path, PathBuf::from(&checkout));
+            assert_eq!(subjects[0].worktree.workspace_id, Some(second_id));
         });
     }
 
