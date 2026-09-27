@@ -23,10 +23,42 @@ impl DisplayTerminal {
     }
 
     pub fn set_appearance(&mut self, appearance: TerminalAppearance) -> Result<()> {
+        let previous = self.callbacks.color_scheme();
+        // Color-only updates still apply below. Mode 2031 reports a light/dark
+        // change, so an unchanged scheme skips the mode query entirely.
+        let notify = previous != appearance.color_scheme && self.color_scheme_reports_enabled()?;
         configure_appearance(self.terminal.raw(), appearance)?;
         self.callbacks.set_color_scheme(appearance.color_scheme);
         self.snapshot_cache.invalidate();
+        if notify {
+            // libghostty answers `CSI ? 996 n` from the stored scheme. It does
+            // not emit this unsolicited report when mode 2031 is set.
+            self.callbacks.push(crate::BackendEvent::WritePty(
+                crate::encode_color_scheme_report(appearance.color_scheme)?,
+            ));
+        }
         Ok(())
+    }
+
+    /// Whether DEC mode 2031 is set, so a scheme change must be reported.
+    fn color_scheme_reports_enabled(&self) -> Result<bool> {
+        // DEC private modes pack with the ANSI flag clear, so 2031 is the
+        // identifier `GHOSTTY_TERMINAL_DATA_MODE` expects.
+        let mut config = sys::GhosttyTerminalModeConfig {
+            mode: crate::Mode::COLOR_SCHEME_REPORT.raw(),
+            value: false,
+        };
+        // SAFETY: `config` is a live mode record and `terminal` is owned by
+        // this display terminal for the duration of the call.
+        let result = unsafe {
+            sys::ghostty_terminal_get(
+                self.terminal.raw(),
+                sys::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_MODE,
+                (&raw mut config).cast(),
+            )
+        };
+        check("terminal_get_mode", result)?;
+        Ok(config.value)
     }
 
     /// Construct with an allocator that remains valid through this terminal's Drop.
@@ -455,6 +487,43 @@ mod tests {
             replies
                 .windows(b"]12;rgb:7777/8888/9999".len())
                 .any(|window| window == b"]12;rgb:7777/8888/9999")
+        );
+    }
+
+    #[test]
+    fn set_appearance_notifies_mode_2031_subscribers() {
+        let mut terminal = DisplayTerminal::new(
+            WindowSize::new(80, 24, 8, 16).unwrap(),
+            1_000,
+            TerminalAppearance::default(),
+        )
+        .expect("terminal must initialize");
+
+        terminal.feed(b"\x1b[?2031h").expect("mode 2031 must parse");
+        let _ = terminal.drain_events();
+
+        let appearance = TerminalAppearance {
+            color_scheme: crate::ColorScheme::Light,
+            ..TerminalAppearance::default()
+        };
+        terminal
+            .set_appearance(appearance)
+            .expect("appearance must apply");
+
+        let replies = terminal
+            .drain_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                BackendEvent::WritePty(bytes) => Some(bytes),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(
+            replies
+                .windows(b"\x1b[?997;2n".len())
+                .any(|window| window == b"\x1b[?997;2n"),
+            "mode 2031 subscribers must be told the scheme is light, got {replies:?}"
         );
     }
 
