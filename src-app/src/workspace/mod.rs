@@ -15,11 +15,11 @@ pub mod surface_naming;
 mod tab;
 pub mod worktree;
 
-pub(crate) use git::parse_head;
 pub use git::{
     GIT_STATS_SWEEP_DEADLINE, GitDiffStats, detect_branch, find_git_dir, resolve_repo_root,
     resolve_worktree_root,
 };
+pub(crate) use git::{capture_git_stdout, parse_head};
 #[cfg(test)]
 pub(crate) use ports::PortEntry;
 pub use ports::{PaneScan, scan_panes};
