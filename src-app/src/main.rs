@@ -1338,11 +1338,13 @@ struct AgentSessionsState {
 struct PaneFlowApp {
     workspaces: Vec<Workspace>,
     active_idx: usize,
-    renaming_idx: Option<usize>,
-    /// US-010: sidebar tab being renamed inline, as `(workspace_idx, tab_idx)`.
+    /// Inline folder rename target. The value is a workspace id, not the row's
+    /// index: the list can shift before the edit commits (issue #935).
+    renaming_idx: Option<u64>,
+    /// US-010: sidebar tab being renamed inline, as `(workspace id, tab id)`.
     /// Shares `rename_text` with the workspace rename - only one inline rename
     /// can be live at a time, and `commit_rename` settles whichever is.
-    renaming_tab: Option<(usize, usize)>,
+    renaming_tab: Option<(u64, u64)>,
     rename_text: String,
     /// `rename_text` still holds exactly the value the rename was seeded with,
     /// so the editor paints it as a selection and the next printable key (or

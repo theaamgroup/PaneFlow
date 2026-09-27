@@ -613,7 +613,9 @@ mod tests {
         );
     }
 
-    fn blank_paneflow_app(cx: &mut gpui::Context<crate::PaneFlowApp>) -> crate::PaneFlowApp {
+    pub(crate) fn blank_paneflow_app(
+        cx: &mut gpui::Context<crate::PaneFlowApp>,
+    ) -> crate::PaneFlowApp {
         use std::sync::atomic::{AtomicU64, AtomicUsize};
         use std::sync::{Arc, Mutex};
 
@@ -733,3 +735,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) use tests::blank_paneflow_app;

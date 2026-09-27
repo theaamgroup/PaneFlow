@@ -429,6 +429,9 @@ impl PaneFlowApp {
         let Some(ws) = self.workspaces.get(ws_idx) else {
             return;
         };
+        // `renaming_tab` stores this workspace's id. Comparing it to `ws_idx`
+        // cancelled a different workspace after the list had shifted (issue #935).
+        let workspace_id = ws.id;
         let record = ws
             .tabs()
             .get(tab_idx)
@@ -454,7 +457,7 @@ impl PaneFlowApp {
         // only runs for the ACTIVE workspace, and closing a BACKGROUND
         // workspace's tab while renaming it is reachable straight from that
         // tab row's right-click menu. `cancel_inline_rename` restores focus.
-        if self.renaming_tab.is_some_and(|(w, _)| w == ws_idx) {
+        if self.renaming_tab.is_some_and(|(id, _)| id == workspace_id) {
             self.cancel_inline_rename(window, cx);
         }
         self.dismiss_transient_surfaces();
@@ -511,19 +514,23 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) {
         self.commit_rename(cx);
-        let Some(title) = self
-            .workspaces
-            .get(ws_idx)
-            .and_then(|ws| ws.tabs().get(tab_idx))
-            .map(|tab| crate::app::sidebar::tab_row_title(tab, tab_idx, cx))
-        else {
+        // Ids, not the indices this call was given: a reorder or an undo-close
+        // inserted ahead of the row must not retarget the editor (issue #935).
+        let Some((workspace_id, tab_id, title)) = self.workspaces.get(ws_idx).and_then(|ws| {
+            let tab = ws.tabs().get(tab_idx)?;
+            Some((
+                ws.id,
+                tab.id,
+                crate::app::sidebar::tab_row_title(tab, tab_idx, cx),
+            ))
+        }) else {
             return;
         };
         self.rename_text = title;
         // Seeded, so the editor opens with the whole displayed label selected.
         // Set after `commit_rename`, which clears the flag.
         self.rename_seeded = true;
-        self.renaming_tab = Some((ws_idx, tab_idx));
+        self.renaming_tab = Some((workspace_id, tab_id));
         self.sidebar_rename_focus.focus(window, cx);
         cx.notify();
     }
