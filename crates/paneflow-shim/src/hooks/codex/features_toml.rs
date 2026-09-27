@@ -30,6 +30,8 @@ pub(super) fn codex_features(content: &str) -> Option<CodexFeatures> {
     loop {
         scanner.skip_trivia();
         let Some(byte) = scanner.peek() else {
+            // Only a clean end of input ends the scan.
+            scanner.at_end().then_some(())?;
             break;
         };
         if byte == b'[' {
@@ -44,9 +46,15 @@ pub(super) fn codex_features(content: &str) -> Option<CodexFeatures> {
             }
             scanner.end_of_line()?;
             // `[features.sub]` only defines features implicitly, and TOML
-            // still allows a later `[features]` header after it.
+            // still allows a later `[features]` header after it. A
+            // `[features.hooks]` table, though, already defines the flag the
+            // appended block would set.
             let is_features = path == ["features"];
-            defined |= is_features;
+            let defines_flag = matches!(
+                path.as_slice(),
+                [features, flag, ..] if features == "features" && is_hooks_name(flag)
+            );
+            defined |= is_features || defines_flag;
             in_features_table = is_features && !array;
             at_root = false;
             continue;
@@ -84,8 +92,12 @@ pub(super) fn codex_features(content: &str) -> Option<CodexFeatures> {
     })
 }
 
+fn is_hooks_name(name: &str) -> bool {
+    name == "hooks" || name == "codex_hooks"
+}
+
 fn enables_hooks(key: &[String], value: &str) -> bool {
-    matches!(key, [name] if name == "hooks" || name == "codex_hooks") && value == "true"
+    matches!(key, [name] if is_hooks_name(name)) && value == "true"
 }
 
 /// `Some(false)` for a value that is not an inline table.
@@ -127,21 +139,34 @@ impl<'a> Scanner<'a> {
         Self { text, pos: 0 }
     }
 
-    fn rest(&self) -> &'a str {
-        self.text.get(self.pos..).unwrap_or_default()
+    /// `None` at a position inside a character or past the end, which the
+    /// scan never produces; callers then fail instead of seeing a clean end.
+    fn rest(&self) -> Option<&'a str> {
+        self.text.get(self.pos..)
+    }
+
+    fn at_end(&self) -> bool {
+        self.pos == self.text.len()
     }
 
     fn peek(&self) -> Option<u8> {
-        self.rest().bytes().next()
+        self.rest()?.bytes().next()
+    }
+
+    fn at(&self, token: &str) -> bool {
+        self.rest().is_some_and(|rest| rest.starts_with(token))
     }
 
     /// Advances past one whole character, never into the middle of one.
     fn bump(&mut self) {
-        self.pos += self.rest().chars().next().map_or(1, char::len_utf8);
+        self.pos += self
+            .rest()
+            .and_then(|rest| rest.chars().next())
+            .map_or(1, char::len_utf8);
     }
 
     fn eat(&mut self, token: &str) -> bool {
-        let found = self.rest().starts_with(token);
+        let found = self.at(token);
         if found {
             self.pos += token.len();
         }
@@ -155,8 +180,7 @@ impl<'a> Scanner<'a> {
     }
 
     fn skip_comment(&mut self) {
-        if self.peek() == Some(b'#') {
-            let line = self.rest();
+        if let Some(line) = self.rest().filter(|line| line.starts_with('#')) {
             self.pos += line.find(['\n', '\r']).unwrap_or(line.len());
         }
     }
@@ -175,7 +199,7 @@ impl<'a> Scanner<'a> {
     fn end_of_line(&mut self) -> Option<()> {
         self.skip_blank();
         self.skip_comment();
-        if self.peek().is_none() || self.eat("\n") || self.eat("\r\n") {
+        if self.at_end() || self.eat("\n") || self.eat("\r\n") {
             Some(())
         } else {
             None
@@ -196,10 +220,10 @@ impl<'a> Scanner<'a> {
 
     fn simple_key(&mut self) -> Option<String> {
         match self.peek()? {
-            b'"' if !self.rest().starts_with("\"\"\"") => self.basic_string(),
-            b'\'' if !self.rest().starts_with("'''") => self.literal_string(),
+            b'"' if !self.at("\"\"\"") => self.basic_string(),
+            b'\'' if !self.at("'''") => self.literal_string(),
             _ => {
-                let rest = self.rest();
+                let rest = self.rest()?;
                 let len = rest
                     .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
                     .unwrap_or(rest.len());
@@ -216,7 +240,7 @@ impl<'a> Scanner<'a> {
     fn basic_string(&mut self) -> Option<String> {
         self.pos += 1;
         let mut out = String::new();
-        let mut chars = self.rest().char_indices();
+        let mut chars = self.rest()?.char_indices();
         while let Some((index, c)) = chars.next() {
             match c {
                 '"' => {
@@ -263,7 +287,7 @@ impl<'a> Scanner<'a> {
     /// A single-line literal string; `pos` sits on the opening quote.
     fn literal_string(&mut self) -> Option<String> {
         self.pos += 1;
-        let rest = self.rest();
+        let rest = self.rest()?;
         let end = rest.find(['\'', '\n', '\r'])?;
         if rest.as_bytes().get(end) != Some(&b'\'') {
             return None;
@@ -278,7 +302,7 @@ impl<'a> Scanner<'a> {
         self.pos += delimiter.len();
         let quote = delimiter.as_bytes().first().copied()?;
         loop {
-            let rest = self.rest();
+            let rest = self.rest()?;
             let next = rest.find(|c: char| c == char::from(quote) || (escapes && c == '\\'))?;
             self.pos += next;
             if escapes && self.peek() == Some(b'\\') {
@@ -306,10 +330,10 @@ impl<'a> Scanner<'a> {
         let mut depth = 0usize;
         while let Some(byte) = self.peek() {
             match byte {
-                b'"' if self.rest().starts_with("\"\"\"") => {
+                b'"' if self.at("\"\"\"") => {
                     self.skip_multiline_string("\"\"\"", true)?;
                 }
-                b'\'' if self.rest().starts_with("'''") => {
+                b'\'' if self.at("'''") => {
                     self.skip_multiline_string("'''", false)?;
                 }
                 b'"' => {
@@ -346,62 +370,136 @@ impl<'a> Scanner<'a> {
 mod tests {
     use super::*;
 
+    const EXPECTED: &[(&str, CodexFeatures)] = &[
+        ("", CodexFeatures::Absent),
+        (
+            "model = \"gpt-5\"\r\nfeatures.hooks = true\r\n",
+            CodexFeatures::HooksEnabled,
+        ),
+        (
+            "\u{feff}features = { hooks = true }",
+            CodexFeatures::HooksEnabled,
+        ),
+        (
+            "\"\\u0066eatures\".hooks = true\n",
+            CodexFeatures::HooksEnabled,
+        ),
+        (
+            "list = [\n  \"[features]\", # ]\n  { a = '}' },\n]\nfeatures.hooks = true\n",
+            CodexFeatures::HooksEnabled,
+        ),
+        (
+            "s = '''\n[x]'''''\nfeatures = { hooks = true }\n",
+            CodexFeatures::HooksEnabled,
+        ),
+        (
+            "s = \"\"\"\\\"\"\"\"\nfeatures.hooks = true\n",
+            CodexFeatures::HooksEnabled,
+        ),
+        (
+            "[features]\ncodex_hooks = true\n",
+            CodexFeatures::HooksEnabled,
+        ),
+        ("features = true\n", CodexFeatures::Unsupported),
+        (
+            "features = { hooks = \"true\" }\n",
+            CodexFeatures::Unsupported,
+        ),
+        ("features.hooks.x = true\n", CodexFeatures::Unsupported),
+        ("[[features]]\nhooks = true\n", CodexFeatures::Unsupported),
+        // A `[features.hooks...]` table already defines the flag that the
+        // appended `hooks = true` would set a second time.
+        ("[features.hooks]\nx = 1\n", CodexFeatures::Unsupported),
+        ("[[features.hooks]]\nx = 1\n", CodexFeatures::Unsupported),
+        ("[features.hooks.deep]\nx = 1\n", CodexFeatures::Unsupported),
+        (
+            "[ features . 'hooks' ]\nx = 1\n",
+            CodexFeatures::Unsupported,
+        ),
+        (
+            "[features.codex_hooks]\nx = 1\n",
+            CodexFeatures::Unsupported,
+        ),
+        ("[features.sub]\nhooks = true\n", CodexFeatures::Absent),
+        (
+            "[other]\nfeatures = { hooks = true }\n",
+            CodexFeatures::Absent,
+        ),
+        ("notes = \"features.hooks = true\"\n", CodexFeatures::Absent),
+    ];
+
+    const UNREADABLE: &[&str] = &[
+        "features",
+        "features = ",
+        "features = [1, 2\n",
+        "features = \"open\n",
+        "model = \"gpt-5\n",
+        "[features\n",
+        "= 1\n",
+    ];
+
     #[test]
     fn scanner_follows_values_that_span_lines_or_hide_delimiters() {
-        let cases = [
-            ("", CodexFeatures::Absent),
-            (
-                "model = \"gpt-5\"\r\nfeatures.hooks = true\r\n",
-                CodexFeatures::HooksEnabled,
-            ),
-            (
-                "\u{feff}features = { hooks = true }",
-                CodexFeatures::HooksEnabled,
-            ),
-            (
-                "\"\\u0066eatures\".hooks = true\n",
-                CodexFeatures::HooksEnabled,
-            ),
-            (
-                "list = [\n  \"[features]\", # ]\n  { a = '}' },\n]\nfeatures.hooks = true\n",
-                CodexFeatures::HooksEnabled,
-            ),
-            (
-                "s = '''\n[x]'''''\nfeatures = { hooks = true }\n",
-                CodexFeatures::HooksEnabled,
-            ),
-            (
-                "s = \"\"\"\\\"\"\"\"\nfeatures.hooks = true\n",
-                CodexFeatures::HooksEnabled,
-            ),
-            ("features = true\n", CodexFeatures::Unsupported),
-            (
-                "features = { hooks = \"true\" }\n",
-                CodexFeatures::Unsupported,
-            ),
-            ("features.hooks.x = true\n", CodexFeatures::Unsupported),
-            ("[features.sub]\nhooks = true\n", CodexFeatures::Absent),
-            (
-                "[other]\nfeatures = { hooks = true }\n",
-                CodexFeatures::Absent,
-            ),
-        ];
-        for (content, expected) in cases {
-            assert_eq!(codex_features(content), Some(expected), "{content:?}");
+        for (content, expected) in EXPECTED {
+            assert_eq!(
+                codex_features(content).as_ref(),
+                Some(expected),
+                "{content:?}"
+            );
         }
     }
 
     #[test]
     fn scanner_rejects_content_it_cannot_follow() {
-        for content in [
-            "features",
-            "features = ",
-            "features = [1, 2\n",
-            "features = \"open\n",
-            "[features\n",
-            "= 1\n",
-        ] {
+        for content in UNREADABLE {
             assert_eq!(codex_features(content), None, "{content:?}");
+        }
+    }
+
+    /// The bytes `enable_codex_feature_flag` appends when the scan is `Absent`.
+    fn with_managed_block(content: &str) -> String {
+        let separator = if content.is_empty() || content.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        format!("{content}{separator}\n# managed\n[features]\nhooks = true\n")
+    }
+
+    fn parse_toml(content: &str) -> Result<toml::Table, toml::de::Error> {
+        toml::from_str(content.trim_start_matches('\u{feff}'))
+    }
+
+    #[test]
+    fn scanner_agrees_with_the_toml_crate() {
+        for (content, _) in EXPECTED {
+            let table = parse_toml(content)
+                .unwrap_or_else(|err| panic!("fixture must be valid TOML {content:?}: {err}"));
+            let features = table.get("features");
+            let enabled = features.is_some_and(|features| {
+                ["hooks", "codex_hooks"]
+                    .iter()
+                    .any(|name| features.get(name).and_then(toml::Value::as_bool) == Some(true))
+            });
+            match codex_features(content) {
+                Some(CodexFeatures::HooksEnabled) => assert!(enabled, "{content:?}"),
+                Some(CodexFeatures::Unsupported) => {
+                    // `[features.codex_hooks]` would still take the append,
+                    // but a flag defined as a table is refused, not merged.
+                    assert!(features.is_some() && !enabled, "{content:?}");
+                }
+                Some(CodexFeatures::Absent) => {
+                    assert!(!enabled, "{content:?}");
+                    assert!(
+                        parse_toml(&with_managed_block(content)).is_ok(),
+                        "appending must keep valid TOML: {content:?}"
+                    );
+                }
+                None => panic!("valid TOML must scan: {content:?}"),
+            }
+        }
+        for content in UNREADABLE {
+            assert!(parse_toml(content).is_err(), "{content:?}");
         }
     }
 }

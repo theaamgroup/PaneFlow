@@ -814,6 +814,8 @@ fn enable_codex_feature_flag_keeps_inline_and_dotted_enabled_features() {
             !content.contains("[features]") && !content.contains(CODEX_TOML_MARKER),
             "must not declare features a second time:\n{content}"
         );
+        let table: toml::Table = toml::from_str(&content).unwrap();
+        assert!(table["features"].is_table(), "{content}");
     }
 }
 
@@ -829,6 +831,11 @@ fn enable_codex_feature_flag_refuses_unsupported_inline_and_dotted_features() {
         "features.other = true\n",
         "'features'.other = true\n",
         "[[features]]\nhooks = true\n",
+        // A `[features.hooks]` table already defines the flag itself.
+        "[features.hooks]\nx = 1\n",
+        "[[features.hooks]]\nx = 1\n",
+        "[features.hooks.deep]\nx = 1\n",
+        "[features.codex_hooks]\nx = 1\n",
     ];
     for original in fixtures {
         let td = tempfile::TempDir::new().unwrap();
@@ -838,6 +845,26 @@ fn enable_codex_feature_flag_refuses_unsupported_inline_and_dotted_features() {
         assert!(
             enable_codex_feature_flag(&path).is_err(),
             "an existing features definition without hooks must refuse:\n{original}"
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, original, "a refusal must not write");
+        assert!(toml::from_str::<toml::Table>(&content).is_ok(), "{content}");
+    }
+}
+
+#[test]
+fn enable_codex_feature_flag_refuses_config_it_cannot_read() {
+    // Content the scanner cannot follow is not valid TOML either; appending
+    // to it cannot help, so refuse and leave the bytes alone.
+    for original in ["features = [1, 2\n", "model = \"gpt-5\n"] {
+        assert!(toml::from_str::<toml::Table>(original).is_err());
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("config.toml");
+        std::fs::write(&path, original).unwrap();
+
+        assert!(
+            enable_codex_feature_flag(&path).is_err(),
+            "unreadable config must refuse:\n{original}"
         );
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, original, "a refusal must not write");
@@ -867,6 +894,12 @@ fn enable_codex_feature_flag_ignores_features_keys_that_are_not_root_features() 
         assert!(
             content.starts_with(original) && content.ends_with("[features]\nhooks = true\n"),
             "the managed block must be appended after the user's bytes:\n{content}"
+        );
+        let table: toml::Table = toml::from_str(&content).unwrap();
+        assert_eq!(
+            table["features"]["hooks"].as_bool(),
+            Some(true),
+            "{content}"
         );
     }
 }
