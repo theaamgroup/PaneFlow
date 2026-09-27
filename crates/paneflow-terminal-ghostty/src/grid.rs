@@ -8,6 +8,23 @@ use crate::{GhosttyError, Point, Result};
 
 const MAX_GRAPHEME_CODEPOINTS: usize = 1024;
 
+// Rows `grid_lines` has returned on this thread. Transcript tests bound a
+// windowed read against a whole-history read.
+#[cfg(test)]
+thread_local! {
+    static GRID_LINES_ROWS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_grid_lines_rows_read() {
+    GRID_LINES_ROWS_READ.with(|cell| cell.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn grid_lines_rows_read() -> usize {
+    GRID_LINES_ROWS_READ.with(|cell| cell.get())
+}
+
 #[derive(Default)]
 pub(crate) struct GridLine {
     pub(crate) line: i32,
@@ -90,7 +107,13 @@ impl DisplayTerminal {
         range: Option<std::ops::Range<usize>>,
     ) -> Result<Vec<GridLine>> {
         let geometry = self.grid_geometry()?;
-        self.grid_lines_with_geometry(&geometry, range)
+        let lines = self.grid_lines_with_geometry(&geometry, range)?;
+        #[cfg(test)]
+        {
+            let read = lines.len();
+            GRID_LINES_ROWS_READ.with(|cell| cell.set(cell.get().saturating_add(read)));
+        }
+        Ok(lines)
     }
 
     /// Rows labeled with `geometry`, the same scrollback and total a caller

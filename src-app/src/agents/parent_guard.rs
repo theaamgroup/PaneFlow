@@ -1274,6 +1274,89 @@ mod tests {
         assert_eq!(run_pty_guard_from_args(&args), 0);
     }
 
+    /// Helper whose stdin is the control pipe. Returns immediately unless the
+    /// parent test set [`SUBPROCESS_GUARD_GROUP_ENV`]. `monitor_control_pipe`
+    /// is true, unlike [`pty_guard_subprocess_entrypoint`].
+    #[cfg(unix)]
+    #[test]
+    fn pty_guard_control_pipe_entrypoint() {
+        use std::io::Write;
+
+        let Ok(spec) = std::env::var(SUBPROCESS_GUARD_GROUP_ENV) else {
+            return;
+        };
+        let mut fields = spec.splitn(3, '|');
+        let pgid = fields
+            .next()
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("guard test pgid");
+        let session_id = fields
+            .next()
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("guard test session");
+        let members = fields
+            .next()
+            .and_then(parse_member_pins)
+            .expect("guard test pins");
+        // SAFETY: getppid has no preconditions. This helper's parent is the
+        // test process that holds the control pipe.
+        let parent_pid = unsafe { libc::getppid() } as u32;
+        let group = PinnedProcessGroup {
+            pgid,
+            session_id,
+            members,
+        };
+        println!("PANEFLOW_GUARD_READY");
+        std::io::stdout().flush().expect("flush guard readiness");
+        assert_eq!(
+            run_pty_guard_with_groups(parent_pid, group, PtyGuardMode::Frozen, true, Vec::new()),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    fn wait_for_guard_ready(stdout: &mut std::process::ChildStdout) {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        use std::time::{Duration, Instant};
+
+        let stdout_fd = stdout.as_raw_fd();
+        // SAFETY: set nonblocking on this test-owned pipe so a broken helper
+        // cannot hang the suite indefinitely.
+        unsafe {
+            let flags = libc::fcntl(stdout_fd, libc::F_GETFL);
+            assert!(flags >= 0, "fcntl getfl on guard stdout");
+            assert_eq!(
+                libc::fcntl(stdout_fd, libc::F_SETFL, flags | libc::O_NONBLOCK),
+                0,
+                "fcntl setfl on guard stdout"
+            );
+        }
+        let deadline = Instant::now() + FIXTURE_WAIT_BUDGET;
+        let mut output = Vec::new();
+        let mut buffer = [0u8; 1024];
+        loop {
+            match stdout.read(&mut buffer) {
+                Ok(0) => panic!(
+                    "control-pipe guard exited before readiness: {}",
+                    String::from_utf8_lossy(&output)
+                ),
+                Ok(read) => output.extend_from_slice(&buffer[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("read control-pipe guard readiness: {error}"),
+            }
+            if String::from_utf8_lossy(&output).contains("PANEFLOW_GUARD_READY") {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "control-pipe guard readiness timed out: {}",
+                String::from_utf8_lossy(&output)
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn control_pipe_close_kills_a_term_ignoring_group() {
@@ -1297,6 +1380,18 @@ mod tests {
         }
         let mut child = command.spawn().expect("spawn TERM-ignoring group");
         let pgid = child.id();
+
+        struct GroupCleanup(i32);
+        impl Drop for GroupCleanup {
+            fn drop(&mut self) {
+                // Test-only best effort; this group was created by the fixture.
+                unsafe {
+                    libc::kill(-self.0, libc::SIGKILL);
+                }
+            }
+        }
+        let _cleanup = GroupCleanup(pgid as i32);
+
         let mut ready = String::new();
         BufReader::new(child.stdout.take().expect("piped stdout"))
             .read_line(&mut ready)
@@ -1306,7 +1401,56 @@ mod tests {
         let pinned_start = pid_start_time(pgid).expect("pin child start time");
         let group =
             pin_leader_process_group(pgid, Some(pinned_start)).expect("pin child process group");
-        shutdown_guard_targets(&group, &PtyGuardMode::Frozen, &[]);
+        let spec = format!(
+            "{}|{}|{}",
+            group.pgid,
+            group.session_id,
+            serialize_member_pins(&group.members)
+        );
+        let exe = std::env::current_exe().expect("current test executable");
+        let helper = Command::new(exe)
+            .args([
+                "--exact",
+                "agents::parent_guard::tests::pty_guard_control_pipe_entrypoint",
+                "--nocapture",
+            ])
+            .env(SUBPROCESS_GUARD_GROUP_ENV, spec)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn control-pipe guard");
+
+        struct HelperCleanup(Option<std::process::Child>);
+        impl Drop for HelperCleanup {
+            fn drop(&mut self) {
+                if let Some(helper) = self.0.as_mut() {
+                    let _ = helper.kill();
+                    let _ = helper.wait();
+                }
+            }
+        }
+        let mut helper = HelperCleanup(Some(helper));
+        let guard_stdout = {
+            let guard = helper.0.as_mut().expect("helper");
+            let stdin = guard.stdin.take().expect("guard stdin");
+            let mut stdout = guard.stdout.take().expect("guard stdout");
+            wait_for_guard_ready(&mut stdout);
+            // The pipe is open and empty, so the guard's nonblocking read
+            // returns EAGAIN. That is not EOF: closing is what must kill.
+            let open_pipe_grace = GUARD_POLL_INTERVAL * 2 + Duration::from_millis(200);
+            std::thread::sleep(open_pipe_grace);
+            assert!(
+                child.try_wait().expect("try_wait child").is_none(),
+                "open control pipe must not kill the group; EAGAIN is not EOF"
+            );
+            assert!(
+                guard.try_wait().expect("try_wait guard").is_none(),
+                "guard must keep polling while its control pipe is open"
+            );
+            drop(stdin);
+            stdout
+        };
 
         let deadline = Instant::now() + FIXTURE_WAIT_BUDGET;
         let status = loop {
@@ -1325,6 +1469,28 @@ mod tests {
             Some(libc::SIGKILL),
             "a TERM-ignoring group must reach the guard's SIGKILL escalation"
         );
+
+        let helper_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if helper
+                .0
+                .as_mut()
+                .expect("helper")
+                .try_wait()
+                .expect("try_wait guard")
+                .is_some()
+            {
+                break;
+            }
+            if Instant::now() >= helper_deadline {
+                panic!("control-pipe guard did not exit after EOF");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // try_wait already reaped the helper. Disarm Drop so it cannot
+        // signal a recycled pid.
+        helper.0.take();
+        drop(guard_stdout);
     }
 
     #[cfg(target_os = "macos")]

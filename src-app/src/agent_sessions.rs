@@ -459,9 +459,18 @@ pub mod cache {
                     );
                 }
                 assert_eq!(guard.len(), super::MAX_CACHE_ENTRIES);
-                // /proj-0 is the oldest entry by access_seq.
                 assert!(guard.contains_key(&(SessionAgent::Claude, "/proj-0".to_string())));
+                assert!(guard.contains_key(&(SessionAgent::Claude, "/proj-1".to_string())));
             }
+            // Insertion order alone makes /proj-0 the oldest. Touch it
+            // through the real lookup so its access stamp moves to the
+            // front. Deleting the lookup's `access_seq` bump leaves
+            // /proj-0 oldest and this assertion fails.
+            assert!(
+                super::lookup_with_mtime(SessionAgent::Claude, "/proj-0", SystemTime::UNIX_EPOCH,)
+                    .is_some(),
+                "lookup must hit the seeded /proj-0 entry and refresh its stamp"
+            );
             // Insert the 11th distinct entry via the REAL production
             // path: `store_result` enforces the cap, picks the LRU
             // victim, evicts it, then inserts. This catches any
@@ -479,8 +488,12 @@ pub mod cache {
                     "new entry must be present"
                 );
                 assert!(
-                    !guard.contains_key(&(SessionAgent::Claude, "/proj-0".to_string())),
-                    "LRU victim (proj-0) must have been evicted"
+                    guard.contains_key(&(SessionAgent::Claude, "/proj-0".to_string())),
+                    "/proj-0 was looked up and must survive eviction"
+                );
+                assert!(
+                    !guard.contains_key(&(SessionAgent::Claude, "/proj-1".to_string())),
+                    "LRU victim must be /proj-1 once /proj-0 has been looked up"
                 );
             }
             super::clear();
@@ -1068,9 +1081,24 @@ mod tests {
     /// command-backed agent is skipped without spawning its list CLI.
     #[test]
     fn attribution_for_column_within_skips_command_agents_once_the_budget_is_spent() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("hang-list");
+        std::fs::write(&script, "#!/bin/sh\nsleep 60\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let program: &'static str =
+            Box::leak(script.to_string_lossy().into_owned().into_boxed_str());
+        crate::command_sessions::set_list_program_override(Some(program));
+        struct ClearOverride;
+        impl Drop for ClearOverride {
+            fn drop(&mut self) {
+                crate::command_sessions::set_list_program_override(None);
+            }
+        }
+        let _clear = ClearOverride;
+
         let cwd = dir.path().to_string_lossy().into_owned();
-        let spent = std::time::Instant::now() - std::time::Duration::from_secs(1);
         let agents = [
             SessionAgent::Hermes,
             SessionAgent::Grok,
@@ -1078,6 +1106,21 @@ mod tests {
             SessionAgent::Gemini,
             SessionAgent::Kiro,
         ];
+
+        // The stub has to be what the readers spawn. With the vendor CLIs
+        // absent, every budget returns NotFound and this test cannot fail.
+        let budget = std::time::Duration::from_millis(500);
+        let budget_until = std::time::Instant::now() + budget;
+        let started = std::time::Instant::now();
+        let probed = attribution_for_column_within(&cwd, "main", &agents, budget_until);
+        let probed_elapsed = started.elapsed();
+        assert!(probed.is_empty(), "a hung list command yields no rows");
+        assert!(
+            probed_elapsed >= budget && probed_elapsed < crate::command_sessions::COMMAND_DEADLINE,
+            "the shared budget must cut the hanging list command, took {probed_elapsed:?}"
+        );
+
+        let spent = std::time::Instant::now() - std::time::Duration::from_secs(1);
         let started = std::time::Instant::now();
         let sessions = attribution_for_column_within(&cwd, "main", &agents, spent);
         let elapsed = started.elapsed();
