@@ -948,7 +948,8 @@ pub fn prune(repo_root: &Path) -> Result<(), String> {
 /// a `.env` that points at `~/.ssh/id_rsa` into the new worktree as a regular
 /// file. Source entries that are not regular files are skipped, and the
 /// destination is created with `O_EXCL` so a planted dest symlink cannot be
-/// written through.
+/// written through. A copy that fails after that create removes the new
+/// file; a truncated `.env` must not count as already present.
 pub fn copy_env_files(src_root: &Path, dst_root: &Path) -> Vec<String> {
     let entries = match std::fs::read_dir(src_root) {
         Ok(entries) => entries,
@@ -1014,8 +1015,52 @@ pub fn copy_env_files(src_root: &Path, dst_root: &Path) -> Vec<String> {
     copied
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_ENV_COPY_AFTER_CREATE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// One-shot post-create failure for [`copy_env_file_no_follow`]. Drop
+/// disarms it so a reused test thread cannot fail a later copy.
+#[cfg(test)]
+struct FailEnvCopyAfterCreateGuard;
+
+#[cfg(test)]
+impl FailEnvCopyAfterCreateGuard {
+    fn arm() -> Self {
+        FAIL_ENV_COPY_AFTER_CREATE.with(|flag| flag.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for FailEnvCopyAfterCreateGuard {
+    fn drop(&mut self) {
+        FAIL_ENV_COPY_AFTER_CREATE.with(|flag| flag.set(false));
+    }
+}
+
+/// Test hook. When armed, fails once after `dst` exists and before secret
+/// bytes are copied. No-op on the success path.
+#[cfg(test)]
+fn fail_env_copy_after_create(dst: &Path) -> std::io::Result<()> {
+    if !FAIL_ENV_COPY_AFTER_CREATE.with(|flag| flag.replace(false)) {
+        return Ok(());
+    }
+    assert!(
+        std::fs::symlink_metadata(dst).is_ok(),
+        "env copy failure hook ran before the destination existed"
+    );
+    Err(std::io::Error::other(
+        "injected env copy failure after destination create",
+    ))
+}
+
 /// Copy `src` onto a newly created regular `dst`. Source is opened with
 /// `O_NOFOLLOW` and dest with `O_EXCL` so neither name can be a symlink.
+/// After the destination exists, any error removes it before returning:
+/// a later copy skips an existing name, so a truncated `.env` would stick.
 fn copy_env_file_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
     use std::io::{self, Write};
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -1031,11 +1076,23 @@ fn copy_env_file_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
         .mode(permissions.mode())
         .custom_flags(libc::O_NOFOLLOW)
         .open(dst)?;
-    // Apply the source mode before any secret bytes land, so a 0600
-    // `.env` is never world-readable for the duration of `io::copy`.
-    dst_file.set_permissions(permissions)?;
-    io::copy(&mut src_file, &mut dst_file)?;
-    dst_file.flush()?;
+    // `open` has created `dst`. Every later failure must unlink it; the
+    // `?`s stay inside this result so none of them can return early.
+    let copied = (|| -> io::Result<()> {
+        // Apply the source mode before any secret bytes land, so a 0600
+        // `.env` is never world-readable for the duration of `io::copy`.
+        dst_file.set_permissions(permissions)?;
+        #[cfg(test)]
+        fail_env_copy_after_create(dst)?;
+        io::copy(&mut src_file, &mut dst_file)?;
+        dst_file.flush()?;
+        Ok(())
+    })();
+    if let Err(error) = copied {
+        drop(dst_file);
+        let _ = std::fs::remove_file(dst);
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -2008,6 +2065,40 @@ mod tests {
             logs_contain("failed to copy env file"),
             "copy failure should emit a warning"
         );
+    }
+
+    /// Issue #940: a copy that fails after the destination is created must
+    /// remove that file. Later copies skip existing names, so a truncated
+    /// `.env` would otherwise stay in the checkout.
+    #[test]
+    fn a_failed_env_copy_leaves_no_partial_file() {
+        let src = tempfile::tempdir().expect("src");
+        let dst_dir = tempfile::tempdir().expect("dst");
+        let env = src.path().join(".env");
+        let body = "SECRET=1";
+        std::fs::write(&env, body).unwrap();
+        let dst = dst_dir.path().join(".env");
+
+        let guard = FailEnvCopyAfterCreateGuard::arm();
+        let error = copy_env_file_no_follow(&env, &dst).expect_err("injected copy failure");
+        drop(guard);
+        assert!(
+            error
+                .to_string()
+                .contains("injected env copy failure after destination create"),
+            "failure must come from the post-create hook, got {error}"
+        );
+        assert_eq!(
+            std::fs::symlink_metadata(&dst)
+                .err()
+                .map(|missing| missing.kind()),
+            Some(std::io::ErrorKind::NotFound),
+            "failed env copy left a partial file at {}",
+            dst.display()
+        );
+
+        copy_env_file_no_follow(&env, &dst).expect("retry after the partial file was removed");
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), body);
     }
 
     /// Issue #921: a tag that shares a branch's name must not rename the
