@@ -380,7 +380,7 @@ fn menu_label(label: &'static str, ui: crate::theme::UiColors) -> AnyElement {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::source_probe::source_slice;
 
     /// Issue #105 meets issue #349: the menu is not a back door to Settings.
@@ -735,6 +735,3 @@ mod tests {
         }
     }
 }
-
-#[cfg(test)]
-pub(crate) use tests::blank_paneflow_app;

@@ -4285,7 +4285,7 @@ mod tests {
         workspaces: Vec<Workspace>,
     ) -> gpui::Entity<PaneFlowApp> {
         cx.new(|cx| {
-            let mut app = crate::app::sidebar::customize_menu::blank_paneflow_app(cx);
+            let mut app = crate::app::sidebar::customize_menu::tests::blank_paneflow_app(cx);
             hold_session_saves(&mut app);
             app.workspaces = workspaces;
             app.active_idx = 0;
