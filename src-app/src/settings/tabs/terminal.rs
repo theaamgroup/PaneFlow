@@ -35,7 +35,7 @@ use crate::settings::components::{
     select_listbox, select_option, select_trigger_with_hover, setting_card, setting_text,
     toggle_switch,
 };
-use crate::ui_primitives::AnimatedHoverExt;
+use crate::ui_primitives::{AnimatedHover, AnimatedHoverExt};
 
 use crate::{PaneFlowApp, TerminalDropdown};
 
@@ -82,6 +82,52 @@ fn hex_string_from_hsla(color: Hsla) -> String {
         channel(rgba.g),
         channel(rgba.b)
     )
+}
+
+/// The cursor-color select. `select_trigger_with_hover` owns the combobox
+/// role, the open state, and the tab stop; the caller adds the swatch, the
+/// hex, and the pointer / keyboard arms.
+fn cursor_color_trigger(
+    is_open: bool,
+    current_hex: &str,
+    ui: crate::theme::UiColors,
+) -> AnimatedHover {
+    select_trigger_with_hover(
+        "term-cursor-color-row",
+        ui,
+        lighter_control_hover(ui.subtle),
+        is_open,
+        format!("Cursor color, {current_hex}"),
+    )
+}
+
+/// One cursor-color swatch. Selected only when an explicit override matches
+/// this hex; "use the color scheme" leaves every swatch unselected.
+fn cursor_color_swatch(
+    row_idx: usize,
+    col_idx: usize,
+    hex: u32,
+    current_hex: &str,
+    uses_theme: bool,
+) -> AnimatedHover {
+    let hex_string = hex_string_from_u32(hex);
+    let selected = !uses_theme && hex_string == current_hex;
+    let resting_opacity = if selected { 1.0 } else { 0.92 };
+    div()
+        .id(SharedString::from(format!(
+            "term-cursor-color-{row_idx}-{col_idx}"
+        )))
+        .role(Role::ListBoxOption)
+        .aria_label(hex_string)
+        .aria_selected(selected)
+        .w(px(32.))
+        .h(px(32.))
+        .rounded(px(6.))
+        .bg(hsla_from_u32(hex))
+        .opacity(resting_opacity)
+        .animated_hover(move |style, delta| {
+            style.opacity(resting_opacity + (1.0 - resting_opacity) * delta);
+        })
 }
 
 impl PaneFlowApp {
@@ -503,56 +549,63 @@ impl PaneFlowApp {
         let theme_color = crate::terminal::view::hsla_from_hex_color(&theme_hex)
             .unwrap_or_else(|| hsla_from_u32(0x007aff));
 
+        let trigger = cursor_color_trigger(is_open, &current_hex, ui)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.open_terminal_dropdown(
+                        (!is_open).then_some(TerminalDropdown::CursorColor),
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            // Keyboard / assistive-tech activation (issue #361): the pointer opens
+            // on press above, so this arm takes only the `ClickEvent::Keyboard`
+            // GPUI synthesizes from Space / Enter on the focused trigger.
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if !matches!(event, ClickEvent::Keyboard(_)) {
+                    return;
+                }
+                this.open_terminal_dropdown(
+                    (!is_open).then_some(TerminalDropdown::CursorColor),
+                    window,
+                    cx,
+                );
+            }))
+            .child(
+                div()
+                    .w(px(12.))
+                    .h(px(12.))
+                    .flex_none()
+                    .rounded(px(3.))
+                    .bg(current_color),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(12.))
+                    .text_color(ui.text)
+                    .truncate()
+                    .child(current_hex.clone()),
+            )
+            .child(select_chevron(ui));
+
         let top = div()
-            .id("term-cursor-color-row")
             .flex()
             .flex_row()
             .items_center()
             .gap(px(16.))
             .px(px(12.))
             .py(px(10.))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.font_dropdown_open = false;
-                    this.font_search.clear();
-                    this.terminal_dropdown = if is_open {
-                        None
-                    } else {
-                        Some(TerminalDropdown::CursorColor)
-                    };
-                    this.settings_focus.focus(window, cx);
-                    cx.notify();
-                }),
-            )
             .child(setting_text(
                 ui,
                 "Cursor color",
                 "Overrides the cursor color from the active color scheme.",
             ))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .w(px(12.))
-                            .h(px(12.))
-                            .rounded(px(3.))
-                            .bg(current_color),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(ui.text)
-                            .child(current_hex.clone()),
-                    )
-                    .child(select_chevron(ui)),
-            );
+            .child(div().flex_shrink_0().child(trigger));
 
         let mut row = div().flex().flex_col().child(top);
 
@@ -561,23 +614,9 @@ impl PaneFlowApp {
             for (row_idx, chunk) in CURSOR_COLOR_SWATCHES.chunks(4).enumerate() {
                 let mut swatch_row = div().flex().flex_row().gap(px(4.));
                 for (col_idx, &hex) in chunk.iter().enumerate() {
-                    let hex_string = hex_string_from_u32(hex);
-                    let selected = !uses_theme && hex_string == current_hex;
-                    let resting_opacity = if selected { 1.0 } else { 0.92 };
-                    let value = hex_string.clone();
+                    let value = hex_string_from_u32(hex);
                     swatch_row = swatch_row.child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "term-cursor-color-{row_idx}-{col_idx}"
-                            )))
-                            .w(px(32.))
-                            .h(px(32.))
-                            .rounded(px(6.))
-                            .bg(hsla_from_u32(hex))
-                            .opacity(resting_opacity)
-                            .animated_hover(move |style, delta| {
-                                style.opacity(resting_opacity + (1.0 - resting_opacity) * delta);
-                            })
+                        cursor_color_swatch(row_idx, col_idx, hex, &current_hex, uses_theme)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                                 this.persist_setting(
                                     true,
@@ -874,5 +913,77 @@ impl PaneFlowApp {
                         .when(!at_max, move |b| b.on_click(inc)),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn written_a11y(element: &impl gpui::Element) -> gpui::accesskit::Node {
+        let mut node = gpui::accesskit::Node::new(gpui::accesskit::Role::Unknown);
+        gpui::Element::write_a11y_info(element, &mut node);
+        node
+    }
+
+    /// Issue #881: the cursor-color row was a bare div, and its swatches had
+    /// no name or selected state.
+    #[test]
+    fn cursor_color_picker_is_an_accessible_combobox() {
+        let ui = crate::theme::ui_colors();
+        let current = hex_string_from_u32(CURSOR_COLOR_SWATCHES[0]);
+
+        let trigger = cursor_color_trigger(false, &current, ui);
+        assert_eq!(
+            gpui::Element::a11y_role(&trigger),
+            Some(gpui::accesskit::Role::ComboBox),
+            "the cursor color trigger must be a combobox"
+        );
+        let trigger_node = written_a11y(&trigger);
+        let trigger_label = format!("Cursor color, {current}");
+        assert_eq!(trigger_node.label(), Some(trigger_label.as_str()));
+        assert_eq!(trigger_node.is_expanded(), Some(false));
+
+        let open = cursor_color_trigger(true, &current, ui);
+        assert_eq!(written_a11y(&open).is_expanded(), Some(true));
+
+        assert_eq!(CURSOR_COLOR_SWATCHES.len(), 16);
+        let mut selected = 0usize;
+        for (index, &hex) in CURSOR_COLOR_SWATCHES.iter().enumerate() {
+            let swatch = cursor_color_swatch(index / 4, index % 4, hex, &current, false);
+            assert_eq!(
+                gpui::Element::a11y_role(&swatch),
+                Some(gpui::accesskit::Role::ListBoxOption),
+                "swatch {index} must be a listbox option"
+            );
+            let node = written_a11y(&swatch);
+            let hex_label = hex_string_from_u32(hex);
+            assert_eq!(node.label(), Some(hex_label.as_str()));
+            if node.is_selected() == Some(true) {
+                selected += 1;
+                assert_eq!(hex_label, current);
+            } else {
+                assert_eq!(
+                    node.is_selected(),
+                    Some(false),
+                    "an unselected swatch must report selected = false"
+                );
+            }
+        }
+        assert_eq!(selected, 1, "exactly one swatch is the current color");
+
+        let row = include_str!("terminal.rs")
+            .split("fn terminal_cursor_color_row(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn terminal_enum_row(").next())
+            .expect("cursor color row");
+        assert!(
+            row.contains("cursor_color_trigger(") && row.contains("ClickEvent::Keyboard"),
+            "the cursor color row must open from the keyboard arm on the combobox trigger"
+        );
+        assert!(
+            row.contains("cursor_color_swatch("),
+            "the open picker must use the accessible swatches"
+        );
     }
 }
