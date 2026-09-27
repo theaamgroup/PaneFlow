@@ -268,10 +268,10 @@ impl PaneFlowApp {
         // Probe the new checkout now rather than waiting up to 30 s for the
         // poll: a row that names a branch only after half a minute reads as
         // broken.
-        if let Some(path) = worktree {
-            if !checkout_probes_suppressed() {
-                Self::spawn_initial_git_stats(ws_id, path.to_string_lossy().into_owned(), cx);
-            }
+        if let Some(path) = worktree
+            && !checkout_probes_suppressed()
+        {
+            Self::spawn_initial_git_stats(ws_id, path.to_string_lossy().into_owned(), cx);
         }
         // The git surfaces follow the tab's checkout: Diff mode is rebuilt
         // when the tab is the one on screen - switching tab already does
