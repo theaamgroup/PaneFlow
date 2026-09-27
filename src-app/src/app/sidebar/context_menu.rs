@@ -153,16 +153,16 @@ impl PaneFlowApp {
     }
 
     pub(crate) fn open_workspace_service_url(&mut self, url: &str, cx: &mut Context<Self>) {
-        if let Err(err) = crate::external_open::open_url(url) {
+        crate::external_open::open_url_in(url, cx, |app, err, cx| {
+            log::warn!("sidebar: open URL failed: {err}");
             let message = if err.kind() == std::io::ErrorKind::NotFound {
                 "Could not open URL - check that /usr/bin/open exists, or set a default browser"
                     .to_string()
             } else {
                 format!("Could not open URL: {err}")
             };
-            log::warn!("sidebar: open URL failed: {err}");
-            self.show_toast(message, cx);
-        }
+            app.show_toast(message, cx);
+        });
     }
 
     /// Build the deferred element that paints the right-click workspace
