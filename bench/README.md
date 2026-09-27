@@ -185,8 +185,10 @@ which commit and machine.
 `--set-baseline` when the run reports a `cpu_share` below 0.90: a contended
 run inflates every timing it would freeze, and every later comparison against
 it would read as a false improvement. Close the competing workload and run
-again. The startup baseline is measured on the same machine with the
-installed PaneFlow app closed.
+again. `scripts/bench-terminal.sh` applies that same refusal, and both
+scripts also refuse a result that carries no `cpu_share`. The startup
+baseline is measured on the same machine with the installed PaneFlow app
+closed.
 
 **A change that moves a metric updates the baseline in the same pull request.**
 A baseline older than the code it is compared against turns every table into
