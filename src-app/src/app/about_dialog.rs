@@ -533,16 +533,23 @@ mod tests {
         );
         // Every open path goes through `open_about_dialog`, so none can skip
         // the focus move; every dismiss goes through `close_about_dialog`, so
-        // none can strand focus on an unmounted node.
+        // none can strand focus on an unmounted node. Scan each file whole
+        // (issue #1030): `main.rs` has `#[cfg(test)]` in the module header, so
+        // a prefix split never reaches `show_about_dialog`.
         for (name, file) in [
             ("main.rs", include_str!("../main.rs")),
             ("bootstrap.rs", include_str!("bootstrap.rs")),
         ] {
-            let production = file.split("#[cfg(test)]").next().expect("production half");
             assert!(
-                !production.contains("show_about_dialog = true"),
+                !file.contains("show_about_dialog = true"),
                 "{name} must open About through open_about_dialog, not by flipping the flag"
             );
+            if name == "main.rs" {
+                assert!(
+                    file.contains("show_about_dialog: bool"),
+                    "main.rs scan must reach the late show_about_dialog field"
+                );
+            }
         }
         assert!(
             !src.contains("this.show_about_dialog = false"),

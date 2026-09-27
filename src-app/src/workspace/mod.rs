@@ -434,11 +434,16 @@ impl Workspace {
     /// The worktree of every tab bound to one, as absolute path strings.
     /// Feeds the git probe set: a bound tab needs its own branch and diffstat,
     /// which the workspace's own fields cannot answer.
+    ///
+    /// A path that is not valid UTF-8 is skipped. Substituting U+FFFD would
+    /// hand git a directory that does not exist (issue #1025).
     pub fn bound_tab_worktrees(&self) -> Vec<String> {
         self.tabs
             .iter()
-            .filter_map(|tab| tab.worktree.as_ref())
-            .map(|path| path.to_string_lossy().into_owned())
+            .filter_map(|tab| {
+                let path = tab.worktree.as_deref()?;
+                path.to_str().map(str::to_owned)
+            })
             .collect()
     }
 
@@ -618,10 +623,12 @@ impl Workspace {
                 title: tab.title.clone(),
                 title_is_automatic: tab.title_is_automatic,
                 layout: persisted_tab_layout(tab.serialize_without_scrollback(cx)),
+                // Omit a non-UTF-8 path instead of writing U+FFFD (issue #1025).
                 worktree: tab
                     .worktree
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().into_owned()),
+                    .as_deref()
+                    .and_then(std::path::Path::to_str)
+                    .map(str::to_owned),
                 unread: self
                     .agent_completion_notification
                     .is_unread_for(&tab.surface_ids(cx)),

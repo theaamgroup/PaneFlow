@@ -1715,7 +1715,7 @@ impl PaneFlowApp {
             // followed it in (issue #347). Without this the tab stayed bound
             // and the next split landed in the checkout the pane had left.
             if self.workspaces[ws_idx].tabs()[tab_idx].worktree.is_some() {
-                self.set_tab_worktree(ws_idx, tab_idx, None, cx);
+                let _ = self.set_tab_worktree(ws_idx, tab_idx, None, cx);
             }
             // Issue #724: `cd` into a foreign repository points `git_dir` and
             // its watch at that repo. Returning here left the foreign branch
@@ -1810,17 +1810,25 @@ impl PaneFlowApp {
                             bound,
                         ) {
                             CwdBinding::Bind(checkout) => {
-                                if let Some((ws_idx, tab_idx)) = tab {
-                                    app.set_tab_worktree(
+                                if let Some((ws_idx, tab_idx)) = tab
+                                    && let Err(message) = app.set_tab_worktree(
                                         ws_idx,
                                         tab_idx,
                                         Some(checkout.clone()),
                                         cx,
-                                    );
+                                    )
+                                {
+                                    app.show_toast(message, cx);
+                                    return;
                                 }
-                                let key = checkout.to_string_lossy().into_owned();
+                                // A non-UTF-8 checkout cannot be a probe key.
+                                // `to_string_lossy` would file U+FFFD (issue #1025).
+                                let Some(key) = checkout.to_str() else {
+                                    app.show_toast("That worktree path is not valid UTF-8", cx);
+                                    return;
+                                };
                                 if app.worktree_states.set_checkout(
-                                    &key,
+                                    key,
                                     crate::app::tab_worktree::CheckoutGit {
                                         branch,
                                         is_repo,
@@ -1836,7 +1844,7 @@ impl PaneFlowApp {
                                 // as it did before the tab was ever bound: the
                                 // pane is in the workspace's own checkout.
                                 if let Some((ws_idx, tab_idx)) = tab {
-                                    app.set_tab_worktree(ws_idx, tab_idx, None, cx);
+                                    let _ = app.set_tab_worktree(ws_idx, tab_idx, None, cx);
                                 }
                             }
                             CwdBinding::Keep => {}
