@@ -479,6 +479,10 @@ jobs:
           fi
           echo "Metal framework headers: $METAL_HEADERS"
 
+      # Tampered archive and wrong EdDSA key (issue #904). No release secrets.
+      - name: update signature rejection self-test
+        run: swift scripts/verify-update.swift --self-test
+
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1 (master as of 2026-08-05)
         with:
           toolchain: "1.98.0"
