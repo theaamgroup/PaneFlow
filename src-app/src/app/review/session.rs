@@ -358,7 +358,7 @@ mod tests {
         let checkout = checkout.to_str().expect("utf8 temp path").to_string();
 
         let cx = cx.add_empty_window();
-        let app = cx.new(|cx| blank_paneflow_app(cx));
+        let app = cx.new(blank_paneflow_app);
         app.update(cx, |app, cx| {
             let mut first =
                 crate::workspace::Workspace::empty_with_cwd_and_id(1, "one", PathBuf::from(&repo));
