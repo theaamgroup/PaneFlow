@@ -806,6 +806,45 @@ fn requested_surface_id(params: &serde_json::Value) -> Result<Option<u64>, JsonR
         .ok_or_else(|| JsonRpcError::invalid_params("'surface_id' must be a non-negative integer"))
 }
 
+/// The typed payload params of `surface.send_text`.
+#[derive(Debug, PartialEq, Eq)]
+struct SendTextParams<'a> {
+    /// Absent is `""`: the arm's missing-text / bare-submit rule decides.
+    text: &'a str,
+    /// Absent is `false`: inject without a CR.
+    submit: bool,
+    /// Absent is `None`: bracketed paste is auto-decided per target.
+    paste: Option<bool>,
+}
+
+/// Read `text`, `submit`, and `paste`, distinguishing ABSENT from MALFORMED
+/// the way `requested_fenced` does: a present `null` is malformed. They used
+/// to coerce a wrong type to the default, so `{"text":5,"submit":true}` sent a
+/// bare Enter and `"submit":"true"` silently did not submit, both replying
+/// `sent: true` (issue #1023).
+fn send_text_params(params: &serde_json::Value) -> Result<SendTextParams<'_>, JsonRpcError> {
+    let text = match params.get("text") {
+        None => "",
+        Some(value) => value
+            .as_str()
+            .ok_or_else(|| JsonRpcError::invalid_params("'text' must be a string"))?,
+    };
+    let requested_bool = |key: &str| -> Result<Option<bool>, JsonRpcError> {
+        let Some(value) = params.get(key) else {
+            return Ok(None);
+        };
+        value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| JsonRpcError::invalid_params(format!("'{key}' must be a boolean")))
+    };
+    Ok(SendTextParams {
+        text,
+        submit: requested_bool("submit")?.unwrap_or(false),
+        paste: requested_bool("paste")?,
+    })
+}
+
 /// Extract an optional bounded integer param, distinguishing ABSENT from
 /// MALFORMED or OUT OF RANGE.
 ///
@@ -2166,6 +2205,17 @@ impl PaneFlowApp {
                     Ok(surface_id) => surface_id,
                     Err(error) => return error.into_value(),
                 };
+                // Issue #1023: the same holds for a wrong-typed `text`,
+                // `submit`, or `paste`; `{"text":5,"submit":true}` must not
+                // become a bare Enter.
+                let SendTextParams {
+                    text,
+                    submit,
+                    paste: paste_param,
+                } = match send_text_params(params) {
+                    Ok(send) => send,
+                    Err(error) => return error.into_value(),
+                };
                 // US-012 (cli-hardening-followup-2026-Q3): same-UID RCE
                 // primitive gate. See ipc.rs module doc for the blast-radius
                 // rationale. Default off. EP-003 US-010 (agent-control-plane)
@@ -2181,19 +2231,13 @@ impl PaneFlowApp {
                     }
                     .into_value();
                 }
-                let text = params.get("text").and_then(|t| t.as_str()).unwrap_or("");
                 // US-005 (orchestration-v2): `submit: true` is the ONLY
                 // sanctioned submission path. It is unreachable unless the gate
                 // above passed (env OR free-access), so a CR can never be sent
                 // silently; the default stays strict inject-without-CR.
-                let submit = params
-                    .get("submit")
-                    .and_then(|s| s.as_bool())
-                    .unwrap_or(false);
                 // EP-001 US-002 (agent-control-plane-hardening): an explicit
                 // `paste` param forces / forbids bracketed paste (the CLI
                 // `--paste` override); absent, it is auto-decided per target.
-                let paste_param = params.get("paste").and_then(|p| p.as_bool());
                 // EP-001 US-003: an empty payload is a no-op EXCEPT as a bare
                 // submit (`send --submit ""` presses Enter on an agent prompt
                 // that is already filled). Only then is the historical text-required guard
@@ -3679,6 +3723,80 @@ mod tests {
                 error.message, "'surface_id' must be a non-negative integer",
                 "{malformed}"
             );
+        }
+    }
+
+    /// Issue #1023: absent keys keep today's defaults; valid values are read.
+    #[test]
+    fn send_text_params_absent_are_defaults_and_valid_values_are_honoured() {
+        assert_eq!(
+            send_text_params(&serde_json::json!({})).unwrap(),
+            SendTextParams {
+                text: "",
+                submit: false,
+                paste: None,
+            }
+        );
+        assert_eq!(
+            send_text_params(&serde_json::json!({"text": "hi", "submit": true, "paste": false}))
+                .unwrap(),
+            SendTextParams {
+                text: "hi",
+                submit: true,
+                paste: Some(false),
+            }
+        );
+        assert_eq!(
+            send_text_params(&serde_json::json!({"text": "", "submit": true})).unwrap(),
+            SendTextParams {
+                text: "",
+                submit: true,
+                paste: None,
+            }
+        );
+    }
+
+    /// `{"text":5,"submit":true}` used to be a bare Enter and
+    /// `"submit":"true"` a silent non-submit. A present `null` is malformed,
+    /// as for `fenced` and `surface_id`.
+    #[test]
+    fn send_text_params_reject_wrong_typed_text_submit_and_paste() {
+        for (malformed, message) in [
+            (
+                serde_json::json!({"text": 5, "submit": true}),
+                "'text' must be a string",
+            ),
+            (
+                serde_json::json!({"text": ["a"]}),
+                "'text' must be a string",
+            ),
+            (serde_json::json!({"text": null}), "'text' must be a string"),
+            (
+                serde_json::json!({"text": "hi", "submit": "true"}),
+                "'submit' must be a boolean",
+            ),
+            (
+                serde_json::json!({"text": "hi", "submit": 1}),
+                "'submit' must be a boolean",
+            ),
+            (
+                serde_json::json!({"text": "hi", "submit": null}),
+                "'submit' must be a boolean",
+            ),
+            (
+                serde_json::json!({"text": "hi", "paste": 1}),
+                "'paste' must be a boolean",
+            ),
+            (
+                serde_json::json!({"text": "hi", "paste": null}),
+                "'paste' must be a boolean",
+            ),
+        ] {
+            let error = send_text_params(&malformed)
+                .err()
+                .unwrap_or_else(|| panic!("{malformed} must be rejected, not defaulted"));
+            assert_eq!(error.code, JsonRpcError::INVALID_PARAMS, "{malformed}");
+            assert_eq!(error.message, message, "{malformed}");
         }
     }
 
@@ -6270,10 +6388,7 @@ mod tests {
             let terminal = terminal.read(cx);
             terminal.terminal.exited.is_none() && !terminal.terminal.should_close_on_exit()
         });
-        assert!(
-            idle,
-            "a rejected surface_id must not write to the active pane"
-        );
+        assert!(idle, "a rejected param must not write to the active pane");
     }
 
     /// Issue #1020: `{"surface_id":"42","text":"x","submit":true}` is -32602
@@ -6318,6 +6433,44 @@ mod tests {
         );
         assert_surface_id_type_error(&result);
         assert_no_pty_write(&terminal, cx);
+    }
+
+    /// Issue #1023: `{"text":5,"submit":true}` is -32602 and writes no CR,
+    /// with the gate closed and open. So are a string `submit` and a numeric
+    /// `paste`, which used to reply `sent: true`.
+    #[gpui::test]
+    fn surface_send_text_rejects_wrong_typed_params_without_writing(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let (app, terminal) = ipc_app_with_active_terminal(cx);
+        let cases = [
+            (
+                serde_json::json!({"text": 5, "submit": true}),
+                "'text' must be a string",
+            ),
+            (
+                serde_json::json!({"text": "x", "submit": "true"}),
+                "'submit' must be a boolean",
+            ),
+            (
+                serde_json::json!({"text": "x", "paste": 1}),
+                "'paste' must be a boolean",
+            ),
+        ];
+        for unrestricted in [false, true] {
+            // Gate open is the case that matters: a check after the gate would
+            // press Enter on the active pane.
+            cx.update(|_, cx| {
+                app.update(cx, |app, _cx| {
+                    app.cached_config.ai_unrestricted = Some(unrestricted);
+                });
+            });
+            for (params, message) in &cases {
+                let result = dispatch_surface(&app, cx, "surface.send_text", params.clone());
+                assert_eq!(result["_jsonrpc_error"]["code"], -32602, "{result}");
+                assert_eq!(result["_jsonrpc_error"]["message"], *message, "{result}");
+                assert_no_pty_write(&terminal, cx);
+            }
+        }
     }
 
     /// Issue #1021: a string `surface_id` is -32602 before a keystroke is sent.
