@@ -157,7 +157,7 @@ impl PaneFlowApp {
     ///
     /// Every persisted terminal surface emits `scrollback: None`, keeping PTY
     /// output local to the process that produced it.
-    fn build_session_state(&self, cx: &App) -> paneflow_config::schema::SessionState {
+    pub(crate) fn build_session_state(&self, cx: &App) -> paneflow_config::schema::SessionState {
         paneflow_config::schema::SessionState {
             version: paneflow_config::schema::SESSION_SCHEMA_VERSION,
             active_workspace: self.active_idx,
@@ -591,6 +591,8 @@ impl PaneFlowApp {
     /// The folded Workspaces rows are restored unconditionally - they are
     /// cheap, and a user who returns to Review later still wants the folds
     /// they left. The grid itself is only rebuilt when Review is reachable.
+    /// Issue #932: when Review is off, the raw node is kept and the grid is
+    /// not opened, so the save at the end of restore does not erase it.
     pub(crate) fn apply_restored_diff_mode(
         &mut self,
         restored_mode: paneflow_config::schema::AppMode,
@@ -602,10 +604,15 @@ impl PaneFlowApp {
         // Issue #438: `restore_review_layout` prunes subjects whose repo is no
         // longer open and whose worktree is gone, so a grid that survives is
         // one every pane can actually load.
-        if self.cached_config.review_view_enabled()
-            && let Some(node) = review_layout.as_ref()
-        {
-            self.restore_review_layout(node, cx);
+        // Issue #932: that rebuild is also what opens the Review panes. With
+        // the setting off, hold the raw node instead of dropping it.
+        if self.cached_config.review_view_enabled() {
+            self.review.retained_layout = None;
+            if let Some(node) = review_layout.as_ref() {
+                self.restore_review_layout(node, cx);
+            }
+        } else {
+            self.review.retained_layout = review_layout;
         }
         self.mode = restored_mode;
         if !matches!(self.mode, paneflow_config::schema::AppMode::Diff) {

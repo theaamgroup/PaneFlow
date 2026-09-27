@@ -94,9 +94,13 @@ fn prune_layout(
 
 impl PaneFlowApp {
     pub(crate) fn serialize_review_layout(&self, cx: &App) -> Option<LayoutNode> {
-        self.review
-            .full_layout()
-            .map(|root| root.serialize_without_scrollback(cx))
+        if let Some(root) = self.review.full_layout() {
+            return Some(root.serialize_without_scrollback(cx));
+        }
+        // Issue #932: Review was off at restore, so nothing was rebuilt.
+        // Write the raw node back. `skip_serializing_if = Option::is_none`
+        // would otherwise drop the key on the save that finishes restore.
+        self.review.retained_layout.clone()
     }
 
     pub(crate) fn serialize_review_collapsed(&self) -> Vec<String> {
@@ -199,6 +203,8 @@ fn collect_pane_surfaces(node: &LayoutNode) -> Vec<&SurfaceDefinition> {
 
 #[cfg(test)]
 mod tests {
+    use gpui::AppContext;
+
     use super::*;
 
     fn diff_pane(repo: &str, path: &str) -> LayoutNode {
@@ -292,5 +298,160 @@ mod tests {
     fn prune_returns_none_when_nothing_survives() {
         let node = split(vec![diff_pane("/a", "/a")], vec![1.0]);
         assert!(prune_layout(&node, &|_| false).is_none());
+    }
+
+    /// Issue #932: quitting with a Review grid, then relaunching with Review
+    /// off, used to drop the node. The save at the end of restore writes
+    /// `build_session_state`, and a `None` layout is omitted from session.json.
+    #[gpui::test]
+    fn review_layout_survives_a_restart_with_review_disabled(cx: &mut gpui::TestAppContext) {
+        let saved = split(
+            vec![
+                diff_pane("/no/such/review-a", "/no/such/review-a/.worktrees/a"),
+                diff_pane("/no/such/review-b", "/no/such/review-b/.worktrees/b"),
+            ],
+            vec![0.25, 0.75],
+        );
+        let cx = cx.add_empty_window();
+        let app = cx.new(|cx| {
+            let mut app = blank_paneflow_app(cx);
+            app.cached_config.review_enabled = Some(false);
+            app
+        });
+        app.update(cx, |app, cx| {
+            app.apply_restored_diff_mode(
+                paneflow_config::schema::AppMode::Diff,
+                Some(saved.clone()),
+                &[],
+                cx,
+            );
+            assert!(
+                app.review.layout.is_none(),
+                "Review stays closed while the setting is off"
+            );
+            assert_eq!(app.mode, paneflow_config::schema::AppMode::Cli);
+            let state = app.build_session_state(cx);
+            assert_eq!(state.review_layout, Some(saved));
+        });
+    }
+
+    fn blank_paneflow_app(cx: &mut gpui::Context<crate::PaneFlowApp>) -> crate::PaneFlowApp {
+        use std::sync::atomic::{AtomicU64, AtomicUsize};
+        use std::sync::{Arc, Mutex};
+
+        use gpui::AppContext;
+
+        let settings_search_input =
+            cx.new(|cx| crate::widgets::text_input::TextInput::new("", "Search settings…", cx));
+        let shortcut_search_input = cx.new(|cx| {
+            crate::widgets::text_input::TextInput::new("", "Search actions or keys…", cx)
+        });
+        let sessions_filter_input =
+            cx.new(|cx| crate::widgets::text_input::TextInput::new("", "Filter sessions", cx));
+        let (_ipc_tx, ipc_rx) = std::sync::mpsc::channel();
+        let (_git_tx, git_event_rx) = std::sync::mpsc::channel();
+        crate::PaneFlowApp {
+            workspaces: Vec::new(),
+            active_idx: 0,
+            renaming_idx: None,
+            renaming_tab: None,
+            rename_text: String::new(),
+            rename_seeded: false,
+            pending_config: Arc::new(Mutex::new(None)),
+            save_seq: Arc::new(AtomicU64::new(0)),
+            session_corruption: None,
+            session_restore: None,
+            config_persist_seq: Arc::new(AtomicU64::new(0)),
+            config_field_persist_seq: Arc::new(crate::config_writer::FieldPersistSeq::default()),
+            config_persist_in_flight: Arc::new(AtomicUsize::new(0)),
+            config_last_persist_gen: Arc::new(AtomicU64::new(0)),
+            cached_config: paneflow_config::schema::PaneFlowConfig::default(),
+            ipc_rx,
+            ipc_status: crate::ipc::IpcStatus::disabled_for_test(),
+            title_bar: cx.new(crate::window_chrome::title_bar::TitleBar::new),
+            primary_sidebar_visible: true,
+            primary_sidebar_animation: None,
+            git_watcher: None,
+            git_event_rx,
+            git_watch_counts: std::collections::HashMap::new(),
+            terminal_branches: std::collections::HashMap::new(),
+            settings_section: None,
+            settings_scroll: gpui::ScrollHandle::new(),
+            settings_drag: None,
+            settings_search_input,
+            terminal_dropdown: None,
+            general_dropdown: None,
+            new_tab_branch_dropdown: None,
+            sidebar_scroll: gpui::ScrollHandle::new(),
+            effective_shortcuts: Vec::new(),
+            recording_shortcut_idx: None,
+            shortcut_search_input,
+            shortcut_capture_active: false,
+            shortcut_reset_pending: false,
+            collapsed_shortcut_groups: std::collections::HashSet::new(),
+            shortcut_rows: Vec::new(),
+            shortcut_list: crate::settings::tabs::shortcuts::new_shortcut_list_state(),
+            shortcut_drag: None,
+            settings_focus: cx.focus_handle(),
+            mono_font_names: Vec::new(),
+            font_dropdown_open: false,
+            font_search: String::new(),
+            theme_dropdown_open: false,
+            theme_mode: crate::ThemeMode::Dark,
+            workspace_menu_open: None,
+            worktree_states: crate::app::tab_worktree::WorktreeStates::default(),
+            branch_checkout_pending: None,
+            sidebar_customize_menu_open: false,
+            sidebar_show_submenu_open: false,
+            tab_menu_open: None,
+            pane_menu_open: None,
+            pending_pane_focus: None,
+            agent_sessions: crate::AgentSessionsState {
+                sessions_sidebar_open: false,
+                sessions_sidebar_animation: None,
+                sessions_by_agent: std::array::from_fn(|_| Vec::new()),
+                sessions_omitted: [0; crate::agent_sessions::SESSION_AGENT_COUNT],
+                sessions_cwd: None,
+                sessions_surface_id: None,
+                sessions_bound_palette: None,
+                sessions_scroll: gpui::ScrollHandle::new(),
+                sessions_scan_generation: 0,
+                sessions_selected: 0,
+                sessions_focus: cx.focus_handle(),
+                sessions_group_collapsed: [false; crate::agent_sessions::SESSION_AGENT_COUNT],
+                sessions_group_show_all: [false; crate::agent_sessions::SESSION_AGENT_COUNT],
+                sessions_scanning: [false; crate::agent_sessions::SESSION_AGENT_COUNT],
+                sessions_filter_input,
+            },
+            toast: None,
+            toast_queue: std::collections::VecDeque::new(),
+            _toast_task: None,
+            toast_serial: 0,
+            jump_cursor: None,
+            closed_items: Vec::new(),
+            show_about_dialog: false,
+            about_dialog_focus: cx.focus_handle(),
+            system_info_dialog: None,
+            system_info_dialog_focus: cx.focus_handle(),
+            overlay_origins: Default::default(),
+            pane_overview: None,
+            pane_overview_focus: cx.focus_handle(),
+            work_review: None,
+            work_review_focus: cx.focus_handle(),
+            pane_palette: None,
+            pane_palette_focus: cx.focus_handle(),
+            pending_palette_focus: false,
+            pending_palette_launch: None,
+            pending_close: None,
+            claude_registry_seen: Default::default(),
+            claude_registry_sweep_pending: false,
+            pending_close_focus: cx.focus_handle(),
+            pending_close_focus_claim: false,
+            review: crate::app::review::ReviewState::new(cx),
+            mode: paneflow_config::schema::AppMode::Cli,
+            sidebar_order_cache: std::cell::RefCell::new(Default::default()),
+            empty_workspace_focus: cx.focus_handle(),
+            sidebar_rename_focus: cx.focus_handle(),
+        }
     }
 }
