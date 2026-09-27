@@ -411,10 +411,20 @@ pub(crate) fn cleanup_hook_config_file(
     directory: &Path,
     created_file: bool,
     created_directory: bool,
+    project_local: bool,
     remove: fn(&mut serde_json::Value),
     lease: &mut HookLease,
 ) {
     let remove_directory = with_last_lease(path, lease, |lease_created_file| {
+        // #892: a project file (or its directory) swapped for a symlink after
+        // install is under the checkout's control. `write_json_atomic` follows
+        // links on purpose for a home config; doing that here would rewrite
+        // the user-owned target. A missing file is not a symlink.
+        if project_local
+            && (path.parent().is_some_and(config_dir_is_symlink) || config_dir_is_symlink(path))
+        {
+            return Ok(false);
+        }
         let Some(content) = read_optional_text(path)? else {
             return Ok(false);
         };

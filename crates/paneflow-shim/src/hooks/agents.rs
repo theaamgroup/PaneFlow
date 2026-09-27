@@ -216,6 +216,9 @@ pub(crate) struct ManagedHookConfigGuard {
     remove_fn: fn(&mut serde_json::Value),
     /// Gemini `settings.json` was spliced as JSONC. Drop must not reserialize it.
     jsonc: bool,
+    /// Project-local files must not be cleaned through a symlink swapped in
+    /// after install (#892). Home-scope guards leave this false.
+    project_local: bool,
     lease: HookLease,
 }
 
@@ -253,12 +256,20 @@ impl ManagedHookConfigGuard {
             &config_dir.join(spec.config_filename),
             spec.tool_label,
         )?;
-        Self::install_anchored(
-            &config_dir,
-            spec,
-            // #202: project-local configs get the same protection as the
-            // home-scope ones - refuse a parse failure, never clobber.
-            InvalidJsonPolicy::Refuse,
+        Ok(
+            match Self::install_anchored(
+                &config_dir,
+                spec,
+                // #202: project-local configs get the same protection as the
+                // home-scope ones - refuse a parse failure, never clobber.
+                InvalidJsonPolicy::Refuse,
+            )? {
+                HookInstall::Installed(mut guard) => {
+                    guard.project_local = true;
+                    HookInstall::Installed(guard)
+                }
+                skipped => skipped,
+            },
         )
     }
 
@@ -318,6 +329,7 @@ impl ManagedHookConfigGuard {
             created_dir: installed.created_directory,
             remove_fn: spec.remove,
             jsonc: installed.jsonc,
+            project_local: false,
             lease: installed.lease,
         })
     }
@@ -339,6 +351,7 @@ impl Drop for ManagedHookConfigGuard {
                 &self.config_dir,
                 self.created_file,
                 self.created_dir,
+                self.project_local,
                 self.remove_fn,
                 &mut self.lease,
             );
