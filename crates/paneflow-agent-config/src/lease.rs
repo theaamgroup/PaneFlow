@@ -276,8 +276,13 @@ fn lease_dir() -> Result<PathBuf> {
 }
 
 #[cfg(test)]
+fn lease_path_in(directory: &Path, resource: &Path) -> PathBuf {
+    directory.join(format!("{:016x}.lock", resource_hash(resource)))
+}
+
+#[cfg(test)]
 fn lease_path(resource: &Path) -> Result<PathBuf> {
-    Ok(lease_dir()?.join(format!("{:016x}.lock", resource_hash(resource))))
+    Ok(lease_path_in(&lease_dir()?, resource))
 }
 
 /// Remove lease lock files that no live session holds, returning how many
@@ -390,9 +395,10 @@ mod tests {
 
     #[test]
     fn only_the_final_live_lease_can_clean_up() {
+        let directory = tempfile::tempdir().unwrap();
         let resource = unique_resource("last");
-        let mut first = ConfigLease::acquire(&resource).unwrap();
-        let mut second = ConfigLease::acquire(&resource).unwrap();
+        let mut first = ConfigLease::acquire_in(directory.path(), &resource).unwrap();
+        let mut second = ConfigLease::acquire_in(directory.path(), &resource).unwrap();
         first.mark_created().unwrap();
 
         assert!(first.try_take_last().unwrap().is_none());
@@ -400,15 +406,16 @@ mod tests {
         assert!(last.take_created().unwrap());
         drop(last);
 
-        let mut later = ConfigLease::acquire(&resource).unwrap();
+        let mut later = ConfigLease::acquire_in(directory.path(), &resource).unwrap();
         let mut last = later.try_take_last().unwrap().unwrap();
         assert!(!last.take_created().unwrap());
     }
 
     #[test]
     fn created_note_survives_the_recording_lease_and_is_cleared_by_the_last() {
+        let directory = tempfile::tempdir().unwrap();
         let resource = unique_resource("note");
-        let mut recorder = ConfigLease::acquire(&resource).unwrap();
+        let mut recorder = ConfigLease::acquire_in(directory.path(), &resource).unwrap();
         assert!(!recorder.is_created());
         assert_eq!(recorder.created_note(), None);
         recorder.mark_created_with("[\"A\"]").unwrap();
@@ -419,7 +426,7 @@ mod tests {
         // upgrade. Same retry as dropped_lease_does_not_strand_the_resource.
         let mut last = None;
         for attempt in 0..10 {
-            let mut later = ConfigLease::acquire(&resource).unwrap();
+            let mut later = ConfigLease::acquire_in(directory.path(), &resource).unwrap();
             assert!(later.is_created());
             assert_eq!(later.created_note().as_deref(), Some("[\"A\"]"));
             match later.try_take_last().unwrap() {
@@ -440,15 +447,18 @@ mod tests {
         assert!(last.take_created().unwrap());
         drop(last);
         assert_eq!(
-            ConfigLease::acquire(&resource).unwrap().created_note(),
+            ConfigLease::acquire_in(directory.path(), &resource)
+                .unwrap()
+                .created_note(),
             None
         );
     }
 
     #[test]
     fn dropped_lease_does_not_strand_the_resource() {
+        let directory = tempfile::tempdir().unwrap();
         let resource = unique_resource("crash");
-        let mut abandoned = ConfigLease::acquire(&resource).unwrap();
+        let mut abandoned = ConfigLease::acquire_in(directory.path(), &resource).unwrap();
         abandoned.mark_created().unwrap();
         drop(abandoned);
 
@@ -457,7 +467,7 @@ mod tests {
         // upgrade. Retry acquire + try_take_last; a real strand stays None.
         let mut last = None;
         for attempt in 0..10 {
-            let mut survivor = ConfigLease::acquire(&resource).unwrap();
+            let mut survivor = ConfigLease::acquire_in(directory.path(), &resource).unwrap();
             match survivor.try_take_last().unwrap() {
                 Some(taken) => {
                     last = Some(taken);
@@ -508,16 +518,17 @@ mod tests {
 
     #[test]
     fn final_drop_removes_lock_but_preserves_durable_marker() {
+        let directory = tempfile::tempdir().unwrap();
         let resource = unique_resource("cleanup");
-        let path = lease_path(&resource).unwrap();
-        let mut first = ConfigLease::acquire(&resource).unwrap();
-        let second = ConfigLease::acquire(&resource).unwrap();
+        let path = lease_path_in(directory.path(), &resource);
+        let mut first = ConfigLease::acquire_in(directory.path(), &resource).unwrap();
+        let second = ConfigLease::acquire_in(directory.path(), &resource).unwrap();
         first.mark_created_with("owned").unwrap();
         drop(first);
         assert!(path.exists(), "a live holder keeps its lock inode");
         drop(second);
         assert!(!path.exists(), "the final holder removes the lock");
-        let mut later = ConfigLease::acquire(&resource).unwrap();
+        let mut later = ConfigLease::acquire_in(directory.path(), &resource).unwrap();
         assert_eq!(later.created_note().as_deref(), Some("owned"));
         let mut last = later.try_take_last().unwrap().unwrap();
         assert!(last.take_created().unwrap());
@@ -728,5 +739,38 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         ))
+    }
+
+    /// Durable `.created` markers from these tests must not land in the
+    /// installed lease directory (#925).
+    #[test]
+    fn marker_tests_use_a_temporary_lease_directory() {
+        // Composed at runtime: include_str! captures this test, so a literal
+        // needle would match the assertion itself.
+        let source = include_str!("lease.rs");
+        let tests = source
+            .split_once("mod tests {")
+            .expect("lease tests module")
+            .1;
+        let function = concat!("f", "n");
+        let marked = concat!("mark_", "created");
+        let real_acquire = concat!("ConfigLease::", "acquire(");
+        let cross_home = [
+            "leases_share_resource_across_paneflow_homes",
+            "lease_namespace_child",
+        ];
+        for body in tests.split(function) {
+            let name = body
+                .trim_start()
+                .split(|c: char| matches!(c, '(' | ' ' | '<' | '\n'))
+                .next()
+                .unwrap_or("");
+            if body.contains(marked) && body.contains(real_acquire) {
+                assert!(
+                    cross_home.contains(&name),
+                    "{name} records a marker through the installed lease directory"
+                );
+            }
+        }
     }
 }
