@@ -163,6 +163,57 @@ fn find_real_binary_in_walks_past_self_dir_to_find_real_binary() {
     assert_eq!(found.as_deref(), Some(real_fake.as_path()));
 }
 
+/// Issue #871: two PaneFlow bin dirs on `$PATH` (each an executable
+/// `claude` plus a sibling `paneflow-ai-hook`) are different shim copies,
+/// not hardlinks. From either copy's point of view the walk must skip
+/// both and return the real binary, which has no hook sibling.
+#[test]
+fn find_real_binary_in_skips_another_paneflow_shim_dir() {
+    let shim_a = tempfile::TempDir::new().unwrap();
+    let shim_b = tempfile::TempDir::new().unwrap();
+    let real = tempfile::TempDir::new().unwrap();
+
+    let shim_a_claude = shim_a.path().join("claude");
+    std::fs::File::create(&shim_a_claude).unwrap();
+    make_executable(&shim_a_claude);
+    let shim_a_hook = shim_a.path().join("paneflow-ai-hook");
+    std::fs::File::create(&shim_a_hook).unwrap();
+    make_executable(&shim_a_hook);
+
+    let shim_b_claude = shim_b.path().join("claude");
+    std::fs::File::create(&shim_b_claude).unwrap();
+    make_executable(&shim_b_claude);
+    let shim_b_hook = shim_b.path().join("paneflow-ai-hook");
+    std::fs::File::create(&shim_b_hook).unwrap();
+    make_executable(&shim_b_hook);
+
+    let real_claude = real.path().join("claude");
+    std::fs::File::create(&real_claude).unwrap();
+    make_executable(&real_claude);
+
+    let entries = vec![
+        shim_a.path().to_owned(),
+        shim_b.path().to_owned(),
+        real.path().to_owned(),
+    ];
+
+    let found_from_a = find_real_binary_in(
+        "claude",
+        entries.clone(),
+        Some(shim_a.path()),
+        Some(shim_a_claude.as_path()),
+    );
+    assert_eq!(found_from_a.as_deref(), Some(real_claude.as_path()));
+
+    let found_from_b = find_real_binary_in(
+        "claude",
+        entries,
+        Some(shim_b.path()),
+        Some(shim_b_claude.as_path()),
+    );
+    assert_eq!(found_from_b.as_deref(), Some(real_claude.as_path()));
+}
+
 #[test]
 fn find_real_binary_in_returns_none_when_absent() {
     let dir = tempfile::TempDir::new().unwrap();
