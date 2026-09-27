@@ -35,6 +35,10 @@ pub(crate) struct WorktreeStates {
     /// Local branches per repository root. What the picker actually offers -
     /// the listing only says which of them already has a directory.
     branches: HashMap<String, Vec<String>>,
+    /// Times each tab's checkout binding has changed, keyed by tab id
+    /// (issue #937). Not dropped by [`Self::retain_live`]: tab ids are never
+    /// reused, and each entry is one integer.
+    binding_generations: HashMap<u64, u64>,
 }
 
 impl WorktreeStates {
@@ -100,6 +104,20 @@ impl WorktreeStates {
         self.branches.get(repo_root).map_or(&[], Vec::as_slice)
     }
 
+    /// Times `tab_id`'s checkout binding has changed. Zero until the first
+    /// change. A slow checkout snapshots this before awaiting git (issue #937).
+    pub(crate) fn binding_generation(&self, tab_id: u64) -> u64 {
+        self.binding_generations.get(&tab_id).copied().unwrap_or(0)
+    }
+
+    /// Record that `tab_id`'s binding changed. `bind_tab_to_checkout` and
+    /// `set_tab_worktree` are the callers; a landing that snapshotted the
+    /// previous value then leaves the tab alone.
+    pub(crate) fn bump_binding_generation(&mut self, tab_id: u64) {
+        let next = self.binding_generation(tab_id).wrapping_add(1);
+        self.binding_generations.insert(tab_id, next);
+    }
+
     /// Drop every entry no longer named by `live`. Called after a workspace or
     /// tab closes so a torn-down worktree does not keep a row's worth of state
     /// alive for the rest of the session.
@@ -131,6 +149,10 @@ impl PaneFlowApp {
             );
             return false;
         };
+        // A same-path rebind returns inside `set_tab_worktree` without
+        // writing. It still has to retire a checkout that is in flight:
+        // the user just chose this directory again (issue #937).
+        self.bump_tab_binding(ws_idx, tab_idx);
         self.set_tab_worktree(ws_idx, tab_idx, Some(path), cx);
         true
     }
@@ -198,6 +220,18 @@ impl PaneFlowApp {
             .unwrap_or_else(|| "Project root".to_string())
     }
 
+    fn bump_tab_binding(&mut self, ws_idx: usize, tab_idx: usize) {
+        let Some(tab_id) = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tabs().get(tab_idx))
+            .map(|tab| tab.id)
+        else {
+            return;
+        };
+        self.worktree_states.bump_binding_generation(tab_id);
+    }
+
     /// Bind `tab_idx` to `worktree`, or unbind it with `None`.
     ///
     /// The binding takes effect for panes opened *after* it: an existing pane
@@ -212,22 +246,31 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) {
         let active_idx = self.active_idx;
-        let Some(ws) = self.workspaces.get_mut(ws_idx) else {
-            return;
+        let (is_active_tab, ws_id, tab_id) = {
+            let Some(ws) = self.workspaces.get_mut(ws_idx) else {
+                return;
+            };
+            let is_active_tab = ws_idx == active_idx && ws.active_tab_idx() == tab_idx;
+            let ws_id = ws.id;
+            let Some(tab) = ws.tab_mut(tab_idx) else {
+                return;
+            };
+            if tab.worktree == worktree {
+                return;
+            }
+            let tab_id = tab.id;
+            tab.worktree = worktree.clone();
+            (is_active_tab, ws_id, tab_id)
         };
-        let is_active_tab = ws_idx == active_idx && ws.active_tab_idx() == tab_idx;
-        let ws_id = ws.id;
-        let Some(tab) = ws.tab_mut(tab_idx) else {
-            return;
-        };
-        if tab.worktree == worktree {
-            return;
-        }
-        tab.worktree = worktree.clone();
+        // Issue #937: a slow checkout snapshotted the previous generation and
+        // must not replace this choice when git returns.
+        self.worktree_states.bump_binding_generation(tab_id);
         // Probe the new checkout now rather than waiting up to 30 s for the
         // poll: a row that names a branch only after half a minute reads as
         // broken.
-        if let Some(path) = worktree {
+        if let Some(path) = worktree
+            && !checkout_probes_suppressed()
+        {
             Self::spawn_initial_git_stats(ws_id, path.to_string_lossy().into_owned(), cx);
         }
         // The git surfaces follow the tab's checkout: Diff mode is rebuilt
@@ -302,8 +345,9 @@ impl PaneFlowApp {
     ///
     /// The work runs off the render thread (a checkout can take seconds on a
     /// large repository) and re-resolves the tab by id when it lands, because
-    /// indices do not survive an await. A checkout made here is the user's:
-    /// nothing removes it but the tab menu's "Remove worktree"
+    /// indices do not survive an await. A binding chosen while git runs is
+    /// left in place (issue #937); the checkout on disk stays. Nothing
+    /// removes it but the tab menu's "Remove worktree"
     /// ([`Self::remove_tab_worktree`]).
     pub(crate) fn bind_tab_to_branch(
         &mut self,
@@ -350,8 +394,9 @@ impl PaneFlowApp {
             return;
         }
 
-        self.branch_checkout_pending = Some(branch.clone());
-        cx.notify();
+        // Snapshot before the await. Fast binds return above this check and
+        // still bump the generation, so they win when this checkout lands.
+        let binding_at_start = self.begin_slow_branch_checkout(tab_id, &branch, cx);
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let probe = repo_root.clone();
@@ -367,22 +412,14 @@ impl PaneFlowApp {
                         // for the rest of the session.
                         app.branch_checkout_pending = None;
                         match prepared {
-                            Ok(path) => {
-                                let Some((ws_idx, tab_idx)) = app.tab_position(ws_id, tab_id)
-                                else {
-                                    cx.notify();
-                                    return;
-                                };
-                                if path == repo_root {
-                                    app.set_tab_worktree(ws_idx, tab_idx, None, cx);
-                                } else {
-                                    // Through the same gate as the fast path,
-                                    // which re-checks that the directory git
-                                    // resolved the branch to still exists.
-                                    app.bind_tab_to_checkout(ws_idx, tab_idx, path, cx);
-                                }
-                                app.spawn_worktree_listing(ws_idx, cx);
-                            }
+                            Ok(path) => app.land_branch_checkout(
+                                ws_id,
+                                tab_id,
+                                &repo_root,
+                                path,
+                                binding_at_start,
+                                cx,
+                            ),
                             Err(message) => app.show_toast(message, cx),
                         }
                         cx.notify();
@@ -391,6 +428,61 @@ impl PaneFlowApp {
             },
         )
         .detach();
+    }
+
+    /// Mark `branch` as the checkout in flight and return the tab's binding
+    /// generation at this moment (issue #937). The landing binds only while
+    /// that generation is still current.
+    fn begin_slow_branch_checkout(
+        &mut self,
+        tab_id: u64,
+        branch: &str,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let binding_at_start = self.worktree_states.binding_generation(tab_id);
+        self.branch_checkout_pending = Some(branch.to_string());
+        cx.notify();
+        binding_at_start
+    }
+
+    /// Bind the checkout a slow `git worktree add` produced, unless the tab's
+    /// binding changed while git ran (issue #937).
+    ///
+    /// The directory is left on disk either way. Only "Remove worktree"
+    /// deletes a checkout this picker created.
+    fn land_branch_checkout(
+        &mut self,
+        ws_id: u64,
+        tab_id: u64,
+        repo_root: &std::path::Path,
+        path: std::path::PathBuf,
+        binding_at_start: u64,
+        cx: &mut Context<Self>,
+    ) {
+        // Direct callers (tests) did not pass through the spawn's clear.
+        self.branch_checkout_pending = None;
+        let Some((ws_idx, tab_idx)) = self.tab_position(ws_id, tab_id) else {
+            cx.notify();
+            return;
+        };
+        if self.worktree_states.binding_generation(tab_id) != binding_at_start {
+            // The user already chose another binding. Refresh what the picker
+            // offers; the new directory is still there. Do not touch the tab.
+            if !checkout_probes_suppressed() {
+                self.spawn_worktree_listing(ws_idx, cx);
+            }
+            return;
+        }
+        if path.as_path() == repo_root {
+            self.set_tab_worktree(ws_idx, tab_idx, None, cx);
+        } else {
+            // Through the same gate as the fast path, which re-checks that
+            // the directory git resolved the branch to still exists.
+            self.bind_tab_to_checkout(ws_idx, tab_idx, path, cx);
+        }
+        if !checkout_probes_suppressed() {
+            self.spawn_worktree_listing(ws_idx, cx);
+        }
     }
 
     /// Locate a tab by the ids that survive an await, unlike its indices.
@@ -709,10 +801,49 @@ fn remove_validated_checkout(
     Ok(())
 }
 
+// A probe still running on smol's pool when a test returns is dropped off
+// the GPUI test thread, and the scheduler aborts the suite.
+#[cfg(test)]
+thread_local! {
+    static SUPPRESS_CHECKOUT_PROBES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn checkout_probes_suppressed() -> bool {
+    #[cfg(test)]
+    {
+        SUPPRESS_CHECKOUT_PROBES.with(|flag| flag.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+struct SuppressCheckoutProbes;
+
+#[cfg(test)]
+impl SuppressCheckoutProbes {
+    fn arm() -> Self {
+        SUPPRESS_CHECKOUT_PROBES.with(|flag| flag.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SuppressCheckoutProbes {
+    fn drop(&mut self) {
+        SUPPRESS_CHECKOUT_PROBES.with(|flag| flag.set(false));
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CheckoutGit, WorktreeStates, removal_refusal, remove_checkout};
+    use super::{
+        CheckoutGit, SuppressCheckoutProbes, WorktreeStates, removal_refusal, remove_checkout,
+    };
     use crate::workspace::GitDiffStats;
+    use gpui::AppContext;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -1061,5 +1192,228 @@ mod tests {
         states.retain_live(&live);
         assert!(states.branches("/r").is_empty());
         assert!(states.listing("/r").is_empty());
+    }
+
+    /// Issue #937: `git worktree add` for branch A must not put the tab back
+    /// on A when the user bound that tab somewhere else while git was running.
+    #[gpui::test]
+    fn a_late_branch_checkout_does_not_override_a_newer_binding(cx: &mut gpui::TestAppContext) {
+        let newer = tempfile::tempdir().expect("newer checkout");
+        let late = tempfile::tempdir().expect("late checkout");
+        let root = tempfile::tempdir().expect("workspace root");
+        // Binding starts git probes on smol threads. The test scheduler
+        // panics if one of those tasks is still running when this returns.
+        let _probes = SuppressCheckoutProbes::arm();
+        let window = cx.add_empty_window();
+        let app = window.new(blank_paneflow_app);
+        app.update(window, |app, cx| {
+            let ws = crate::workspace::Workspace::empty_with_cwd_and_id(
+                7,
+                "repo",
+                root.path().to_path_buf(),
+            );
+            let tab_id = ws.tabs()[0].id;
+            let ws_id = ws.id;
+            app.workspaces.push(ws);
+            app.active_idx = 0;
+            // `save_session` writes session-dev.json. Holding a restore makes
+            // it return before `session_path()`, so this test never latches
+            // `PANEFLOW_HOME`.
+            app.session_restore = hold_session_save();
+            let started = app.begin_slow_branch_checkout(tab_id, "feat/a", cx);
+            assert!(
+                app.bind_tab_to_checkout(0, 0, newer.path().to_path_buf(), cx),
+                "the binding chosen while git runs must take"
+            );
+            app.land_branch_checkout(
+                ws_id,
+                tab_id,
+                root.path(),
+                late.path().to_path_buf(),
+                started,
+                cx,
+            );
+            assert_eq!(
+                app.workspaces[0].tabs()[0].worktree.as_deref(),
+                Some(newer.path()),
+                "a checkout that finishes late must not replace the newer binding"
+            );
+            assert!(
+                late.path().is_dir(),
+                "the late checkout stays on disk; only Remove worktree deletes one"
+            );
+            assert!(
+                app.branch_checkout_pending.is_none(),
+                "landing releases the in-flight slot"
+            );
+        });
+        // Binding and the skipped landing start git probes. Finish them on
+        // this scheduler. Dropping the window while a probe is still on the
+        // background thread panics the harness.
+        cx.run_until_parked();
+
+        // Production must snapshot before the await and land through the same
+        // helper this test calls. The behavioral half above cannot see a spawn
+        // that went back to binding unconditionally.
+        let src = include_str!("tab_worktree.rs");
+        let bind = crate::source_probe::source_slice(
+            src,
+            "pub(crate) fn bind_tab_to_branch(",
+            "/// Locate a tab by the ids that survive an await",
+        );
+        let armed = crate::source_probe::source_slice(bind, "let binding_at_start", "cx.spawn(");
+        assert!(
+            !armed.contains(".await"),
+            "the binding generation must be snapshotted before git runs: {armed}"
+        );
+        let spawn = crate::source_probe::source_slice(bind, "cx.spawn(", ".detach();");
+        assert!(
+            spawn.contains("land_branch_checkout(") && spawn.contains("binding_at_start"),
+            "the spawn must land through the snapshotted generation: {spawn}"
+        );
+    }
+
+    fn hold_session_save() -> Option<crate::app::session::PendingSessionRestore> {
+        crate::app::session::PendingSessionRestore::from_session(
+            paneflow_config::schema::SessionState {
+                version: paneflow_config::schema::SESSION_SCHEMA_VERSION,
+                active_workspace: 0,
+                workspaces: vec![paneflow_config::schema::WorkspaceSession {
+                    title: "hold".into(),
+                    cwd: "/tmp/paneflow-session-hold".into(),
+                    tabs: vec![paneflow_config::schema::TabSession::empty()],
+                    active_tab: 0,
+                    legacy_layout: None,
+                    legacy_empty: false,
+                    pinned: false,
+                    sidebar_collapsed: false,
+                    muted: false,
+                }],
+                mode: paneflow_config::schema::AppMode::Cli,
+                review_layout: None,
+                review_collapsed: Vec::new(),
+                primary_sidebar_collapsed: false,
+            },
+        )
+    }
+
+    fn blank_paneflow_app(cx: &mut gpui::Context<crate::PaneFlowApp>) -> crate::PaneFlowApp {
+        use std::sync::atomic::{AtomicU64, AtomicUsize};
+        use std::sync::{Arc, Mutex};
+
+        use gpui::AppContext;
+
+        let settings_search_input =
+            cx.new(|cx| crate::widgets::text_input::TextInput::new("", "Search settings…", cx));
+        let shortcut_search_input = cx.new(|cx| {
+            crate::widgets::text_input::TextInput::new("", "Search actions or keys…", cx)
+        });
+        let sessions_filter_input =
+            cx.new(|cx| crate::widgets::text_input::TextInput::new("", "Filter sessions", cx));
+        let (_ipc_tx, ipc_rx) = std::sync::mpsc::channel();
+        let (_git_tx, git_event_rx) = std::sync::mpsc::channel();
+        crate::PaneFlowApp {
+            workspaces: Vec::new(),
+            active_idx: 0,
+            renaming_idx: None,
+            renaming_tab: None,
+            rename_text: String::new(),
+            rename_seeded: false,
+            pending_config: Arc::new(Mutex::new(None)),
+            save_seq: Arc::new(AtomicU64::new(0)),
+            session_corruption: None,
+            session_restore: None,
+            config_persist_seq: Arc::new(AtomicU64::new(0)),
+            config_field_persist_seq: Arc::new(crate::config_writer::FieldPersistSeq::default()),
+            config_persist_in_flight: Arc::new(AtomicUsize::new(0)),
+            config_last_persist_gen: Arc::new(AtomicU64::new(0)),
+            cached_config: paneflow_config::schema::PaneFlowConfig::default(),
+            ipc_rx,
+            ipc_status: crate::ipc::IpcStatus::disabled_for_test(),
+            title_bar: cx.new(crate::window_chrome::title_bar::TitleBar::new),
+            primary_sidebar_visible: true,
+            primary_sidebar_animation: None,
+            git_watcher: None,
+            git_event_rx,
+            git_watch_counts: std::collections::HashMap::new(),
+            terminal_branches: std::collections::HashMap::new(),
+            settings_section: None,
+            settings_scroll: gpui::ScrollHandle::new(),
+            settings_drag: None,
+            settings_search_input,
+            terminal_dropdown: None,
+            general_dropdown: None,
+            new_tab_branch_dropdown: None,
+            sidebar_scroll: gpui::ScrollHandle::new(),
+            effective_shortcuts: Vec::new(),
+            recording_shortcut_idx: None,
+            shortcut_search_input,
+            shortcut_capture_active: false,
+            shortcut_reset_pending: false,
+            collapsed_shortcut_groups: std::collections::HashSet::new(),
+            shortcut_rows: Vec::new(),
+            shortcut_list: crate::settings::tabs::shortcuts::new_shortcut_list_state(),
+            shortcut_drag: None,
+            settings_focus: cx.focus_handle(),
+            mono_font_names: Vec::new(),
+            font_dropdown_open: false,
+            font_search: String::new(),
+            theme_dropdown_open: false,
+            theme_mode: crate::ThemeMode::Dark,
+            workspace_menu_open: None,
+            worktree_states: crate::app::tab_worktree::WorktreeStates::default(),
+            branch_checkout_pending: None,
+            sidebar_customize_menu_open: false,
+            sidebar_show_submenu_open: false,
+            tab_menu_open: None,
+            pane_menu_open: None,
+            pending_pane_focus: None,
+            agent_sessions: crate::AgentSessionsState {
+                sessions_sidebar_open: false,
+                sessions_sidebar_animation: None,
+                sessions_by_agent: std::array::from_fn(|_| Vec::new()),
+                sessions_omitted: [0; crate::agent_sessions::SESSION_AGENT_COUNT],
+                sessions_cwd: None,
+                sessions_surface_id: None,
+                sessions_bound_palette: None,
+                sessions_scroll: gpui::ScrollHandle::new(),
+                sessions_scan_generation: 0,
+                sessions_selected: 0,
+                sessions_focus: cx.focus_handle(),
+                sessions_group_collapsed: [false; crate::agent_sessions::SESSION_AGENT_COUNT],
+                sessions_group_show_all: [false; crate::agent_sessions::SESSION_AGENT_COUNT],
+                sessions_scanning: [false; crate::agent_sessions::SESSION_AGENT_COUNT],
+                sessions_filter_input,
+            },
+            toast: None,
+            toast_queue: std::collections::VecDeque::new(),
+            _toast_task: None,
+            toast_serial: 0,
+            jump_cursor: None,
+            closed_items: Vec::new(),
+            show_about_dialog: false,
+            about_dialog_focus: cx.focus_handle(),
+            system_info_dialog: None,
+            system_info_dialog_focus: cx.focus_handle(),
+            overlay_origins: Default::default(),
+            pane_overview: None,
+            pane_overview_focus: cx.focus_handle(),
+            work_review: None,
+            work_review_focus: cx.focus_handle(),
+            pane_palette: None,
+            pane_palette_focus: cx.focus_handle(),
+            pending_palette_focus: false,
+            pending_palette_launch: None,
+            pending_close: None,
+            claude_registry_seen: Default::default(),
+            claude_registry_sweep_pending: false,
+            pending_close_focus: cx.focus_handle(),
+            pending_close_focus_claim: false,
+            review: crate::app::review::ReviewState::new(cx),
+            mode: paneflow_config::schema::AppMode::Cli,
+            sidebar_order_cache: std::cell::RefCell::new(Default::default()),
+            empty_workspace_focus: cx.focus_handle(),
+            sidebar_rename_focus: cx.focus_handle(),
+        }
     }
 }
