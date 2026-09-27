@@ -1,3 +1,4 @@
+use super::owned_files::report_cleanup_failure;
 use super::{
     cleanup_hook_config_file, install_hook_config_file, paneflow_ipc_reachable,
     refuse_symlinked_project_hook_file, sweep_orphan_hook_config, with_last_lease,
@@ -129,7 +130,8 @@ fn sweep_orphan_codex_feature_flag(path: &Path) -> std::io::Result<Option<()>> {
 }
 
 fn cleanup_codex_feature_flag(path: &Path, lease: &mut HookLease) {
-    let _ = with_last_lease(path, lease, |_| disable_codex_feature_flag_unlocked(path));
+    let disabled = with_last_lease(path, lease, |_| disable_codex_feature_flag_unlocked(path));
+    report_cleanup_failure(path, disabled.as_ref().err());
 }
 
 pub(crate) fn enable_codex_feature_flag(path: &Path) -> std::io::Result<bool> {

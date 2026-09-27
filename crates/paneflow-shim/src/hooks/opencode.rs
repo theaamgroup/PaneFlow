@@ -1,4 +1,4 @@
-use super::owned_files::{remove_created_file, PANEFLOW_TS_BASENAME};
+use super::owned_files::{remove_created_file, report_cleanup_failure, PANEFLOW_TS_BASENAME};
 use super::{
     home_unavailable, paneflow_ipc_reachable, refuse_symlink, with_last_lease, with_orphan_lease,
     HookInstall, HookInstallResult, HookInstallSkip, HookLease,
@@ -257,12 +257,14 @@ impl Drop for OpenCodePluginGuard {
                 }
             },
         );
+        report_cleanup_failure(&self.config_path, config_ok.as_ref().err());
         if config_ok.is_ok() {
-            let _ = with_last_lease(
+            let removed = with_last_lease(
                 &self.plugin_path,
                 &mut self.plugin_lease,
                 |created_plugin| remove_created_file(&self.plugin_path, created_plugin),
             );
+            report_cleanup_failure(&self.plugin_path, removed.as_ref().err());
         }
     }
 }
@@ -271,9 +273,10 @@ impl Drop for OpenCodePluginGuard {
 /// session's lease shows PaneFlow created it and no other session still
 /// holds it.
 fn rollback_plugin_file(plugin_path: &Path, plugin_lease: &mut HookLease) {
-    let _ = with_last_lease(plugin_path, plugin_lease, |created_plugin| {
+    let removed = with_last_lease(plugin_path, plugin_lease, |created_plugin| {
         remove_created_file(plugin_path, created_plugin)
     });
+    report_cleanup_failure(plugin_path, removed.as_ref().err());
 }
 
 fn merge_opencode_plugin_entry(

@@ -1,3 +1,4 @@
+use super::owned_files::report_cleanup_failure;
 use super::{
     home_unavailable, paneflow_ipc_reachable, refuse_symlink, resolve_plain_hook_command,
     with_last_lease, with_orphan_lease, HookInstall, HookInstallResult, HookInstallSkip, HookLease,
@@ -273,7 +274,7 @@ impl Drop for HermesHookConfigGuard {
     fn drop(&mut self) {
         let _ =
             revoke_managed_approvals(&self.allowlist_path, self.created_allowlist, &self.granted);
-        let _ = with_last_lease(&self.path, &mut self.lease, |lease_created_file| {
+        let cleaned = with_last_lease(&self.path, &mut self.lease, |lease_created_file| {
             let Some(content) = read_optional_text(&self.path)? else {
                 return Ok(());
             };
@@ -286,6 +287,7 @@ impl Drop for HermesHookConfigGuard {
                 write_text_atomic(&self.path, &cleaned)
             }
         });
+        report_cleanup_failure(&self.path, cleaned.as_ref().err());
     }
 }
 
