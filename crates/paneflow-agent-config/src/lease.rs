@@ -762,7 +762,7 @@ mod tests {
         for body in tests.split(function) {
             let name = body
                 .trim_start()
-                .split(|c: char| matches!(c, '(' | ' ' | '<' | '\n'))
+                .split(['(', ' ', '<', '\n'])
                 .next()
                 .unwrap_or("");
             if body.contains(marked) && body.contains(real_acquire) {
