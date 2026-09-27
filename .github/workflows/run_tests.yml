@@ -687,9 +687,11 @@ jobs:
         # was about (the original c3e2331 root cause reproduced equally
         # in unsigned bundles per Core Text's bundle-context behavior),
         # and skipping codesign keeps this gate free of Apple secrets.
+        # `--allow-version-mismatch`: this smoke stamps 0.0.0-ci, not the
+        # binary's Cargo version. The release bundle step does not opt out.
         run: |
           set -euo pipefail
-          bash scripts/bundle-macos.sh --version "0.0.0-ci" --arch aarch64
+          bash scripts/bundle-macos.sh --allow-version-mismatch --version "0.0.0-ci" --arch aarch64
 
       - name: Launch .app and capture screenshot
         run: |
