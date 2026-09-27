@@ -274,7 +274,9 @@ impl PaneFlowApp {
             // so one click never dismisses twice (and eats the next toast).
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                if let Err(err) = crate::external_open::open_http_url(&url) {
+                if let Err(err) = crate::external_open::open_http_url_in(&url, cx, |_, err, _| {
+                    log::warn!("toast: open release notes failed: {err}");
+                }) {
                     log::warn!("toast: open release notes failed: {err}");
                 }
                 this.dismiss_toast(cx);
