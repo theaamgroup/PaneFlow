@@ -1157,9 +1157,9 @@ mod tests {
         let newer = tempfile::tempdir().expect("newer checkout");
         let late = tempfile::tempdir().expect("late checkout");
         let root = tempfile::tempdir().expect("workspace root");
-        let cx = cx.add_empty_window();
-        let app = cx.new(blank_paneflow_app);
-        app.update(cx, |app, cx| {
+        let window = cx.add_empty_window();
+        let app = window.new(blank_paneflow_app);
+        app.update(window, |app, cx| {
             let ws = crate::workspace::Workspace::empty_with_cwd_and_id(
                 7,
                 "repo",
@@ -1200,6 +1200,10 @@ mod tests {
                 "landing releases the in-flight slot"
             );
         });
+        // Binding and the skipped landing start git probes. Finish them on
+        // this scheduler. Dropping the window while a probe is still on the
+        // background thread panics the harness.
+        cx.run_until_parked();
 
         // Production must snapshot before the await and land through the same
         // helper this test calls. The behavioral half above cannot see a spawn
