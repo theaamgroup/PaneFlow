@@ -502,9 +502,43 @@ pub(super) fn cleanup_accepted_owned_file(
     lease: &mut HookLease,
     accepts: &dyn Fn(&str) -> bool,
 ) {
-    let _ = with_last_lease(path, lease, |created| {
+    let cleaned = with_last_lease(path, lease, |created| {
         remove_unchanged_file(path, created, accepts)
     });
+    report_cleanup_failure(path, cleaned.as_ref().err());
+}
+
+/// A last-session cleanup that failed. `NotFound` is success: the file is
+/// already gone. The line goes to `$PANEFLOW_HOOK_LOG` through
+/// [`crate::diagnose`], never stderr. The shim sits in front of the agent TUI.
+pub(super) fn report_cleanup_failure(path: &Path, error: Option<&std::io::Error>) {
+    let Some(error) = error else {
+        return;
+    };
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return;
+    }
+    let message = format!(
+        "could not clean up {}: {error}",
+        super::safe_path_display(path)
+    );
+    #[cfg(test)]
+    RECORDED_CLEANUP_FAILURES.with(|slot| slot.borrow_mut().push(message.clone()));
+    crate::diagnose(&message);
+}
+
+#[cfg(test)]
+thread_local! {
+    static RECORDED_CLEANUP_FAILURES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Messages passed to [`crate::diagnose`] by [`report_cleanup_failure`].
+/// `diagnose` reads the process-global `$PANEFLOW_HOOK_LOG`, which these
+/// tests cannot set while other tests are running.
+#[cfg(test)]
+fn take_recorded_cleanup_failures() -> Vec<String> {
+    RECORDED_CLEANUP_FAILURES.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
 }
 
 /// Remove an owned file only when the lease's durable ownership bit says
@@ -1096,6 +1130,70 @@ mod tests {
         assert!(
             !path.exists(),
             "the orphan sweep must remove a crashed session's created file"
+        );
+    }
+
+    #[test]
+    fn last_session_cleanup_failure_is_recorded() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join("hooks");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("paneflow.json");
+        let content = "managed hook";
+        std::fs::write(&path, content).unwrap();
+        let mut lease = HookLease::acquire(&path).unwrap();
+        lease.mark_created().unwrap();
+
+        // `TempDir` cannot remove a non-writable directory.
+        struct RestoreWritable(PathBuf);
+        impl Drop for RestoreWritable {
+            fn drop(&mut self) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        let _restore = RestoreWritable(directory.clone());
+        let _ = take_recorded_cleanup_failures();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        cleanup_accepted_owned_file(&path, &mut lease, &|existing| existing == content);
+
+        let recorded = take_recorded_cleanup_failures();
+        let shown = super::super::safe_path_display(&path);
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
+        let line = &recorded[0];
+        let prefix = format!("could not clean up {shown}:");
+        assert!(
+            line.starts_with(&prefix) && line.len() > prefix.len(),
+            "cleanup failure must name the path and the error: {line}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            content,
+            "a failed cleanup must leave the hook file in place"
+        );
+    }
+
+    #[test]
+    fn missing_file_is_not_recorded_as_a_cleanup_failure() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("paneflow.json");
+        let missing = std::io::Error::new(std::io::ErrorKind::NotFound, "already gone");
+        let _ = take_recorded_cleanup_failures();
+        report_cleanup_failure(&path, Some(&missing));
+        assert!(
+            take_recorded_cleanup_failures().is_empty(),
+            "NotFound is success and must not be recorded"
+        );
+
+        let mut lease = HookLease::acquire(&path).unwrap();
+        lease.mark_created().unwrap();
+        cleanup_accepted_owned_file(&path, &mut lease, &|_| true);
+        assert!(
+            take_recorded_cleanup_failures().is_empty(),
+            "cleaning up a file that is already gone is success"
         );
     }
 }
