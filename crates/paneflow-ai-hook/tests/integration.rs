@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::OnceLock;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -70,6 +71,7 @@ impl MockServer {
     }
 
     fn expect_frame(&self, scenario: &str) -> Value {
+        warm_hook_binary();
         let result = self
             .rx
             .recv_timeout(RECV_TIMEOUT)
@@ -156,6 +158,27 @@ fn run_hook(event: &str, hook_env: &HookEnv<'_>, stdin_bytes: &[u8]) -> std::pro
     run_hook_with_env(event, hook_env, &[], stdin_bytes)
 }
 
+/// Exec `HOOK_BIN` once with no arguments, and do not time it.
+///
+/// macOS Gatekeeper/XProtect scans a freshly linked executable on first launch
+/// (12-20s). Missing argv returns at the `missing argv[1]` check after that
+/// scan. The exit status is ignored; every timed scenario must call this
+/// before it starts its timer so the tight recv and exit bounds still catch a
+/// real hang.
+fn warm_hook_binary() {
+    static WARMED: OnceLock<()> = OnceLock::new();
+    WARMED.get_or_init(|| {
+        // No argv: dispatch returns at the missing argv[1] check. Drop
+        // PANEFLOW_HOOK_LOG so that diagnostic is not appended to a real log.
+        let _ = Command::new(HOOK_BIN)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .env_remove("PANEFLOW_HOOK_LOG")
+            .status();
+    });
+}
+
 /// `run_hook` plus extra `PANEFLOW_*` variables the shim sets only on the
 /// synthesized lifecycle frames (`PANEFLOW_AI_EXIT_CODE`,
 /// `PANEFLOW_AI_EVENT_SOURCE`).
@@ -165,6 +188,7 @@ fn run_hook_with_env(
     extra_env: &[(&str, &str)],
     stdin_bytes: &[u8],
 ) -> std::process::ExitStatus {
+    warm_hook_binary();
     let mut command = Command::new(HOOK_BIN);
     command
         .arg(event)
@@ -270,6 +294,7 @@ fn assert_envelope<'a>(frame: &'a Value, case: &SuccessCase) -> &'a Value {
 
 #[test]
 fn supported_events_dispatch_through_the_process_boundary() {
+    warm_hook_binary();
     let cases = vec![
         SuccessCase {
             name: "claude_prompt",
@@ -440,6 +465,7 @@ fn supported_events_dispatch_through_the_process_boundary() {
 
 #[test]
 fn shim_synthesized_exit_forwards_exit_code_and_interrupt_source() {
+    warm_hook_binary();
     let server = MockServer::start();
     let status = run_hook_with_env(
         "Exit",
@@ -470,6 +496,7 @@ fn shim_synthesized_exit_forwards_exit_code_and_interrupt_source() {
 
 #[test]
 fn exit_without_exit_code_env_logs_and_sends_no_frame() {
+    warm_hook_binary();
     let server = MockServer::start();
     let log_directory = tempfile::TempDir::new().expect("log directory");
     let log_path = log_directory.path().join("hook.log");
@@ -495,6 +522,7 @@ fn exit_without_exit_code_env_logs_and_sends_no_frame() {
 
 #[test]
 fn shim_synthesized_session_end_forwards_interrupt_source_with_empty_stdin() {
+    warm_hook_binary();
     let server = MockServer::start();
     let status = run_hook_with_env(
         "SessionEnd",
@@ -521,6 +549,7 @@ fn shim_synthesized_session_end_forwards_interrupt_source_with_empty_stdin() {
 
 #[test]
 fn informational_notification_is_dropped_with_one_accurate_diagnostic() {
+    warm_hook_binary();
     let server = MockServer::start();
     let log_directory = tempfile::TempDir::new().expect("log directory");
     let log_path = log_directory.path().join("hook.log");
@@ -547,6 +576,7 @@ fn informational_notification_is_dropped_with_one_accurate_diagnostic() {
 
 #[test]
 fn malformed_tool_is_rejected_instead_of_becoming_claude() {
+    warm_hook_binary();
     let server = MockServer::start();
     let log_directory = tempfile::TempDir::new().expect("log directory");
     let log_path = log_directory.path().join("hook.log");
@@ -570,6 +600,7 @@ fn malformed_tool_is_rejected_instead_of_becoming_claude() {
 
 #[test]
 fn inherited_paneflow_environment_is_filtered_case_insensitively() {
+    warm_hook_binary();
     assert!(is_paneflow_environment_key(OsStr::new("PANEFLOW_AI_TOOL")));
     assert!(is_paneflow_environment_key(OsStr::new("paneflow_ai_tool")));
     assert!(!is_paneflow_environment_key(OsStr::new("PATH")));
@@ -577,6 +608,7 @@ fn inherited_paneflow_environment_is_filtered_case_insensitively() {
 
 #[test]
 fn frame_read_is_bounded_when_peer_stays_open_without_newline() {
+    warm_hook_binary();
     let server = MockServer::start();
     let name = server
         .socket_path
@@ -596,6 +628,7 @@ fn frame_read_is_bounded_when_peer_stays_open_without_newline() {
 
 #[test]
 fn missing_socket_still_exits_successfully() {
+    warm_hook_binary();
     let (missing_path, _keepalive) = unique_ipc_path();
     let status = run_hook(
         "Stop",
@@ -613,6 +646,7 @@ fn missing_socket_still_exits_successfully() {
 
 #[test]
 fn malformed_stdin_logs_and_sends_no_frame() {
+    warm_hook_binary();
     let server = MockServer::start();
     let log_directory = tempfile::TempDir::new().expect("log directory");
     let log_path = log_directory.path().join("hook.log");
@@ -637,6 +671,7 @@ fn malformed_stdin_logs_and_sends_no_frame() {
 
 #[test]
 fn oversized_stdin_logs_and_sends_no_frame() {
+    warm_hook_binary();
     let server = MockServer::start();
     let log_directory = tempfile::TempDir::new().expect("log directory");
     let log_path = log_directory.path().join("hook.log");
