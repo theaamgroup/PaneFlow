@@ -222,13 +222,16 @@ pub struct TerminalConfig {
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub cursor_blink: Option<CursorBlinkConfig>,
     /// US-014: global default extra environment variables injected into every
-    /// new terminal PTY. `TERM`,
-    /// `COLORTERM`, and Paneflow identity keys (`PANEFLOW_WORKSPACE_ID`,
-    /// `PANEFLOW_SURFACE_ID`, `PANEFLOW_SOCKET_PATH`, `PANEFLOW_BIN_DIR`) are
-    /// protected and cannot be overridden. `LD_*` and `DYLD_*` keys are dropped
-    /// before PTY spawn. A custom `PATH` is allowed, but Paneflow re-prepends
-    /// `PANEFLOW_BIN_DIR` afterward so agent commands still route through the
-    /// shim. `None` (block absent) and `Some({})` both inject nothing.
+    /// new terminal PTY. `TERM`, `COLORTERM`, `TERM_PROGRAM`,
+    /// `TERM_PROGRAM_VERSION`, `SHLVL`, the PaneFlow identity keys
+    /// (`PANEFLOW_WORKSPACE_ID`, `PANEFLOW_SURFACE_ID`, `PANEFLOW_SOCKET_PATH`,
+    /// `PANEFLOW_BIN_DIR`, `PANEFLOW_AI_HOOK_PATH`), `ZDOTDIR`, and
+    /// `PANEFLOW_ORIG_ZDOTDIR` are protected and cannot be overridden. `LD_*`
+    /// and `DYLD_*` keys are dropped, along with `CLAUDECODE` and the
+    /// `CLAUDE_CODE_*` markers. Each dropped key is logged without its value.
+    /// A custom `PATH` is allowed, but PaneFlow re-prepends `PANEFLOW_BIN_DIR`
+    /// afterward so agent commands still route through the shim. `None` (block
+    /// absent) and `Some({})` both inject nothing.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
