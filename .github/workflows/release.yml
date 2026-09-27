@@ -268,6 +268,11 @@ jobs:
           ( cd release-assets && shasum -a 256 "${dmg}" > "${dmg}.sha256" )
           ls -la release-assets/
 
+      # Tampered-archive and wrong-key rejection, before appcast verification
+      # (issue #904). The signed-archive check in the next step stays.
+      - name: Update signature rejection self-test
+        run: swift scripts/verify-update.swift --self-test
+
       - name: Generate signed Sparkle appcast
         if: steps.macos_signing.outputs.signing_available == 'true' && steps.notarize.outcome == 'success'
         env:
