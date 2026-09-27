@@ -93,14 +93,16 @@ jobs:
           DATE=$(date -u +"%Y-%m-%d")
           NOW_UTC=$(date -u +"%H:%M UTC")
           TITLE="Security: cargo-deny advisory hit on ${DATE}"
-          # Idempotency: only one open issue per day. If a previous
-          # cron tick already opened one, this re-run reuses it via
-          # a comment rather than spawning a duplicate. `--search`
-          # with `in:title` is GitHub-side string match; the title
-          # has no user-supplied content so this is injection-safe.
+          # Idempotency: one open advisory issue, not one per day. If a
+          # previous cron tick already opened one, this re-run reuses it
+          # via a comment rather than spawning a duplicate. `--search`
+          # uses a fixed title prefix (no date) so the same unresolved
+          # advisory is not re-filed every night. `in:title` is a
+          # GitHub-side string match; the query has no user-supplied
+          # content so this is injection-safe.
           EXISTING=$(gh issue list \
             --state open \
-            --search "in:title \"${TITLE}\"" \
+            --search 'in:title "Security: cargo-deny advisory hit"' \
             --json number \
             --jq '.[0].number // empty')
 
@@ -125,7 +127,7 @@ jobs:
               echo "3. If no fixed upgrade exists but the code path is unreachable"
               echo "   from PaneFlow, add the advisory ID to \`deny.toml\`'s"
               echo "   \`[advisories].ignore\` list with a rationale matching the"
-              echo "   pattern of the existing \`RUSTSEC-2023-0071\` entry."
+              echo "   pattern of the existing \`RUSTSEC-2026-0194\` entry in \`deny.toml\`."
               echo "4. The \`run_tests.yml::security_audit\` job will gate the next"
               echo "   PR -- fix here unblocks every downstream PR."
               echo
