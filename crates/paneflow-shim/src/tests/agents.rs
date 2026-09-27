@@ -213,6 +213,54 @@ fn managed_guard_refuses_invalid_primary_user_config() {
 }
 
 #[test]
+fn gemini_install_preserves_commented_settings() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".gemini");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    let original =
+        "{\n  // Gemini accepts comments in settings.json\n  \"theme\": \"Default\"\n}\n";
+    std::fs::write(&path, original).unwrap();
+
+    let guard = ManagedHookConfigGuard::install_at(
+        &dir,
+        ManagedHookSpec::new(
+            ".gemini",
+            "settings.json",
+            "Gemini",
+            merge_gemini_hooks,
+            remove_gemini_hooks,
+        ),
+        InvalidJsonPolicy::Refuse,
+    )
+    .expect("commented Gemini settings must install");
+
+    let installed = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        installed.contains("// Gemini accepts comments in settings.json"),
+        "comment must survive install:\n{installed}"
+    );
+    let parsed = paneflow_agent_config::jsonc::parse(&installed).expect("installed JSONC");
+    assert_eq!(parsed["theme"], json!("Default"));
+    for event in ["BeforeAgent", "AfterAgent", "BeforeTool", "AfterTool"] {
+        let command = parsed["hooks"][event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            is_paneflow_hook_command(command),
+            "{event} hook missing from {installed}"
+        );
+    }
+
+    drop(guard);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        original.as_bytes(),
+        "drop must restore the original bytes"
+    );
+}
+
+#[test]
 fn pi_extension_guard_roundtrip() {
     let td = tempfile::TempDir::new().unwrap();
     let ext_dir = td.path().join(".pi/agent/extensions");
