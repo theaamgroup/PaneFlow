@@ -1,3 +1,5 @@
+mod top_level_keys;
+
 use super::owned_files::report_cleanup_failure;
 use super::{
     home_unavailable, paneflow_ipc_reachable, refuse_symlink, resolve_plain_hook_command,
@@ -9,6 +11,7 @@ use paneflow_agent_config::{
 use std::env;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use top_level_keys::yaml_may_have_top_level_hooks;
 
 pub(crate) const HERMES_BLOCK_BEGIN: &str =
     "# >>> paneflow managed hooks (auto-installed; removed on session end) >>>";
@@ -63,12 +66,6 @@ pub(crate) fn strip_hermes_managed_block(content: &str) -> Option<String> {
         end += 1;
     }
     Some(format!("{}{}", &content[..begin], &content[end..]))
-}
-
-fn yaml_has_top_level_hooks(content: &str) -> bool {
-    content
-        .lines()
-        .any(|line| line.starts_with("hooks:") || line == "hooks")
 }
 
 /// Profile directory Hermes reads: `HERMES_HOME` when set and non-empty,
@@ -212,7 +209,7 @@ impl HermesHookConfigGuard {
             let created = existing.is_none();
             let content = existing.unwrap_or_default();
             let mut base = strip_hermes_managed_block(&content).unwrap_or(content);
-            if yaml_has_top_level_hooks(&base) {
+            if yaml_may_have_top_level_hooks(&base) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "user Hermes config already has hooks",

@@ -467,19 +467,82 @@ fn hermes_guard_appends_block_and_strips_on_drop() {
 #[test]
 fn hermes_guard_refuses_when_user_has_hooks_key() {
     // A duplicate top-level `hooks:` key would silently override the
-    // user's own hooks under PyYAML-family last-wins semantics.
-    let td = tempfile::TempDir::new().unwrap();
-    let dir = td.path().join(".hermes");
-    std::fs::create_dir_all(&dir).unwrap();
-    let user_yaml = "hooks:\n  pre_tool_call:\n    - command: \"~/mine.sh\"\n";
-    std::fs::write(dir.join("config.yaml"), user_yaml).unwrap();
+    // user's own hooks under PyYAML-family last-wins semantics. Issue #1056:
+    // every YAML spelling of that key counts, not only a bare `hooks:`.
+    let fixtures = [
+        "hooks:\n  pre_tool_call:\n    - command: \"~/mine.sh\"\n",
+        "\"hooks\":\n  pre_tool_call:\n    - command: \"~/mine.sh\"\n",
+        "'hooks':\n  pre_tool_call:\n    - command: \"~/mine.sh\"\n",
+        "hooks :\n  pre_tool_call:\n    - command: \"~/mine.sh\"\n",
+        "model: x\n\"hooks\" : {pre_tool_call: []}\n",
+        "hooks: {} # mine\n",
+        "hooks: # mine\n  pre_tool_call: []\n",
+        "hooks:{}\n",
+        "\"\\u0068ooks\": {}\n",
+        "'it''s': 1\n'hooks' : {}\n",
+        "? hooks\n: {pre_tool_call: []}\n",
+        "---\nhooks:\n  pre_tool_call: []\n",
+        "--- # first document\nmodel: x\nhooks: {}\n",
+        "&mine hooks: {}\n",
+        "!!str hooks: {}\n",
+        "  hooks:\n    pre_tool_call: []\n",
+        "model: x\r\nhooks :\r\n  pre_tool_call: []\r\n",
+        "{model: x, hooks: {pre_tool_call: []}}\n",
+        // Unsure cases refuse: a merge key can pull `hooks` in from an
+        // anchor, and an alias or multi-line key cannot be read here.
+        "base: &base\n  hooks: {}\n<<: *base\n",
+        "*key : {}\n",
+        "\"multi\n  line\": {}\n",
+    ];
+    for user_yaml in fixtures {
+        let td = tempfile::TempDir::new().unwrap();
+        let dir = td.path().join(".hermes");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.yaml"), user_yaml).unwrap();
 
-    assert!(HermesHookConfigGuard::install_at(&dir).is_err());
-    assert_eq!(
-        std::fs::read_to_string(dir.join("config.yaml")).unwrap(),
-        user_yaml,
-        "refusal must leave the file untouched"
-    );
+        assert!(
+            HermesHookConfigGuard::install_at(&dir).is_err(),
+            "must refuse a top-level hooks key:\n{user_yaml}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.yaml")).unwrap(),
+            user_yaml,
+            "refusal must leave the file untouched"
+        );
+    }
+}
+
+#[test]
+fn hermes_guard_installs_when_hooks_is_not_a_top_level_key() {
+    // `hooks` nested under another mapping, inside a block scalar or a
+    // comment, or as a prefix of a different key is not a duplicate.
+    let fixtures = [
+        "model: x\nprofile:\n  hooks:\n    pre_tool_call: []\n",
+        "notes: |\n  hooks:\n    pre_tool_call: []\n",
+        "notes: >-\n  hooks: folded text\n",
+        "# hooks:\nmodel: x\n",
+        "model: x # hooks: here\n",
+        "hooks_dir: /tmp/hooks\n",
+        "\"hooks_dir\": /tmp/hooks\n",
+        "model: 'hooks: quoted value'\n",
+        "'hooks''': x\n",
+    ];
+    for user_yaml in fixtures {
+        let td = tempfile::TempDir::new().unwrap();
+        let dir = td.path().join(".hermes");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.yaml"), user_yaml).unwrap();
+
+        let guard = HermesHookConfigGuard::install_at(&dir)
+            .unwrap_or_else(|err| panic!("must install over:\n{user_yaml}\n{err}"));
+        let content = std::fs::read_to_string(dir.join("config.yaml")).unwrap();
+        assert!(content.starts_with(user_yaml) && content.contains(HERMES_BLOCK_BEGIN));
+        drop(guard);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.yaml")).unwrap(),
+            user_yaml
+        );
+    }
 }
 
 #[test]
