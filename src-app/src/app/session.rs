@@ -145,9 +145,10 @@ pub(crate) struct SessionCorruptionInfo {
     /// platform's modification-time call returns a value newer than
     /// `now` (clock drift) or the metadata call fails.
     pub(crate) file_age_seconds: Option<u64>,
-    /// Resolved path of the freshly-written backup, or `None` if the
-    /// backup write itself failed (AC6 - never block startup on
-    /// backup-side errors).
+    /// Resolved path of the preserved file, or `None` if there is nothing
+    /// to preserve or the preserve step failed (AC6 - never block startup
+    /// on backup-side errors). Parse failures are copied here; an oversize
+    /// file is renamed here.
     pub(crate) backup_path: Option<PathBuf>,
 }
 
@@ -327,15 +328,18 @@ impl PaneFlowApp {
     /// |-------------------------|-------------------|-----------------|----------------|
     /// | File missing            | `None`            | `None`          | no             |
     /// | Read error (perms, IO)  | `None`            | `Some(info)`    | no             |
-    /// | Non-regular / oversize | `None`            | `Some(info)`    | no             |
+    /// | Non-regular             | `None`            | `Some(info)`    | no             |
+    /// | Oversize                | `None`            | `Some(info)`    | yes (rename)   |
     /// | Read OK + parse OK      | `Some(state)`     | `None`          | no             |
     /// | Read OK + parse FAIL    | `None` (fallback) | `Some(info)`    | yes            |
     /// | Unsupported version     | `None` (fallback) | `Some(info)`    | yes            |
     ///
     /// On parse failure the bad file is preserved as
-    /// `session.json.corrupted-<unix-timestamp>` *before* the next
+    /// `session.json.corrupted-<unix-timestamp>-<pid>-<seq>` *before* the next
     /// `save_session` overwrites it, so we keep forensic evidence even
-    /// when the user immediately moves on. The backup directory is
+    /// when the user immediately moves on. An oversize file is renamed to
+    /// that same name rather than copied; a non-regular file is left in place.
+    /// The backup directory is
     /// rotated down to [`MAX_CORRUPTION_BACKUPS`] entries (R8) so a
     /// chronic-corruption case can't silently fill Application Support.
     ///
@@ -367,7 +371,20 @@ impl PaneFlowApp {
             Ok(SessionRead::Data(d)) => d,
             Ok(SessionRead::Missing) => return (None, None),
             Ok(SessionRead::Rejected(category)) => {
-                return (None, Some(session_corruption_info(path, category, None)));
+                // Stat while the file is still at `path`. An oversize file is
+                // then renamed aside so the next save cannot replace it (#931).
+                // A non-regular file (fifo, directory) is not a backup candidate.
+                let mut info = session_corruption_info(path, category, None);
+                if category == "oversize" {
+                    info.backup_path = move_oversize_session_aside(path).unwrap_or_else(|e| {
+                        log::warn!(
+                            "session load: could not move oversize session aside at {}: {e}",
+                            path.display()
+                        );
+                        None
+                    });
+                }
+                return (None, Some(info));
             }
             Err(e) => {
                 if e.kind() != std::io::ErrorKind::NotFound {
@@ -1751,8 +1768,39 @@ fn serde_category_tag(err: &serde_json::Error) -> &'static str {
     }
 }
 
+/// `<stem>.corrupted-<unix-nanos>-<pid>-<seq>` beside `session_path`.
+///
+/// `Ok(None)` when the clock is before the Unix epoch. The sequence counter
+/// advances only when a name is produced, and it is shared with every
+/// preserve path so two backups in the same nanosecond cannot collide.
+fn next_corruption_backup_path(session_path: &Path) -> std::io::Result<Option<(PathBuf, String)>> {
+    let parent = match session_path.parent() {
+        Some(p) => p,
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "session path has no parent",
+            ));
+        }
+    };
+    let ts = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_nanos(),
+        Err(_) => return Ok(None),
+    };
+    let seq = SESSION_CORRUPTION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stem = session_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("session.json");
+    let backup = parent.join(format!(
+        "{stem}.corrupted-{ts}-{}-{seq}",
+        std::process::id()
+    ));
+    Ok(Some((backup, stem.to_string())))
+}
+
 /// Persist the corrupted file's bytes to
-/// `<session_path>.corrupted-<unix-timestamp>` and rotate the backup
+/// `<session_path>.corrupted-<unix-nanos>-<pid>-<seq>` and rotate the backup
 /// directory down to [`MAX_CORRUPTION_BACKUPS`] entries.
 ///
 /// Returns `Ok(Some(path))` on success, `Ok(None)` if the wall clock is
@@ -1781,19 +1829,9 @@ fn write_corruption_backup(
         .mode(0o700)
         .create(parent)?;
 
-    let ts = match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(d) => d.as_nanos(),
-        Err(_) => return Ok(None),
+    let Some((backup, stem)) = next_corruption_backup_path(session_path)? else {
+        return Ok(None);
     };
-    let seq = SESSION_CORRUPTION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let stem = session_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("session.json");
-    let backup = parent.join(format!(
-        "{stem}.corrupted-{ts}-{}-{seq}",
-        std::process::id()
-    ));
     // The name is unique per call (nanos, pid, sequence), so `create_new`
     // never trips on our own earlier backup. It is O_EXCL: a symlink planted
     // at the name fails the open instead of being written through. The
@@ -1806,7 +1844,22 @@ fn write_corruption_backup(
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     std::io::Write::write_all(&mut file, contents)?;
 
-    rotate_corruption_backups(parent, stem);
+    rotate_corruption_backups(parent, &stem);
+    Ok(Some(backup))
+}
+
+/// Rename an oversize session onto the corruption-backup name so the next
+/// save cannot replace it. A rename keeps the bytes without copying them.
+///
+/// Same `Ok(Some)` / `Ok(None)` / `Err` contract as [`write_corruption_backup`].
+fn move_oversize_session_aside(session_path: &Path) -> std::io::Result<Option<PathBuf>> {
+    let Some((backup, stem)) = next_corruption_backup_path(session_path)? else {
+        return Ok(None);
+    };
+    std::fs::rename(session_path, &backup)?;
+    if let Some(parent) = backup.parent() {
+        rotate_corruption_backups(parent, &stem);
+    }
     Ok(Some(backup))
 }
 
@@ -2349,12 +2402,13 @@ mod tests {
     }
 
     #[test]
-    fn oversized_session_returns_corruption_info_without_backup() {
+    fn oversized_session_returns_corruption_info_and_backup() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let session_path = tmp.path().join("session.json");
         let file = std::fs::File::create(&session_path).expect("seed");
         file.set_len(MAX_SESSION_SIZE_BYTES + 1)
             .expect("sparse oversize file");
+        drop(file);
 
         let (state, info) = PaneFlowApp::load_session_at(&session_path);
 
@@ -2362,9 +2416,46 @@ mod tests {
         let info = info.expect("oversize rejection emits diagnostics");
         assert_eq!(info.error_category, "oversize");
         assert_eq!(info.file_size, MAX_SESSION_SIZE_BYTES + 1);
+        let backup = info.backup_path.expect("oversize file is renamed aside");
+        assert_eq!(
+            std::fs::metadata(&backup).expect("backup exists").len(),
+            MAX_SESSION_SIZE_BYTES + 1,
+            "rename preserves the rejected file; do not copy it"
+        );
+    }
+
+    #[test]
+    fn oversized_session_is_moved_aside_before_it_can_be_overwritten() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_path = tmp.path().join("session.json");
+        let file = std::fs::File::create(&session_path).expect("seed");
+        file.set_len(MAX_SESSION_SIZE_BYTES + 1)
+            .expect("sparse oversize file");
+        drop(file);
+
+        let (state, info) = PaneFlowApp::load_session_at(&session_path);
+
+        assert!(state.is_none());
+        let info = info.expect("oversize rejection emits diagnostics");
+        let backup = info
+            .backup_path
+            .expect("oversize file is renamed aside before the next save");
         assert!(
-            info.backup_path.is_none(),
-            "do not copy huge rejected files"
+            !session_path.exists(),
+            "the live path must be clear before the next save renames over it"
+        );
+        assert_eq!(
+            std::fs::metadata(&backup)
+                .expect("renamed file exists")
+                .len(),
+            MAX_SESSION_SIZE_BYTES + 1
+        );
+        assert!(
+            backup
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("session.json.corrupted-")),
+            "backup name format honoured"
         );
     }
 
