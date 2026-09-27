@@ -2328,14 +2328,23 @@ fn utf8_locale_override(
         .find(|candidate| available.iter().any(|name| name == candidate))
 }
 
+/// Warn that one `terminal.env` key was not applied. One line per key; the
+/// value is never included.
+fn warn_dropped_terminal_env_key(key: &str) {
+    log::warn!(
+        target: "paneflow::terminal::backend",
+        "terminal.env key {key} was dropped"
+    );
+}
+
 /// Assemble the child PTY environment: PaneFlow identity vars, explicit TERM /
 /// locale / terminal-program identification, the AI-hook PATH prepend, and the
 /// user-env merge (a user var wins on collision EXCEPT the protected keys
 /// PaneFlow owns and `PANEFLOW_BIN_DIR` is re-prepended after any user PATH).
-/// Pure except for `inject_ai_hook_env` staging the shim
-/// binaries, so the env contract stays unit-testable now that the mockable
-/// `PtyBackend::spawn` seam is gone (EP-002 US-004). Mirrors Zed's
-/// `insert_zed_terminal_env`.
+/// Side effects are `inject_ai_hook_env` staging the shim binaries and one
+/// warn per dropped `terminal.env` key (the value is not logged). The env
+/// contract stays unit-testable now that the mockable `PtyBackend::spawn`
+/// seam is gone (EP-002 US-004). Mirrors Zed's `insert_zed_terminal_env`.
 fn assemble_pty_env(
     mut env: std::collections::HashMap<String, String>,
     workspace_id: u64,
@@ -2435,14 +2444,16 @@ fn assemble_pty_env(
             // Reject malformed env names (empty / `=` / NUL) and drop
             // dynamic-loader-influencing keys (LD_* / DYLD_*) outright: the
             // global `terminal.env` is untrusted, and these inject a bundled
-            // `.so` into the spawned shell (RCE). `PATH` is deliberately still
-            // mergeable here (a documented US-014 use case), but
-            // PANEFLOW_BIN_DIR is re-prepended after the merge so agent
-            // commands still route through the shim.
-            if !is_valid_env_name(&k) || is_forbidden_child_env_key(&k) {
-                continue;
-            }
-            if PROTECTED.contains(&k.as_str()) {
+            // `.so` into the spawned shell (RCE). Protected names are
+            // PaneFlow-owned. Each skipped key is logged once, without its
+            // value. `PATH` is deliberately still mergeable here (a documented
+            // US-014 use case), but PANEFLOW_BIN_DIR is re-prepended after the
+            // merge so agent commands still route through the shim.
+            if !is_valid_env_name(&k)
+                || is_forbidden_child_env_key(&k)
+                || PROTECTED.contains(&k.as_str())
+            {
+                warn_dropped_terminal_env_key(&k);
                 continue;
             }
             env.insert(k, v);
@@ -4523,6 +4534,43 @@ mod tests {
             env.get("PANEFLOW_ORIG_ZDOTDIR"),
             None,
             "untrusted PANEFLOW_ORIG_ZDOTDIR must not be injected when integration did not set it"
+        );
+    }
+
+    /// Issue #922: `terminal.env` may name `ZDOTDIR`, but the child must not
+    /// receive it, and the drop must be logged without the value.
+    #[test]
+    fn terminal_env_drop_logs_zdotdir_and_omits_it() {
+        crate::diff::capture_logs();
+        let value = "terminal-env-drop-zdotdir-value";
+        let needle = "terminal.env key ZDOTDIR was dropped";
+        let before = crate::diff::captured_logs_count(needle);
+        let mut user = HashMap::new();
+        user.insert(ZDOTDIR_ENV.to_string(), value.to_string());
+        user.insert("SHLVL".to_string(), "99".to_string());
+        user.insert("KEEP_ME".to_string(), "yes".to_string());
+
+        let env = assemble_pty_env(HashMap::new(), 1, 1, Some(user));
+
+        assert_eq!(
+            env.get(ZDOTDIR_ENV),
+            None,
+            "ZDOTDIR set in terminal.env must not reach the child"
+        );
+        assert_eq!(
+            env.get("SHLVL").map(String::as_str),
+            Some("0"),
+            "SHLVL from terminal.env must not replace the reset value"
+        );
+        assert_eq!(env.get("KEEP_ME").map(String::as_str), Some("yes"));
+        let after = crate::diff::captured_logs_count(needle);
+        assert!(
+            after > before,
+            "dropping ZDOTDIR must warn (before {before}, after {after})"
+        );
+        assert!(
+            !crate::diff::captured_logs_contain(value),
+            "the dropped ZDOTDIR value must not be logged"
         );
     }
 
