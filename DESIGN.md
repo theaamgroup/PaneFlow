@@ -1109,10 +1109,13 @@ These are real and MUST NOT be described as solved:
    per-surface.
 5. **`reduce_motion` is config-driven, not OS-driven.** It does not read the
    macOS "Reduce Motion" system setting.
-6. **The Review-with-agent popover is mouse-only.** It has no focus handle and
-   no key handler; its rows are click-only and the sole dismissal is an outside
-   mouse press (`pane/review.rs`). It does not meet the Escape floor above, and
-   it is the one live overlay that does not.
+6. **The Review-with-agent popover tracks a focus handle.** Each agent pick is
+   `Role::CheckBox`, named with that agent's label, and reports `aria_toggled`
+   for whether it is picked. The launch row is a `Role::Button` named
+   "Review with agent". Escape closes the popover: the menu's key handler when
+   the popover holds focus, and `dismiss_overlays` when the diff still does
+   (`pane/review.rs`, `diff/view/render.rs`). Up and down move between the
+   rows. An outside mouse press still dismisses it.
 7. **Swapping two panes is mouse-only.** The keyboard swap mode is gone; the
    only path is dragging a pane header onto another pane's center
    (`PaneEvent::DropPaneMove` with no edge, `app/event_handlers.rs`).

@@ -75,6 +75,12 @@ impl DiffView {
 
     fn dismiss_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.body_menu = None;
+        // Escape is `diff_dismiss` while this surface is focused, which is
+        // still the case when the review menu was opened from the header or
+        // from `DiffReviewWithAgent` and has not taken focus yet.
+        if let Some(pane) = self.review_menu_owner().and_then(|pane| pane.upgrade()) {
+            pane.update(cx, |pane, cx| pane.close_review_menu(cx));
+        }
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
