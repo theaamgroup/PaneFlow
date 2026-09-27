@@ -90,6 +90,16 @@ impl DisplayTerminal {
         range: Option<std::ops::Range<usize>>,
     ) -> Result<Vec<GridLine>> {
         let geometry = self.grid_geometry()?;
+        self.grid_lines_with_geometry(&geometry, range)
+    }
+
+    /// Rows labeled with `geometry`, the same scrollback and total a caller
+    /// reports for this read. [`Self::grid_lines`] takes a fresh geometry.
+    pub(crate) fn grid_lines_with_geometry(
+        &self,
+        geometry: &GridGeometry,
+        range: Option<std::ops::Range<usize>>,
+    ) -> Result<Vec<GridLine>> {
         let range = range.unwrap_or(0..geometry.total_rows);
         if range.start > range.end || range.end > geometry.total_rows {
             return Err(GhosttyError::Ffi {
@@ -102,7 +112,7 @@ impl DisplayTerminal {
         let mut grapheme = Vec::new();
         for y in range {
             let mut line = GridLine::default();
-            self.fill_grid_line(y, &geometry, &mut line, &mut grapheme)?;
+            self.fill_grid_line(y, geometry, &mut line, &mut grapheme)?;
             lines.push(line);
         }
         Ok(lines)
