@@ -20,7 +20,8 @@ pub struct TerminalTheme {
     pub selection: Hsla,
     /// US-007: foreground color for text inside the selection rect,
     /// guaranteed to satisfy APCA Lc ≥ `MIN_APCA_CONTRAST` against
-    /// `selection`. Computed once at theme-load time by
+    /// `background.blend(selection)`, not bare `selection`. Computed once
+    /// at theme-load time by
     /// [`TerminalTheme::recompute_selection_foreground`] from the theme's
     /// regular `foreground`. Used by `build_layout` to override the
     /// per-cell `fg` for cells inside the selection.
@@ -456,25 +457,18 @@ fn is_light_theme(theme: &TerminalTheme) -> bool {
 
 impl TerminalTheme {
     /// US-007: recompute [`Self::selection_foreground`] from the current
-    /// `foreground` and `selection` colors so APCA Lc(selection_fg, selection)
-    /// ≥ [`MIN_APCA_CONTRAST`]. Called at theme-load time (and on every
+    /// `foreground` so APCA Lc against `background.blend(selection)` is at
+    /// least [`MIN_APCA_CONTRAST`]. Called at theme-load time (and on every
     /// hot-reload). Reusing the same `ensure_minimum_contrast` algorithm as
     /// per-cell text guarantees consistent visual semantics - selected text
     /// is no harder to read than non-selected text on near-luminance themes.
     pub(crate) fn recompute_selection_foreground(&mut self) {
-        // The `selection` slot's alpha represents how the selection blends
-        // with the cell background underneath. For contrast purposes we
-        // approximate the perceived selection background as the opaque
-        // version of `selection` (alpha = 1.0). A future refinement could
-        // alpha-composite against the actual cell `background` for a
-        // tighter contrast estimate, but the simple opaque-bg model is
-        // what `MIN_APCA_CONTRAST` was tuned for in the per-cell path.
-        let selection_bg_opaque = Hsla {
-            a: 1.0,
-            ..self.selection
-        };
+        // The selection wash is translucent (#872). Fit the foreground
+        // against the theme background with the selection wash composited
+        // on top, the same quad the cell paints.
+        let selection_bg = self.background.blend(self.selection);
         self.selection_foreground =
-            ensure_minimum_contrast(self.foreground, selection_bg_opaque, MIN_APCA_CONTRAST);
+            ensure_minimum_contrast(self.foreground, selection_bg, MIN_APCA_CONTRAST);
     }
 }
 
@@ -795,14 +789,14 @@ mod tests {
     /// APCA Lc threshold the per-cell contrast pass uses. A near-luminance
     /// theme without this invariant would render selected text illegibly.
     fn assert_selection_invariant(theme: &TerminalTheme, label: &str) {
-        let bg_opaque = Hsla {
-            a: 1.0,
-            ..theme.selection
-        };
-        let lc = apca_contrast(theme.selection_foreground, bg_opaque).abs();
+        let lc = apca_contrast(
+            theme.selection_foreground,
+            theme.background.blend(theme.selection),
+        )
+        .abs();
         assert!(
             lc >= MIN_APCA_CONTRAST,
-            "{label}: APCA Lc({lc}) < {MIN_APCA_CONTRAST} for selection_foreground vs selection"
+            "{label}: APCA Lc({lc}) < {MIN_APCA_CONTRAST} for selection_foreground vs background.blend(selection)"
         );
     }
 
