@@ -86,15 +86,37 @@ pub struct DisplayTerminal {
     /// the program asked for, so these are reapplied after every such call.
     pub(crate) key_encoder_overrides: crate::input_options::KeyEncoderOverrides,
     pub(crate) callbacks: Box<CallbackState>,
+    /// Cmd+K arrived while a VT sequence was open. [`Self::feed`] writes the
+    /// clear at the next ground boundary so its ESC bytes cannot split that
+    /// sequence.
+    pub(crate) pending_clear: bool,
     pub(crate) _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
 impl DisplayTerminal {
+    /// Write PTY output.
+    ///
+    /// A clear requested while the parser was mid-sequence waits here. Bytes
+    /// are written only until ground, the clear follows, and whatever is left
+    /// of `bytes` is written after it.
     pub fn feed(&mut self, bytes: &[u8]) -> Result<()> {
+        if !self.pending_clear {
+            self.write_vt(bytes);
+            return Ok(());
+        }
+        let written = self.feed_until_ground(bytes)?;
+        if !written.at_ground {
+            return Ok(());
+        }
+        self.apply_clear();
+        self.write_vt(&bytes[written.consumed..]);
+        Ok(())
+    }
+
+    fn write_vt(&mut self, bytes: &[u8]) {
         // SAFETY: the terminal handle is owned by `self` and the slice is
         // borrowed for the duration of the call.
         unsafe { sys::ghostty_terminal_vt_write(self.terminal.raw(), bytes.as_ptr(), bytes.len()) };
-        Ok(())
     }
 
     pub fn resize(&mut self, size: WindowSize) -> Result<()> {
@@ -139,17 +161,36 @@ impl DisplayTerminal {
     /// A no-op that returns `Ok(false)` while the alternate screen is active:
     /// that frame belongs to the full-screen program painting it, which would
     /// not know to repaint, and the alternate screen has no scrollback to
-    /// drop in the first place. `Ok(true)` when the primary screen was
-    /// cleared.
+    /// drop in the first place.
+    ///
+    /// On the primary screen this returns `Ok(true)`. The clear is written
+    /// immediately when the parser is at ground. Otherwise it is remembered
+    /// and [`Self::feed`] writes it once the open sequence reaches ground, so
+    /// the clear's own ESC bytes cannot split that sequence.
     pub fn clear_screen_and_scrollback(&mut self) -> Result<bool> {
         if self.alternate_screen_active()? {
             return Ok(false);
         }
-        self.feed(CLEAR_SCREEN_AND_SCROLLBACK)?;
+        if !self.parser_at_ground()? {
+            self.pending_clear = true;
+            return Ok(true);
+        }
+        self.apply_clear();
+        Ok(true)
+    }
+
+    /// Empty input consumes nothing. Success means the parser is already at
+    /// ground; `NO_VALUE` means a sequence is still open.
+    fn parser_at_ground(&mut self) -> Result<bool> {
+        Ok(self.feed_until_ground(&[])?.at_ground)
+    }
+
+    fn apply_clear(&mut self) {
+        self.pending_clear = false;
+        self.write_vt(CLEAR_SCREEN_AND_SCROLLBACK);
         self.tracked_epoch
             .set(self.tracked_epoch.get().wrapping_add(1));
         self.snapshot_cache.invalidate();
-        Ok(true)
     }
 
     pub fn drain_events(&mut self) -> Vec<BackendEvent> {
@@ -330,6 +371,48 @@ mod tests {
         let content = terminal.snapshot().expect("snapshot after clear");
         assert_eq!(content.history_size, 0);
         assert!(content.cells.iter().all(|cell| cell.character == ' '));
+    }
+
+    /// Cmd+K between two reads must not inject its ESC into an open sequence.
+    /// `CSI 1` stays open across the clear, so the following `m` is the SGR
+    /// final byte rather than a literal cell, and the clear still runs.
+    #[test]
+    fn clear_waits_for_ground_mid_sequence() {
+        let size = WindowSize::new(10, 2, 8, 16).expect("valid terminal size");
+        let mut terminal = DisplayTerminal::new(size, 100, crate::TerminalAppearance::default())
+            .expect("terminal must initialize");
+        terminal
+            .feed(b"one\r\ntwo\r\nthree\r\n")
+            .expect("fixture output must parse");
+        assert!(
+            terminal
+                .snapshot()
+                .expect("snapshot before clear")
+                .history_size
+                > 0
+        );
+
+        terminal.feed(b"\x1b[1").expect("partial sequence");
+        assert!(
+            terminal
+                .clear_screen_and_scrollback()
+                .expect("clear must be accepted")
+        );
+        terminal.feed(b"mX").expect("sequence tail");
+
+        let content = terminal.snapshot().expect("snapshot after clear");
+        assert!(
+            content.cells.iter().all(|cell| cell.character != 'm'),
+            "a clear mid-sequence must not print the rest of that sequence"
+        );
+        assert!(
+            content
+                .cells
+                .iter()
+                .all(|cell| cell.character == ' ' || cell.character == 'X'),
+            "the deferred clear must erase the screen and keep only the tail"
+        );
+        assert_eq!(content.history_size, 0);
     }
 
     #[test]
