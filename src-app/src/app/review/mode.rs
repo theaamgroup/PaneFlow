@@ -27,10 +27,23 @@ impl PaneFlowApp {
         self.mode = AppMode::Diff;
         self.review_resume_all(cx);
         self.review_refresh_worktree_listings(cx);
+        // Issue #932: a restart with Review off kept the raw node instead of
+        // rebuilding it. Opening Review in this process has to use that node.
+        // `save_session` below would otherwise persist the default grid and
+        // drop the one the user left.
+        if self.review.layout.is_none()
+            && let Some(node) = self.review.retained_layout.clone()
+        {
+            self.restore_review_layout(&node, cx);
+            if self.review.layout.is_some() {
+                self.review.retained_layout = None;
+            }
+        }
         if self.review.layout.is_none()
             && let Some(subject) = self.review_default_subject()
         {
             self.review_show_subject(subject, cx);
+            self.review.retained_layout = None;
         } else if let Some(pane) = self.review_active_pane() {
             self.pending_pane_focus = Some(pane);
         }
@@ -54,7 +67,9 @@ impl PaneFlowApp {
 
     pub(crate) fn review_is_viable(&self) -> bool {
         self.cached_config.review_view_enabled()
-            && (self.review.layout.is_some() || self.review_default_subject().is_some())
+            && (self.review.layout.is_some()
+                || self.review.retained_layout.is_some()
+                || self.review_default_subject().is_some())
     }
 
     pub(crate) fn leave_review_if_disabled(&mut self, cx: &mut Context<Self>) {
@@ -156,11 +171,9 @@ mod review_switch_tests {
             .next()
             .unwrap();
         assert!(mode.contains("if !self.review_is_viable() || self.mode == AppMode::Diff"));
-        assert!(
-            mode.contains(
-                "self.review.layout.is_some() || self.review_default_subject().is_some()"
-            )
-        );
+        assert!(mode.contains("self.review.layout.is_some()"));
+        assert!(mode.contains("self.review.retained_layout.is_some()"));
+        assert!(mode.contains("self.review_default_subject().is_some()"));
         assert!(mode.contains("self.review_suspend_all(cx)"));
         let footer = include_str!("../sidebar_actions_menu.rs");
         assert!(footer.contains("self.cached_config.review_view_enabled().then(||"));
