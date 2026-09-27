@@ -38,8 +38,29 @@ enum Revalidation {
 /// session attribution, so an unchanged refresh does not spawn vendor CLIs.
 /// A mismatch, including no stored fingerprint, is [`Revalidation::Changed`];
 /// attribution for that re-diff stays on the reload path.
-fn revalidation_for_fingerprint<T: PartialEq>(stored: Option<&T>, fresh: &T) -> Revalidation {
-    if stored == Some(fresh) {
+trait FingerprintUnchanged {
+    fn unchanged_against(&self, fresh: &Self) -> bool;
+}
+
+impl FingerprintUnchanged for &str {
+    fn unchanged_against(&self, fresh: &Self) -> bool {
+        *self == *fresh
+    }
+}
+
+impl FingerprintUnchanged for super::super::git::ColumnFingerprint {
+    fn unchanged_against(&self, fresh: &Self) -> bool {
+        // `None == None` under PartialEq, which would skip a reload after a
+        // diff that could not be read (issue #891).
+        self.is_unchanged_against(fresh)
+    }
+}
+
+fn revalidation_for_fingerprint<T: FingerprintUnchanged>(
+    stored: Option<&T>,
+    fresh: &T,
+) -> Revalidation {
+    if stored.is_some_and(|stored| stored.unchanged_against(fresh)) {
         Revalidation::Unchanged
     } else {
         Revalidation::Changed
