@@ -958,6 +958,22 @@ pub fn detect_branch(cwd: &str) -> (String, bool) {
 mod tests {
     use super::*;
 
+    /// A fresh temp directory still looks like a repo when `TMPDIR` sits
+    /// inside a checkout. The not-a-repo cases cannot tell those apart.
+    fn skip_if_git_ancestor(path: &std::path::Path, test_name: &str) -> bool {
+        let inherited = path
+            .ancestors()
+            .skip(1)
+            .any(|ancestor| ancestor.join(".git").exists());
+        if inherited {
+            eprintln!(
+                "skipping {test_name}: an ancestor of {} already has .git",
+                path.display()
+            );
+        }
+        inherited
+    }
+
     #[test]
     fn detect_branch_normal_branch() {
         let dir = tempfile::tempdir().unwrap();
@@ -983,6 +999,8 @@ mod tests {
                 "main",
                 repo.to_str().unwrap(),
             ])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .status();
         let Ok(status) = status else {
@@ -1036,6 +1054,9 @@ mod tests {
     fn detect_branch_not_a_git_repo() {
         let dir = tempfile::tempdir().unwrap();
         // No .git directory
+        if skip_if_git_ancestor(dir.path(), "detect_branch_not_a_git_repo") {
+            return;
+        }
 
         let (branch, is_repo) = detect_branch(dir.path().to_str().unwrap());
         assert_eq!(branch, "");
@@ -1157,6 +1178,9 @@ mod tests {
     #[test]
     fn find_git_dir_not_a_repo() {
         let dir = tempfile::tempdir().unwrap();
+        if skip_if_git_ancestor(dir.path(), "find_git_dir_not_a_repo") {
+            return;
+        }
         let result = find_git_dir(dir.path().to_str().unwrap());
         assert_eq!(result, None);
     }
@@ -1660,6 +1684,12 @@ mod tests {
         // and the bounded run must fall back to the empty (`is_empty()`) default
         // - the "stats unavailable" badge state - rather than panic or hang.
         let dir = tempfile::tempdir().unwrap();
+        if skip_if_git_ancestor(
+            dir.path(),
+            "from_cwd_on_non_repo_yields_unavailable_default",
+        ) {
+            return;
+        }
         let stats = GitDiffStats::from_cwd(dir.path().to_str().unwrap());
         assert!(
             stats.is_empty(),
@@ -1835,9 +1865,13 @@ mod tests {
     }
 
     fn test_git(cwd: &std::path::Path, args: &[&str]) -> bool {
+        // This command only. Other tests share the process, and a developer
+        // gitconfig (`commit.gpgsign`, `core.hooksPath`) must not stall the fixture.
         std::process::Command::new("git")
             .args(args)
             .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .output()
             .map(|out| out.status.success())

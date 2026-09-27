@@ -1221,7 +1221,14 @@ mod tests {
         .expect("git config name");
         std::fs::write(repo_root.join("README.md"), "test\n").expect("tracked file");
         run_git(&repo_root, &["add", "."], GIT_DEADLINE).expect("git add");
-        run_git(&repo_root, &["commit", "-m", "fixture"], GIT_DEADLINE).expect("git commit");
+        // `-c` overrides a developer `commit.gpgsign`. Do not set
+        // `GIT_CONFIG_GLOBAL` on this process; other tests share it.
+        run_git(
+            &repo_root,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "fixture"],
+            GIT_DEADLINE,
+        )
+        .expect("git commit");
 
         let marker = tmp.path().join("HOOK_RAN");
         let marker_script = tmp.path().join("marker.sh");
@@ -1635,7 +1642,15 @@ mod tests {
             vec!["init", "-q", "-b", "main"],
             vec!["config", "user.email", "t@example.com"],
             vec!["config", "user.name", "t"],
-            vec!["commit", "-q", "--allow-empty", "-m", "init"],
+            vec![
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
             vec!["branch", "feat/x"],
         ] {
             run_git(&repo, &args, GIT_DEADLINE).unwrap_or_else(|e| panic!("git {args:?}: {e}"));
@@ -1684,7 +1699,15 @@ mod tests {
             vec!["init", "-q", "-b", "main"],
             vec!["config", "user.email", "t@example.com"],
             vec!["config", "user.name", "t"],
-            vec!["commit", "-q", "--allow-empty", "-m", "init"],
+            vec![
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
             vec!["branch", "feat/x"],
         ] {
             run_git(&repo, &args, GIT_DEADLINE).unwrap_or_else(|e| panic!("git {args:?}: {e}"));
@@ -1746,7 +1769,15 @@ mod tests {
             vec!["init", "-q", "-b", "main"],
             vec!["config", "user.email", "t@example.com"],
             vec!["config", "user.name", "t"],
-            vec!["commit", "-q", "--allow-empty", "-m", "init"],
+            vec![
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
             vec!["branch", "staging"],
             vec!["tag", "tag-only"],
             vec!["checkout", "-q", "-b", "feature"],
@@ -2001,7 +2032,12 @@ mod tests {
         .expect("name");
         std::fs::write(repo.join("f"), "a").expect("file");
         run_git(&repo, &["add", "f"], GIT_DEADLINE).expect("add");
-        run_git(&repo, &["commit", "-m", "init"], GIT_DEADLINE).expect("commit");
+        run_git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+            GIT_DEADLINE,
+        )
+        .expect("commit");
         run_git(&repo, &["branch", "rel"], GIT_DEADLINE).expect("branch");
         run_git(&repo, &["tag", "rel"], GIT_DEADLINE).expect("tag");
 
