@@ -298,25 +298,84 @@ fn bfs_descendants_macos(
     result
 }
 
+/// Open descriptors for `pid`, in kernel order.
+///
+/// Sized from `BSDInfo.pbi_nfiles` (the process's allocated descriptor
+/// table). `listpidinfo` truncates to the buffer it was given, and a full
+/// buffer is indistinguishable from a complete list, so a full result is
+/// retried at double the size. A list that still fills the ceiling is
+/// logged; it is not treated as complete.
+#[cfg(target_os = "macos")]
+fn file_descriptors_of(pid: i32) -> Option<Vec<libproc::libproc::file_info::ProcFDInfo>> {
+    use libproc::libproc::bsd_info::BSDInfo;
+    use libproc::libproc::file_info::{ListFDs, ProcFDInfo};
+    use libproc::libproc::proc_pid::{listpidinfo, pidinfo};
+
+    /// Scan-thread memory ceiling, above the stock `kern.maxfilesperproc`.
+    /// `listpidinfo` multiplies the count by the 8-byte entry size into a
+    /// `c_int`, so this also stays inside that cast.
+    const MAX_FDS_PER_PROC: usize = 1 << 20;
+    const FALLBACK_CAP: usize = 1024;
+
+    let mut cap = pidinfo::<BSDInfo>(pid, 0)
+        .ok()
+        .map(|info| info.pbi_nfiles as usize)
+        .filter(|count| *count > 0)
+        .unwrap_or(FALLBACK_CAP)
+        .min(MAX_FDS_PER_PROC);
+    // A retry that fails keeps the previous full buffer instead of dropping
+    // every socket the first read already found.
+    let mut truncated: Option<Vec<ProcFDInfo>> = None;
+
+    loop {
+        let fds = match listpidinfo::<ListFDs>(pid, cap) {
+            Ok(fds) => fds,
+            Err(_) => {
+                if let Some(partial) = &truncated {
+                    log_truncated_descriptor_list(pid, partial.len());
+                }
+                return truncated;
+            }
+        };
+        if fds.len() < cap {
+            return Some(fds);
+        }
+        if cap >= MAX_FDS_PER_PROC {
+            log_truncated_descriptor_list(pid, cap);
+            return Some(fds);
+        }
+        truncated = Some(fds);
+        cap = cap.saturating_mul(2).min(MAX_FDS_PER_PROC);
+    }
+}
+
+/// One line per process lifetime. The scan is periodic; a warning per tick
+/// would flood `paneflow-debug.log`.
+#[cfg(target_os = "macos")]
+fn log_truncated_descriptor_list(pid: i32, cap: usize) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    log::warn!(
+        "port scan filled its {cap}-descriptor buffer for pid {pid}; a listening \
+         socket past it has no port chip"
+    );
+}
+
 /// macOS LISTEN ports for one PID, appended to `ports`.
 ///
-/// Walks the PID's file descriptors via `libproc::listpidinfo::<ListFDs>`,
+/// Walks every descriptor the PID has open ([`file_descriptors_of`]),
 /// queries `pidfdinfo::<SocketFDInfo>` for every Socket FD, and filters to
 /// TCP sockets in the `Listen` state. `insi_lport` in `TcpSockInfo.tcpsi_ini`
 /// is the kernel's inpcb local port cast to `c_int`; the low 16 bits hold
 /// the network-byte-order u16, so we mask + `from_be` to get host order.
 #[cfg(target_os = "macos")]
 fn listen_ports_of(pid: u32, ports: &mut Vec<u16>) {
-    use libproc::libproc::file_info::{ListFDs, ProcFDType, pidfdinfo};
+    use libproc::libproc::file_info::{ProcFDType, pidfdinfo};
     use libproc::libproc::net_info::{SocketFDInfo, SocketInfoKind, TcpSIState};
-    use libproc::libproc::proc_pid::listpidinfo;
 
-    // Typical ulimit default on macOS is 256-4096 FDs per process. 1024 is
-    // a sensible over-provisioning ceiling - the buffer is uninitialised
-    // memory so allocation cost is a single malloc, not a zeroing pass.
-    const MAX_FDS_PER_PROC: usize = 1024;
-
-    let Ok(fds) = listpidinfo::<ListFDs>(pid as i32, MAX_FDS_PER_PROC) else {
+    let Some(fds) = file_descriptors_of(pid as i32) else {
         // EPERM / dead-process races / SIP-restricted targets → skip
         // silently. `listpidinfo` already wraps the error string, which is
         // more noise than signal during routine UI-triggered scans.
@@ -626,6 +685,86 @@ mod tests {
         assert!(
             ports.contains(&port),
             "scan_panes must detect a live listener owned by the root pid; got {ports:?}"
+        );
+    }
+
+    /// Listening socket opened after 1100 held descriptors. A fixed 1024-entry
+    /// buffer does not include it. The held files are closed before the test
+    /// returns so later tests in this process do not inherit them.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scan_panes_detects_a_listener_past_the_1024th_descriptor() {
+        const HELD_FILES: usize = 1100;
+        raise_nofile_soft_limit(16_384);
+
+        let mut held = Vec::with_capacity(HELD_FILES);
+        for _ in 0..HELD_FILES {
+            held.push(std::fs::File::open("/dev/null").expect("open /dev/null"));
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let listener_fd = std::os::fd::AsRawFd::as_raw_fd(&listener);
+        assert!(
+            listener_fd > 1024,
+            "listener fd {listener_fd} is inside the old 1024-descriptor window"
+        );
+
+        let scan = scan_panes(&[(1, std::process::id())], &[]);
+        let ports = scan
+            .get(&1)
+            .map(|pane| {
+                pane.ports
+                    .iter()
+                    .map(|entry| entry.port)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        drop(held);
+        drop(listener);
+
+        assert!(
+            ports.contains(&port),
+            "scan_panes must detect a listener past the 1024th descriptor; got {ports:?}"
+        );
+    }
+
+    /// Raise the soft `RLIMIT_NOFILE` when it cannot cover `needed` descriptors.
+    /// Never lowers a ceiling that is already higher. Clamps to the hard limit.
+    #[cfg(target_os = "macos")]
+    fn raise_nofile_soft_limit(needed: u64) {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `limit` is a writable `rlimit`. getrlimit only fills it.
+        let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) };
+        assert_eq!(
+            rc,
+            0,
+            "getrlimit(RLIMIT_NOFILE): {}",
+            std::io::Error::last_os_error()
+        );
+
+        let target = needed.min(limit.rlim_max);
+        if limit.rlim_cur >= target {
+            return;
+        }
+        // 1100 fillers, the listener, and headroom for the harness.
+        const MIN_CEILING: u64 = 3_072;
+        assert!(
+            target >= MIN_CEILING,
+            "hard RLIMIT_NOFILE {} cannot hold {MIN_CEILING} descriptors",
+            limit.rlim_max
+        );
+        limit.rlim_cur = target;
+        // SAFETY: `limit` is a readable `rlimit`. setrlimit does not retain it.
+        let rc = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) };
+        assert_eq!(
+            rc,
+            0,
+            "setrlimit(RLIMIT_NOFILE, {target}): {}",
+            std::io::Error::last_os_error()
         );
     }
 
