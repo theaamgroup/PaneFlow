@@ -502,8 +502,10 @@ mod tests {
         terminal.feed(b"\x1b[?2031h").expect("mode 2031 must parse");
         let _ = terminal.drain_events();
 
-        let mut appearance = TerminalAppearance::default();
-        appearance.color_scheme = crate::ColorScheme::Light;
+        let appearance = TerminalAppearance {
+            color_scheme: crate::ColorScheme::Light,
+            ..TerminalAppearance::default()
+        };
         terminal
             .set_appearance(appearance)
             .expect("appearance must apply");
