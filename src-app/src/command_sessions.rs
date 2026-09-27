@@ -246,14 +246,18 @@ fn parse_session_line(
         return None;
     }
 
-    let (session_id, summary) = if agent == SessionAgent::Gemini {
-        parse_gemini_list_line(line)?
+    let (session_id, summary, timestamp) = if agent == SessionAgent::Gemini {
+        let (session_id, summary, index) = parse_gemini_list_line(line)?;
+        // Gemini prints oldest-first with a relative time only. The list
+        // index is the order key, so the collector's timestamp sort keeps
+        // the highest index (the newest row).
+        (session_id, summary, gemini_index_timestamp(&index))
     } else {
         let session_id = extract_session_id(line, allow_numeric_ids)?;
         let summary = line_summary(line, &session_id);
-        (session_id, summary)
+        let timestamp = extract_iso8601(line).unwrap_or_default();
+        (session_id, summary, timestamp)
     };
-    let timestamp = extract_iso8601(line).unwrap_or_default();
 
     Some(SessionMeta {
         agent,
@@ -270,7 +274,7 @@ fn parse_session_line(
 ///
 /// Resume accepts `{index|uuid|latest}`. Prefer the bracket id so a relative
 /// time like `(2 days ago)` is never treated as session id `2`.
-fn parse_gemini_list_line(line: &str) -> Option<(String, Option<String>)> {
+fn parse_gemini_list_line(line: &str) -> Option<(String, Option<String>, String)> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
         Regex::new(r"^\s*(\d+)\.\s+(.*)\s+\[([^\]]+)\]\s*$")
@@ -289,7 +293,21 @@ fn parse_gemini_list_line(line: &str) -> Option<(String, Option<String>)> {
         return None;
     };
 
-    Some((session_id, gemini_summary_from_middle(middle)))
+    Some((
+        session_id,
+        gemini_summary_from_middle(middle),
+        index.to_string(),
+    ))
+}
+
+/// Lexical order key for a Gemini list index. A higher index is newer.
+///
+/// The length prefix keeps numeric order (`9` before `10`). `" T"` sorts
+/// before any real ISO-8601 year, so mixed-agent attribution still prefers
+/// dated rows, and [`crate::agent_sessions::format_relative_time`] falls
+/// back to one space instead of a fabricated age.
+fn gemini_index_timestamp(index: &str) -> String {
+    format!(" T{:010}{index}", index.len())
 }
 
 fn gemini_summary_from_middle(middle: &str) -> Option<String> {
@@ -619,20 +637,52 @@ Available sessions for this project (3):\n\
         );
         assert_eq!(omitted, 0);
         assert_eq!(sessions.len(), 3);
+        // Highest list index is newest, so the sidebar order is the reverse
+        // of Gemini's oldest-first printout.
         assert_eq!(
             sessions
                 .iter()
                 .map(|s| s.session_id.as_str())
                 .collect::<Vec<_>>(),
-            ["a1b2c3d4", "e5f67890", "abcd1234"]
+            ["abcd1234", "e5f67890", "a1b2c3d4"]
         );
+        assert!(sessions[0].timestamp > sessions[1].timestamp);
+        assert!(sessions[1].timestamp > sessions[2].timestamp);
         assert!(sessions.iter().all(|s| s.session_id != "2"));
-        assert_eq!(sessions[0].summary.as_deref(), Some("Fix bug in auth"));
+        assert_eq!(sessions[0].summary.as_deref(), Some("Update documentation"));
         assert_eq!(
             sessions[1].summary.as_deref(),
             Some("Refactor database schema")
         );
-        assert_eq!(sessions[2].summary.as_deref(), Some("Update documentation"));
+        assert_eq!(sessions[2].summary.as_deref(), Some("Fix bug in auth"));
+    }
+
+    #[test]
+    fn gemini_sessions_keep_the_newest_under_the_cap() {
+        let cap = crate::agent_sessions::SIDEBAR_SESSION_RETAINED_PER_SOURCE;
+        let mut out = String::new();
+        for i in 1..=cap + 1 {
+            out.push_str(&format!("{i}. Session {i} (1 day ago) [id{i:04}]\n"));
+        }
+        let (sessions, omitted) = parse_command_sessions(
+            out.as_bytes(),
+            SessionAgent::Gemini,
+            "/repo",
+            true,
+            CommandScope::CurrentDirectory,
+        );
+        let expected: Vec<String> = (2..=cap + 1).rev().map(|i| format!("id{i:04}")).collect();
+        assert_eq!(omitted, 1);
+        assert_eq!(sessions.len(), cap);
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|s| s.session_id.as_str())
+                .collect::<Vec<_>>(),
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(sessions[0].session_id, format!("id{:04}", cap + 1));
+        assert!(sessions.iter().all(|s| s.session_id != "id0001"));
     }
 
     #[test]
