@@ -546,7 +546,8 @@ fn cursor_light_ui() -> UiColors {
 /// Returns a finalized theme: `selection_foreground` is computed via APCA
 /// before return. Callers may further modify the theme (e.g. via
 /// `apply_surface_overrides`) - that path also re-runs the recomputation,
-/// so the invariant `apca_contrast(selection_foreground, selection) ≥ 45.0`
+/// so the invariant
+/// `apca_contrast(selection_foreground, background.blend(selection)) ≥ 45.0`
 /// holds at every observation point.
 pub fn theme_by_name(name: &str) -> Option<TerminalTheme> {
     let canonical = canonical_theme_name(name)?;
