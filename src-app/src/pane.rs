@@ -890,6 +890,13 @@ impl Pane {
         true
     }
 
+    /// Header hover paints its end state this frame when nothing is in flight,
+    /// or when Reduce motion is on (issue #916). Shared by the action-button
+    /// tint and the close chip so the two cannot drift.
+    fn header_hover_settles_instantly(epoch: u64, distance: f32) -> bool {
+        epoch == 0 || distance <= f32::EPSILON || crate::ui_primitives::reduce_motion()
+    }
+
     /// Shared shell for header icon buttons. The live progress cell lets a
     /// rapid enter/exit reverse from the currently painted value instead of
     /// snapping to an endpoint.
@@ -971,7 +978,7 @@ impl Pane {
             .child(icon);
 
         let distance = (target - from).abs();
-        let visual = if epoch == 0 || distance <= f32::EPSILON {
+        let visual = if Self::header_hover_settles_instantly(epoch, distance) {
             live_progress.set(target);
             let tint = hover_tint
                 .map(|hover_tint| base_tint.blend(hover_tint.opacity(target)))
@@ -1081,7 +1088,7 @@ impl Pane {
             .rounded_full()
             .shadow_lg();
         let distance = (target - from).abs();
-        let visual = if epoch == 0 || distance <= f32::EPSILON {
+        let visual = if Self::header_hover_settles_instantly(epoch, distance) {
             live_progress.set(target);
             Self::close_chip_frame(visual, target, armed, ui).into_any_element()
         } else {
@@ -2339,6 +2346,32 @@ mod tests {
         let cjk = "プロジェクト・パネフロー・テスト・ドキュメント.md";
         let out = truncate_surface_title(cjk);
         assert_eq!(out.chars().count(), MAX_SURFACE_TITLE_LEN);
+    }
+
+    /// Issue #916: the action-button tint and the close chip share one settle
+    /// decision. Reduce motion takes the instant path even when a hover is
+    /// already in flight.
+    #[test]
+    fn pane_header_hover_honors_reduce_motion() {
+        let _restore = RestoreReduceMotion;
+        crate::ui_primitives::set_reduce_motion(false);
+        assert!(
+            !super::Pane::header_hover_settles_instantly(1, 1.0),
+            "an in-flight header hover still ramps when Reduce motion is off"
+        );
+        crate::ui_primitives::set_reduce_motion(true);
+        assert!(
+            super::Pane::header_hover_settles_instantly(1, 1.0),
+            "Reduce motion must settle a non-zero epoch and distance in the same frame"
+        );
+    }
+
+    struct RestoreReduceMotion;
+
+    impl Drop for RestoreReduceMotion {
+        fn drop(&mut self) {
+            crate::ui_primitives::set_reduce_motion(false);
+        }
     }
 
     #[test]
