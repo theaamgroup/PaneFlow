@@ -1599,13 +1599,18 @@ not-a-filter
         );
         let overrides =
             git_diff_clean_filter_overrides(&repo_root, GIT_DEADLINE).expect("list repo filters");
-        assert_eq!(
-            overrides,
-            vec![
-                "filter.x.clean=".to_string(),
-                "filter.x.process=".to_string(),
-                "filter.x.required=false".to_string(),
-            ]
+        // Discovery reads the same config `git diff` uses, including the
+        // global file. A machine with Git LFS also lists `filter.lfs`.
+        let filter_x = [
+            "filter.x.clean=",
+            "filter.x.process=",
+            "filter.x.required=false",
+        ];
+        assert!(
+            overrides
+                .windows(filter_x.len())
+                .any(|window| { window.iter().zip(filter_x).all(|(got, want)| got == want) }),
+            "repo filter.x must be blanked alongside any global filters: {overrides:?}"
         );
 
         let mut poisoned = git_filter_listing_command(&repo_root);
