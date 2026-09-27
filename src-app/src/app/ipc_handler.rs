@@ -6567,8 +6567,8 @@ mod tests {
     ) {
         let cx = cx.add_empty_window();
         let (app, terminal) = ipc_app_with_active_terminal(cx);
+        // With the gate closed, a check after the gate would reply -32601.
         for unrestricted in [false, true] {
-            // Gate closed: a check after the gate would reply -32601.
             cx.update(|_, cx| {
                 app.update(cx, |app, _cx| {
                     app.cached_config.ai_unrestricted = Some(unrestricted);
