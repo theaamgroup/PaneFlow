@@ -170,6 +170,7 @@ fi
 #   --timestamp    embed an Apple-supplied RFC3161 timestamp - required
 #                  for notarization. Without --timestamp, notarytool rejects
 #                  with "The signature does not include a secure timestamp."
+#                  codesign_with_timestamp retries a transient TSA failure.
 #   --entitlements bind the entitlements plist to the signature so
 #                  Gatekeeper enforces them at launch.
 #
@@ -177,6 +178,33 @@ fi
 # the inside-out walk above already covers the children with their own,
 # correct entitlements. --deep is still used on --verify below, where it
 # is the right flag for recursive signature traversal.
+#
+# Every codesign that passes --timestamp goes through codesign_with_timestamp.
+# `codesign --verify` does not: it is a local check and does not reach Apple.
+# The shared flags stay here so a timestamp retry cannot sign with a
+# different argv than the one-shot call did.
+APPLE_RETRY_ATTEMPTS=3
+APPLE_RETRY_BACKOFF_SECONDS=5
+
+codesign_with_timestamp() {
+    local attempt=1
+    while [ "$attempt" -le "$APPLE_RETRY_ATTEMPTS" ]; do
+        if codesign --force --options runtime --timestamp "$@"; then
+            return 0
+        fi
+        if [ "$attempt" -ge "$APPLE_RETRY_ATTEMPTS" ]; then
+            echo "codesign --timestamp: attempt ${attempt}/${APPLE_RETRY_ATTEMPTS} failed"
+            echo "codesign --timestamp: failed after ${APPLE_RETRY_ATTEMPTS} attempts"
+            return 1
+        fi
+        echo "codesign --timestamp: attempt ${attempt}/${APPLE_RETRY_ATTEMPTS} failed - retrying"
+        sleep "$APPLE_RETRY_BACKOFF_SECONDS"
+        attempt=$((attempt + 1))
+    done
+    echo "codesign --timestamp: failed after ${APPLE_RETRY_ATTEMPTS} attempts"
+    return 1
+}
+
 NESTED_PATTERNS=(
     "Contents/Frameworks"
     "Contents/Helpers"
@@ -202,10 +230,7 @@ for sub in "${NESTED_PATTERNS[@]}"; do
         case "$nested" in
             "$SPARKLE_FRAMEWORK"|"$SPARKLE_FRAMEWORK"/*) continue ;;
         esac
-        codesign \
-            --force \
-            --options runtime \
-            --timestamp \
+        codesign_with_timestamp \
             --sign "$IDENTITY" \
             "$nested"
     done < <(find -d "$dir" -name '*.dylib' -print0)
@@ -219,10 +244,7 @@ for sub in "${NESTED_PATTERNS[@]}"; do
         case "$nested" in
             "$SPARKLE_FRAMEWORK"|"$SPARKLE_FRAMEWORK"/*) continue ;;
         esac
-        codesign \
-            --force \
-            --options runtime \
-            --timestamp \
+        codesign_with_timestamp \
             --entitlements "$ENTITLEMENTS" \
             --sign "$IDENTITY" \
             "$nested"
@@ -256,23 +278,20 @@ if [ -d "$SPARKLE_FRAMEWORK" ]; then
         }
     done
 
-    codesign --force --options runtime --timestamp \
+    codesign_with_timestamp \
         --sign "$IDENTITY" "$SPARKLE_INSTALLER"
-    codesign --force --options runtime --timestamp \
+    codesign_with_timestamp \
         --preserve-metadata=entitlements \
         --sign "$IDENTITY" "$SPARKLE_DOWNLOADER"
-    codesign --force --options runtime --timestamp \
+    codesign_with_timestamp \
         --sign "$IDENTITY" "$SPARKLE_AUTOUPDATE"
-    codesign --force --options runtime --timestamp \
+    codesign_with_timestamp \
         --sign "$IDENTITY" "$SPARKLE_UPDATER"
-    codesign --force --options runtime --timestamp \
+    codesign_with_timestamp \
         --sign "$IDENTITY" "$SPARKLE_FRAMEWORK"
 fi
 
-codesign \
-    --force \
-    --options runtime \
-    --timestamp \
+codesign_with_timestamp \
     --entitlements "$ENTITLEMENTS" \
     --sign "$IDENTITY" \
     "$APP"
