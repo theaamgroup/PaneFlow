@@ -26,7 +26,120 @@ onlycomment() { grep -E ':[0-9]+:[[:space:]]*(//|/\*|\*)'; }
 ATTR=$(scan | grep -v 'cfg!(' | grep -Ei '\bwindows\b|"msvc"' | nocomment)
 MACRO=$(scan | grep    'cfg!(' | grep -Ei '\bwindows\b|"msvc"' | nocomment)
 COMMENTS=$(scan | grep -Ei '\bwindows\b|"msvc"' | onlycomment)
-TOML=$(grep -rn --exclude-dir=target --exclude-dir=.git "target\.'cfg(windows)'" --include='Cargo.toml' . 2>/dev/null | grep -v '^\./target/')
+# Issue #903: count every [target.'cfg(...)'...] / [target."cfg(...)"...]
+# header whose cfg expression names windows (as a word, or target_os with
+# "windows") or "msvc". An exact `cfg(windows)` grep missed those spellings.
+# The live [target.'cfg(target_os = "macos")'] table must not match.
+TOML=$(python3 - <<'PYEOF'
+import os, re
+
+def strip_comment(line):
+    out = []
+    i = 0
+    quote = None
+    n = len(line)
+    while i < n:
+        c = line[i]
+        if quote:
+            out.append(c)
+            if quote == '"' and c == '\\' and i + 1 < n:
+                out.append(line[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            out.append(c)
+            i += 1
+            continue
+        if c == '#':
+            break
+        out.append(c)
+        i += 1
+    return ''.join(out)
+
+def cfg_exprs(header):
+    """Cfg bodies inside [target.'cfg(...)'...] and [target."cfg(...)"...] keys."""
+    out = []
+    i = 0
+    n = len(header)
+    while i < n:
+        k = header.find('[target.', i)
+        if k < 0:
+            break
+        j = k + len('[target.')
+        while j < n and header[j] in ' \t':
+            j += 1
+        if j >= n or header[j] not in ("'", '"'):
+            i = k + 1
+            continue
+        quote = header[j]
+        j += 1
+        if header[j:j + 4] != 'cfg(':
+            i = k + 1
+            continue
+        j += 3  # index of the '(' that opens cfg(
+        depth = 0
+        body = []
+        closed = False
+        while j < n:
+            c = header[j]
+            if quote == '"' and c == '\\' and j + 1 < n and header[j + 1] in '"\\':
+                body.append(header[j + 1])
+                j += 2
+                continue
+            if c == '(':
+                depth += 1
+                if depth > 1:
+                    body.append(c)
+                j += 1
+                continue
+            if c == ')':
+                depth -= 1
+                if depth == 0:
+                    closed = True
+                    j += 1
+                    break
+                body.append(c)
+                j += 1
+                continue
+            body.append(c)
+            j += 1
+        if not closed or j >= n or header[j] != quote or ']' not in header[j + 1:]:
+            i = k + 1
+            continue
+        out.append(''.join(body))
+        i = header.find(']', j) + 1
+    return out
+
+def is_windows(expr):
+    if re.search(r'\bwindows\b', expr, re.I):
+        return True
+    if re.search(r'target_os', expr, re.I) and re.search(r'"windows"', expr, re.I):
+        return True
+    return re.search(r'"msvc"', expr, re.I) is not None
+
+hits = []
+for root, dirs, files in os.walk('.'):
+    dirs[:] = [d for d in dirs if d not in ('target', '.git')]
+    for name in files:
+        if name != 'Cargo.toml':
+            continue
+        path = os.path.join(root, name)
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            for lineno, line in enumerate(fh, 1):
+                raw = line.rstrip('\r\n')
+                for expr in cfg_exprs(strip_comment(raw)):
+                    if is_windows(expr):
+                        hits.append('%s:%d:%s' % (path, lineno, raw))
+                        break
+if hits:
+    print('\n'.join(hits))
+PYEOF
+) || exit 1
 IDENT=$(grep -rn --exclude-dir=target --exclude-dir=.git --include='*.rs' 'windows_app_identity' . 2>/dev/null | grep -v '^\./target/')
 UNIXMAC=$(scan | grep -E '\bunix\b' | grep -E 'not\s*\(\s*target_os\s*=\s*"macos"')
 
