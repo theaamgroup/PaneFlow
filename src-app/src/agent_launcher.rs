@@ -12,7 +12,8 @@
 //! persistence tag, and a launch command. The launch command honors
 //! `claude_code_bypass_permissions` exactly as the tab bar does.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -510,6 +511,14 @@ pub(crate) fn is_plain_shell_token(token: &str) -> bool {
 
 const INSTALLED_BINARIES_TTL: Duration = Duration::from_secs(2);
 
+/// Longest one PATH directory may hold the installed-agent scan.
+/// A local `stat` answers in microseconds; a dead network mount does not.
+/// Same 250 ms window as the `.git` directory probe: one stalled directory
+/// cannot pin boot or a queued launch. The helper keeps running, so a later
+/// refresh (the in-flight flag is cleared when this scan returns) reads the
+/// answer when the mount recovers instead of treating the miss as final.
+const INSTALLED_AGENT_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+
 type ProbeFn = Arc<dyn Fn() -> HashSet<&'static str> + Send + Sync>;
 
 struct InstalledBinaryCache {
@@ -691,6 +700,11 @@ impl InstalledBinaries {
     /// refresh is in flight; otherwise wait for an in-flight cold walk so
     /// the caller returns with a published snapshot either way. Boot calls
     /// this from `smol::unblock`, so the GPUI thread never walks `PATH`.
+    ///
+    /// Each PATH directory is bounded by [`INSTALLED_AGENT_PROBE_TIMEOUT`].
+    /// A directory that misses the deadline is skipped for this snapshot;
+    /// the walk still returns, `refresh_in_flight` clears, and boot can
+    /// replay a launch that was queued while the scan was pending.
     fn warm(&self) {
         let run_here = {
             let mut cache = self.inner.lock_cache();
@@ -745,22 +759,220 @@ impl InstalledBinaries {
     fn cache_mutex_is_free(&self) -> bool {
         self.inner.cache.try_lock().is_ok()
     }
+
+    #[cfg(test)]
+    fn refresh_in_flight(&self) -> bool {
+        self.inner.lock_cache().refresh_in_flight
+    }
 }
 
 fn probe_installed_binaries() -> HashSet<&'static str> {
-    probe_installed_binaries_with(|bin| which::which(bin).is_ok())
+    let dirs = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    probe_agents_on_path(&dirs)
 }
 
 /// The PATH scan with its lookup injected. The candidate list is
 /// `TerminalAgent::ALL`, so only known agent binaries can come back; the
 /// lookup decides which of them are present. Split out so a fixture can
 /// drive it without depending on what the host has installed.
+#[cfg(test)]
 fn probe_installed_binaries_with(is_installed: impl Fn(&str) -> bool) -> HashSet<&'static str> {
     TerminalAgent::ALL
         .into_iter()
         .map(TerminalAgent::binary)
         .filter(|bin| is_installed(bin))
         .collect()
+}
+
+/// One in-flight lookup for a single PATH entry, shared so a dead mount
+/// does not spawn another `stat` on every refresh.
+struct DirLookup {
+    /// `None` while the helper is still in `stat`. `Some` once it has
+    /// answered, including an empty set when the directory has no agent.
+    hits: Mutex<Option<HashSet<&'static str>>>,
+    cond: Condvar,
+    started: Instant,
+}
+
+fn dir_lookups() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Arc<DirLookup>>> {
+    static LOOKUPS: OnceLock<Mutex<HashMap<PathBuf, Arc<DirLookup>>>> = OnceLock::new();
+    LOOKUPS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+type PathDirProbeHook = Arc<dyn Fn(&Path) + Send + Sync>;
+
+/// Test stand-in for `stat` on one PATH entry. Production scans pass through.
+#[cfg(test)]
+static PATH_DIR_PROBE_HOOK: Mutex<Option<PathDirProbeHook>> = Mutex::new(None);
+
+#[cfg(test)]
+fn install_path_dir_probe_hook(hook: Option<PathDirProbeHook>) {
+    *PATH_DIR_PROBE_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+}
+
+#[cfg(test)]
+fn note_path_dir_probe(dir: &Path) {
+    let hook = PATH_DIR_PROBE_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(hook) = hook {
+        hook(dir);
+    }
+}
+
+/// Publishes on drop, including when the scan panics, so a helper cannot
+/// leave its directory in flight forever.
+struct DirLookupPublish {
+    lookup: Arc<DirLookup>,
+    hits: Option<HashSet<&'static str>>,
+}
+
+impl Drop for DirLookupPublish {
+    fn drop(&mut self) {
+        publish_dir_lookup(&self.lookup, self.hits.take().unwrap_or_default());
+    }
+}
+
+fn publish_dir_lookup(lookup: &DirLookup, hits: HashSet<&'static str>) {
+    {
+        let mut slot = lookup
+            .hits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(hits);
+    }
+    lookup.cond.notify_all();
+}
+
+fn start_dir_lookup(dir: &Path) -> Arc<DirLookup> {
+    let (lookup, spawn) = {
+        let mut map = dir_lookups();
+        if let Some(existing) = map.get(dir).cloned() {
+            (existing, false)
+        } else {
+            let lookup = Arc::new(DirLookup {
+                hits: Mutex::new(None),
+                cond: Condvar::new(),
+                started: Instant::now(),
+            });
+            map.insert(dir.to_path_buf(), Arc::clone(&lookup));
+            (lookup, true)
+        }
+    };
+    if spawn {
+        spawn_dir_lookup(dir, &lookup);
+    }
+    lookup
+}
+
+fn spawn_dir_lookup(dir: &Path, lookup: &Arc<DirLookup>) {
+    let dir_for_thread = dir.to_path_buf();
+    let lookup_for_thread = Arc::clone(lookup);
+    let spawned = std::thread::Builder::new()
+        .name("paneflow-agent-which".into())
+        .spawn(move || {
+            let mut publish = DirLookupPublish {
+                lookup: lookup_for_thread,
+                hits: None,
+            };
+            publish.hits = Some(scan_dir_blocking(&dir_for_thread));
+        });
+    if let Err(err) = spawned {
+        tracing::warn!(
+            target: "paneflow_app::agent_launcher",
+            error = %err,
+            directory = %dir.display(),
+            "failed to spawn installed-agent PATH probe; skipping that directory"
+        );
+        publish_dir_lookup(lookup, HashSet::new());
+    }
+}
+
+fn scan_dir_blocking(dir: &Path) -> HashSet<&'static str> {
+    // Before any `stat`: a dead mount blocks inside `which`, and the test
+    // hook does the same for one directory. The caller waits on a deadline
+    // and does not join this thread.
+    #[cfg(test)]
+    note_path_dir_probe(dir);
+    let mut hits = HashSet::new();
+    for bin in TerminalAgent::ALL.into_iter().map(TerminalAgent::binary) {
+        if which::which_in(bin, Some(dir.as_os_str()), Path::new(".")).is_ok() {
+            hits.insert(bin);
+        }
+    }
+    hits
+}
+
+fn wait_dir_lookup(dir: &Path, lookup: &DirLookup) -> Option<HashSet<&'static str>> {
+    let remaining = INSTALLED_AGENT_PROBE_TIMEOUT.saturating_sub(lookup.started.elapsed());
+    let slot = lookup
+        .hits
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if slot.is_some() {
+        return slot.clone();
+    }
+    if remaining.is_zero() {
+        // Already past this directory's deadline (or a previous scan is
+        // still blocked in it). Don't spend another budget here.
+        return None;
+    }
+    let (slot, status) = lookup
+        .cond
+        .wait_timeout_while(slot, remaining, |slot| slot.is_none())
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let hits = slot.clone();
+    let timed_out = status.timed_out();
+    drop(slot);
+    if hits.is_none() && timed_out {
+        tracing::warn!(
+            target: "paneflow_app::agent_launcher",
+            directory = %dir.display(),
+            "installed-agent PATH probe did not answer within {remaining:?}; skipping that directory"
+        );
+    }
+    hits
+}
+
+fn forget_dir_lookup(dir: &Path, lookup: &Arc<DirLookup>) {
+    let mut map = dir_lookups();
+    if map
+        .get(dir)
+        .is_some_and(|current| Arc::ptr_eq(current, lookup))
+    {
+        map.remove(dir);
+    }
+}
+
+/// PATH scan whose blocking `stat`s cannot outlive
+/// [`INSTALLED_AGENT_PROBE_TIMEOUT`] per directory. Lookups start together,
+/// so one stalled entry does not push the rest past that window: their
+/// clocks are already running, and a directory that has answered is kept.
+/// A miss is not final — the helper's later answer stays in the map for
+/// the next refresh, which can run because the caller clears
+/// `refresh_in_flight` when this returns.
+fn probe_agents_on_path(dirs: &[PathBuf]) -> HashSet<&'static str> {
+    let lookups: Vec<(PathBuf, Arc<DirLookup>)> = dirs
+        .iter()
+        .map(|dir| (dir.clone(), start_dir_lookup(dir)))
+        .collect();
+    let mut found = HashSet::new();
+    for (dir, lookup) in &lookups {
+        if let Some(hits) = wait_dir_lookup(dir, lookup) {
+            found.extend(hits);
+            forget_dir_lookup(dir, lookup);
+        }
+    }
+    found
 }
 
 fn installed_binaries() -> &'static InstalledBinaries {
@@ -788,7 +1000,8 @@ pub(crate) fn installed_binary_scan_pending() -> bool {
 
 /// Blocking warm of the installed-agent cache for the boot task: walks
 /// `PATH` on the caller's thread (call it from `smol::unblock`), or waits
-/// for the walk already in flight. Returns once a snapshot is published.
+/// for the walk already in flight. Returns once a snapshot is published,
+/// including when a PATH directory misses [`INSTALLED_AGENT_PROBE_TIMEOUT`].
 pub(crate) fn refresh_installed_binaries() {
     installed_binaries().warm();
 }
@@ -1514,5 +1727,117 @@ mod tests {
         // snapshot published.
         refresh_installed_binaries();
         assert!(!installed_binary_scan_pending());
+    }
+
+    /// Issue #905: one PATH directory on a dead mount must not hold the
+    /// scan, the boot warm, or a launch queued during that scan. The hook
+    /// blocks in one directory; the warm returns inside the deadline with
+    /// the in-flight flag clear, and the queued launch is replayed while
+    /// that directory is still blocked.
+    #[test]
+    fn installed_agent_probe_finishes_when_a_path_dir_stalls() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        const PATH_DIR_STALL: Duration = Duration::from_secs(3);
+        let bound = Duration::from_secs(1);
+        assert!(
+            INSTALLED_AGENT_PROBE_TIMEOUT < bound,
+            "the deadline must sit well under the stalled directory"
+        );
+
+        let healthy = tempfile::tempdir().expect("temp dir");
+        let claude = healthy.path().join("claude");
+        std::fs::write(&claude, "#!/bin/sh\n").expect("write claude");
+        let mut perms = std::fs::metadata(&claude).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&claude, perms).expect("chmod");
+        let stalled = healthy.path().join("stalled-mount");
+
+        let stall_finished = Arc::new(AtomicBool::new(false));
+        let hook_finished = Arc::clone(&stall_finished);
+        let stalled_hook = stalled.clone();
+
+        struct ClearPathDirProbeHook;
+        impl Drop for ClearPathDirProbeHook {
+            fn drop(&mut self) {
+                install_path_dir_probe_hook(None);
+            }
+        }
+        let _clear_hook = ClearPathDirProbeHook;
+        install_path_dir_probe_hook(Some(Arc::new(move |dir| {
+            if dir == stalled_hook.as_path() {
+                std::thread::sleep(PATH_DIR_STALL);
+                hook_finished.store(true, Ordering::SeqCst);
+            }
+        })));
+
+        // Stalled entry first, the installed binary after it: a walk that
+        // blocks inside the first directory never sees `claude`.
+        let dirs = vec![stalled, healthy.path().to_path_buf()];
+        let binaries = InstalledBinaries::with_probe(Arc::new(move || probe_agents_on_path(&dirs)));
+
+        assert!(
+            binaries.scan_pending(),
+            "a launch confirmed now is waiting on the first scan"
+        );
+        // Boot takes the queued launch only after `refresh_installed_binaries`
+        // returns (`pane_palette_resume_queued_launch`).
+        let mut queued = Some("claude");
+
+        let started = Instant::now();
+        binaries.warm();
+        let replayed = queued.take();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < bound,
+            "stalled PATH directory held the scan for {elapsed:?}; bound is {bound:?}"
+        );
+        assert!(
+            !binaries.refresh_in_flight(),
+            "the deadline must clear refresh_in_flight so a later refresh can run"
+        );
+        assert!(
+            !binaries.scan_pending(),
+            "the scan must publish on the deadline instead of staying on 'looking'"
+        );
+        assert_eq!(
+            replayed,
+            Some("claude"),
+            "a launch queued during the scan must be replayed when the warm returns"
+        );
+        assert!(
+            !stall_finished.load(Ordering::SeqCst),
+            "the warm returned while the PATH directory was still stalled"
+        );
+        assert!(
+            binaries.contains("claude"),
+            "a directory that answered is kept when another directory stalls"
+        );
+
+        binaries.seed(
+            HashSet::from(["claude"]),
+            Instant::now() - INSTALLED_BINARIES_TTL - Duration::from_millis(1),
+        );
+        let again = Instant::now();
+        binaries.warm();
+        assert!(
+            again.elapsed() < bound,
+            "a later refresh waited on the stalled directory for {:?}",
+            again.elapsed()
+        );
+        assert!(
+            !binaries.refresh_in_flight(),
+            "the later refresh must clear refresh_in_flight too"
+        );
+        assert!(
+            binaries.contains("claude"),
+            "the later refresh still sees a binary the stalled directory did not hide"
+        );
+        assert!(
+            !stall_finished.load(Ordering::SeqCst),
+            "the later refresh must not wait out the stall"
+        );
     }
 }
