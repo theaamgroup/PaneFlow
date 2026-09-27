@@ -1960,10 +1960,14 @@ impl PaneFlowApp {
         // Whatever this settles, the buffer is spent - the next rename seeds
         // its own selection.
         self.rename_seeded = false;
-        if let Some(idx) = self.renaming_idx.take() {
+        // Issue #935: both targets are ids. A close, reorder, or undo-close
+        // between open and commit moves indices; writing through the old slot
+        // renames whichever row slid into it. A missing id changes nothing.
+        // The `take` still clears the rename either way.
+        if let Some(ws_id) = self.renaming_idx.take() {
             let text = std::mem::take(&mut self.rename_text);
             if !text.is_empty()
-                && let Some(ws) = self.workspaces.get_mut(idx)
+                && let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id == ws_id)
             {
                 ws.title = text;
                 self.save_session(cx);
@@ -1971,22 +1975,25 @@ impl PaneFlowApp {
         }
         // US-010: the sidebar tab rows share `rename_text` with the workspace
         // rename, so one commit settles whichever inline rename was live.
-        if let Some((ws_idx, tab_idx)) = self.renaming_tab.take() {
+        if let Some((ws_id, tab_id)) = self.renaming_tab.take() {
             let text = std::mem::take(&mut self.rename_text);
-            let should_persist = self
-                .workspaces
-                .get(ws_idx)
-                .and_then(|workspace| workspace.tabs().get(tab_idx))
-                .is_some_and(|tab| {
-                    // Compare against the label the row was SHOWING, which is
-                    // also what seeded the editor. Recomputing "Tab N" here
-                    // instead would make an untouched agent-derived label
-                    // ("claude") look like a deliberate rename the moment the
-                    // user pressed Enter, freezing it into `Tab::title`.
-                    let displayed = crate::app::sidebar::tab_row_title(tab, tab_idx, cx);
-                    tab_rename_should_persist(&displayed, &text)
-                });
+            let located = self.tab_position(ws_id, tab_id);
+            let should_persist = located.is_some_and(|(ws_idx, tab_idx)| {
+                self.workspaces
+                    .get(ws_idx)
+                    .and_then(|workspace| workspace.tabs().get(tab_idx))
+                    .is_some_and(|tab| {
+                        // Compare against the label the row was SHOWING, which is
+                        // also what seeded the editor. Recomputing "Tab N" here
+                        // instead would make an untouched agent-derived label
+                        // ("claude") look like a deliberate rename the moment the
+                        // user pressed Enter, freezing it into `Tab::title`.
+                        let displayed = crate::app::sidebar::tab_row_title(tab, tab_idx, cx);
+                        tab_rename_should_persist(&displayed, &text)
+                    })
+            });
             if should_persist
+                && let Some((ws_idx, tab_idx)) = located
                 && let Some(tab) = self
                     .workspaces
                     .get_mut(ws_idx)
@@ -4225,5 +4232,181 @@ mod tests {
             folders[cap..push].contains("refused_at_cap = true"),
             "a new folder at the cap must still be refused: {folders}"
         );
+    }
+
+    /// `save_session` resolves the real session path. A staged restore makes
+    /// that write return before the lookup, so these tests cannot clobber
+    /// `session-dev.json` or pin `PANEFLOW_HOME`'s `OnceLock`.
+    fn hold_session_saves(app: &mut PaneFlowApp) {
+        app.session_restore = crate::app::session::PendingSessionRestore::from_session(
+            paneflow_config::schema::SessionState {
+                version: 2,
+                active_workspace: 0,
+                workspaces: vec![paneflow_config::schema::WorkspaceSession {
+                    title: String::new(),
+                    cwd: String::new(),
+                    tabs: vec![paneflow_config::schema::TabSession::empty()],
+                    active_tab: 0,
+                    legacy_layout: None,
+                    legacy_empty: false,
+                    pinned: false,
+                    sidebar_collapsed: false,
+                    muted: false,
+                }],
+                mode: paneflow_config::schema::AppMode::Cli,
+                review_layout: None,
+                review_collapsed: Vec::new(),
+                primary_sidebar_collapsed: false,
+            },
+        );
+        assert!(
+            app.session_restore.is_some(),
+            "session saves must stay skipped"
+        );
+    }
+
+    fn two_named_workspaces(first_id: u64, second_id: u64) -> Vec<Workspace> {
+        vec![
+            Workspace::empty_with_cwd_and_id(
+                first_id,
+                "Alpha",
+                std::path::PathBuf::from("/paneflow-935-rename-alpha"),
+            ),
+            Workspace::empty_with_cwd_and_id(
+                second_id,
+                "Beta",
+                std::path::PathBuf::from("/paneflow-935-rename-beta"),
+            ),
+        ]
+    }
+
+    fn app_with_workspaces(
+        cx: &mut gpui::VisualTestContext,
+        workspaces: Vec<Workspace>,
+    ) -> gpui::Entity<PaneFlowApp> {
+        cx.new(|cx| {
+            let mut app = crate::app::sidebar::customize_menu::tests::blank_paneflow_app(cx);
+            hold_session_saves(&mut app);
+            app.workspaces = workspaces;
+            app.active_idx = 0;
+            app
+        })
+    }
+
+    /// Type over the rename `begin_workspace_rename` just opened on `index`.
+    fn type_workspace_rename(
+        app: &gpui::Entity<PaneFlowApp>,
+        cx: &mut gpui::VisualTestContext,
+        index: usize,
+        typed: &str,
+    ) {
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.begin_workspace_rename(index, window, cx);
+                app.rename_text = typed.to_string();
+            });
+        });
+    }
+
+    /// Issue #935: closing the workspace under an open rename used to leave
+    /// the stored index pointing at the row that slid into that slot.
+    #[gpui::test]
+    fn closing_a_workspace_mid_rename_does_not_rename_its_neighbour(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        // Ids match the opening indices, so a commit that still indexes with
+        // the stored value writes "Gamma" onto Beta after Alpha is removed.
+        let app = app_with_workspaces(cx, two_named_workspaces(0, 1));
+        type_workspace_rename(&app, cx, 0, "Gamma");
+
+        cx.update(|_window, cx| {
+            app.update(cx, |app, cx| {
+                assert_eq!(app.renaming_idx, Some(0));
+                assert!(app.close_workspace_at_inner(0, None, cx));
+                assert_eq!(
+                    app.renaming_idx,
+                    Some(0),
+                    "close must leave the rename armed so commit is what refuses the write"
+                );
+                app.commit_rename(cx);
+                assert_eq!(app.workspaces.len(), 1);
+                assert_eq!(app.workspaces[0].id, 1);
+                assert_eq!(
+                    app.workspaces[0].title, "Beta",
+                    "the closed row's draft must not land on its neighbour"
+                );
+                assert!(app.renaming_idx.is_none());
+                assert!(app.rename_text.is_empty());
+            });
+        });
+    }
+
+    /// Issue #935: a row inserted ahead of the renamed workspace changes its
+    /// index. Commit still has to write the typed name onto the original id.
+    #[gpui::test]
+    fn reordering_a_workspace_mid_rename_writes_the_original(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        // Not equal to the opening indices. Storing `0` and resolving it as an
+        // id would miss Alpha; resolving `10` as an index would miss it too.
+        let app = app_with_workspaces(cx, two_named_workspaces(10, 11));
+        type_workspace_rename(&app, cx, 0, "Gamma");
+
+        cx.update(|_window, cx| {
+            app.update(cx, |app, cx| {
+                assert_eq!(app.renaming_idx, Some(10));
+                // Drop Beta into the gap above Alpha.
+                app.reorder_workspace(11, 0, cx);
+                assert_eq!(
+                    app.workspaces.iter().map(|ws| ws.id).collect::<Vec<_>>(),
+                    vec![11, 10]
+                );
+                app.commit_rename(cx);
+                assert_eq!(app.workspaces[0].id, 11);
+                assert_eq!(app.workspaces[0].title, "Beta");
+                assert_eq!(app.workspaces[1].id, 10);
+                assert_eq!(app.workspaces[1].title, "Gamma");
+                assert!(app.renaming_idx.is_none());
+            });
+        });
+    }
+
+    /// Issue #935: the same shift for a tab row. The neighbour that slides into
+    /// the old index must keep its title.
+    #[gpui::test]
+    fn reordering_a_tab_mid_rename_writes_the_original(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let mut workspace = Workspace::empty_with_cwd_and_id(
+            4,
+            "Alpha",
+            std::path::PathBuf::from("/paneflow-935-rename-tabs"),
+        );
+        assert!(workspace.open_tab(crate::workspace::Tab::new("One", None)));
+        workspace.tab_mut(0).expect("first tab").id = 0;
+        assert!(workspace.open_tab(crate::workspace::Tab::new("Two", None)));
+        workspace.tab_mut(1).expect("second tab").id = 1;
+        let app = app_with_workspaces(cx, vec![workspace]);
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.begin_tab_rename(0, 0, window, cx);
+                app.rename_text = "Renamed".to_string();
+                assert_eq!(app.renaming_tab, Some((4, 0)));
+                app.workspaces[0].reorder_tab(1, 0);
+                assert_eq!(
+                    app.workspaces[0]
+                        .tabs()
+                        .iter()
+                        .map(|tab| tab.id)
+                        .collect::<Vec<_>>(),
+                    vec![1, 0]
+                );
+                app.commit_rename(cx);
+                let tabs = app.workspaces[0].tabs();
+                assert_eq!(tabs[0].id, 1);
+                assert_eq!(tabs[0].title, "Two");
+                assert_eq!(tabs[1].id, 0);
+                assert_eq!(tabs[1].title, "Renamed");
+                assert!(app.renaming_tab.is_none());
+            });
+        });
     }
 }
