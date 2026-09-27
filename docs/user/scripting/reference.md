@@ -149,7 +149,7 @@ printf '%s\n' '{"jsonrpc":"2.0","method":"system.capabilities","params":{},"id":
 | `surface.read`             | `surface_id`, `lines?`, `offset?`, `fenced?`, `workspace_id?`                                   | Scrollback, `output_generation`, `truncated`             |
 | `surface.search`           | `surface_id`, `pattern`, `max_matches?`, `workspace_id?`                                        | Case-insensitive substring matches                       |
 | `surface.status`           | `surface_id`                                                                                    | Agent state for one surface                              |
-| `surface.send_text`        | `surface_id`, `text`, `submit?`, `paste?`                                                       | Gated PTY text write                                     |
+| `surface.send_text`        | `surface_id`, `text`, `submit?`, `paste?`                                                       | Gated PTY text write; `submit`/`paste` are booleans      |
 | `surface.send_keystroke`   | `surface_id`, `keystroke`                                                                       | Env-gated non-submitting keystroke                       |
 | `fleet.list`               | -                                                                                               | Read-only fleet snapshot                                 |
 | `agent.whoami`             | `surface_id`, `workspace_id` (both required, from the caller's pane environment)                | Caller's pane identity; see [Pane identity](#pane-identity) |
@@ -227,7 +227,7 @@ Errors come back as JSON-RPC `error` envelopes:
 | Code     | When                                                                                                         | Example `message`                                   |
 | -------- | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
 | `-32700` | The request line is not valid JSON, for example an empty variable left `"surface_id":,`. The reply's `id` is `null` | `Parse error: expected value at line 1 column 72` |
-| `-32602` | A missing, non-numeric, or unknown parameter                                                                 | ``missing field `workspace_id` ``, `invalid type: string "1", expected u64` |
+| `-32602` | A missing, wrong-typed, or unknown parameter                                                                 | ``missing field `workspace_id` ``, `invalid type: string "1", expected u64` |
 | `-32602` | No live surface has that `surface_id` (closed, or from another PaneFlow instance)                            | `surface not found`                                 |
 
 Raw IPC remains a same-user operation; environment IDs are routing metadata, not

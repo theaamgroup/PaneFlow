@@ -470,7 +470,8 @@ fn prune_stale_version_dirs(current: &Path) {
 }
 
 /// Stable ai-hook path whose bytes **this** process verified against the
-/// binary it embeds. `None` until `ensure_ai_hook_extracted` succeeds.
+/// binary it embeds. `None` until `ensure_ai_hook_extracted` succeeds, and
+/// again after any later attempt fails.
 static VERIFIED_AI_HOOK: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// The stable ai-hook path, but only once this app has confirmed the file
@@ -505,21 +506,45 @@ pub fn verified_ai_hook_path() -> Option<PathBuf> {
 /// Unhappy path: `data_dir()` unresolvable -> `ai_hook_binary_path()` is `None`
 /// -> `Err`; `paneflow hooks setup` then refuses cleanly rather than writing a
 /// config pointing at a non-existent path.
+///
+/// Production callers only: this resolves the real per-user path. Tests drive
+/// [`ensure_ai_hook_extracted_into`] against a `TempDir` (#876), because a
+/// test run whose embedded bytes differ would otherwise rewrite the binary a
+/// running PaneFlow's agent hooks execute.
 pub fn ensure_ai_hook_extracted() -> Result<PathBuf> {
-    let hook_path = crate::runtime_paths::ai_hook_binary_path().ok_or_else(|| {
-        anyhow!(
+    let Some(hook_path) = crate::runtime_paths::ai_hook_binary_path() else {
+        set_verified_ai_hook(None);
+        return Err(anyhow!(
             "EP-004 US-016: data_dir() unresolvable/unwritable; cannot extract paneflow-ai-hook"
+        ));
+    };
+    ensure_ai_hook_extracted_into(&hook_path)
+}
+
+/// The stable ai-hook extraction with its target path injected. It rewrites
+/// [`VERIFIED_AI_HOOK`] on every attempt, so the slot mirrors the latest one:
+/// `Some(hook_path)` once this build's bytes are confirmed there, `None` on
+/// any failure. A failed re-verification clears a path verified earlier,
+/// because this process can no longer vouch for the bytes at it (#542).
+fn ensure_ai_hook_extracted_into(hook_path: &Path) -> Result<PathBuf> {
+    let result = extract_ai_hook_at(hook_path);
+    set_verified_ai_hook(result.as_ref().ok().cloned());
+    result
+}
+
+fn set_verified_ai_hook(path: Option<PathBuf>) {
+    *VERIFIED_AI_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = path;
+}
+
+fn extract_ai_hook_at(hook_path: &Path) -> Result<PathBuf> {
+    let target_dir = hook_path.parent().ok_or_else(|| {
+        anyhow!(
+            "EP-004 US-016: ai-hook path {} has no parent",
+            hook_path.display()
         )
     })?;
-    let target_dir = hook_path
-        .parent()
-        .ok_or_else(|| {
-            anyhow!(
-                "EP-004 US-016: ai-hook path {} has no parent",
-                hook_path.display()
-            )
-        })?
-        .to_path_buf();
     let filename = hook_path
         .file_name()
         .ok_or_else(|| {
@@ -537,13 +562,10 @@ pub fn ensure_ai_hook_extracted() -> Result<PathBuf> {
         filename,
         bytes: bytes.as_ref(),
     };
-    extract_into(std::slice::from_ref(&entry), &target_dir)?;
+    extract_into(std::slice::from_ref(&entry), target_dir)?;
     // Only now is the file known to carry THIS build's bytes, which is what
     // `verified_ai_hook_path` promises its callers.
-    *VERIFIED_AI_HOOK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook_path.clone());
-    Ok(hook_path)
+    Ok(hook_path.to_path_buf())
 }
 
 /// Core extraction loop. Factored out of `ensure_binaries_extracted` so
@@ -802,41 +824,110 @@ mod tests {
         );
     }
 
+    /// Serializes the tests that write the process-global [`VERIFIED_AI_HOOK`]
+    /// slot; libtest runs tests on parallel threads.
+    static AI_HOOK_SLOT_TESTS: Mutex<()> = Mutex::new(());
+
+    /// Puts back whatever the slot held before the test, even when an
+    /// assertion unwinds. Declare it after the serial guard so it drops first,
+    /// while the slot is still exclusively held.
+    struct RestoreVerifiedAiHook(Option<PathBuf>);
+
+    impl RestoreVerifiedAiHook {
+        fn capture() -> Self {
+            Self(verified_ai_hook_path())
+        }
+    }
+
+    impl Drop for RestoreVerifiedAiHook {
+        fn drop(&mut self) {
+            set_verified_ai_hook(self.0.take());
+        }
+    }
+
+    fn serialize_ai_hook_slot() -> std::sync::MutexGuard<'static, ()> {
+        AI_HOOK_SLOT_TESTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// #542: a path is advertised to panes only after this build verified the
     /// bytes at it. Existence plus `+x` is not enough - a stale binary from a
     /// previous release satisfies both, and advertising it would pin panes to
     /// that version's hook behaviour while the launch log claims a fallback.
+    /// Driven against a `TempDir`, never the real per-user path (#876).
     #[test]
-    fn the_verified_ai_hook_path_is_empty_until_extraction_succeeds() {
-        // Serialized against nothing else: this is the only test touching the
-        // slot, and it restores whatever it found.
-        let previous = verified_ai_hook_path();
-
-        *VERIFIED_AI_HOOK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    fn ensure_ai_hook_extracted_into_publishes_the_path_it_wrote() {
+        let _serial = serialize_ai_hook_slot();
+        let _restore = RestoreVerifiedAiHook::capture();
+        set_verified_ai_hook(None);
         assert_eq!(
             verified_ai_hook_path(),
             None,
             "an unverified stable path must not be advertised, however runnable"
         );
 
-        match ensure_ai_hook_extracted() {
-            Ok(path) => assert_eq!(
-                verified_ai_hook_path(),
-                Some(path),
-                "a successful extraction must publish exactly the path it wrote"
-            ),
-            Err(_) => assert_eq!(
-                verified_ai_hook_path(),
-                None,
-                "a failed extraction must leave the slot empty, not stale"
-            ),
-        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let hook_path = dir.path().join("bin").join("paneflow-ai-hook");
+        let path = ensure_ai_hook_extracted_into(&hook_path)
+            .expect("extraction into a writable TempDir must succeed");
 
-        *VERIFIED_AI_HOOK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = previous;
+        assert_eq!(path, hook_path, "the seam must write where it was told");
+        let embedded = embedded_bytes("paneflow-ai-hook").unwrap();
+        assert!(
+            std::fs::read(&hook_path).unwrap() == embedded.as_ref(),
+            "{} must carry this build's embedded paneflow-ai-hook bytes",
+            hook_path.display()
+        );
+        assert_eq!(
+            verified_ai_hook_path(),
+            Some(hook_path),
+            "a successful extraction must publish exactly the path it wrote"
+        );
+    }
+
+    /// #542: a failed extraction must clear the slot, not leave a path an
+    /// earlier attempt verified. The slot is seeded with a stale value first so
+    /// the assertion can only hold if the failure path actually clears it.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_ai_hook_extracted_into_clears_the_slot_when_extraction_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _serial = serialize_ai_hook_slot();
+        let _restore = RestoreVerifiedAiHook::capture();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let stale = dir.path().join("earlier").join("paneflow-ai-hook");
+        set_verified_ai_hook(Some(stale.clone()));
+        assert_eq!(verified_ai_hook_path(), Some(stale));
+
+        let ro_parent = dir.path().join("ro");
+        std::fs::create_dir(&ro_parent).unwrap();
+        std::fs::set_permissions(&ro_parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let hook_path = ro_parent.join("bin").join("paneflow-ai-hook");
+
+        let result = ensure_ai_hook_extracted_into(&hook_path);
+        let slot = verified_ai_hook_path();
+
+        // Restore perms before asserting so TempDir drop can clean up.
+        std::fs::set_permissions(&ro_parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = format!(
+            "{:#}",
+            result.expect_err("extraction under a read-only parent must fail")
+        );
+        // The embed lookup precedes the write, so failing here proves the
+        // embed resolved and the refusal came from the read-only directory.
+        assert!(
+            err.contains("create cache dir"),
+            "extraction must fail on the read-only directory, got: {err}"
+        );
+        assert!(!hook_path.exists(), "nothing may be written: {err}");
+        assert_eq!(
+            slot, None,
+            "a failed extraction must leave the slot empty, not stale"
+        );
     }
 
     /// The digest fast-path is the only branch a correct-bytes file ever
