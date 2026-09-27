@@ -7,7 +7,7 @@
 //! the calls that go on to schedule tools.
 use super::owned_files::{
     cleanup_accepted_owned_file, install_accepted_owned_file, is_own_or_sibling_rendering,
-    sweep_accepted_owned_file,
+    report_cleanup_failure, sweep_accepted_owned_file,
 };
 use super::{
     config_dir_is_symlink, home_unavailable, hook_config_error, install_hook_config_file,
@@ -331,6 +331,7 @@ fn release_settings(settings_path: &Path, hooks_path: &Path, lease: &mut HookLea
             keep.as_deref(),
         )
     });
+    report_cleanup_failure(settings_path, restored.as_ref().err());
     if matches!(restored, Ok(Some(()))) && keep.is_some() {
         consume_env_baseline(&baseline_path);
     }
