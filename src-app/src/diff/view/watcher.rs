@@ -10,8 +10,6 @@ use futures::future::Either;
 use notify::event::ModifyKind;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::agent_sessions::SessionMeta;
-
 use super::{DiffView, REFRESH_COOLDOWN, REFRESH_DEBOUNCE};
 
 const WATCH_IGNORE_DIRS: &[&str] = &[
@@ -33,7 +31,40 @@ const WATCH_IGNORE_DIRS: &[&str] = &[
 enum Revalidation {
     Unchanged,
     Changed,
-    Attribution(Vec<SessionMeta>),
+}
+
+/// Watcher refresh after comparing the stored fingerprint to a fresh one
+/// (issue #877). A match is [`Revalidation::Unchanged`] and does not run
+/// session attribution, so an unchanged refresh does not spawn vendor CLIs.
+/// A mismatch, including no stored fingerprint, is [`Revalidation::Changed`];
+/// attribution for that re-diff stays on the reload path.
+trait FingerprintUnchanged {
+    fn unchanged_against(&self, fresh: &Self) -> bool;
+}
+
+impl FingerprintUnchanged for &str {
+    fn unchanged_against(&self, fresh: &Self) -> bool {
+        *self == *fresh
+    }
+}
+
+impl FingerprintUnchanged for super::super::git::ColumnFingerprint {
+    fn unchanged_against(&self, fresh: &Self) -> bool {
+        // `None == None` under PartialEq, which would skip a reload after a
+        // diff that could not be read (issue #891).
+        self.is_unchanged_against(fresh)
+    }
+}
+
+fn revalidation_for_fingerprint<T: FingerprintUnchanged>(
+    stored: Option<&T>,
+    fresh: &T,
+) -> Revalidation {
+    if stored.is_some_and(|stored| stored.unchanged_against(fresh)) {
+        Revalidation::Unchanged
+    } else {
+        Revalidation::Changed
+    }
 }
 
 /// What the watcher covers, kept beside the [`RecommendedWatcher`] so the
@@ -528,28 +559,11 @@ impl DiffView {
     fn revalidate(&mut self, cx: &mut gpui::Context<Self>) {
         let base = self.base_ref.clone();
         let path = self.column.path.clone();
-        let branch = self.column.branch.clone();
-        let generation = self.column.generation;
         let stored = self.column.fingerprint.clone();
         cx.spawn(async move |this, cx| {
             let outcome = smol::unblock(move || {
                 let fresh = super::super::git::column_fingerprint(&path, &base);
-                // A `None` diff or untracked component never matches, even
-                // against itself (issue #891). PartialEq would treat that as
-                // unchanged and skip the reload.
-                if !stored
-                    .as_ref()
-                    .is_some_and(|stored| stored.is_unchanged_against(&fresh))
-                {
-                    return Revalidation::Changed;
-                }
-                let cwd = path.to_string_lossy();
-                let sessions = crate::agent_sessions::attribution_for_column(&cwd, &branch);
-                if sessions.is_empty() {
-                    Revalidation::Unchanged
-                } else {
-                    Revalidation::Attribution(sessions)
-                }
+                revalidation_for_fingerprint(stored.as_ref(), &fresh)
             })
             .await;
             if matches!(outcome, Revalidation::Unchanged) {
@@ -560,15 +574,8 @@ impl DiffView {
                     if view.suspended {
                         return;
                     }
-                    match outcome {
-                        Revalidation::Changed => view.start_loading(cx),
-                        Revalidation::Attribution(sessions) => {
-                            if view.column.generation == generation {
-                                view.column.attribution = sessions;
-                                cx.notify();
-                            }
-                        }
-                        Revalidation::Unchanged => {}
+                    if let Revalidation::Changed = outcome {
+                        view.start_loading(cx);
                     }
                 })
             });
@@ -1169,5 +1176,59 @@ mod tests {
 
         harness.tx = None;
         assert!(harness.poll().is_ready());
+    }
+
+    #[test]
+    fn revalidate_unchanged_fingerprint_skips_attribution() {
+        // Old refresh called `attribution_for_column` on a match and returned
+        // `Attribution` when that list was non-empty. A match is `Unchanged`
+        // and neither the decision nor `revalidate` runs attribution.
+        let fresh = "fingerprint";
+        assert!(
+            matches!(
+                revalidation_for_fingerprint(Some(&fresh), &fresh),
+                Revalidation::Unchanged
+            ),
+            "a matching fingerprint must not run attribution"
+        );
+        let stored = "stale";
+        assert!(
+            matches!(
+                revalidation_for_fingerprint(Some(&stored), &fresh),
+                Revalidation::Changed
+            ),
+            "a changed fingerprint still reloads"
+        );
+        assert!(
+            matches!(
+                revalidation_for_fingerprint(None::<&&str>, &fresh),
+                Revalidation::Changed
+            ),
+            "a missing fingerprint still reloads"
+        );
+
+        let src = include_str!("watcher.rs");
+        let decision = src
+            .split("fn revalidation_for_fingerprint(")
+            .nth(1)
+            .and_then(|rest| rest.split("impl DiffView {").next())
+            .expect("decision function");
+        assert!(
+            !decision.contains("attribution_for_column"),
+            "fingerprint decision must not call attribution_for_column"
+        );
+        let refresh = src
+            .split("fn revalidate(")
+            .nth(1)
+            .and_then(|rest| rest.split("#[cfg(test)]").next())
+            .expect("revalidate");
+        assert!(
+            refresh.contains("revalidation_for_fingerprint"),
+            "revalidate must decide from the fingerprint"
+        );
+        assert!(
+            !refresh.contains("attribution_for_column"),
+            "revalidate must not call attribution_for_column"
+        );
     }
 }
