@@ -49,7 +49,127 @@ P_ALL="$P_LINUX|$P_NOTUNIX|$P_NOTMAC"
 ATTR=$(scan | grep -v 'cfg!(' | content_match "$P_ALL" | nocomment)
 MACRO=$(scan | grep    'cfg!(' | content_match "$P_ALL" | nocomment)
 COMMENTS=$(scan | content_match "$P_ALL" | onlycomment)
-TOML=$(grep -rn --exclude-dir=target --exclude-dir=.git -E "target\.'cfg\((unix|target_os = \"linux\")\)'" --include='Cargo.toml' . 2>/dev/null | grep -v '^\./target/')
+# Issue #903: count every [target.'cfg(...)'...] / [target."cfg(...)"...]
+# header, not one exact spelling. A table counts when its cfg expression
+# matches P_ALL or the bare cfg(unix) / target_os = "linux" alternative.
+# P_ALL does not match a bare unix table; that hit must stay. The live
+# [target.'cfg(target_os = "macos")'] table must not match.
+TOML=$(P_ALL="$P_ALL" python3 - <<'PYEOF'
+import os, re
+
+def strip_comment(line):
+    out = []
+    i = 0
+    quote = None
+    n = len(line)
+    while i < n:
+        c = line[i]
+        if quote:
+            out.append(c)
+            if quote == '"' and c == '\\' and i + 1 < n:
+                out.append(line[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            out.append(c)
+            i += 1
+            continue
+        if c == '#':
+            break
+        out.append(c)
+        i += 1
+    return ''.join(out)
+
+def cfg_exprs(header):
+    """Cfg bodies inside [target.'cfg(...)'...] and [target."cfg(...)"...] keys."""
+    out = []
+    i = 0
+    n = len(header)
+    while i < n:
+        k = header.find('[target.', i)
+        if k < 0:
+            break
+        j = k + len('[target.')
+        while j < n and header[j] in ' \t':
+            j += 1
+        if j >= n or header[j] not in ("'", '"'):
+            i = k + 1
+            continue
+        quote = header[j]
+        j += 1
+        if header[j:j + 4] != 'cfg(':
+            i = k + 1
+            continue
+        j += 3  # index of the '(' that opens cfg(
+        depth = 0
+        body = []
+        closed = False
+        while j < n:
+            c = header[j]
+            if quote == '"' and c == '\\' and j + 1 < n and header[j + 1] in '"\\':
+                body.append(header[j + 1])
+                j += 2
+                continue
+            if c == '(':
+                depth += 1
+                if depth > 1:
+                    body.append(c)
+                j += 1
+                continue
+            if c == ')':
+                depth -= 1
+                if depth == 0:
+                    closed = True
+                    j += 1
+                    break
+                body.append(c)
+                j += 1
+                continue
+            body.append(c)
+            j += 1
+        if not closed or j >= n or header[j] != quote or ']' not in header[j + 1:]:
+            i = k + 1
+            continue
+        out.append(''.join(body))
+        i = header.find(']', j) + 1
+    return out
+
+# P_ALL is the .rs predicate (linux / not(unix) / not(macos)). It does not
+# match a bare `unix` expression; cfg(unix) and target_os = "linux" stay.
+p_all = re.compile(os.environ['P_ALL'], re.I)
+bare_unix = re.compile(r'\s*unix\s*')
+bare_linux_os = re.compile(r'target_os\s*=\s*"linux"')
+
+def is_linux(expr):
+    if p_all.search(expr):
+        return True
+    if bare_unix.fullmatch(expr):
+        return True
+    return bare_linux_os.search(expr) is not None
+
+hits = []
+for root, dirs, files in os.walk('.'):
+    dirs[:] = [d for d in dirs if d not in ('target', '.git')]
+    for name in files:
+        if name != 'Cargo.toml':
+            continue
+        path = os.path.join(root, name)
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            for lineno, line in enumerate(fh, 1):
+                raw = line.rstrip('\r\n')
+                for expr in cfg_exprs(strip_comment(raw)):
+                    if is_linux(expr):
+                        hits.append('%s:%d:%s' % (path, lineno, raw))
+                        break
+if hits:
+    print('\n'.join(hits))
+PYEOF
+) || exit 1
 
 # Operator-negated cfg! macros naming a target_os (`!cfg!(target_os = "...")`).
 # Invisible to P_NOTMAC, which only matches the `not(...)` predicate form.
