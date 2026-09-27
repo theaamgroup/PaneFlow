@@ -8,6 +8,8 @@
 //! - `render_toast`: the deferred rendering block used by `Render for
 //!   PaneFlowApp` to paint the active toast.
 
+use std::collections::VecDeque;
+
 use gpui::{
     Animation, AnimationExt, AnyElement, AsyncApp, ClickEvent, Context, CursorStyle, IntoElement,
     MouseButton, ParentElement, Role, SharedString, Styled, WeakEntity, deferred, div, ease_in_out,
@@ -64,6 +66,38 @@ fn arrival_replaces_active(active: Option<&Toast>) -> bool {
     active.is_none_or(Toast::is_sticky)
 }
 
+/// Pending toasts behind the one on screen. One stays visible; the rest wait
+/// FIFO. A burst must not replay for many full lifetimes (issue #910).
+const TOAST_QUEUE_CAP: usize = 3;
+
+/// Queue `arriving` behind the timed toast showing `active_message`.
+///
+/// Drops a repeat of that message or of the last queued message. At the cap,
+/// discards the oldest queued timed toast. A sticky waiter is not discarded
+/// to make room for a timed one; sticky arrivals still replace a sticky
+/// active toast before this runs. Returns whether `arriving` was queued.
+fn queue_toast_behind(active_message: &str, queue: &mut VecDeque<Toast>, arriving: Toast) -> bool {
+    if arriving.message == active_message
+        || queue
+            .back()
+            .is_some_and(|queued| queued.message == arriving.message)
+    {
+        return false;
+    }
+    while queue.len() >= TOAST_QUEUE_CAP {
+        let oldest_timed = queue.iter().position(|queued| !queued.is_sticky());
+        if let Some(index) = oldest_timed {
+            let _ = queue.remove(index);
+        } else if arriving.is_sticky() {
+            let _ = queue.pop_front();
+        } else {
+            return false;
+        }
+    }
+    queue.push_back(arriving);
+    true
+}
+
 impl PaneFlowApp {
     pub(crate) fn show_toast(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
         self.push_toast(message.into(), TOAST_HOLD_MS, cx);
@@ -100,8 +134,14 @@ impl PaneFlowApp {
     fn enqueue_toast(&mut self, toast: Toast, cx: &mut Context<Self>) {
         if arrival_replaces_active(self.toast.as_ref()) {
             self.show_next_toast(toast, cx);
-        } else {
-            self.toast_queue.push_back(toast);
+            return;
+        }
+        // `arrival_replaces_active` is false only while a timed toast is up.
+        let Some(active_message) = self.toast.as_ref().map(|active| active.message.clone()) else {
+            self.show_next_toast(toast, cx);
+            return;
+        };
+        if queue_toast_behind(&active_message, &mut self.toast_queue, toast) {
             cx.notify();
         }
     }
@@ -423,6 +463,40 @@ mod tests {
         }
     }
 
+    fn timed_message(message: impl Into<String>) -> Toast {
+        let mut toast = timed(TOAST_HOLD_MS);
+        toast.message = message.into();
+        toast
+    }
+
+    fn queued_messages(queue: &VecDeque<Toast>) -> Vec<&str> {
+        queue.iter().map(|toast| toast.message.as_str()).collect()
+    }
+
+    fn assert_queue_coalesced_and_capped(active: &Toast, queue: &VecDeque<Toast>) {
+        assert!(
+            queue.len() <= TOAST_QUEUE_CAP,
+            "toast queue length {} exceeds {TOAST_QUEUE_CAP}",
+            queue.len()
+        );
+        assert!(
+            queue.iter().all(|toast| toast.message != active.message),
+            "queue holds a duplicate of the active message {}",
+            active.message
+        );
+        if let Some(last) = queue.back() {
+            let copies = queue
+                .iter()
+                .filter(|toast| toast.message == last.message)
+                .count();
+            assert_eq!(
+                copies, 1,
+                "queue holds a duplicate of the last message {}",
+                last.message
+            );
+        }
+    }
+
     fn sticky() -> Toast {
         Toast {
             message: "Updated to PaneFlow 0.6.1".into(),
@@ -488,5 +562,39 @@ mod tests {
         assert!(enter_opacity > 0.0);
         assert_eq!(enter_opacity, 0.5);
         assert_eq!(toast_stage_opacity(2, 1.0), 0.0);
+    }
+
+    #[test]
+    fn repeated_toasts_are_coalesced_and_queue_is_capped() {
+        let active = timed_message("Copied");
+        let mut queue = VecDeque::new();
+
+        for _ in 0..10 {
+            assert!(!queue_toast_behind(
+                &active.message,
+                &mut queue,
+                timed_message("Copied")
+            ));
+            assert_queue_coalesced_and_capped(&active, &queue);
+        }
+        assert!(
+            queue.is_empty(),
+            "repeats of the active toast must not queue"
+        );
+
+        for message in ["One", "Two", "Three", "Four", "Five"] {
+            queue_toast_behind(&active.message, &mut queue, timed_message(message));
+            assert_queue_coalesced_and_capped(&active, &queue);
+        }
+        assert_eq!(queued_messages(&queue), ["Three", "Four", "Five"]);
+
+        // Same as the tail, not the active toast: still one copy.
+        assert!(!queue_toast_behind(
+            &active.message,
+            &mut queue,
+            timed_message("Five")
+        ));
+        assert_queue_coalesced_and_capped(&active, &queue);
+        assert_eq!(queued_messages(&queue), ["Three", "Four", "Five"]);
     }
 }
