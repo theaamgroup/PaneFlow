@@ -4565,7 +4565,7 @@ mod tests {
         assert_eq!(env.get("KEEP_ME").map(String::as_str), Some("yes"));
         let after = crate::diff::captured_logs_count(needle);
         assert!(
-            after >= before + 1,
+            after > before,
             "dropping ZDOTDIR must warn (before {before}, after {after})"
         );
         assert!(
