@@ -118,6 +118,10 @@ impl DiffView {
                     let new_state = match built {
                         Built::Failed(e) => {
                             log::warn!("diff: ({branch}) FAILED: {e}");
+                            // Drop the stored fingerprint so the next revalidate
+                            // cannot match a stale complete read and leave the
+                            // column failed (issue #891).
+                            col.fingerprint = None;
                             col.loading_mode = None;
                             col.loading_theme_generation = None;
                             ColumnState::Failed(e)
