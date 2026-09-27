@@ -280,7 +280,9 @@ impl PaneFlowApp {
             worktree_binding_for_cwd(&self.workspaces[ws_idx].bound_tab_worktrees(), &cwd);
         if let Some(worktree) = binding {
             let tab_idx = self.workspaces[ws_idx].active_tab_idx();
-            self.set_tab_worktree(ws_idx, tab_idx, Some(worktree), cx);
+            if let Err(message) = self.set_tab_worktree(ws_idx, tab_idx, Some(worktree), cx) {
+                self.show_toast(message, cx);
+            }
         }
         self.pending_pane_focus = Some(pane);
         self.save_session(cx);

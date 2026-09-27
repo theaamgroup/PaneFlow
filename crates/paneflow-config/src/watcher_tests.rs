@@ -331,6 +331,74 @@ fn test_watcher_detects_change_through_symlinked_config() {
 }
 
 #[test]
+fn replacing_the_config_with_a_symlink_rewatches_the_target_directory() {
+    // Issue #1026: the path is a real file when the watcher starts. Replacing
+    // it with a symlink into another directory must watch that directory, so
+    // a later edit of the target reloads. The target's own basename does not
+    // match the configured file, so the edit is seen only after the match
+    // path follows the link.
+    let configured_dir = TempDir::new().unwrap();
+    let target_dir = TempDir::new().unwrap();
+    let path = configured_dir.path().join("paneflow.json");
+    write_valid_config(&path);
+    let target = target_dir.path().join("real.json");
+    write_updated_config(&target);
+
+    let received = Arc::new(Mutex::new(Vec::<PaneFlowConfig>::new()));
+    let received_clone = Arc::clone(&received);
+    let cb: Arc<dyn Fn(PaneFlowConfig) + Send + Sync> =
+        Arc::new(move |cfg| received_clone.lock().unwrap().push(cfg));
+
+    let watcher = ConfigWatcher::new_with_path(path.clone(), cb);
+    watcher.start().expect("watcher should start");
+
+    // Give the watcher time to initialize.
+    thread::sleep(Duration::from_millis(100));
+
+    fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+
+    let received_poll = Arc::clone(&received);
+    let saw_replacement = wait_for(
+        move || {
+            received_poll
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|cfg| cfg.default_shell.as_deref() == Some("/bin/zsh"))
+        },
+        Duration::from_secs(5),
+    );
+    assert!(
+        saw_replacement,
+        "replacing the config with a symlink should reload through the target"
+    );
+
+    // A trailing event from the replacement also reloads through the link.
+    // Let that debounce finish before the target edit, or the edit's contents
+    // would be observed without a watch on the target directory.
+    thread::sleep(MAX_DEBOUNCE + DEBOUNCE_DURATION);
+
+    fs::write(&target, r#"{"default_shell": "/bin/sh", "commands": []}"#).unwrap();
+
+    let received_poll = Arc::clone(&received);
+    let saw_edit = wait_for(
+        move || {
+            received_poll
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|cfg| cfg.default_shell.as_deref() == Some("/bin/sh"))
+        },
+        Duration::from_secs(5),
+    );
+    assert!(
+        saw_edit,
+        "editing the symlink target should fire the callback after rewatch"
+    );
+}
+
+#[test]
 fn test_watcher_invalid_change_keeps_old() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("paneflow.json");
