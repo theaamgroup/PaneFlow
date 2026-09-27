@@ -151,6 +151,10 @@ fn run_git_timed(dir: &Path, args: &[&str], deadline: Duration) -> Result<Vec<u8
         return Err("git diff exceeded its deadline".to_string());
     }
     let mut cmd = crate::workspace::worktree::git_command();
+    // Issue #943: a worktree `git diff` rewrites a stat-dirty `.git/index`
+    // (and holds `index.lock`) unless this is set. `GIT_OPTIONAL_LOCKS=0`
+    // does not. Keep it before the subcommand so git treats it as config.
+    cmd.args(["-c", "diff.autoRefreshIndex=false"]);
     crate::workspace::worktree::git_subcommand(&mut cmd, args);
     cmd.current_dir(dir)
         // U-035: never block on a credential/helper prompt.
@@ -2303,6 +2307,73 @@ pub(crate) mod tests {
         let second = column_fingerprint(root, "HEAD");
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn review_diff_does_not_rewrite_a_stat_dirty_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(test_git(root, &["init"]), "git init is required");
+        assert!(test_git(root, &["config", "core.autocrlf", "false"]));
+        // Repo-local true, so a global `false` cannot hide a missing `-c`.
+        // The command-line flag is what has to suppress the rewrite.
+        assert!(test_git(root, &["config", "diff.autoRefreshIndex", "true"]));
+        std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        assert!(test_git(root, &["add", "tracked.txt"]));
+        assert!(test_git(
+            root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "-m",
+                "init",
+            ],
+        ));
+
+        // Stat-only touch: content still matches the index, which is the case
+        // where porcelain `git diff` rewrites `.git/index`.
+        let tracked = root.join("tracked.txt");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&tracked)
+            .unwrap();
+        let bumped = file.metadata().unwrap().modified().unwrap() + Duration::from_secs(10);
+        file.set_modified(bumped).unwrap();
+        drop(file);
+
+        let index = root.join(".git").join("index");
+        let before = std::fs::metadata(&index).unwrap().modified().unwrap();
+        let _ = take_git_commands();
+        let fingerprint = column_fingerprint(root, "HEAD");
+        let cmds = take_git_commands();
+        assert!(
+            fingerprint.diff_hash.is_some(),
+            "a stat-only touch must still produce a diff hash, commands={cmds:?}"
+        );
+        assert!(
+            cmds.iter().any(|cmd| cmd.starts_with("diff ")),
+            "column_fingerprint must run git diff, commands={cmds:?}"
+        );
+        let after = std::fs::metadata(&index).unwrap().modified().unwrap();
+        assert_eq!(
+            before, after,
+            "column_fingerprint must not rewrite a stat-dirty .git/index"
+        );
+
+        // The index is still stat-dirty, so a porcelain diff without the flag
+        // rewrites it. A no-op touch would pass the assert above vacuously.
+        assert!(
+            test_git(root, &["diff", "--no-color", "HEAD", "--"]),
+            "control diff must succeed"
+        );
+        let refreshed = std::fs::metadata(&index).unwrap().modified().unwrap();
+        assert_ne!(
+            before, refreshed,
+            "the fixture must stay stat-dirty until a diff without the flag"
+        );
     }
 
     #[test]
