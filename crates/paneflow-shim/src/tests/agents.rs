@@ -785,6 +785,93 @@ fn enable_codex_feature_flag_recognizes_equivalent_features_headers() {
 }
 
 #[test]
+fn enable_codex_feature_flag_keeps_inline_and_dotted_enabled_features() {
+    // Issue #1053: `features` spelled as an inline table or as dotted keys is
+    // already the features table. Appending `[features]` would declare it a
+    // second time and make the whole Codex config invalid.
+    let fixtures = [
+        "model = \"gpt-5\"\nfeatures = { hooks = true }\n\n[profiles.default]\nmodel = \"o3\"\n",
+        "model = \"gpt-5\"\nfeatures.hooks = true\n\n[profiles.default]\nmodel = \"o3\"\n",
+        "features = { other = 1, \"hooks\" = true } # inline\n",
+        "\"features\" . hooks = true # dotted, quoted, spaced\nfeatures.other = false\n",
+        "features.codex_hooks = true\n",
+        // A multi-line string that looks like a table header must not end
+        // the root table before the real dotted key.
+        "notes = \"\"\"\n[other]\n\"\"\"\nfeatures.hooks = true\n",
+    ];
+    for original in fixtures {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("config.toml");
+        std::fs::write(&path, original).unwrap();
+
+        assert!(
+            !enable_codex_feature_flag(&path).unwrap(),
+            "an enabled hooks feature must be a no-op:\n{original}"
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, original, "bytes must be unchanged");
+        assert!(
+            !content.contains("[features]") && !content.contains(CODEX_TOML_MARKER),
+            "must not declare features a second time:\n{content}"
+        );
+    }
+}
+
+#[test]
+fn enable_codex_feature_flag_refuses_unsupported_inline_and_dotted_features() {
+    // Issue #1053: an existing `features` definition that does not enable
+    // hooks cannot be extended by appending a table, so refuse untouched.
+    let fixtures = [
+        "features = { other = true }\n",
+        "features = {}\n",
+        "features = { hooks = false }\n",
+        "features.hooks = false\n",
+        "features.other = true\n",
+        "'features'.other = true\n",
+        "[[features]]\nhooks = true\n",
+    ];
+    for original in fixtures {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("config.toml");
+        std::fs::write(&path, original).unwrap();
+
+        assert!(
+            enable_codex_feature_flag(&path).is_err(),
+            "an existing features definition without hooks must refuse:\n{original}"
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, original, "a refusal must not write");
+    }
+}
+
+#[test]
+fn enable_codex_feature_flag_ignores_features_keys_that_are_not_root_features() {
+    // `features` nested under another table, or inside a string value, is
+    // not the root features table, so the install still appends one.
+    let fixtures = [
+        "[profiles.default]\nfeatures.hooks = true\n",
+        "[profiles.default]\nfeatures = { hooks = true }\n",
+        "notes = \"features.hooks = true\"\n",
+        "notes = '''\nfeatures = { hooks = true }\n'''\n",
+    ];
+    for original in fixtures {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("config.toml");
+        std::fs::write(&path, original).unwrap();
+
+        assert!(
+            enable_codex_feature_flag(&path).unwrap(),
+            "a non-root features key must not skip the install:\n{original}"
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.starts_with(original) && content.ends_with("[features]\nhooks = true\n"),
+            "the managed block must be appended after the user's bytes:\n{content}"
+        );
+    }
+}
+
+#[test]
 fn codex_guard_wires_feature_flag_through_config_toml() {
     let td = tempfile::TempDir::new().unwrap();
     let codex_dir = td.path().join(".codex");
