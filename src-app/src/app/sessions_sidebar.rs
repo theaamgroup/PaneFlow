@@ -1167,11 +1167,7 @@ fn sessions_scan_body(agent: SessionAgent, cwd: &str) -> (Vec<SessionMeta>, usiz
 /// Synchronous claim-and-run used by the in-flight reuse test. `None` means
 /// an in-flight scan for this agent and directory was reused.
 #[cfg(test)]
-fn run_sessions_scan(
-    agent: SessionAgent,
-    cwd: &str,
-    generation: u64,
-) -> Option<(Vec<SessionMeta>, usize, u64)> {
+fn run_sessions_scan(agent: SessionAgent, cwd: &str, generation: u64) -> SessionsScanOutcome {
     if !try_begin_sessions_scan(agent, cwd, generation) {
         return None;
     }
@@ -1262,17 +1258,17 @@ impl SessionsScanGate {
 }
 
 #[cfg(test)]
-static SESSIONS_SCAN_GATES: std::sync::LazyLock<
-    std::sync::Mutex<
-        std::collections::HashMap<(SessionAgent, String), std::sync::Arc<SessionsScanGate>>,
-    >,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+type SessionsScanGateMap =
+    std::collections::HashMap<(SessionAgent, String), std::sync::Arc<SessionsScanGate>>;
+#[cfg(test)]
+type SessionsScanOutcome = Option<(Vec<SessionMeta>, usize, u64)>;
 
 #[cfg(test)]
-fn sessions_scan_gates() -> std::sync::MutexGuard<
-    'static,
-    std::collections::HashMap<(SessionAgent, String), std::sync::Arc<SessionsScanGate>>,
-> {
+static SESSIONS_SCAN_GATES: std::sync::LazyLock<std::sync::Mutex<SessionsScanGateMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(SessionsScanGateMap::new()));
+
+#[cfg(test)]
+fn sessions_scan_gates() -> std::sync::MutexGuard<'static, SessionsScanGateMap> {
     SESSIONS_SCAN_GATES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1808,7 +1804,7 @@ mod tests {
         other: String,
         gate: std::sync::Arc<SessionsScanGate>,
         other_gate: std::sync::Arc<SessionsScanGate>,
-        worker: Option<std::thread::JoinHandle<Option<(Vec<SessionMeta>, usize, u64)>>>,
+        worker: Option<std::thread::JoinHandle<SessionsScanOutcome>>,
     }
 
     impl Drop for InFlightScanTest {
