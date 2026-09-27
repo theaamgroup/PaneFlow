@@ -27,6 +27,8 @@ const MAX_DEBOUNCE: Duration = Duration::from_secs(1);
 ///
 /// The watcher monitors the parent directory (not the file directly) so that
 /// editor save patterns involving delete+recreate (atomic saves) are captured.
+/// A symlink whose target lives in another directory is watched there too: the
+/// write lands in the target's directory, often under the target's own name.
 /// File events are debounced at 300ms to coalesce rapid sequences of writes.
 pub struct ConfigWatcher {
     callback: Arc<dyn Fn(PaneFlowConfig) + Send + Sync>,
@@ -82,13 +84,32 @@ impl ConfigWatcher {
             .expect("config path has no parent directory")
             .to_path_buf();
 
+        // Canonicalize follows the symlink. It fails when the file is not
+        // there yet; the configured parent is still watched below.
+        let canonical_path = std::fs::canonicalize(&self.config_path).ok();
+        // Issue #875: a write to the target does not show up in the link's
+        // directory. Watch the canonical parent when it is a different one.
+        let extra_watch_dir = canonical_path.as_ref().and_then(|path| {
+            path.parent()
+                .filter(|dir| *dir != watch_dir.as_path())
+                .map(Path::to_path_buf)
+        });
+
+        let mut watch_dirs = vec![watch_dir];
+        if let Some(dir) = extra_watch_dir {
+            watch_dirs.push(dir);
+        }
+
         // notify can't watch a directory that doesn't exist yet - create it
         // on first run so hot-reload works even before the user writes a config.
-        if !watch_dir.exists() {
-            std::fs::create_dir_all(&watch_dir).map_err(notify::Error::io)?;
+        for dir in &watch_dirs {
+            if !dir.exists() {
+                std::fs::create_dir_all(dir).map_err(notify::Error::io)?;
+            }
         }
 
         let config_path = self.config_path.clone();
+        let match_path = canonical_path.unwrap_or_else(|| config_path.clone());
         let callback = Arc::clone(&self.callback);
 
         // Channel for notify -> processing thread.
@@ -103,13 +124,15 @@ impl ConfigWatcher {
             notify::Config::default(),
         )?;
 
-        // Watch the parent directory (non-recursive) to catch delete+recreate.
-        watcher.watch(&watch_dir, RecursiveMode::NonRecursive)?;
+        // Watch each parent (non-recursive) to catch delete+recreate.
+        for dir in &watch_dirs {
+            watcher.watch(dir, RecursiveMode::NonRecursive)?;
+        }
 
         // Spawn the event-processing loop in a background thread.
         // The thread owns `watcher` to keep it alive.
         thread::spawn(move || {
-            event_loop(rx, &config_path, &callback, &watcher);
+            event_loop(rx, &config_path, &match_path, &callback, &watcher);
         });
 
         info!(
@@ -135,12 +158,17 @@ fn is_relevant_event(kind: &EventKind) -> bool {
 /// paths before emitting events (macOS FSEvents canonicalizes
 /// `/var/folders/...` to `/private/var/folders/...`, Windows sometimes uses
 /// UNC `\\?\C:\...` prefixes) so a full-path comparison is inherently
-/// fragile. Because the watcher is installed `NonRecursive` on the parent
-/// directory, every event we receive already belongs to that directory -
-/// basename equality is sufficient and portable.
-fn event_targets_config(event: &Event, config_path: &Path) -> bool {
-    let target_name = config_path.file_name();
-    target_name.is_some() && event.paths.iter().any(|p| p.file_name() == target_name)
+/// fragile. The watcher is installed `NonRecursive` on the configured
+/// path's parent and, when that parent differs, on the canonical path's
+/// parent. Basename equality against either file name is sufficient.
+fn event_targets_config(event: &Event, config_path: &Path, canonical_path: &Path) -> bool {
+    let configured_name = config_path.file_name();
+    let canonical_name = canonical_path.file_name();
+    event.paths.iter().any(|path| {
+        let name = path.file_name();
+        (configured_name.is_some() && name == configured_name)
+            || (canonical_name.is_some() && name == canonical_name)
+    })
 }
 
 /// The main event-processing loop running on the background thread.
@@ -150,6 +178,7 @@ fn event_targets_config(event: &Event, config_path: &Path) -> bool {
 fn event_loop(
     rx: mpsc::Receiver<notify::Result<Event>>,
     config_path: &Path,
+    canonical_path: &Path,
     callback: &Arc<dyn Fn(PaneFlowConfig) + Send + Sync>,
     _watcher: &RecommendedWatcher,
 ) {
@@ -184,7 +213,9 @@ fn event_loop(
 
         match event_result {
             Ok(Ok(event)) => {
-                if is_relevant_event(&event.kind) && event_targets_config(&event, config_path) {
+                if is_relevant_event(&event.kind)
+                    && event_targets_config(&event, config_path, canonical_path)
+                {
                     let now = Instant::now();
                     let burst_start = *first_event_at.get_or_insert(now);
                     // Trailing debounce, but never pushed past the max-wait cap

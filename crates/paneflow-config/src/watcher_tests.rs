@@ -67,7 +67,11 @@ fn test_event_targets_config() {
         paths: vec![PathBuf::from("/tmp/paneflow/paneflow.json")],
         attrs: Default::default(),
     };
-    assert!(event_targets_config(&matching_event, &config_path));
+    assert!(event_targets_config(
+        &matching_event,
+        &config_path,
+        &config_path
+    ));
 
     let non_matching_event = Event {
         kind: EventKind::Modify(notify::event::ModifyKind::Data(
@@ -76,7 +80,31 @@ fn test_event_targets_config() {
         paths: vec![PathBuf::from("/tmp/paneflow/other.json")],
         attrs: Default::default(),
     };
-    assert!(!event_targets_config(&non_matching_event, &config_path));
+    assert!(!event_targets_config(
+        &non_matching_event,
+        &config_path,
+        &config_path
+    ));
+
+    // A symlink target often has its own file name. Match that basename too.
+    let canonical_path = PathBuf::from("/etc/dotfiles/real.json");
+    let canonical_event = Event {
+        kind: EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )),
+        paths: vec![canonical_path.clone()],
+        attrs: Default::default(),
+    };
+    assert!(event_targets_config(
+        &canonical_event,
+        &config_path,
+        &canonical_path
+    ));
+    assert!(!event_targets_config(
+        &non_matching_event,
+        &config_path,
+        &canonical_path
+    ));
 }
 
 #[test]
@@ -253,6 +281,42 @@ fn test_watcher_detects_file_change() {
     thread::sleep(Duration::from_millis(100));
 
     write_updated_config(&path);
+
+    let received_poll = Arc::clone(&received);
+    let fired = wait_for(
+        move || !received_poll.lock().unwrap().is_empty(),
+        Duration::from_secs(5),
+    );
+    assert!(fired, "callback should have been invoked at least once");
+
+    let configs = received.lock().unwrap();
+    let last = configs.last().unwrap();
+    assert_eq!(last.default_shell, Some("/bin/zsh".to_string()));
+}
+
+#[test]
+fn test_watcher_detects_change_through_symlinked_config() {
+    // Issue #875: the real file lives in A; the watcher is pointed at a
+    // symlink of the same name in B. The write is to the target in A.
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+    let target = dir_a.path().join("paneflow.json");
+    write_valid_config(&target);
+    let link = dir_b.path().join("paneflow.json");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let received = Arc::new(Mutex::new(Vec::<PaneFlowConfig>::new()));
+    let received_clone = Arc::clone(&received);
+    let cb: Arc<dyn Fn(PaneFlowConfig) + Send + Sync> =
+        Arc::new(move |cfg| received_clone.lock().unwrap().push(cfg));
+
+    let watcher = ConfigWatcher::new_with_path(link, cb);
+    watcher.start().expect("watcher should start");
+
+    // Give the watcher time to initialize.
+    thread::sleep(Duration::from_millis(100));
+
+    write_updated_config(&target);
 
     let received_poll = Arc::clone(&received);
     let fired = wait_for(
