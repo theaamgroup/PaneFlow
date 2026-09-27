@@ -2,6 +2,44 @@
 
 use std::process::{Command, ExitStatus, Stdio};
 
+use gpui::{AppContext as _, Context};
+
+/// Replaces [`launch_services_open`] for one call. The real opener talks to
+/// Launch Services and can block until the browser accepts the URL; tests hold
+/// that call without starting a browser.
+#[cfg(test)]
+type LaunchServicesOpenHook = Box<dyn FnOnce(&str) -> std::io::Result<()> + Send>;
+#[cfg(test)]
+type LaunchServicesHookSlot = std::sync::Mutex<Option<LaunchServicesOpenHook>>;
+#[cfg(test)]
+type LaunchServicesHookLock = std::sync::MutexGuard<'static, Option<LaunchServicesOpenHook>>;
+
+#[cfg(test)]
+static LAUNCH_SERVICES_OPEN_HOOK: LaunchServicesHookSlot = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+struct LaunchServicesHookGuard;
+
+#[cfg(test)]
+impl Drop for LaunchServicesHookGuard {
+    fn drop(&mut self) {
+        *lock_launch_services_hook() = None;
+    }
+}
+
+#[cfg(test)]
+fn lock_launch_services_hook() -> LaunchServicesHookLock {
+    LAUNCH_SERVICES_OPEN_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+fn install_launch_services_hook(hook: LaunchServicesOpenHook) -> LaunchServicesHookGuard {
+    *lock_launch_services_hook() = Some(hook);
+    LaunchServicesHookGuard
+}
+
 /// How often a running workspace launcher is polled for its exit status.
 const WORKSPACE_LAUNCH_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -59,18 +97,81 @@ pub(crate) async fn run_workspace_command(mut command: Command) -> std::io::Resu
     }
 }
 
+/// Schedule an open of `url` and return without waiting for Launch Services.
+///
+/// `/usr/bin/open` blocks until the browser accepts the URL. That wait runs
+/// on a detached thread so a click never stalls the GPUI thread (issue #906).
+/// Failures are logged. A caller that can show a toast uses [`open_url_in`].
 pub(crate) fn open_url(url: &str) -> std::io::Result<()> {
-    open_url_impl(url)
+    detach_launch_services(url.to_string())
 }
 
-/// Open an untrusted URL after requiring `http://` or `https://`.
+/// Schedule an open, then report a Launch Services failure on the GPUI thread.
 ///
-/// Untrusted or user-facing web links must go through this, not [`open_url`].
-/// `file://` / `javascript:` / unknown schemes are refused so they never
-/// reach `open::that`.
-pub(crate) fn open_http_url(url: &str) -> std::io::Result<()> {
+/// `on_failure` runs inside `cx.spawn`, never on the background task that
+/// calls Launch Services. That is the only place a toast may be shown.
+pub(crate) fn open_url_in(
+    url: &str,
+    cx: &mut Context<crate::PaneFlowApp>,
+    on_failure: impl FnOnce(&mut crate::PaneFlowApp, std::io::Error, &mut Context<crate::PaneFlowApp>)
+    + 'static,
+) {
+    open_with_report(url.to_string(), cx, on_failure);
+}
+
+/// Open an untrusted `http`/`https` URL without blocking the caller.
+///
+/// `file://` / `javascript:` / unknown schemes are refused on this thread so
+/// they never reach Launch Services. A Launch Services failure is delivered
+/// through `cx.spawn`, which is where the toast is shown.
+pub(crate) fn open_http_url_in(
+    url: &str,
+    cx: &mut Context<crate::PaneFlowApp>,
+    on_failure: impl FnOnce(&mut crate::PaneFlowApp, std::io::Error, &mut Context<crate::PaneFlowApp>)
+    + 'static,
+) -> std::io::Result<()> {
     let validated = require_http_url(url)?;
-    open_url_impl(&validated)
+    open_with_report(validated, cx, on_failure);
+    Ok(())
+}
+
+fn detach_launch_services(url: String) -> std::io::Result<()> {
+    // Dropping the join handle detaches the thread. The caller must not wait
+    // for Launch Services to accept the URL.
+    std::thread::Builder::new()
+        .name("paneflow-open-url".into())
+        .spawn(move || {
+            if let Err(err) = launch_services_open(&url) {
+                log::warn!("open URL failed: {err}");
+            }
+        })?;
+    Ok(())
+}
+
+fn open_with_report(
+    url: String,
+    cx: &mut Context<crate::PaneFlowApp>,
+    on_failure: impl FnOnce(&mut crate::PaneFlowApp, std::io::Error, &mut Context<crate::PaneFlowApp>)
+    + 'static,
+) {
+    cx.spawn(async move |this, async_cx| {
+        let opened = async_cx
+            .background_spawn(async move { launch_services_open(&url) })
+            .await;
+        let Err(err) = opened else {
+            return;
+        };
+        // Toast and caller logs run on the GPUI thread. If the window is
+        // already gone, log the Launch Services error here.
+        let detail = err.to_string();
+        if this
+            .update(async_cx, |app, cx| on_failure(app, err, cx))
+            .is_err()
+        {
+            log::warn!("open URL failed: {detail}");
+        }
+    })
+    .detach();
 }
 
 pub(crate) fn require_http_url(url: &str) -> std::io::Result<String> {
@@ -163,7 +264,20 @@ fn extract_scheme(input: &str) -> Option<&str> {
     Some(prefix)
 }
 
-fn open_url_impl(url: &str) -> std::io::Result<()> {
+/// Hand `url` to the macOS URL handler (`/usr/bin/open` → Launch Services).
+///
+/// Blocks until the browser accepts the URL. Callers schedule it off the
+/// GPUI thread; they do not call it inline.
+fn launch_services_open(url: &str) -> std::io::Result<()> {
+    #[cfg(test)]
+    {
+        // Drop the mutex guard before invoking the hook. The test holds the
+        // hook until it releases, and must still be able to clear this slot.
+        let hook = lock_launch_services_hook().take();
+        if let Some(hook) = hook {
+            return hook(url);
+        }
+    }
     open::that(url)
 }
 
@@ -349,5 +463,62 @@ mod tests {
     #[test]
     fn allowlist_is_http_https_only() {
         assert_eq!(ALLOWED_LINK_SCHEMES, &["http", "https"]);
+    }
+
+    /// Holds Launch Services until this test releases it. `open_url` must
+    /// have returned while that hold is still in place. An inline open never
+    /// gets here: the result wait times out and the test fails.
+    #[test]
+    fn open_url_returns_before_launch_services_accepts() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+        let _hook = super::install_launch_services_hook(Box::new(move |url: &str| {
+            let _ = entered_tx.send(url.to_string());
+            let _ = release_rx.recv();
+            let _ = accepted_tx.send(());
+            Ok(())
+        }));
+        let mut release = ReleaseOnDrop(Some(release_tx));
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(open_url("https://example.com"));
+        });
+
+        let opened = entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("launch services was not called");
+        assert_eq!(opened, "https://example.com");
+
+        let scheduled = done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("open_url blocked until launch services accepted");
+        scheduled.expect("scheduling the open failed");
+        assert!(
+            accepted_rx.try_recv().is_err(),
+            "launch services accepted before it was released"
+        );
+
+        release.release();
+        accepted_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("launch services did not accept after release");
+    }
+
+    struct ReleaseOnDrop(Option<std::sync::mpsc::Sender<()>>);
+
+    impl ReleaseOnDrop {
+        fn release(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.release();
+        }
     }
 }
