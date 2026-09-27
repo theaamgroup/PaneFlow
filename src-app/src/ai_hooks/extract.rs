@@ -889,11 +889,8 @@ mod tests {
     /// #542: a failed extraction must clear the slot, not leave a path an
     /// earlier attempt verified. The slot is seeded with a stale value first so
     /// the assertion can only hold if the failure path actually clears it.
-    #[cfg(unix)]
     #[test]
     fn ensure_ai_hook_extracted_into_clears_the_slot_when_extraction_fails() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _serial = serialize_ai_hook_slot();
         let _restore = RestoreVerifiedAiHook::capture();
 
@@ -902,28 +899,30 @@ mod tests {
         set_verified_ai_hook(Some(stale.clone()));
         assert_eq!(verified_ai_hook_path(), Some(stale));
 
-        let ro_parent = dir.path().join("ro");
-        std::fs::create_dir(&ro_parent).unwrap();
-        std::fs::set_permissions(&ro_parent, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let hook_path = ro_parent.join("bin").join("paneflow-ai-hook");
+        // A regular file where the `bin` directory should go. Unlike a
+        // read-only directory, root cannot write through it.
+        let blocker = dir.path().join("bin");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let hook_path = blocker.join("paneflow-ai-hook");
 
         let result = ensure_ai_hook_extracted_into(&hook_path);
         let slot = verified_ai_hook_path();
 
-        // Restore perms before asserting so TempDir drop can clean up.
-        std::fs::set_permissions(&ro_parent, std::fs::Permissions::from_mode(0o755)).unwrap();
-
         let err = format!(
             "{:#}",
-            result.expect_err("extraction under a read-only parent must fail")
+            result.expect_err("extraction under a file-blocked parent must fail")
         );
         // The embed lookup precedes the write, so failing here proves the
-        // embed resolved and the refusal came from the read-only directory.
+        // embed resolved and the refusal came from creating the directory.
         assert!(
             err.contains("create cache dir"),
-            "extraction must fail on the read-only directory, got: {err}"
+            "extraction must fail creating the blocked directory, got: {err}"
         );
-        assert!(!hook_path.exists(), "nothing may be written: {err}");
+        assert_eq!(
+            std::fs::read(&blocker).unwrap(),
+            b"not a directory",
+            "nothing may be written: {err}"
+        );
         assert_eq!(
             slot, None,
             "a failed extraction must leave the slot empty, not stale"
