@@ -171,11 +171,9 @@ mod review_switch_tests {
             .next()
             .unwrap();
         assert!(mode.contains("if !self.review_is_viable() || self.mode == AppMode::Diff"));
-        assert!(
-            mode.contains(
-                "self.review.layout.is_some() || self.review_default_subject().is_some()"
-            )
-        );
+        assert!(mode.contains("self.review.layout.is_some()"));
+        assert!(mode.contains("self.review.retained_layout.is_some()"));
+        assert!(mode.contains("self.review_default_subject().is_some()"));
         assert!(mode.contains("self.review_suspend_all(cx)"));
         let footer = include_str!("../sidebar_actions_menu.rs");
         assert!(footer.contains("self.cached_config.review_view_enabled().then(||"));
