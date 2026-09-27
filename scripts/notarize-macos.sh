@@ -32,6 +32,100 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# --- Transient Apple retries ---------------------------------------------
+# `notarytool submit` and `stapler staple` used to fail the release on the
+# first dropped connection. Three attempts, then give up. The backoff is
+# short on purpose: this is a blip, not the 30s status poll below.
+#
+# Submit passes --submission-id. A retry can open a second notarization
+# when the upload reached Apple and the reply was lost, so every attempt
+# logs the submission id from that attempt's JSON, or that there was none.
+# The id actually polled is the successful attempt. APPLE_RETRY_STDOUT is
+# that attempt's stdout.
+APPLE_RETRY_ATTEMPTS=3
+APPLE_RETRY_BACKOFF_SECONDS=5
+APPLE_RETRY_STDOUT=""
+
+# String id from a notarytool JSON body, or nothing when the body has none.
+submission_id_from_json() {
+    python3 -c 'import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+except Exception:
+    raise SystemExit(0)
+ident = data.get("id") if isinstance(data, dict) else None
+if isinstance(ident, str):
+    sys.stdout.write(ident)
+' <<< "$1"
+}
+
+# Suffix for a submit attempt. An empty id is still logged: omitting the
+# line would hide a reply that never carried one.
+submission_attempt_note() {
+    local submission_id="$1"
+    if [ -n "$submission_id" ]; then
+        printf ' (submission id: %s)' "$submission_id"
+    else
+        printf ' (no submission id)'
+    fi
+}
+
+# retry_transient LABEL [--submission-id] -- CMD...
+# On success with --submission-id, APPLE_RETRY_STDOUT holds that stdout.
+retry_transient() {
+    local label="$1"
+    shift
+    local log_submission_id=0
+    if [ "${1:-}" = "--submission-id" ]; then
+        log_submission_id=1
+        shift
+    fi
+    if [ "${1:-}" != "--" ]; then
+        echo "error: retry_transient: expected -- before the command" >&2
+        return 2
+    fi
+    shift
+
+    local attempt=1
+    local output=""
+    local submission_id=""
+    local note=""
+    local ok=0
+    APPLE_RETRY_STDOUT=""
+
+    while [ "$attempt" -le "$APPLE_RETRY_ATTEMPTS" ]; do
+        ok=0
+        note=""
+        submission_id=""
+        if [ "$log_submission_id" -eq 1 ]; then
+            if output="$("$@")"; then
+                ok=1
+            fi
+            submission_id="$(submission_id_from_json "$output")"
+            note="$(submission_attempt_note "$submission_id")"
+            if [ "$ok" -eq 1 ]; then
+                APPLE_RETRY_STDOUT="$output"
+                echo "${label}: attempt ${attempt}/${APPLE_RETRY_ATTEMPTS} ok${note}"
+                return 0
+            fi
+        elif "$@"; then
+            return 0
+        fi
+
+        if [ "$attempt" -ge "$APPLE_RETRY_ATTEMPTS" ]; then
+            echo "${label}: attempt ${attempt}/${APPLE_RETRY_ATTEMPTS} failed${note}"
+            echo "${label}: failed after ${APPLE_RETRY_ATTEMPTS} attempts"
+            return 1
+        fi
+        echo "${label}: attempt ${attempt}/${APPLE_RETRY_ATTEMPTS} failed - retrying${note}"
+        sleep "$APPLE_RETRY_BACKOFF_SECONDS"
+        attempt=$((attempt + 1))
+    done
+
+    echo "${label}: failed after ${APPLE_RETRY_ATTEMPTS} attempts"
+    return 1
+}
+
 # --- Build the submission archive ----------------------------------------
 # `ditto -c -k --keepParent` is Apple's canonical way to archive an .app
 # for notarytool. Plain `zip(1)` strips resource forks and extended
@@ -66,11 +160,13 @@ ditto -c -k --keepParent "$APP" "$ZIP"
 # `--output-format json` keeps parsing deterministic - the human-readable
 # default text shifts between Xcode releases.
 echo "Submitting $ZIP to notarytool..."
-SUBMIT_JSON="$(xcrun notarytool submit "$ZIP" \
+retry_transient "notarytool submit" --submission-id -- \
+    xcrun notarytool submit "$ZIP" \
     --apple-id "$APPLE_ID" \
     --password "$APPLE_APP_SPECIFIC_PASSWORD" \
     --team-id "$APPLE_TEAM_ID" \
-    --output-format json)"
+    --output-format json
+SUBMIT_JSON="$APPLE_RETRY_STDOUT"
 
 # Parse with python3 (stdlib, always present on macOS runners).
 SUBMISSION_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<< "$SUBMIT_JSON")"
@@ -182,7 +278,10 @@ done
 # The ticket is fetched from Apple's CDN and attached to the .app bundle
 # so Gatekeeper can validate offline (air-gapped installs, flaky wifi).
 # Without stapling, first-launch needs a round-trip to Apple servers.
-xcrun stapler staple "$APP"
+# Staple is retried (the ticket CDN can blip, or the connection can drop).
+# Validate stays a single check of whatever staple attached.
+retry_transient "stapler staple" -- \
+    xcrun stapler staple "$APP"
 xcrun stapler validate "$APP"
 
 # --- Gatekeeper smoke-test (AC5) -----------------------------------------
