@@ -13,8 +13,9 @@ pub struct GitDiffStats {
     pub files_changed: usize,
     pub insertions: usize,
     pub deletions: usize,
-    /// Untracked line reads stopped at [`GIT_DIFF_STAT_UNTRACKED_FILE_CAP`].
-    /// `insertions` is then a lower bound, not the exact total (issue #691).
+    /// Untracked line reads stopped at [`GIT_DIFF_STAT_UNTRACKED_FILE_CAP`],
+    /// or the `ls-files` listing exceeded [`GIT_LS_FILES_STDOUT_CAP`].
+    /// `insertions` is then a lower bound, not the exact total (issues #691, #913).
     pub insertions_truncated: bool,
 }
 
@@ -34,7 +35,15 @@ pub const GIT_STATS_SWEEP_DEADLINE: std::time::Duration = std::time::Duration::f
 
 /// stdout cap for `git diff --shortstat` - the command emits a single summary
 /// line, so 256 KiB is far beyond any real output while bounding a hijacked git.
+/// Path listings use [`GIT_LS_FILES_STDOUT_CAP`]; this cap is too small for
+/// those and must not be reused for them (issue #913).
 const GIT_DIFF_STAT_STDOUT_CAP: u64 = 256 * 1024;
+
+/// stdout cap for `git ls-files` path listings. 8 MiB holds on the order of
+/// 10^5 paths, so a large untracked tree still resolves exactly. Past this
+/// the probe keeps the captured prefix and sets [`GitDiffStats::insertions_truncated`]
+/// instead of dropping every untracked path (issue #913).
+const GIT_LS_FILES_STDOUT_CAP: u64 = 8 * 1024 * 1024;
 
 const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const GIT_DIFF_STAT_UNTRACKED_FILE_CAP: usize = 200;
@@ -133,13 +142,19 @@ impl GitDiffStats {
     }
 
     fn add_untracked(&mut self, cwd: &str, deadline_at: std::time::Instant) {
-        let Some(out) = git_stdout(
-            cwd,
+        let Ok((out, truncated)) = capture_git_stdout(
+            std::path::Path::new(cwd),
             &["ls-files", "--others", "--exclude-standard", "-z"],
             deadline_at,
+            GIT_LS_FILES_STDOUT_CAP,
         ) else {
             return;
         };
+        // `OutputLimitExceeded` is a partial listing, not "no untracked files".
+        // The line total below is then a lower bound (issue #913).
+        if truncated {
+            self.insertions_truncated = true;
+        }
         let text = String::from_utf8_lossy(&out);
         let to_read = self.record_untracked_paths(&text);
         self.insertions += untracked_insertions_within(cwd, to_read, deadline_at);
@@ -233,6 +248,214 @@ fn git_stdout(cwd: &str, args: &[&str], deadline_at: std::time::Instant) -> Opti
     let output =
         paneflow_process::run_with_timeout(cmd, remaining, GIT_DIFF_STAT_STDOUT_CAP).ok()?;
     output.status.success().then_some(output.stdout)
+}
+
+fn git_listing_command(cwd: &std::path::Path, args: &[&str]) -> std::process::Command {
+    let mut cmd = super::worktree::git_command();
+    super::worktree::git_subcommand(&mut cmd, args);
+    cmd.current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .env("LANGUAGE", "C");
+    cmd
+}
+
+/// Run one git command and capture stdout.
+///
+/// `Ok((bytes, true))` is stdout [`paneflow_process::ProcError::OutputLimitExceeded`]:
+/// `bytes` is the captured prefix (complete NUL-delimited records only). Callers
+/// degrade to a marked partial result. Timeouts and nonzero exits stay `Err`.
+pub(crate) fn capture_git_stdout(
+    cwd: &std::path::Path,
+    args: &[&str],
+    deadline_at: std::time::Instant,
+    stdout_cap: u64,
+) -> Result<(Vec<u8>, bool), String> {
+    let remaining = deadline_at
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|left| !left.is_zero())
+        .ok_or_else(|| "Git inspection timed out".to_string())?;
+    match paneflow_process::run_with_timeout(git_listing_command(cwd, args), remaining, stdout_cap)
+    {
+        Ok(output) => {
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr)
+                    .chars()
+                    .take(300)
+                    .collect());
+            }
+            Ok((output.stdout, false))
+        }
+        Err(paneflow_process::ProcError::OutputLimitExceeded {
+            stream: paneflow_process::OutputStream::Stdout,
+            ..
+        }) => {
+            // The bounded runner drops the prefix it already read. Read the
+            // listing once more and keep the complete records under the cap.
+            let prefix = read_stdout_prefix(cwd, args, deadline_at, stdout_cap);
+            Ok((prefix.unwrap_or_default(), true))
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+struct PrefixRead {
+    bytes: Vec<u8>,
+    truncated: bool,
+    failed: bool,
+}
+
+/// Second capture after stdout [`paneflow_process::ProcError::OutputLimitExceeded`].
+/// Stops at `cap` bytes and returns them; does not treat that limit as failure.
+fn read_stdout_prefix(
+    cwd: &std::path::Path,
+    args: &[&str],
+    deadline_at: std::time::Instant,
+    cap: u64,
+) -> Option<Vec<u8>> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    use std::sync::mpsc::TryRecvError;
+
+    let remaining = deadline_at.checked_duration_since(std::time::Instant::now())?;
+    if remaining.is_zero() {
+        return None;
+    }
+    let cap = usize::try_from(cap).ok()?;
+    let mut cmd = git_listing_command(cwd, args);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let mut child = cmd.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    if std::thread::Builder::new()
+        .name("git-listing-prefix".to_string())
+        .spawn(move || {
+            let _ = tx.send(read_capped_stdout(stdout, cap));
+        })
+        .is_err()
+    {
+        stop_child(&mut child);
+        return None;
+    }
+    let started = std::time::Instant::now();
+    let read = loop {
+        match rx.try_recv() {
+            Ok(read) => break Some(read),
+            Err(TryRecvError::Disconnected) => break None,
+            Err(TryRecvError::Empty) => {}
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let drain = remaining
+                    .saturating_sub(started.elapsed())
+                    .min(std::time::Duration::from_secs(1))
+                    .max(std::time::Duration::from_millis(200));
+                break rx.recv_timeout(drain).ok();
+            }
+            Ok(None) => {
+                if started.elapsed() >= remaining {
+                    stop_child(&mut child);
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => {
+                stop_child(&mut child);
+                return None;
+            }
+        }
+    };
+    if !matches!(child.try_wait(), Ok(Some(_))) {
+        stop_child(&mut child);
+    }
+    let read = read?;
+    if read.failed && read.bytes.is_empty() {
+        return None;
+    }
+    if read.truncated || read.failed {
+        Some(complete_nul_records(read.bytes, cap))
+    } else {
+        Some(read.bytes)
+    }
+}
+
+fn read_capped_stdout(mut pipe: impl std::io::Read, cap: usize) -> PrefixRead {
+    use std::io::ErrorKind;
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 32 * 1024];
+    loop {
+        match pipe.read(&mut chunk) {
+            Ok(0) => {
+                return PrefixRead {
+                    bytes,
+                    truncated: false,
+                    failed: false,
+                };
+            }
+            Ok(n) => {
+                let room = cap.saturating_add(1).saturating_sub(bytes.len());
+                if room == 0 {
+                    return PrefixRead {
+                        bytes,
+                        truncated: true,
+                        failed: false,
+                    };
+                }
+                let take = n.min(room);
+                bytes.extend_from_slice(&chunk[..take]);
+                if bytes.len() > cap {
+                    return PrefixRead {
+                        bytes,
+                        truncated: true,
+                        failed: false,
+                    };
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => {
+                return PrefixRead {
+                    bytes,
+                    truncated: false,
+                    failed: true,
+                };
+            }
+        }
+    }
+}
+
+/// Drop a trailing partial NUL record so a cut path is not counted.
+fn complete_nul_records(mut bytes: Vec<u8>, cap: usize) -> Vec<u8> {
+    if bytes.len() > cap {
+        bytes.truncate(cap);
+    }
+    match bytes.iter().rposition(|byte| *byte == 0) {
+        Some(end) => {
+            bytes.truncate(end + 1);
+            bytes
+        }
+        None => Vec::new(),
+    }
+}
+
+fn stop_child(child: &mut std::process::Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let pid = child.id();
+    if let Ok(pid) = i32::try_from(pid)
+        && pid > 0
+    {
+        // SAFETY: `pid` is this child's process-group id (`process_group(0)`
+        // at spawn). `SIGKILL` is a valid signal number.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn untracked_insertions(cwd: &str, rel_path: &str) -> usize {
@@ -1369,6 +1592,50 @@ mod tests {
         assert_eq!(to_read, vec!["a".to_string(), "b".to_string()]);
         assert!(!stats.insertions_truncated);
         assert_eq!(stats.insertion_label(), "+4");
+    }
+
+    #[test]
+    fn untracked_listing_over_cap_marks_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(
+            test_git(root, &["init"]),
+            "git init must succeed so the listing cap can be observed"
+        );
+        assert!(test_git(
+            root,
+            &["config", "core.excludesFile", "/dev/null"]
+        ));
+        // Long names keep the fixture small while the NUL-separated listing
+        // still exceeds [`GIT_LS_FILES_STDOUT_CAP`].
+        let stem = "n".repeat(240);
+        let per = stem.len() + 1 + 6 + 1;
+        let count = (GIT_LS_FILES_STDOUT_CAP as usize) / per + 2;
+        for index in 0..count {
+            let name = format!("{stem}-{index:06}");
+            std::fs::File::create(root.join(name)).unwrap();
+        }
+        let listed_bytes = count * per;
+        assert!(
+            listed_bytes > GIT_LS_FILES_STDOUT_CAP as usize,
+            "fixture listing is {listed_bytes} bytes, cap is {GIT_LS_FILES_STDOUT_CAP}"
+        );
+
+        let stats = GitDiffStats::from_cwd(root.to_str().unwrap());
+        assert!(
+            stats.insertions_truncated,
+            "over-cap listing left an exact count: {stats:?}"
+        );
+        assert_eq!(stats.insertion_label(), format!("+{}+", stats.insertions));
+        assert!(
+            stats.files_changed > 0,
+            "prefix of the listing was dropped: {stats:?}"
+        );
+        assert!(
+            stats.files_changed < count,
+            "file count {} includes every untracked path",
+            stats.files_changed
+        );
     }
 
     #[test]
