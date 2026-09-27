@@ -150,6 +150,15 @@ fn record_git_args(args: &[&str]) {
 fn record_git_args(_args: &[&str]) {}
 
 fn run_git_timed(dir: &Path, args: &[&str], deadline: Duration) -> Result<Vec<u8>, String> {
+    run_git_timed_with_config(dir, args, deadline, &[])
+}
+
+fn run_git_timed_with_config(
+    dir: &Path,
+    args: &[&str],
+    deadline: Duration,
+    clean_filter_overrides: &[String],
+) -> Result<Vec<u8>, String> {
     record_git_args(args);
     if deadline.is_zero() {
         return Err("git diff exceeded its deadline".to_string());
@@ -159,6 +168,11 @@ fn run_git_timed(dir: &Path, args: &[&str], deadline: Duration) -> Result<Vec<u8
     // (and holds `index.lock`) unless this is set. `GIT_OPTIONAL_LOCKS=0`
     // does not. Keep it before the subcommand so git treats it as config.
     cmd.args(["-c", "diff.autoRefreshIndex=false"]);
+    // Issue #1019: blank clean/process before `diff`, never after it.
+    // A trailing `-c` is combined-diff, not configuration.
+    for value in clean_filter_overrides {
+        cmd.arg("-c").arg(value);
+    }
     crate::workspace::worktree::git_subcommand(&mut cmd, args);
     cmd.current_dir(dir)
         // U-035: never block on a credential/helper prompt.
@@ -236,7 +250,14 @@ impl GitBudget {
     }
 
     fn run(&self, dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-        run_git_timed(dir, args, self.remaining()?)
+        let deadline = self.remaining()?;
+        // Filter listing is only worth a spawn for `git diff`. `rev-parse`
+        // and `ls-files` do not run textconv or clean filters (issue #1019).
+        if !crate::workspace::worktree::git_invokes_diff(args) {
+            return run_git_timed(dir, args, deadline);
+        }
+        let overrides = crate::workspace::worktree::git_diff_clean_filter_overrides(dir, deadline)?;
+        run_git_timed_with_config(dir, args, self.remaining()?, &overrides)
     }
 
     fn run_stdin(

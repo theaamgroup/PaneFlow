@@ -229,13 +229,26 @@ fn untracked_insertions_within(
 /// commands cannot stack independent [`GIT_DIFF_STAT_DEADLINE`]s; an exhausted
 /// budget spawns no process at all.
 fn git_stdout(cwd: &str, args: &[&str], deadline_at: std::time::Instant) -> Option<Vec<u8>> {
-    let remaining = deadline_at.checked_duration_since(std::time::Instant::now())?;
+    let mut remaining = deadline_at.checked_duration_since(std::time::Instant::now())?;
     if remaining.is_zero() {
         return None;
     }
-    // Isolated spawn: the repo's core.fsmonitor / core.hooksPath / diff.external
-    // and an inherited GIT_DIR must not steer the sidebar's periodic stats.
+    // Isolated spawn: repo hooks, fsmonitor, diff.external, and an inherited
+    // GIT_DIR must not steer the sidebar's periodic stats. A diff also blanks
+    // clean/process filters (issue #1019). `git_subcommand` adds `--no-textconv`.
+    // `rev-parse` and `ls-files` do not pay for a filter listing.
     let mut cmd = super::worktree::git_command();
+    if super::worktree::git_invokes_diff(args) {
+        let overrides =
+            super::worktree::git_diff_clean_filter_overrides(std::path::Path::new(cwd), remaining)
+                .ok()?;
+        for value in &overrides {
+            cmd.arg("-c").arg(value);
+        }
+        remaining = deadline_at
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|left| !left.is_zero())?;
+    }
     super::worktree::git_subcommand(&mut cmd, args);
     cmd.current_dir(cwd)
         // U-035: a hung credential/helper prompt would otherwise pin the

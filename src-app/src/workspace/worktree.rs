@@ -161,7 +161,9 @@ pub fn is_paneflow_worktree_dir(repo_root: &Path, branch: &str, path: &Path) -> 
 
 /// Isolated `git` spawn: ignore the opened repo's `core.hooksPath` /
 /// `core.fsmonitor` / `diff.external`, drop inherited git location/SSH env,
-/// and never prompt.
+/// and never prompt. `git diff` also passes `--no-textconv`. Clean filters
+/// are blanked per invocation by [`git_diff_clean_filter_overrides`]
+/// (issue #1019); their names are not known until config is read.
 pub(crate) fn git_command() -> Command {
     let mut cmd = Command::new("git");
     cmd.args([
@@ -213,13 +215,16 @@ fn git_subcommand_index(args: &[&str]) -> Option<usize> {
     None
 }
 
-/// Append a git subcommand, forcing `--no-ext-diff` on `git diff`.
+/// Append a git subcommand, forcing `--no-ext-diff` and `--no-textconv` on
+/// `git diff`.
 ///
 /// `-c alias.<name>=` is inserted immediately before the subcommand token,
 /// after any global options, so a repo or global alias cannot replace it.
 /// An `alias.status` that exits 0 with empty stdout would otherwise make
 /// [`is_clean_for_removal`] report a dirty tree as clean. The same clearance
 /// covers `rev-parse`, `ls-tree`, `branch`, and `switch` (issue #681).
+/// `--no-textconv` is the next argument after `--no-ext-diff` (issue #1019).
+/// Clean filters are not cleared here; see [`git_diff_clean_filter_overrides`].
 pub(crate) fn git_subcommand(cmd: &mut Command, args: &[&str]) {
     let Some(index) = git_subcommand_index(args) else {
         cmd.args(args);
@@ -231,13 +236,22 @@ pub(crate) fn git_subcommand(cmd: &mut Command, args: &[&str]) {
     }
     cmd.arg("-c").arg(format!("alias.{name}="));
     if name == "diff" {
-        cmd.arg("diff").arg("--no-ext-diff");
+        cmd.arg("diff").arg("--no-ext-diff").arg("--no-textconv");
         if index + 1 < args.len() {
             cmd.args(&args[index + 1..]);
         }
     } else {
         cmd.args(&args[index..]);
     }
+}
+
+/// Whether `args` invoke the `diff` subcommand, using the same option scan
+/// as [`git_subcommand`]. `rev-parse` and `ls-files` are not diffs.
+pub(crate) fn git_invokes_diff(args: &[&str]) -> bool {
+    matches!(
+        git_subcommand_index(args).map(|index| args[index]),
+        Some("diff")
+    )
 }
 
 /// Run a git plumbing command and return trimmed stdout, mapping every
@@ -258,6 +272,94 @@ fn run_git(repo: &Path, args: &[&str], deadline: Duration) -> Result<String, Str
         ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `-c` values that blank `filter.<name>.clean` and `filter.<name>.process`
+/// for one read-only `git diff`.
+///
+/// The listing is a direct [`git_command`] spawn, not a diff runner: those
+/// call back here, and `git config` must not recurse into filter
+/// neutralization. Exit code 1 means the pattern matched nothing. A name
+/// that is not `[A-Za-z0-9_-]+` refuses the diff: it cannot be passed as
+/// `-c` and must not be left runnable. Smudge is left configured.
+/// `required=false` is set because an empty `clean` with
+/// `filter.<name>.required=true` (Git LFS) makes
+/// `git diff` exit 128 instead of skipping the command.
+///
+/// `Ok` is only exit 0 (names) or exit 1 (none). Any other failure is `Err`
+/// so the caller does not run a diff whose filters could not be listed.
+pub(crate) fn git_diff_clean_filter_overrides(
+    dir: &Path,
+    deadline: Duration,
+) -> Result<Vec<String>, String> {
+    if deadline.is_zero() {
+        return Err("git diff exceeded its deadline".to_string());
+    }
+    let mut cmd = git_command();
+    cmd.current_dir(dir);
+    cmd.args([
+        "-c",
+        "alias.config=",
+        "config",
+        "--name-only",
+        "--get-regexp",
+        r"^filter\.",
+    ]);
+    let output = paneflow_process::run_with_timeout(cmd, deadline, STDOUT_CAP)
+        .map_err(|error| format!("git config --get-regexp ^filter\\. failed: {error}"))?;
+    match output.status.code() {
+        Some(0) => clean_filter_override_args(&String::from_utf8_lossy(&output.stdout)),
+        Some(1) => Ok(Vec::new()),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = stderr.trim();
+            Err(if detail.is_empty() {
+                "git config --get-regexp ^filter\\. failed".to_string()
+            } else {
+                format!("git config --get-regexp ^filter\\. failed: {detail}")
+            })
+        }
+    }
+}
+
+/// `filter.<name>.<variable>` lines from `git config --name-only --get-regexp`.
+///
+/// A name outside `[A-Za-z0-9_-]` cannot be passed as `-c` without becoming
+/// another argument, and skipping it would leave that filter's command
+/// runnable. The whole listing is refused so the caller does not diff.
+fn clean_filter_override_args(listed_keys: &str) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for raw in listed_keys.lines() {
+        let Some(rest) = raw.trim().strip_prefix("filter.") else {
+            continue;
+        };
+        let Some((name, _)) = rest.rsplit_once('.') else {
+            continue;
+        };
+        if !is_safe_filter_name(name) {
+            return Err(format!(
+                "refusing git diff: filter name {name:?} is not a safe identifier"
+            ));
+        }
+        if names.iter().any(|existing| existing == name) {
+            continue;
+        }
+        names.push(name.to_string());
+    }
+    let mut overrides = Vec::with_capacity(names.len().saturating_mul(3));
+    for name in names {
+        overrides.push(format!("filter.{name}.clean="));
+        overrides.push(format!("filter.{name}.process="));
+        overrides.push(format!("filter.{name}.required=false"));
+    }
+    Ok(overrides)
+}
+
+fn is_safe_filter_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '-'
+        })
 }
 
 /// `git worktree list --porcelain`, parsed.
@@ -1208,10 +1310,26 @@ mod tests {
         let no_ext = diff_cmd
             .find("--no-ext-diff")
             .expect("diff keeps --no-ext-diff");
+        let no_textconv = diff_cmd
+            .find("--no-textconv")
+            .expect("diff keeps --no-textconv");
         assert!(
-            alias_diff_at < diff_token && diff_token < no_ext,
-            "-c alias.diff= must precede diff --no-ext-diff: {diff_cmd}"
+            alias_diff_at < diff_token && diff_token < no_ext && no_ext < no_textconv,
+            "-c alias.diff= must precede diff --no-ext-diff --no-textconv: {diff_cmd}"
         );
+        let between = &diff_cmd[no_ext + "--no-ext-diff".len()..no_textconv];
+        assert!(
+            between.chars().all(|c| c == '"' || c == ' ' || c == '\\'),
+            "--no-textconv must follow --no-ext-diff immediately: {between:?} in {diff_cmd}"
+        );
+        assert!(
+            !status_cmd.contains("--no-textconv"),
+            "only git diff gets --no-textconv: {status_cmd}"
+        );
+        assert!(git_invokes_diff(&["diff", "--shortstat"]));
+        assert!(git_invokes_diff(&["-c", "color.ui=never", "diff"]));
+        assert!(!git_invokes_diff(&["rev-parse", "--show-toplevel"]));
+        assert!(!git_invokes_diff(&["ls-files", "--others"]));
         let dashed = rendered_git_subcommand(&["-c", "color.ui=never", "status"]);
         assert!(
             !dashed.contains("alias.-c"),
@@ -1364,6 +1482,141 @@ mod tests {
             !marker.exists(),
             "repo core.hooksPath/core.fsmonitor/diff.external must not run: {}",
             std::fs::read_to_string(&marker).unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn clean_filter_override_args_refuse_names_that_could_inject_argv() {
+        let overrides = clean_filter_override_args(
+            "\
+filter.x.clean
+filter.x.smudge
+filter.x.process
+filter.x.required
+not-a-filter
+",
+        )
+        .expect("safe filter names");
+        assert_eq!(
+            overrides,
+            vec![
+                "filter.x.clean=".to_string(),
+                "filter.x.process=".to_string(),
+                "filter.x.required=false".to_string(),
+            ]
+        );
+        for unsafe_listing in [
+            "filter.bad name.clean\n",
+            "filter.foo.bar.clean\n",
+            "filter..clean\n",
+        ] {
+            assert!(
+                clean_filter_override_args(unsafe_listing).is_err(),
+                "{unsafe_listing:?} must refuse the diff"
+            );
+        }
+    }
+
+    #[test]
+    fn sidebar_stats_and_diff_fingerprint_do_not_run_textconv_or_clean_filters() {
+        // The clean filter is installed after the commit. `git add` is not a
+        // diff and would run `filter.x.clean`, which would create the marker
+        // before the probes under test.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        run_git(&repo_root, &["init"], GIT_DEADLINE).expect("git init");
+        run_git(
+            &repo_root,
+            &["config", "user.email", "paneflow-tests@example.invalid"],
+            GIT_DEADLINE,
+        )
+        .expect("git config email");
+        run_git(
+            &repo_root,
+            &["config", "user.name", "PaneFlow Tests"],
+            GIT_DEADLINE,
+        )
+        .expect("git config name");
+        run_git(
+            &repo_root,
+            &["config", "core.autocrlf", "false"],
+            GIT_DEADLINE,
+        )
+        .expect("git config autocrlf");
+        std::fs::write(repo_root.join("tracked.txt"), "one\n").expect("tracked file");
+        std::fs::write(repo_root.join(".gitattributes"), "* diff=x filter=x\n")
+            .expect("gitattributes");
+        run_git(&repo_root, &["add", "."], GIT_DEADLINE).expect("git add");
+        run_git(
+            &repo_root,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "fixture"],
+            GIT_DEADLINE,
+        )
+        .expect("git commit");
+
+        let marker = tmp.path().join("FILTER_RAN");
+        let marker_script = tmp.path().join("marker.sh");
+        std::fs::write(
+            &marker_script,
+            format!(
+                "#!/bin/sh\nprintf 'ran\\n' >> '{}'\nif [ $# -eq 0 ]; then cat; else cat \"$1\"; fi\nexit 0\n",
+                marker.display()
+            ),
+        )
+        .expect("marker script");
+        let mut permissions = std::fs::metadata(&marker_script)
+            .expect("marker metadata")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&marker_script, permissions).expect("chmod marker");
+
+        let marker_script_s = marker_script.to_string_lossy();
+        run_git(
+            &repo_root,
+            &["config", "diff.x.textconv", &marker_script_s],
+            GIT_DEADLINE,
+        )
+        .expect("config textconv");
+        run_git(
+            &repo_root,
+            &["config", "filter.x.clean", &marker_script_s],
+            GIT_DEADLINE,
+        )
+        .expect("config clean filter");
+        assert!(
+            !marker.exists(),
+            "setup must not run textconv or the clean filter"
+        );
+
+        std::fs::write(repo_root.join("tracked.txt"), "one\ntwo\n").expect("dirty worktree");
+        let cwd = repo_root.to_str().expect("utf-8 temp path");
+        let stats = crate::workspace::GitDiffStats::from_cwd_within(
+            cwd,
+            std::time::Instant::now() + crate::workspace::GIT_STATS_SWEEP_DEADLINE,
+        );
+        assert!(
+            !marker.exists(),
+            "sidebar diff stats ran textconv or a clean filter: {}",
+            std::fs::read_to_string(&marker).unwrap_or_default()
+        );
+        assert_eq!(
+            (stats.files_changed, stats.insertions, stats.deletions),
+            (1, 1, 0),
+            "sidebar diff did not report the dirty file: {stats:?}"
+        );
+
+        let first = crate::diff::column_fingerprint(&repo_root, "HEAD");
+        std::fs::write(repo_root.join("tracked.txt"), "one\ntwo\nthree\n").expect("second edit");
+        let second = crate::diff::column_fingerprint(&repo_root, "HEAD");
+        assert!(
+            !marker.exists(),
+            "diff fingerprint ran textconv or a clean filter: {}",
+            std::fs::read_to_string(&marker).unwrap_or_default()
+        );
+        assert_ne!(
+            first, second,
+            "diff fingerprint did not observe the tracked edit"
         );
     }
 
