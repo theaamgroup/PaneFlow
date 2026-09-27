@@ -1895,16 +1895,28 @@ impl Render for TerminalView {
         }
 
         if self.copy_mode_active {
+            // Accent plate, with the label lifted to MIN_APCA_CONTRAST.
+            // Status role so AccessKit reports copy mode; the pinned GPUI
+            // has no live-region setter.
+            use crate::terminal::element::{MIN_APCA_CONTRAST, ensure_minimum_contrast};
+
+            let ui = crate::theme::ui_colors();
             let copy_badge = div()
                 .id("copy-mode-badge")
+                .role(Role::Status)
+                .aria_label("Copy mode")
                 .absolute()
                 .top_1()
                 .right_1()
                 .px_2()
                 .py(gpui::px(2.0))
                 .rounded_md()
-                .bg(gpui::rgba(0x89b4facc))
-                .text_color(gpui::rgb(0x1e1e2e))
+                .bg(ui.accent)
+                .text_color(ensure_minimum_contrast(
+                    ui.text,
+                    ui.accent,
+                    MIN_APCA_CONTRAST,
+                ))
                 .text_size(gpui::px(11.0))
                 .font_weight(gpui::FontWeight::BOLD)
                 .child("COPY");
@@ -2323,6 +2335,38 @@ mod tests {
                 "search-status lost `{needle}`; AccessKit needs it to announce result changes"
             );
         }
+    }
+
+    /// Issue #919: the COPY badge painted a fixed Catppuccin plate on every
+    /// theme and had no role, so VoiceOver never heard that copy mode was on.
+    #[test]
+    fn copy_mode_badge_is_themed_and_an_accessible_status() {
+        let source = include_str!("view.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production terminal view source");
+        let chain = source
+            .split(".id(\"copy-mode-badge\")")
+            .nth(1)
+            .and_then(|rest| rest.split(".child(\"COPY\")").next())
+            .expect("view.rs builds the copy-mode-badge node");
+        for needle in [".role(Role::Status)", ".aria_label(\"Copy mode\")"] {
+            assert!(
+                chain.contains(needle),
+                "copy-mode-badge lost `{needle}`; AccessKit needs it to announce copy mode"
+            );
+        }
+        assert!(
+            chain.contains(".bg(ui.accent)")
+                && chain.contains("ensure_minimum_contrast(")
+                && chain.contains("ui.text")
+                && chain.contains("MIN_APCA_CONTRAST"),
+            "copy-mode-badge must paint ui.accent with a contrast-safe label: {chain}"
+        );
+        assert!(
+            !chain.contains("0x") && !chain.contains("rgb(") && !chain.contains("rgba("),
+            "copy-mode-badge still has a hex color literal: {chain}"
+        );
     }
 
     #[test]
