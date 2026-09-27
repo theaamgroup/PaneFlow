@@ -15,7 +15,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -46,6 +46,7 @@ const TITLE_SCAN_BYTES: u64 = 1024 * 1024;
 
 // US-013: per-line JSONL read cap, centralized (see `crate::limits`).
 use crate::limits::MAX_LINE_BYTES;
+use crate::pi_sessions::{CappedLine, read_capped_line};
 
 /// Cap rendered first-user-message labels at this character count to keep
 /// the popover row from overflowing horizontally.
@@ -326,7 +327,6 @@ pub fn read_sessions_for_cwd_with_omitted(cwd: &str) -> (Vec<SessionMeta>, usize
 fn read_session_meta(path: &Path) -> Option<SessionMeta> {
     let file = fs::File::open(path).ok()?;
     let mut reader = BufReader::new(file);
-    let mut buf = String::new();
 
     let mut envelope: Option<FirstLineEnvelope> = None;
     let mut ai_title: Option<String> = None;
@@ -334,85 +334,23 @@ fn read_session_meta(path: &Path) -> Option<SessionMeta> {
 
     let mut title_budget = TITLE_SCAN_BYTES;
     for _ in 0..TITLE_SCAN_LIMIT {
-        // Stop once the remaining budget can no longer hold a full line. The
-        // threshold is MAX_LINE_BYTES rather than zero so the oversized-line
-        // detection below stays exact: it compares the read length against
-        // that constant, which only holds while the whole cap is available.
+        // Stop once the remaining budget can no longer hold a full line, so
+        // `read_capped_line`'s `read == MAX_LINE_BYTES` check stays exact.
         if title_budget < MAX_LINE_BYTES {
             break;
         }
-        buf.clear();
-        // US-010 (cli-hardening-followup-2026-Q3): cap each line read
-        // at MAX_LINE_BYTES. An agent can write to
-        // `~/.claude/projects/<slug>/` (it's the very directory Claude
-        // Code persists sessions to), so a malicious 500 MB
-        // single-line JSONL would otherwise allocate fully on a
-        // background smol::unblock thread before the
-        // TITLE_SCAN_LIMIT count guard fires. Truncation surfaces as
-        // a partial line that fails serde_json::from_str and is
-        // skipped on `continue` below; the file's session entry is
-        // simply omitted, not the entire scan.
-        let n = reader
-            .by_ref()
-            .take(MAX_LINE_BYTES)
-            .read_line(&mut buf)
-            .ok()?;
-        if n == 0 {
-            break;
-        }
-        title_budget = title_budget.saturating_sub(n as u64);
-        if n as u64 == MAX_LINE_BYTES && !buf.ends_with('\n') {
-            // U-017: an exactly-MAX_LINE_BYTES line with no trailing newline is
-            // ambiguous - it may be a genuinely TRUNCATED oversized line, or a
-            // COMPLETE final record written without a final EOL. Peek one byte
-            // to disambiguate: empty = EOF = the line is complete, fall through
-            // and parse it (don't drop a valid final session). Non-empty = more
-            // bytes follow = the cap truncated it mid-line → genuinely oversized.
-            let more_follows = match reader.fill_buf() {
-                Ok(b) => !b.is_empty(),
-                // I/O error mid-read: abort like the drain loop below (don't
-                // silently fall through and parse a possibly-truncated buf).
-                Err(_) => return None,
-            };
-            if more_follows {
-                // Newer Claude Code writes oversized records ahead of the
-                // envelope -- notably a `type:"queue-operation"` first line
-                // whose `content` blob can run to hundreds of KB and which
-                // carries no `cwd`. Abandoning the file here dropped the
-                // whole session from the sidebar (and logged a WARN per
-                // file on every open). Instead, discard the rest of this
-                // one overlong line in bounded chunks -- preserving the
-                // US-010 anti-OOM guard, since we never buffer the tail --
-                // and keep scanning: the envelope lands on a later,
-                // normal-sized line.
-                log::debug!(
-                    target: "paneflow_app::claude_sessions",
-                    "skipped an oversized (>{} B) line in {}; continuing scan for the envelope",
-                    MAX_LINE_BYTES,
-                    path.display(),
-                );
-                loop {
-                    let chunk = match reader.fill_buf() {
-                        Ok(b) => b,
-                        Err(_) => return None,
-                    };
-                    if chunk.is_empty() {
-                        return None; // EOF mid-line: nothing more to find.
-                    }
-                    if let Some(nl) = chunk.iter().position(|&b| b == b'\n') {
-                        reader.consume(nl + 1);
-                        break;
-                    }
-                    let consumed = chunk.len();
-                    reader.consume(consumed);
-                    title_budget = title_budget.saturating_sub(consumed as u64);
-                }
-                continue;
-            }
-            // EOF after exactly MAX_LINE_BYTES: `buf` is a complete final
-            // record - fall through to the normal parse below.
-        }
-        let trimmed = buf.trim_end();
+        // US-010: cap each line. A split multibyte character used to make
+        // `read_line` return `InvalidData` and drop the file. Oversized lines
+        // are skipped. Once the envelope is known, a later read error keeps
+        // the row: EOF mid-line comes back as `Oversized`, then `Eof`.
+        let line = match read_capped_line(&mut reader, path, &mut title_budget) {
+            Some(CappedLine::Eof) => break,
+            Some(CappedLine::Oversized) => continue,
+            Some(CappedLine::Line(line)) => line,
+            None if envelope.is_some() => break,
+            None => return None,
+        };
+        let trimmed = line.trim_end();
         if !trimmed.starts_with('{') {
             continue;
         }
@@ -996,6 +934,35 @@ mod tests {
             read_session_meta(&path).is_none(),
             "an oversized line must be skipped, not parsed"
         );
+    }
+
+    #[test]
+    fn claude_session_survives_an_oversized_multibyte_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir
+            .path()
+            .join("aaaaaaaa-1111-2222-3333-444444444444.jsonl");
+        // U+3042 is 3 bytes and 64 KiB % 3 == 1, so the cap splits a character.
+        let oversized = "\u{3042}".repeat((MAX_LINE_BYTES as usize / 3) + 8);
+        assert!(oversized.len() > MAX_LINE_BYTES as usize);
+        assert!(!oversized.is_char_boundary(MAX_LINE_BYTES as usize));
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{oversized}\n{}\n",
+                r#"{"parentUuid":null,"type":"user","message":{"role":"user","content":"hi"},"uuid":"u","timestamp":"2026-04-26T13:38:41.095Z","cwd":"/tmp/proj","sessionId":"aaaaaaaa-1111-2222-3333-444444444444","version":"2.1.119","gitBranch":"main"}"#,
+                r#"{"type":"ai-title","aiTitle":"Still here","sessionId":"aaaaaaaa-1111-2222-3333-444444444444"}"#,
+            ),
+        )
+        .expect("write fixture");
+
+        let meta = read_session_meta(&path).expect("session stays listed");
+        assert_eq!(meta.agent, SessionAgent::Claude);
+        assert_eq!(meta.session_id, "aaaaaaaa-1111-2222-3333-444444444444");
+        assert_eq!(meta.cwd, "/tmp/proj");
+        assert_eq!(meta.timestamp, "2026-04-26T13:38:41.095Z");
+        assert_eq!(meta.git_branch, "main");
+        assert_eq!(meta.summary.as_deref(), Some("Still here"));
     }
 
     #[test]
