@@ -62,7 +62,7 @@ load. `+` and `-` both parse as separators.
 
 ## Default binding reference
 
-All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 74 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in CLAUDE.md drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
+All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 78 actions total (`app/actions.rs`; `claude_md_action_count_matches_the_actions_macro` fails if this number or the one in CLAUDE.md drifts from the `actions!` block); tables in `keybindings/defaults.rs`.
 
 **`secondary` resolves to Cmd on macOS** (`defaults.rs`), so every `secondary-*` default below is a Cmd binding here. `MACOS_ONLY_DEFAULTS` (`defaults.rs`) adds `Cmd+C`, `Cmd+V`, `Cmd+K` (Terminal: copy, paste, clear scrollback) and `Cmd+Q` (quit) on top.
 
@@ -80,6 +80,8 @@ All registered in `keybindings::apply_keybindings()` via `cx.bind_keys()`. 74 ac
 | `Cmd+1`-`Cmd+9` | Select workspace | Global |
 | `Cmd+Alt+1`-`4` | Layout preset: even-h, even-v, main-vertical, tiled | Global |
 | `Cmd+Shift+=` | Equalize splits | Global |
+| `Cmd+Ctrl+Right` / `Cmd+Ctrl+Left` | Grow / shrink focused pane width (`pane_grow_width`, `pane_shrink_width`) | Global |
+| `Cmd+Ctrl+Down` / `Cmd+Ctrl+Up` | Grow / shrink focused pane height (`pane_grow_height`, `pane_shrink_height`) | Global |
 | `Cmd+Shift+Z` | Toggle zoom | Global |
 | `Cmd+Shift+J` | Jump to next waiting agent, including background tabs | Global |
 | `Cmd+Shift+P` | Pane overview (every terminal pane, all workspaces and tabs) | Global |

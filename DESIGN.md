@@ -931,6 +931,7 @@ a chord or a menu item, and MUST NOT rely on a surface that has neither.
 | Workspaces 1 to 9 | `secondary-1` to `secondary-9` |
 | Layout presets | `secondary-alt-1` to `secondary-alt-4` |
 | Zoom, equalize | `secondary-shift-z`, `secondary-shift-=` |
+| Resize the focused pane | `secondary-ctrl-right`, `secondary-ctrl-left`, `secondary-ctrl-down`, `secondary-ctrl-up` |
 | Review | `secondary-shift-g` |
 | Pane overview | `secondary-shift-p` |
 | Work review | `secondary-shift-u` |
@@ -943,6 +944,8 @@ a chord or a menu item, and MUST NOT rely on a surface that has neither.
 | Copy mode, find in buffer | `ctrl-shift-x`, `ctrl-shift-f` |
 | Diff: hunks, view, dismiss | `]`, `[`, `u`, `escape` |
 | Quit | `cmd-q` |
+
+Keyboard resize exists: the focused pane grows or shrinks by a fixed pixel step on the nearest split of that axis, and a step never shrinks either neighbor below the 80 px minimum.
 
 Four bans are enforced by tests and MUST hold:
 

@@ -4,7 +4,7 @@
 //! with a direction (horizontal/vertical) and per-child flex ratios.
 //!
 //! Module layout (US-029 of the src-app refactor PRD):
-//! - [`tree`] - core types, constants, ratio helpers, `new_split`
+//! - [`tree`] - core types, constants, ratio helpers, keyboard resize, `new_split`
 //! - [`mutations`] - `split_at_*` and `swap_panes`
 //! - [`close`] - `close_focused` and `remove_pane` (kept separate from
 //!   `mutations` for the 280 LOC cap)
@@ -25,6 +25,7 @@ mod tree;
 
 pub use navigation::{FocusDirection, FocusNav};
 pub(crate) use render::SplitPreview;
+pub(crate) use tree::KeyboardResize;
 pub use tree::{LayoutTree, SplitDirection};
 
 /// Hard cap on leaf panes in a single workspace's layout tree (US-054: single
