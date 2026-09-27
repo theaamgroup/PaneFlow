@@ -78,6 +78,8 @@ impl PaneFlowApp {
     /// top-level key and would otherwise drop the siblings - and because a
     /// `branch` turned off has to land as an explicit `false`, its absent
     /// value meaning `true` (issue #349). The ignored `pr` key is not written.
+    /// [`Self::persist_setting`] updates the on-screen cache before it returns
+    /// and writes the file off the GPUI thread (issue #908).
     fn toggle_sidebar_show(&mut self, line: SidebarShowLine, cx: &mut Context<Self>) {
         // Hold the menu open across the flip. The popover's `on_mouse_up_out`
         // runs in the capture phase of this very release - the submenu is
@@ -101,14 +103,7 @@ impl PaneFlowApp {
             "diffstat": show.diffstat_enabled(),
             "indent_guide": show.indent_guide_enabled(),
         });
-        if !crate::config_writer::save_config_values_checked([("sidebar_show", value)]) {
-            self.show_toast("Could not save the sidebar setting", cx);
-            return;
-        }
-        // The file write comes back through the config watcher on a later
-        // tick; the switch has to show its effect on this frame.
-        self.cached_config.sidebar_show = show;
-        cx.notify();
+        self.persist_setting(false, "sidebar_show", value, cx);
     }
 
     /// Fold or unfold every workspace at once (issue #349).
@@ -435,8 +430,306 @@ mod tests {
             "toggle_sidebar_show must not write the ignored pr key"
         );
         assert!(
-            toggle.contains("save_config_values_checked([(\"sidebar_show\", value)])"),
-            "the object is persisted through config_writer's read-modify-write"
+            toggle.contains("persist_setting("),
+            "the object is persisted off the GPUI thread"
         );
+        assert!(
+            !toggle.contains("save_config_values_checked"),
+            "toggle_sidebar_show must not fsync paneflow.json on the caller"
+        );
+    }
+
+    /// Issue #908: the click updates the rail and returns while the config
+    /// write is still blocked. A failed write toasts; an inline `sync_all`
+    /// would still be holding the config write lock when this returns.
+    #[gpui::test]
+    fn sidebar_show_toggle_does_not_fsync_on_the_caller(cx: &mut gpui::TestAppContext) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        use gpui::AppContext;
+
+        const SEED: &str = "{\"theme\":\"Keep\"}\n";
+
+        // `PANEFLOW_HOME` is read once per process. Re-exec this test so the
+        // child is the first reader and the write cannot land in the real
+        // settings file after another test has already resolved the path.
+        if std::env::var_os("PANEFLOW_SIDEBAR_FS_PROBE").is_none() {
+            let home = tempfile::TempDir::new().expect("temp home");
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "sidebar_show_toggle_does_not_fsync_on_the_caller",
+                    "--exact",
+                    "--test-threads=1",
+                ])
+                .env("PANEFLOW_SIDEBAR_FS_PROBE", "1")
+                .env(paneflow_config::loader::HOME_ENV, home.path())
+                .status()
+                .expect("re-exec sidebar probe");
+            assert!(status.success(), "sidebar probe child failed");
+            return;
+        }
+
+        let home = std::path::PathBuf::from(
+            std::env::var_os(paneflow_config::loader::HOME_ENV).expect("probe home"),
+        );
+        let config_path = paneflow_config::loader::config_path().expect("config path");
+        assert!(
+            config_path.starts_with(&home),
+            "refusing to touch a config outside the test home: {}",
+            config_path.display()
+        );
+        std::fs::create_dir_all(config_path.parent().expect("config dir")).expect("config dir");
+        std::fs::write(&config_path, SEED).expect("seed config");
+
+        let lock_held = std::sync::Arc::new(AtomicBool::new(false));
+        let held_flag = std::sync::Arc::clone(&lock_held);
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = crate::config_writer::hold_config_write_lock_for_test();
+            held_flag.store(true, Ordering::SeqCst);
+            let _ = held_tx.send(());
+            let _ = release_rx.recv_timeout(Duration::from_secs(3));
+            held_flag.store(false, Ordering::SeqCst);
+        });
+        struct ReleaseLock {
+            tx: Option<mpsc::Sender<()>>,
+            holder: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for ReleaseLock {
+            fn drop(&mut self) {
+                if let Some(tx) = self.tx.take() {
+                    let _ = tx.send(());
+                }
+                if let Some(holder) = self.holder.take() {
+                    let _ = holder.join();
+                }
+            }
+        }
+        let release_lock = ReleaseLock {
+            tx: Some(release_tx),
+            holder: Some(holder),
+        };
+        held_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("config write lock was not acquired");
+
+        let cx = cx.add_empty_window();
+        let app = cx.new(blank_paneflow_app);
+        let started = Instant::now();
+        app.update(cx, |this, cx| {
+            this.toggle_sidebar_show(super::SidebarShowLine::Diffstat, cx);
+            assert!(
+                this.cached_config.sidebar_show.diffstat_enabled(),
+                "the rail must show the flip before the file write finishes"
+            );
+            assert!(this.sidebar_customize_menu_open);
+            assert!(this.sidebar_show_submenu_open);
+        });
+        let elapsed = started.elapsed();
+        assert!(
+            lock_held.load(Ordering::SeqCst),
+            "toggle returned only after the config write lock was released"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "toggle_sidebar_show blocked for {elapsed:?}; the fsync ran on the caller"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("seed still readable"),
+            SEED,
+            "the caller wrote paneflow.json"
+        );
+
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            lock_held.load(Ordering::SeqCst),
+            "the config write finished while the test still expected it blocked"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("seed still readable"),
+            SEED,
+            "paneflow.json changed while the write lock was held"
+        );
+        let (in_flight, toasted) = cx.update(|_, cx| {
+            let app = app.read(cx);
+            (
+                app.config_persist_in_flight.load(Ordering::SeqCst),
+                app.toast.as_ref().map(|toast| toast.message.clone()),
+            )
+        });
+        assert_eq!(
+            in_flight, 1,
+            "the off-thread write should still be in flight"
+        );
+        assert!(
+            toasted.is_none(),
+            "toast fired before the blocked write failed: {toasted:?}"
+        );
+
+        std::fs::remove_file(&config_path).expect("remove seed");
+        std::fs::create_dir(&config_path).expect("arm a failing config path");
+        // The write finishes on the blocking pool and wakes the foreground
+        // task from that thread. The test scheduler accepts that only after
+        // parking is allowed.
+        cx.executor().allow_parking();
+        drop(release_lock);
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let message = loop {
+            cx.run_until_parked();
+            let message = cx.update(|_, cx| {
+                app.read(cx)
+                    .toast
+                    .as_ref()
+                    .map(|toast| toast.message.clone())
+            });
+            if message.is_some() {
+                break message;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "failed sidebar_show write did not toast"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(
+            message.as_deref(),
+            Some("Could not save setting: sidebar_show")
+        );
+        cx.update(|_, cx| {
+            let app = app.read(cx);
+            assert!(
+                app.cached_config.sidebar_show.diffstat_enabled(),
+                "a failed write must keep the on-screen value and say so"
+            );
+        });
+        assert!(
+            config_path.is_dir(),
+            "the failed write must not replace the config with a file"
+        );
+    }
+
+    fn blank_paneflow_app(cx: &mut gpui::Context<crate::PaneFlowApp>) -> crate::PaneFlowApp {
+        use std::sync::atomic::{AtomicU64, AtomicUsize};
+        use std::sync::{Arc, Mutex};
+
+        use gpui::AppContext;
+
+        let settings_search_input =
+            cx.new(|cx| crate::widgets::text_input::TextInput::new("", "Search settings…", cx));
+        let shortcut_search_input = cx.new(|cx| {
+            crate::widgets::text_input::TextInput::new("", "Search actions or keys…", cx)
+        });
+        let sessions_filter_input =
+            cx.new(|cx| crate::widgets::text_input::TextInput::new("", "Filter sessions", cx));
+        let (_ipc_tx, ipc_rx) = std::sync::mpsc::channel();
+        let (_git_tx, git_event_rx) = std::sync::mpsc::channel();
+        crate::PaneFlowApp {
+            workspaces: Vec::new(),
+            active_idx: 0,
+            renaming_idx: None,
+            renaming_tab: None,
+            rename_text: String::new(),
+            rename_seeded: false,
+            pending_config: Arc::new(Mutex::new(None)),
+            save_seq: Arc::new(AtomicU64::new(0)),
+            session_corruption: None,
+            session_restore: None,
+            config_persist_seq: Arc::new(AtomicU64::new(0)),
+            config_field_persist_seq: Arc::new(crate::config_writer::FieldPersistSeq::default()),
+            config_persist_in_flight: Arc::new(AtomicUsize::new(0)),
+            config_last_persist_gen: Arc::new(AtomicU64::new(0)),
+            cached_config: paneflow_config::schema::PaneFlowConfig::default(),
+            ipc_rx,
+            ipc_status: crate::ipc::IpcStatus::disabled_for_test(),
+            title_bar: cx.new(crate::window_chrome::title_bar::TitleBar::new),
+            primary_sidebar_visible: true,
+            primary_sidebar_animation: None,
+            git_watcher: None,
+            git_event_rx,
+            git_watch_counts: std::collections::HashMap::new(),
+            terminal_branches: std::collections::HashMap::new(),
+            settings_section: None,
+            settings_scroll: gpui::ScrollHandle::new(),
+            settings_drag: None,
+            settings_search_input,
+            terminal_dropdown: None,
+            general_dropdown: None,
+            new_tab_branch_dropdown: None,
+            sidebar_scroll: gpui::ScrollHandle::new(),
+            effective_shortcuts: Vec::new(),
+            recording_shortcut_idx: None,
+            shortcut_search_input,
+            shortcut_capture_active: false,
+            shortcut_reset_pending: false,
+            collapsed_shortcut_groups: std::collections::HashSet::new(),
+            shortcut_rows: Vec::new(),
+            shortcut_list: crate::settings::tabs::shortcuts::new_shortcut_list_state(),
+            shortcut_drag: None,
+            settings_focus: cx.focus_handle(),
+            mono_font_names: Vec::new(),
+            font_dropdown_open: false,
+            font_search: String::new(),
+            theme_dropdown_open: false,
+            theme_mode: crate::ThemeMode::Dark,
+            workspace_menu_open: None,
+            worktree_states: crate::app::tab_worktree::WorktreeStates::default(),
+            branch_checkout_pending: None,
+            sidebar_customize_menu_open: false,
+            sidebar_show_submenu_open: false,
+            tab_menu_open: None,
+            pane_menu_open: None,
+            pending_pane_focus: None,
+            agent_sessions: crate::AgentSessionsState {
+                sessions_sidebar_open: false,
+                sessions_sidebar_animation: None,
+                sessions_by_agent: std::array::from_fn(|_| Vec::new()),
+                sessions_omitted: [0; crate::agent_sessions::SESSION_AGENT_COUNT],
+                sessions_cwd: None,
+                sessions_surface_id: None,
+                sessions_bound_palette: None,
+                sessions_scroll: gpui::ScrollHandle::new(),
+                sessions_scan_generation: 0,
+                sessions_selected: 0,
+                sessions_focus: cx.focus_handle(),
+                sessions_group_collapsed: [false; crate::agent_sessions::SESSION_AGENT_COUNT],
+                sessions_group_show_all: [false; crate::agent_sessions::SESSION_AGENT_COUNT],
+                sessions_scanning: [false; crate::agent_sessions::SESSION_AGENT_COUNT],
+                sessions_filter_input,
+            },
+            toast: None,
+            toast_queue: std::collections::VecDeque::new(),
+            _toast_task: None,
+            toast_serial: 0,
+            jump_cursor: None,
+            closed_items: Vec::new(),
+            show_about_dialog: false,
+            about_dialog_focus: cx.focus_handle(),
+            system_info_dialog: None,
+            system_info_dialog_focus: cx.focus_handle(),
+            overlay_origins: Default::default(),
+            pane_overview: None,
+            pane_overview_focus: cx.focus_handle(),
+            work_review: None,
+            work_review_focus: cx.focus_handle(),
+            pane_palette: None,
+            pane_palette_focus: cx.focus_handle(),
+            pending_palette_focus: false,
+            pending_palette_launch: None,
+            pending_close: None,
+            claude_registry_seen: Default::default(),
+            claude_registry_sweep_pending: false,
+            pending_close_focus: cx.focus_handle(),
+            pending_close_focus_claim: false,
+            review: crate::app::review::ReviewState::new(cx),
+            mode: paneflow_config::schema::AppMode::Cli,
+            sidebar_order_cache: std::cell::RefCell::new(Default::default()),
+            empty_workspace_focus: cx.focus_handle(),
+            sidebar_rename_focus: cx.focus_handle(),
+        }
     }
 }
