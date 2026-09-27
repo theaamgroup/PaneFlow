@@ -158,7 +158,7 @@ impl PaneFlowApp {
     /// Every persisted terminal surface emits `scrollback: None`, keeping PTY
     /// output local to the process that produced it.
     pub(crate) fn build_session_state(&self, cx: &App) -> paneflow_config::schema::SessionState {
-        paneflow_config::schema::SessionState {
+        let mut state = paneflow_config::schema::SessionState {
             version: paneflow_config::schema::SESSION_SCHEMA_VERSION,
             active_workspace: self.active_idx,
             workspaces: self
@@ -199,7 +199,10 @@ impl PaneFlowApp {
             // the rail without touching it - so quitting from Settings still
             // saves the collapse the user chose before opening it.
             primary_sidebar_collapsed: !self.primary_sidebar_visible,
-        }
+        };
+        // Issue #1024: a probe that did not finish must not be saved as the fallback.
+        apply_unconfirmed_persisted_paths(&mut state, &self.workspaces, cx);
+        state
     }
 
     /// US-011: persist the session WITHOUT blocking the GPUI main thread.
@@ -666,14 +669,21 @@ impl PaneFlowApp {
         // can spend the batch deadline. A live directory answers during the
         // same wait as a dead mount. Issue #878.
         warm_restore_cwd_probes(ws_session);
-        let mut cwd = restored_workspace_cwd(&ws_session.cwd);
+        // `cwd` is the directory this launch may spawn in. When the probe
+        // did not finish it is the fallback, and the original string is
+        // kept aside so the save does not record that fallback.
+        let probed_cwd = restored_workspace_cwd(&ws_session.cwd);
+        let mut cwd = probed_cwd.spawn;
+        let mut persisted_cwd = probed_cwd.persisted;
         let mut title = ws_session.title.clone();
-        if should_repair_restored_root_terminal(&title, &cwd) {
+        if persisted_cwd == cwd && should_repair_restored_root_terminal(&title, &cwd) {
             let repaired_cwd = launch_cwd::implicit_launch_cwd();
             log::info!("session restore: repairing legacy default workspace at filesystem root");
             title = launch_cwd::title_for_cwd_or(&repaired_cwd, title);
-            cwd = repaired_cwd;
+            cwd = repaired_cwd.clone();
+            persisted_cwd = repaired_cwd;
         }
+        let keep_original_cwd = persisted_cwd != cwd;
         let ws_id = next_workspace_id();
 
         // US-018: v2 restores a tab list. A v1 file never reaches here
@@ -711,11 +721,14 @@ impl PaneFlowApp {
                 }
                 workspace_terminals += n;
             }
-            // The binding is settled BEFORE the panes spawn: a bound tab's
-            // shells start in its checkout, not at the workspace root with
-            // only the row claiming the branch (issue #347).
-            let bound = restored_tab_worktree(&title, tab_session.worktree.as_deref());
-            let spawn_root = crate::workspace::tab_spawn_root(bound.as_deref(), &cwd);
+            // The binding is settled BEFORE the panes spawn: a confirmed
+            // checkout is where the shells start, not the workspace root
+            // with only the row claiming the branch (issue #347). An
+            // unconfirmed binding is kept for the save but is not a spawn
+            // root (issue #1024).
+            let binding = restored_tab_worktree(&title, tab_session.worktree.as_deref());
+            let bound = binding.persisted;
+            let spawn_root = crate::workspace::tab_spawn_root(binding.spawn.as_deref(), &cwd);
             let root = restored_layout.map(|layout| {
                 let mut pane_deque: VecDeque<Entity<Pane>> = VecDeque::new();
                 LayoutTree::from_layout_node(&layout, &mut pane_deque, &mut |node| {
@@ -740,6 +753,13 @@ impl PaneFlowApp {
         }
         let mut workspace =
             Workspace::restored_with_id(ws_id, title.clone(), cwd, tabs, ws_session.active_tab);
+        if keep_original_cwd {
+            remember_unconfirmed_workspace_cwd(
+                workspace.id,
+                ws_session.cwd.clone(),
+                workspace.cwd.clone(),
+            );
+        }
 
         // Issue #107: restore the sidebar pin. Additive on v2 - an older
         // session has no key and deserializes to `false` (unpinned).
@@ -756,7 +776,12 @@ impl PaneFlowApp {
                 .record_finished(false, Some(surface_id));
         }
         // US-013: kick off the deferred git-stats probe (off render thread).
-        Self::spawn_initial_git_stats(ws_id, workspace.cwd.clone(), cx);
+        // A GPUI test that restores a workspace cannot host that blocking
+        // pool: the test scheduler rejects the wake. The probe is not part
+        // of the persisted-path contract.
+        if !restore_git_stats_suppressed() {
+            Self::spawn_initial_git_stats(ws_id, workspace.cwd.clone(), cx);
+        }
         workspace
     }
 
@@ -780,9 +805,33 @@ impl PaneFlowApp {
             return None;
         }
 
-        let cwd = resolved_surface_cwd(surface.cwd.as_deref(), fallback_cwd);
-
-        let t = cx.new(|cx| TerminalView::with_cwd(workspace_id, Some(cwd), None, cx));
+        let persisted_raw = surface.cwd.clone();
+        let resolved = resolved_surface_cwd(surface.cwd.as_deref(), fallback_cwd);
+        // A GPUI test cannot host the ghostty runtime thread. The display
+        // terminal still carries `current_cwd`, which is what the save reads.
+        let t = {
+            #[cfg(test)]
+            if restore_git_stats_suppressed() {
+                cx.new(|cx| TerminalView::display_only_for_test(workspace_id, cx))
+            } else {
+                cx.new(|cx| {
+                    TerminalView::with_cwd(workspace_id, Some(resolved.spawn.clone()), None, cx)
+                })
+            }
+            #[cfg(not(test))]
+            cx.new(|cx| {
+                TerminalView::with_cwd(workspace_id, Some(resolved.spawn.clone()), None, cx)
+            })
+        };
+        if resolved.persisted != resolved.spawn {
+            let persisted =
+                persisted_raw.unwrap_or_else(|| resolved.persisted.to_string_lossy().into_owned());
+            let spawn = resolved.spawn.to_string_lossy().into_owned();
+            t.update(cx, |view, _| {
+                view.terminal.current_cwd = Some(persisted.clone());
+            });
+            remember_unconfirmed_surface_cwd(t.entity_id().as_u64(), persisted, spawn);
+        }
         // Explicit layout definitions may still seed scrollback.
         // Session restore clears the legacy field before this path.
         if let Some(ref scrollback) = surface.scrollback {
@@ -1006,8 +1055,9 @@ fn persisted_dir_is_live(path: &Path) -> bool {
 
 /// Longest a persisted cwd probe may hold the restore frame step. A local
 /// directory answers in microseconds; only a dead network or cloud mount
-/// runs this out, and such a cwd is treated as unavailable rather than
-/// letting `stat` pin the render thread for the mount's own timeout.
+/// runs this out. The `stat` itself runs on a helper thread. A launch may
+/// spawn at a fallback, but only a finished "not a directory" drops the
+/// persisted path (issue #1024).
 ///
 /// During startup restore this is also the shared budget for one batch:
 /// every probe in that frame stops at the same instant (issue #878).
@@ -1015,9 +1065,31 @@ pub(crate) const RESTORED_CWD_PROBE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(250);
 
 /// Below this, the batch budget is treated as spent. A shorter `stat` would
-/// time out a live directory whose helper thread has not been scheduled yet
-/// and, if cached, would keep it unavailable for the rest of the restore.
+/// time out a live directory whose helper thread has not been scheduled yet.
+/// A spent budget is [`PersistedDirStatus::Unknown`] and is not cached:
+/// the next batch can still stat the path. Caching it as missing would
+/// drop a directory that exists (issue #1024).
 const RESTORE_CWD_PROBE_SLACK: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// What a restore probe knows about one persisted path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PersistedDirStatus {
+    /// `stat` completed and the path is a directory.
+    Live,
+    /// `stat` completed and the path is not a directory.
+    Missing,
+    /// Timed out, the batch budget was spent, or the probe thread failed
+    /// to spawn. Not evidence the directory is gone.
+    Unknown,
+}
+
+fn status_from_stat(is_dir: bool) -> PersistedDirStatus {
+    if is_dir {
+        PersistedDirStatus::Live
+    } else {
+        PersistedDirStatus::Missing
+    }
+}
 
 /// Probe outcomes for the startup restore on this thread. Absent outside
 /// restore, so other callers (and the review pass after restore finishes)
@@ -1025,9 +1097,11 @@ const RESTORE_CWD_PROBE_SLACK: std::time::Duration = std::time::Duration::from_m
 struct RestoreCwdProbes {
     /// Wall-clock end of the current batch's probe budget.
     deadline: Instant,
-    /// `true` only when `stat` answered that the path is a directory.
-    /// A timeout is `false` and is not probed again this restore.
-    cache: HashMap<PathBuf, bool>,
+    /// Finished answers and timed-out probes. [`PersistedDirStatus::Unknown`]
+    /// is not stored as [`PersistedDirStatus::Missing`], or a later check in
+    /// this restore would drop the path. A spent budget with no probe is
+    /// not stored at all, so the next batch can still stat that path.
+    cache: HashMap<PathBuf, PersistedDirStatus>,
 }
 
 thread_local! {
@@ -1088,14 +1162,14 @@ fn restore_cwd_probes_active() -> bool {
     RESTORE_CWD_PROBES.with(|slot| slot.borrow().is_some())
 }
 
-fn cached_restore_cwd_probe(path: &Path) -> Option<bool> {
+fn cached_restore_cwd_probe(path: &Path) -> Option<PersistedDirStatus> {
     RESTORE_CWD_PROBES.with(|slot| slot.borrow().as_ref()?.cache.get(path).copied())
 }
 
-fn remember_restore_cwd_probe(path: &Path, live: bool) {
+fn remember_restore_cwd_probe(path: &Path, status: PersistedDirStatus) {
     RESTORE_CWD_PROBES.with(|slot| {
         if let Some(probes) = slot.borrow_mut().as_mut() {
-            probes.cache.insert(path.to_path_buf(), live);
+            probes.cache.insert(path.to_path_buf(), status);
         }
     });
 }
@@ -1206,7 +1280,7 @@ fn warm_restore_cwd_probes(ws: &paneflow_config::schema::WorkspaceSession) {
         }
         match spawn_cwd_probe(&path) {
             Some(rx) => inflight.push((path, rx)),
-            None => remember_restore_cwd_probe(&path, false),
+            None => remember_restore_cwd_probe(&path, PersistedDirStatus::Unknown),
         }
     }
     join_restore_cwd_probes(inflight);
@@ -1218,21 +1292,22 @@ fn join_restore_cwd_probes(inflight: Vec<(PathBuf, std::sync::mpsc::Receiver<boo
         let wait = restore_cwd_probe_budget(RESTORED_CWD_PROBE_TIMEOUT)
             .unwrap_or(std::time::Duration::ZERO);
         match rx.recv_timeout(wait) {
-            Ok(live) => remember_restore_cwd_probe(&path, live),
+            Ok(is_dir) => remember_restore_cwd_probe(&path, status_from_stat(is_dir)),
             Err(_) => {
                 // The threads were started together, so this wait is the
                 // whole batch budget. Anything still blocked has missed it.
+                // A timeout is Unknown, not Missing: the directory may exist.
                 let waited = wait >= RESTORE_CWD_PROBE_SLACK;
                 if waited {
-                    remember_restore_cwd_probe(&path, false);
+                    remember_restore_cwd_probe(&path, PersistedDirStatus::Unknown);
                     log_cwd_probe_timeout(&path, wait);
                 }
                 expire_restore_cwd_probe_deadline();
                 for (path, rx) in inflight {
                     match rx.try_recv() {
-                        Ok(live) => remember_restore_cwd_probe(&path, live),
+                        Ok(is_dir) => remember_restore_cwd_probe(&path, status_from_stat(is_dir)),
                         Err(_) if waited => {
-                            remember_restore_cwd_probe(&path, false);
+                            remember_restore_cwd_probe(&path, PersistedDirStatus::Unknown);
                             log_cwd_probe_timeout(&path, RESTORED_CWD_PROBE_TIMEOUT);
                         }
                         Err(_) => {}
@@ -1246,47 +1321,56 @@ fn join_restore_cwd_probes(inflight: Vec<(PathBuf, std::sync::mpsc::Receiver<boo
 
 fn log_cwd_probe_timeout(path: &Path, timeout: std::time::Duration) {
     log::warn!(
-        "session restore: cwd {} did not answer stat within {timeout:?}; treating it as unavailable",
+        "session restore: cwd {} did not answer stat within {timeout:?}; keeping the persisted path",
         path.display()
     );
 }
 
-/// Probe a persisted cwd off the render thread with a deadline. `stat` on
-/// an unmounted SMB/NFS/iCloud volume can block for tens of seconds, and
-/// session restore runs on the GPUI frame step, so the probe runs on a
-/// helper thread and a late answer counts as "not a directory". As with
-/// the git untracked-stats helper, a stalled thread is left to unwind on
-/// its own once the filesystem finally answers.
+/// `true` only when `stat` answered that `path` is a directory.
 ///
-/// While a restore is in progress, the outcome is remembered for that
-/// restore and the wait is capped by the batch deadline. A second surface
-/// on a path that already timed out does not stat again. A live directory
-/// that was actually probed still returns true. Outside restore, every call
-/// probes on its own (issue #878).
+/// A timeout, a spent restore budget, or a probe that failed to spawn
+/// returns `false`. That means "not confirmed", not "missing": session
+/// persistence keeps the original path (issue #1024). Review restore uses
+/// this bool and therefore still refuses an unconfirmed path.
+///
+/// While a restore is in progress the wait is capped by the batch deadline,
+/// and a path that already timed out is not stat'd again. Outside restore
+/// every call probes on its own (issue #878). The `stat` runs on a helper
+/// thread so it cannot pin the GPUI thread (issue #705). A stalled worker
+/// is left to unwind on its own once the filesystem finally answers.
 pub(crate) fn persisted_dir_is_live_within(path: &Path, timeout: std::time::Duration) -> bool {
-    if let Some(live) = cached_restore_cwd_probe(path) {
-        return live;
+    persisted_dir_status(path, timeout) == PersistedDirStatus::Live
+}
+
+/// Tri-state restore probe. Persistence uses this; [`persisted_dir_is_live_within`]
+/// is the "safe to use" view and is true only for [`PersistedDirStatus::Live`].
+fn persisted_dir_status(path: &Path, timeout: std::time::Duration) -> PersistedDirStatus {
+    if let Some(status) = cached_restore_cwd_probe(path) {
+        return status;
     }
     let Some(budget) = restore_cwd_probe_budget(timeout) else {
-        return false;
+        // Do not cache this. The path was never stat'd, and a later batch
+        // with time left must still be able to tell Live from Missing.
+        return PersistedDirStatus::Unknown;
     };
     match probe_persisted_dir_within(path, budget) {
-        Some(live) => {
-            remember_restore_cwd_probe(path, live);
-            live
+        Some(is_dir) => {
+            let status = status_from_stat(is_dir);
+            remember_restore_cwd_probe(path, status);
+            status
         }
         None => {
-            remember_restore_cwd_probe(path, false);
+            remember_restore_cwd_probe(path, PersistedDirStatus::Unknown);
             expire_restore_cwd_probe_deadline();
-            false
+            PersistedDirStatus::Unknown
         }
     }
 }
 
 /// The same bounded probe with the timeout kept apart from a definite
 /// answer: `Some(is_dir)` when `stat` replied in time, `None` when it did
-/// not. Restore folds `None` into "unavailable"; the worker, if any, is
-/// left to unwind on its own.
+/// not. Restore treats `None` as unknown and keeps the persisted path.
+/// The worker, if any, is left to unwind on its own.
 pub(crate) fn probe_persisted_dir_within(
     path: &Path,
     timeout: std::time::Duration,
@@ -1307,8 +1391,9 @@ pub(super) enum ProbeOutcome {
 }
 
 /// Spawn the helper that stats `path`. `None` means the thread did not start;
-/// the caller treats the path as unavailable. The join handle is dropped so
-/// a `stat` that outlives the deadline can unwind on its own.
+/// the caller treats the path as [`PersistedDirStatus::Unknown`]. The join
+/// handle is dropped so a `stat` that outlives the deadline can unwind on
+/// its own.
 fn spawn_cwd_probe(path: &Path) -> Option<std::sync::mpsc::Receiver<bool>> {
     let (tx, rx) = std::sync::mpsc::channel();
     let probed = path.to_path_buf();
@@ -1324,7 +1409,7 @@ fn spawn_cwd_probe(path: &Path) -> Option<std::sync::mpsc::Receiver<bool>> {
         }
         Err(err) => {
             log::warn!(
-                "session restore: could not spawn cwd probe for {}: {err}; treating it as unavailable",
+                "session restore: could not spawn cwd probe for {}: {err}; keeping the persisted path",
                 path.display()
             );
             None
@@ -1346,34 +1431,221 @@ pub(super) fn start_persisted_dir_probe(path: &Path, timeout: std::time::Duratio
     }
 }
 
-fn restored_workspace_cwd(raw: &str) -> PathBuf {
-    let path = PathBuf::from(raw);
-    if persisted_dir_is_live_within(&path, RESTORED_CWD_PROBE_TIMEOUT) {
-        return path;
-    }
-    let fallback = launch_cwd::implicit_launch_cwd();
-    log::warn!(
-        "session restore: workspace cwd {} is not a directory; falling back to {}",
-        path.display(),
-        fallback.display()
-    );
-    fallback
+/// Where this launch may spawn, and the path `session.json` must keep.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProbedPath {
+    /// Directory a process may use for this launch.
+    spawn: PathBuf,
+    /// Path the next save writes. Equals `spawn` for Live and Missing.
+    persisted: PathBuf,
 }
 
-fn resolved_surface_cwd(raw: Option<&str>, fallback_cwd: &Path) -> PathBuf {
-    let Some(raw) = raw else {
-        return fallback_cwd.to_path_buf();
-    };
-    let path = PathBuf::from(raw);
-    if persisted_dir_is_live_within(&path, RESTORED_CWD_PROBE_TIMEOUT) {
-        return path;
+/// Original strings kept when a probe did not finish. The runtime fields
+/// may hold the launch fallback; `build_session_state` writes these
+/// instead (issue #1024).
+#[derive(Clone, Debug)]
+struct UnconfirmedPath {
+    persisted: String,
+    spawn: String,
+}
+
+#[derive(Default)]
+struct UnconfirmedPersistedPaths {
+    workspaces: HashMap<u64, UnconfirmedPath>,
+    surfaces: HashMap<u64, UnconfirmedPath>,
+}
+
+thread_local! {
+    static UNCONFIRMED_PERSISTED_PATHS: std::cell::RefCell<Option<UnconfirmedPersistedPaths>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn remember_unconfirmed_path(
+    map: &mut HashMap<u64, UnconfirmedPath>,
+    id: u64,
+    persisted: String,
+    spawn: String,
+) {
+    map.insert(id, UnconfirmedPath { persisted, spawn });
+}
+
+fn remember_unconfirmed_workspace_cwd(id: u64, persisted: String, spawn: String) {
+    UNCONFIRMED_PERSISTED_PATHS.with(|slot| {
+        let mut guard = slot.borrow_mut();
+        let paths = guard.get_or_insert_with(UnconfirmedPersistedPaths::default);
+        remember_unconfirmed_path(&mut paths.workspaces, id, persisted, spawn);
+    });
+}
+
+fn remember_unconfirmed_surface_cwd(id: u64, persisted: String, spawn: String) {
+    UNCONFIRMED_PERSISTED_PATHS.with(|slot| {
+        let mut guard = slot.borrow_mut();
+        let paths = guard.get_or_insert_with(UnconfirmedPersistedPaths::default);
+        remember_unconfirmed_path(&mut paths.surfaces, id, persisted, spawn);
+    });
+}
+
+fn restore_git_stats_suppressed() -> bool {
+    #[cfg(test)]
+    {
+        SUPPRESS_RESTORE_GIT_STATS.with(|flag| flag.get())
     }
-    log::warn!(
-        "session restore: surface cwd {} is not a directory; falling back to {}",
-        path.display(),
-        fallback_cwd.display()
-    );
-    fallback_cwd.to_path_buf()
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SUPPRESS_RESTORE_GIT_STATS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+struct SuppressRestoreGitStats;
+
+#[cfg(test)]
+impl SuppressRestoreGitStats {
+    fn arm() -> Self {
+        SUPPRESS_RESTORE_GIT_STATS.with(|flag| flag.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SuppressRestoreGitStats {
+    fn drop(&mut self) {
+        SUPPRESS_RESTORE_GIT_STATS.with(|flag| flag.set(false));
+    }
+}
+
+#[cfg(test)]
+fn clear_unconfirmed_persisted_paths() {
+    UNCONFIRMED_PERSISTED_PATHS.with(|slot| *slot.borrow_mut() = None);
+}
+
+/// Pair serialized leaves with the tree the session serializer walked.
+/// Keep `persisted` while the snapshot still shows that path or the
+/// fallback this launch spawned. A different cwd means the shell moved.
+fn rewrite_unconfirmed_surfaces(
+    node: &mut LayoutNode,
+    leaves: &mut impl Iterator<Item = Entity<crate::pane::Pane>>,
+    surfaces: &mut HashMap<u64, UnconfirmedPath>,
+    cx: &App,
+) {
+    match node {
+        LayoutNode::Pane {
+            surfaces: definitions,
+        } => {
+            let Some(pane) = leaves.next() else {
+                return;
+            };
+            let pane_ref = pane.read(cx);
+            let Some(terminal) = pane_ref.terminals().next() else {
+                return;
+            };
+            let id = terminal.entity_id().as_u64();
+            let Some(record) = surfaces.get(&id).cloned() else {
+                return;
+            };
+            let Some(surface) = definitions.first_mut() else {
+                return;
+            };
+            let still_unconfirmed = match surface.cwd.as_deref() {
+                Some(cwd) => cwd == record.persisted || cwd == record.spawn,
+                None => true,
+            };
+            if still_unconfirmed {
+                surface.cwd = Some(record.persisted);
+            } else {
+                surfaces.remove(&id);
+            }
+        }
+        LayoutNode::Split { children, .. } => {
+            for child in children {
+                rewrite_unconfirmed_surfaces(child, leaves, surfaces, cx);
+            }
+        }
+    }
+}
+
+fn apply_unconfirmed_persisted_paths(
+    state: &mut paneflow_config::schema::SessionState,
+    workspaces: &[Workspace],
+    cx: &App,
+) {
+    UNCONFIRMED_PERSISTED_PATHS.with(|slot| {
+        let mut guard = slot.borrow_mut();
+        let Some(paths) = guard.as_mut() else {
+            return;
+        };
+        for (ws_state, ws) in state.workspaces.iter_mut().zip(workspaces) {
+            if let Some(record) = paths.workspaces.get(&ws.id).cloned() {
+                if ws_state.cwd == record.spawn || ws_state.cwd == record.persisted {
+                    ws_state.cwd = record.persisted;
+                } else {
+                    paths.workspaces.remove(&ws.id);
+                }
+            }
+            for (tab_state, tab) in ws_state.tabs.iter_mut().zip(ws.tabs()) {
+                let Some(layout) = tab_state.layout.as_mut() else {
+                    continue;
+                };
+                let Some(tree) = tab.saved_layout.as_ref().or(tab.root.as_ref()) else {
+                    continue;
+                };
+                let mut leaves = tree.collect_leaves().into_iter();
+                rewrite_unconfirmed_surfaces(layout, &mut leaves, &mut paths.surfaces, cx);
+            }
+        }
+    });
+}
+
+fn probed_path(raw: &str, fallback: PathBuf, what: &str) -> ProbedPath {
+    let path = PathBuf::from(raw);
+    match persisted_dir_status(&path, RESTORED_CWD_PROBE_TIMEOUT) {
+        PersistedDirStatus::Live => ProbedPath {
+            spawn: path.clone(),
+            persisted: path,
+        },
+        PersistedDirStatus::Missing => {
+            log::warn!(
+                "session restore: {what} {} is not a directory; falling back to {}",
+                path.display(),
+                fallback.display()
+            );
+            ProbedPath {
+                spawn: fallback.clone(),
+                persisted: fallback,
+            }
+        }
+        PersistedDirStatus::Unknown => {
+            log::warn!(
+                "session restore: {what} {} did not answer stat; keeping it and spawning at {}",
+                path.display(),
+                fallback.display()
+            );
+            ProbedPath {
+                spawn: fallback,
+                persisted: path,
+            }
+        }
+    }
+}
+
+fn restored_workspace_cwd(raw: &str) -> ProbedPath {
+    probed_path(raw, launch_cwd::implicit_launch_cwd(), "workspace cwd")
+}
+
+fn resolved_surface_cwd(raw: Option<&str>, fallback_cwd: &Path) -> ProbedPath {
+    let Some(raw) = raw else {
+        let fallback = fallback_cwd.to_path_buf();
+        return ProbedPath {
+            spawn: fallback.clone(),
+            persisted: fallback,
+        };
+    };
+    probed_path(raw, fallback_cwd.to_path_buf(), "surface cwd")
 }
 
 fn without_persisted_scrollback(mut layout: LayoutNode) -> LayoutNode {
@@ -1531,6 +1803,16 @@ fn is_numbered_terminal_title(title: &str) -> bool {
     !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit())
 }
 
+/// A restored worktree binding. `persisted` is what session.json keeps.
+/// `spawn` is the checkout this launch may start in; it is `None` when the
+/// binding is missing or the probe did not finish, so the panes use the
+/// workspace spawn cwd instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProbedWorktree {
+    persisted: Option<PathBuf>,
+    spawn: Option<PathBuf>,
+}
+
 /// Rehydrate a tab's worktree binding (issue #347), dropping it when the
 /// checkout is gone.
 ///
@@ -1541,20 +1823,45 @@ fn is_numbered_terminal_title(title: &str) -> bool {
 /// which is the state it can always fall back to. Logged, so a binding that
 /// silently vanished can be traced.
 ///
-/// The directory check is [`persisted_dir_is_live_within`] (issue #705), not
-/// a plain `is_dir`. This runs on the GPUI frame step, and `stat` on a dead
-/// network mount is not bounded. Still no canonicalization: resolving
-/// symlinks across that mount is a second unbounded `stat`.
-fn restored_tab_worktree(workspace_title: &str, path: Option<&str>) -> Option<PathBuf> {
-    let path = PathBuf::from(path.filter(|p| !p.is_empty())?);
-    if persisted_dir_is_live_within(&path, RESTORED_CWD_PROBE_TIMEOUT) {
-        return Some(path);
+/// A timeout or a spent probe budget keeps the binding and does not use it
+/// as this launch's spawn root (issue #1024). The check is the bounded
+/// helper-thread probe (issue #705), not a plain `is_dir`. Still no
+/// canonicalization: resolving symlinks across that mount is a second
+/// unbounded `stat`.
+fn restored_tab_worktree(workspace_title: &str, path: Option<&str>) -> ProbedWorktree {
+    let Some(raw) = path.filter(|p| !p.is_empty()) else {
+        return ProbedWorktree {
+            persisted: None,
+            spawn: None,
+        };
+    };
+    let path = PathBuf::from(raw);
+    match persisted_dir_status(&path, RESTORED_CWD_PROBE_TIMEOUT) {
+        PersistedDirStatus::Live => ProbedWorktree {
+            persisted: Some(path.clone()),
+            spawn: Some(path),
+        },
+        PersistedDirStatus::Missing => {
+            log::warn!(
+                "session restore: workspace \"{workspace_title}\" had a tab bound to {}, which no longer exists; restoring it unbound",
+                path.display()
+            );
+            ProbedWorktree {
+                persisted: None,
+                spawn: None,
+            }
+        }
+        PersistedDirStatus::Unknown => {
+            log::warn!(
+                "session restore: workspace \"{workspace_title}\" tab worktree {} did not answer stat; keeping the binding",
+                path.display()
+            );
+            ProbedWorktree {
+                persisted: Some(path),
+                spawn: None,
+            }
+        }
     }
-    log::warn!(
-        "session restore: workspace \"{workspace_title}\" had a tab bound to {}, which no longer exists; restoring it unbound",
-        path.display()
-    );
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -2593,38 +2900,40 @@ mod tests {
         let valid_str = valid.to_string_lossy().into_owned();
         let missing_str = missing.to_string_lossy().into_owned();
 
-        assert_eq!(
-            restored_workspace_cwd(&valid_str),
-            valid,
-            "existing workspace cwd is preserved"
-        );
+        let kept = restored_workspace_cwd(&valid_str);
+        assert_eq!(kept.persisted, valid, "existing workspace cwd is preserved");
+        assert_eq!(kept.spawn, valid);
 
         let workspace_fallback = restored_workspace_cwd(&missing_str);
         assert!(
-            workspace_fallback.is_dir(),
+            workspace_fallback.persisted.is_dir(),
             "missing workspace cwd falls back to a live directory"
         );
-        assert_ne!(workspace_fallback, missing);
+        assert_ne!(workspace_fallback.persisted, missing);
+        assert_eq!(workspace_fallback.spawn, workspace_fallback.persisted);
 
         let surface_fallback = tmp.path().join("fallback");
         std::fs::create_dir_all(&surface_fallback).expect("fallback dir");
+        let missing_surface = resolved_surface_cwd(Some(&missing_str), &surface_fallback);
         assert_eq!(
-            resolved_surface_cwd(Some(&missing_str), &surface_fallback),
-            surface_fallback.clone(),
+            missing_surface.persisted, surface_fallback,
             "missing surface cwd falls back to workspace cwd"
         );
+        assert_eq!(missing_surface.spawn, surface_fallback);
+        let absent_surface = resolved_surface_cwd(None, &surface_fallback);
         assert_eq!(
-            resolved_surface_cwd(None, &surface_fallback),
-            surface_fallback,
+            absent_surface.persisted, surface_fallback,
             "absent surface cwd falls back to workspace cwd"
         );
+        assert_eq!(absent_surface.spawn, surface_fallback);
     }
 
     /// A persisted cwd on a dead network mount can stall `stat` for tens of
     /// seconds. Restore runs on the GPUI frame step, so the helpers must
-    /// answer within a bounded window and fall back instead of hanging paint.
+    /// answer within a bounded window. This launch may spawn at a fallback;
+    /// the persisted path is kept (issue #1024).
     #[test]
-    fn restored_cwd_helpers_fall_back_when_stat_stalls() {
+    fn restored_cwd_helpers_keep_persisted_paths_when_stat_stalls() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let stalled = tmp.path().join("unmounted-volume");
         let stalled_str = stalled.to_string_lossy().into_owned();
@@ -2641,11 +2950,12 @@ mod tests {
             elapsed < bound,
             "workspace cwd probe blocked the caller for {elapsed:?} (bound {bound:?})"
         );
-        assert_ne!(
-            workspace_cwd, stalled,
-            "a stalled workspace cwd must fall back, not be trusted"
+        assert_eq!(
+            workspace_cwd.persisted, stalled,
+            "a stalled workspace cwd keeps the persisted path"
         );
-        assert!(workspace_cwd.is_dir());
+        assert_ne!(workspace_cwd.spawn, stalled);
+        assert!(workspace_cwd.spawn.is_dir());
 
         let fallback = tmp.path().join("fallback");
         std::fs::create_dir_all(&fallback).expect("fallback dir");
@@ -2656,7 +2966,8 @@ mod tests {
             elapsed < bound,
             "surface cwd probe blocked the caller for {elapsed:?} (bound {bound:?})"
         );
-        assert_eq!(surface_cwd, fallback);
+        assert_eq!(surface_cwd.persisted, stalled);
+        assert_eq!(surface_cwd.spawn, fallback);
 
         STALLED_STAT_PATHS
             .lock()
@@ -2665,9 +2976,10 @@ mod tests {
     }
 
     /// Issue #705: a tab bound to a worktree on a dead mount must not stall
-    /// the GPUI frame step. The binding is dropped inside the probe bound.
+    /// the GPUI frame step. The binding is kept; this launch does not spawn
+    /// there (issue #1024).
     #[test]
-    fn restored_tab_worktree_falls_back_when_stat_stalls() {
+    fn restored_tab_worktree_keeps_binding_when_stat_stalls() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let stalled = tmp.path().join("unmounted-volume");
         let stalled_str = stalled.to_string_lossy().into_owned();
@@ -2690,7 +3002,12 @@ mod tests {
             elapsed < bound,
             "tab worktree probe blocked the caller for {elapsed:?} (bound {bound:?})"
         );
-        assert_eq!(restored, None, "a stalled worktree stat drops the binding");
+        assert_eq!(
+            restored.persisted.as_deref(),
+            Some(stalled.as_path()),
+            "a stalled worktree stat keeps the binding"
+        );
+        assert_eq!(restored.spawn, None);
     }
 
     /// Issue #878: N surfaces on one dead mount must stat it once per restore.
@@ -2734,16 +3051,12 @@ mod tests {
         {
             let _batch = RestoreCwdProbeGuard::enter();
             reset_cwd_probe_spawns();
-            assert_eq!(
-                restored_workspace_cwd(&live_str),
-                live,
-                "a live directory is unchanged by the restore probe"
-            );
-            assert_eq!(
-                restored_workspace_cwd(&live_str),
-                live,
-                "a cached live result stays live"
-            );
+            let first = restored_workspace_cwd(&live_str);
+            assert_eq!(first.persisted, live);
+            assert_eq!(first.spawn, live, "a live directory is unchanged");
+            let second = restored_workspace_cwd(&live_str);
+            assert_eq!(second.persisted, live);
+            assert_eq!(second.spawn, live, "a cached live result stays live");
             assert_eq!(
                 cwd_probe_spawns(),
                 1,
@@ -2751,26 +3064,32 @@ mod tests {
             );
         }
 
+        let absent = tmp.path().join("absent-not-stalled");
+        let absent_str = absent.to_string_lossy().into_owned();
         let _batch = RestoreCwdProbeGuard::enter();
         reset_cwd_probe_spawns();
         let surfaces = 8;
         let started = std::time::Instant::now();
         for _ in 0..surfaces {
+            let surface = resolved_surface_cwd(Some(&stalled_str), &fallback);
             assert_eq!(
-                resolved_surface_cwd(Some(&stalled_str), &fallback),
-                fallback,
-                "a stalled surface cwd falls back"
+                surface.persisted, stalled,
+                "a stall keeps the persisted cwd"
             );
+            assert_eq!(surface.spawn, fallback);
         }
+        let binding = restored_tab_worktree("ws", Some(&stalled_str));
+        assert_eq!(binding.persisted.as_deref(), Some(stalled.as_path()));
         assert_eq!(
-            restored_tab_worktree("ws", Some(&stalled_str)),
-            None,
-            "a stalled worktree binding is dropped"
+            binding.spawn, None,
+            "an unconfirmed worktree is not a spawn root"
         );
-        assert_ne!(
-            restored_workspace_cwd(&stalled_str),
-            stalled,
-            "a stalled workspace cwd falls back"
+        let workspace = restored_workspace_cwd(&stalled_str);
+        assert_eq!(workspace.persisted, stalled);
+        assert_ne!(workspace.spawn, stalled);
+        assert!(
+            !persisted_dir_is_live_within(&stalled, RESTORED_CWD_PROBE_TIMEOUT),
+            "an unconfirmed path is not safe to use"
         );
         let elapsed = started.elapsed();
         assert_eq!(
@@ -2784,11 +3103,18 @@ mod tests {
         );
 
         let started = std::time::Instant::now();
+        let other_probe = resolved_surface_cwd(Some(&other_str), &fallback);
         assert_eq!(
-            resolved_surface_cwd(Some(&other_str), &fallback),
-            fallback,
-            "a second dead path in the same batch is unavailable"
+            other_probe.persisted, other,
+            "a spent budget keeps the persisted path"
         );
+        assert_eq!(other_probe.spawn, fallback);
+        let unprobed = resolved_surface_cwd(Some(&absent_str), &fallback);
+        assert_eq!(
+            unprobed.persisted, absent,
+            "a path that was never stat'd is not missing"
+        );
+        assert_eq!(unprobed.spawn, fallback);
         let elapsed = started.elapsed();
         assert_eq!(
             cwd_probe_spawns(),
@@ -2802,10 +3128,9 @@ mod tests {
 
         refresh_restore_cwd_probe_deadline();
         for _ in 0..surfaces {
-            assert_eq!(
-                resolved_surface_cwd(Some(&stalled_str), &fallback),
-                fallback
-            );
+            let surface = resolved_surface_cwd(Some(&stalled_str), &fallback);
+            assert_eq!(surface.persisted, stalled);
+            assert_eq!(surface.spawn, fallback);
         }
         assert_eq!(
             cwd_probe_spawns(),
@@ -2813,15 +3138,25 @@ mod tests {
             "a new batch deadline must reuse the cached timeout"
         );
 
+        let confirmed_missing = resolved_surface_cwd(Some(&absent_str), &fallback);
+        assert_eq!(
+            confirmed_missing.persisted, fallback,
+            "a fresh budget stats a path that was never probed"
+        );
+        assert_eq!(confirmed_missing.spawn, fallback);
+        assert_eq!(
+            cwd_probe_spawns(),
+            2,
+            "Unknown from a spent budget must not stick as Missing"
+        );
+
         let live_again = tmp.path().join("live-again");
         std::fs::create_dir_all(&live_again).expect("second live dir");
         let live_again_str = live_again.to_string_lossy().into_owned();
-        assert_eq!(
-            resolved_surface_cwd(Some(&live_again_str), &fallback),
-            live_again,
-            "a live directory on a fresh batch deadline still probes live"
-        );
-        assert_eq!(cwd_probe_spawns(), 2);
+        let live_probe = resolved_surface_cwd(Some(&live_again_str), &fallback);
+        assert_eq!(live_probe.persisted, live_again);
+        assert_eq!(live_probe.spawn, live_again);
+        assert_eq!(cwd_probe_spawns(), 3);
     }
 
     /// Issue #521: the click-time probe on a recent row tells a definite
@@ -3137,15 +3472,21 @@ mod tests {
             "Workspace::restored_with_id(ws_id, title.clone(), cwd, tabs, ws_session.active_tab)",
         );
         let bound_at = restore
-            .find("let bound = restored_tab_worktree(")
+            .find("let binding = restored_tab_worktree(")
             .expect("the binding must be resolved before the layout closure");
+        let persisted_at = restore
+            .find("let bound = binding.persisted")
+            .expect("the tab stores the persisted binding");
         let root_at = restore
-            .find("crate::workspace::tab_spawn_root(bound.as_deref(), &cwd)")
-            .expect("the spawn root must derive from the binding");
+            .find("crate::workspace::tab_spawn_root(binding.spawn.as_deref(), &cwd)")
+            .expect("a confirmed binding is the spawn root");
         let spawn_at = restore
             .find("Self::spawn_pane_from_surfaces(ws_id, surfaces, &spawn_root, cx)")
             .expect("the panes must spawn from the tab's own root");
-        assert!(bound_at < root_at && root_at < spawn_at, "{restore}");
+        assert!(
+            bound_at < persisted_at && persisted_at < root_at && root_at < spawn_at,
+            "{restore}"
+        );
         assert!(
             !restore.contains("&ws_cwd, cx)"),
             "no restored pane may spawn from the workspace cwd once its tab is bound: {restore}"
@@ -3159,8 +3500,8 @@ mod tests {
     #[test]
     fn a_tab_bound_to_a_missing_worktree_restores_unbound() {
         // Issue #347: a 0.2.1 session has no binding at all.
-        assert_eq!(restored_tab_worktree("ws", None), None);
-        assert_eq!(restored_tab_worktree("ws", Some("")), None);
+        assert_eq!(restored_tab_worktree("ws", None).persisted, None);
+        assert_eq!(restored_tab_worktree("ws", Some("")).persisted, None);
         // A path that was removed between two runs is dropped, not resurrected.
         let gone = std::env::temp_dir().join(format!(
             "paneflow-347-gone-{}-{}",
@@ -3169,17 +3510,195 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos())
         ));
-        assert_eq!(restored_tab_worktree("ws", gone.to_str()), None);
+        let gone_binding = restored_tab_worktree("ws", gone.to_str());
+        assert_eq!(gone_binding.persisted, None);
+        assert_eq!(gone_binding.spawn, None);
         // A directory that still exists keeps the binding verbatim.
         let live = tempfile::tempdir().expect("tempdir");
-        assert_eq!(
-            restored_tab_worktree("ws", live.path().to_str()),
-            Some(live.path().to_path_buf())
-        );
+        let live_binding = restored_tab_worktree("ws", live.path().to_str());
+        assert_eq!(live_binding.persisted, Some(live.path().to_path_buf()));
+        assert_eq!(live_binding.spawn, live_binding.persisted);
         // A file is not a checkout either.
         let file = live.path().join("not-a-dir");
         std::fs::write(&file, b"x").expect("write");
-        assert_eq!(restored_tab_worktree("ws", file.to_str()), None);
+        let file_binding = restored_tab_worktree("ws", file.to_str());
+        assert_eq!(file_binding.persisted, None);
+        assert_eq!(file_binding.spawn, None);
+    }
+
+    fn restored_workspace_session(
+        title: &str,
+        cwd: &str,
+        tabs: Vec<paneflow_config::schema::TabSession>,
+    ) -> paneflow_config::schema::WorkspaceSession {
+        paneflow_config::schema::WorkspaceSession {
+            title: title.to_string(),
+            cwd: cwd.to_string(),
+            tabs,
+            active_tab: 0,
+            legacy_layout: None,
+            legacy_empty: false,
+            pinned: false,
+            sidebar_collapsed: false,
+            muted: false,
+        }
+    }
+
+    fn restored_tab(
+        worktree: Option<&str>,
+        surface_cwd: Option<&str>,
+    ) -> paneflow_config::schema::TabSession {
+        use paneflow_config::schema::{LayoutNode, SurfaceDefinition};
+        paneflow_config::schema::TabSession {
+            layout: surface_cwd.map(|cwd| LayoutNode::Pane {
+                surfaces: vec![SurfaceDefinition {
+                    cwd: Some(cwd.to_string()),
+                    ..SurfaceDefinition::default()
+                }],
+            }),
+            worktree: worktree.map(str::to_string),
+            ..paneflow_config::schema::TabSession::default()
+        }
+    }
+
+    fn persisted_surface_cwd(tab: &paneflow_config::schema::TabSession) -> Option<&str> {
+        match tab.layout.as_ref() {
+            Some(paneflow_config::schema::LayoutNode::Pane { surfaces }) => {
+                surfaces.first().and_then(|surface| surface.cwd.as_deref())
+            }
+            other => panic!("expected a pane layout, got {other:?}"),
+        }
+    }
+
+    /// Issue #1024: a stalled `stat` and a spent probe budget keep the
+    /// original cwd and worktree in `build_session_state`. A directory
+    /// `stat` finished and rejected still falls back.
+    #[gpui::test]
+    fn stalled_restore_keeps_persisted_paths_in_session_state(cx: &mut gpui::TestAppContext) {
+        struct ClearStalled(Vec<PathBuf>);
+        impl Drop for ClearStalled {
+            fn drop(&mut self) {
+                let ours = &self.0;
+                STALLED_STAT_PATHS
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .retain(|path| !ours.contains(path));
+            }
+        }
+        struct ClearUnconfirmed;
+        impl Drop for ClearUnconfirmed {
+            fn drop(&mut self) {
+                clear_unconfirmed_persisted_paths();
+            }
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing_cwd = tmp.path().join("missing-workspace");
+        let missing_worktree = tmp.path().join("missing-worktree");
+        let stalled_cwd = tmp.path().join("slow-workspace");
+        let stalled_worktree = tmp.path().join("slow-worktree");
+        let stalled_surface = tmp.path().join("slow-surface");
+        let unprobed_cwd = tmp.path().join("unprobed-workspace");
+        let unprobed_worktree = tmp.path().join("unprobed-worktree");
+        let stalled_paths = vec![
+            stalled_cwd.clone(),
+            stalled_worktree.clone(),
+            stalled_surface.clone(),
+        ];
+        {
+            let mut stalled = STALLED_STAT_PATHS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            stalled.extend(stalled_paths.clone());
+        }
+        let _clear_stalled = ClearStalled(stalled_paths);
+        clear_unconfirmed_persisted_paths();
+        let _clear_unconfirmed = ClearUnconfirmed;
+
+        let missing_cwd_str = missing_cwd.to_string_lossy().into_owned();
+        let missing_worktree_str = missing_worktree.to_string_lossy().into_owned();
+        let stalled_cwd_str = stalled_cwd.to_string_lossy().into_owned();
+        let stalled_worktree_str = stalled_worktree.to_string_lossy().into_owned();
+        let stalled_surface_str = stalled_surface.to_string_lossy().into_owned();
+        let unprobed_cwd_str = unprobed_cwd.to_string_lossy().into_owned();
+        let unprobed_worktree_str = unprobed_worktree.to_string_lossy().into_owned();
+
+        let cx = cx.add_empty_window();
+        let app = cx.new(crate::app::sidebar::customize_menu::tests::blank_paneflow_app);
+        app.update(cx, |app, cx| {
+            let _git_stats = SuppressRestoreGitStats::arm();
+            let _probes = RestoreCwdProbeGuard::enter();
+            let missing = PaneFlowApp::restore_one_workspace(
+                &restored_workspace_session(
+                    "gone",
+                    &missing_cwd_str,
+                    vec![restored_tab(Some(&missing_worktree_str), None)],
+                ),
+                cx,
+            );
+            let stalled = PaneFlowApp::restore_one_workspace(
+                &restored_workspace_session(
+                    "kept",
+                    &stalled_cwd_str,
+                    vec![restored_tab(
+                        Some(&stalled_worktree_str),
+                        Some(&stalled_surface_str),
+                    )],
+                ),
+                cx,
+            );
+            let unprobed = PaneFlowApp::restore_one_workspace(
+                &restored_workspace_session(
+                    "unprobed",
+                    &unprobed_cwd_str,
+                    vec![restored_tab(Some(&unprobed_worktree_str), None)],
+                ),
+                cx,
+            );
+            app.workspaces = vec![missing, stalled, unprobed];
+            let state = app.build_session_state(cx);
+
+            let gone = &state.workspaces[0];
+            assert_ne!(gone.cwd, missing_cwd_str);
+            assert!(
+                std::path::Path::new(&gone.cwd).is_dir(),
+                "a missing workspace cwd falls back to a live directory"
+            );
+            assert_eq!(gone.tabs[0].worktree, None);
+            assert_eq!(app.workspaces[0].cwd, gone.cwd);
+
+            let kept = &state.workspaces[1];
+            assert_eq!(kept.cwd, stalled_cwd_str);
+            assert_eq!(
+                kept.tabs[0].worktree.as_deref(),
+                Some(stalled_worktree_str.as_str())
+            );
+            assert_eq!(
+                persisted_surface_cwd(&kept.tabs[0]),
+                Some(stalled_surface_str.as_str())
+            );
+            assert_ne!(
+                app.workspaces[1].cwd, stalled_cwd_str,
+                "this launch's workspace cwd is the spawn fallback"
+            );
+            assert_eq!(
+                app.workspaces[1].tabs()[0].worktree.as_deref(),
+                Some(stalled_worktree.as_path())
+            );
+
+            let held = &state.workspaces[2];
+            assert_eq!(held.cwd, unprobed_cwd_str);
+            assert_eq!(
+                held.tabs[0].worktree.as_deref(),
+                Some(unprobed_worktree_str.as_str())
+            );
+            assert!(
+                !std::path::Path::new(&held.cwd).exists(),
+                "a spent budget must not replace the cwd with a live fallback"
+            );
+            assert_ne!(app.workspaces[2].cwd, held.cwd);
+            assert!(std::path::Path::new(&app.workspaces[2].cwd).is_dir());
+        });
     }
 
     fn empty_session_state() -> paneflow_config::schema::SessionState {
