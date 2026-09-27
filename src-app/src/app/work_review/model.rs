@@ -1,6 +1,6 @@
 //! Bounded, read-only repository evidence for review and agent handoffs.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,25 @@ const GIT_INSPECT_STDOUT_CAP: u64 = 512 * 1024;
 /// of a few thousand paths overflows (issue #913). 8 MiB still bounds a
 /// hijacked git, and past it the file list is a marked prefix.
 const GIT_PATH_LIST_STDOUT_CAP: u64 = 8 * 1024 * 1024;
+
+const INSPECT_DEADLINE: Duration = Duration::from_secs(8);
+
+#[cfg(test)]
+thread_local! {
+    /// Cwds passed to [`inspect`]. Root lookups do not record a call.
+    static INSPECTED_CWDS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn note_inspect(cwd: &Path) {
+    INSPECTED_CWDS.with(|cwds| cwds.borrow_mut().push(cwd.to_path_buf()));
+}
+
+#[cfg(test)]
+fn take_inspected_cwds() -> Vec<PathBuf> {
+    INSPECTED_CWDS.with(|cwds| std::mem::take(&mut *cwds.borrow_mut()))
+}
 
 fn git(cwd: &Path, args: &[&str], deadline: Instant) -> Result<Vec<u8>, String> {
     let remaining = deadline
@@ -83,9 +102,24 @@ pub(crate) fn same_revision(a: &Checkout, b: &Checkout) -> bool {
     a.root == b.root && a.common == b.common && a.branch == b.branch && a.head == b.head
 }
 
+fn toplevel(cwd: &Path, deadline: Instant) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(git_text(
+        cwd,
+        &["rev-parse", "--show-toplevel"],
+        deadline,
+    )?))
+}
+
+/// `git rev-parse --show-toplevel` for `cwd`, without the rest of [`inspect`].
+pub(crate) fn repo_root(cwd: &Path) -> Result<PathBuf, String> {
+    toplevel(cwd, Instant::now() + INSPECT_DEADLINE)
+}
+
 pub(crate) fn inspect(cwd: &Path) -> Result<Checkout, String> {
-    let deadline = Instant::now() + Duration::from_secs(8);
-    let root = PathBuf::from(git_text(cwd, &["rev-parse", "--show-toplevel"], deadline)?);
+    #[cfg(test)]
+    note_inspect(cwd);
+    let deadline = Instant::now() + INSPECT_DEADLINE;
+    let root = toplevel(cwd, deadline)?;
     let common = PathBuf::from(git_text(
         &root,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -195,6 +229,26 @@ pub(crate) fn inspect(cwd: &Path) -> Result<Checkout, String> {
         files_truncated,
         dirty,
     })
+}
+
+/// Inspect `cwd`'s repository when `roots` has not already seen that root.
+///
+/// The root is resolved before the full inspection. `None` means this
+/// directory sits in a root already inspected in the scan. A path that is not
+/// a repository returns that rev-parse failure, the same one [`inspect`]
+/// returns first, so the scan still lists it.
+pub(crate) fn inspect_if_new_root(
+    cwd: &Path,
+    roots: &mut HashSet<PathBuf>,
+) -> Option<Result<Checkout, String>> {
+    let root = match repo_root(cwd) {
+        Ok(root) => root,
+        Err(error) => return Some(Err(error)),
+    };
+    if !roots.insert(root.clone()) {
+        return None;
+    }
+    Some(inspect(&root))
 }
 
 fn paths(bytes: &[u8]) -> BTreeSet<String> {
@@ -399,6 +453,7 @@ pub(crate) fn handoff_context(checkout: &Checkout) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashSet;
 
     #[test]
     fn inspects_real_worktrees_commits_dirty_files_and_overlaps() {
@@ -579,6 +634,50 @@ mod tests {
         );
         assert!(readiness(&checkout, None).starts_with("No commits yet"));
     }
+
+    #[test]
+    fn work_review_inspects_each_repo_root_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let sub = repo.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let output = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["init", "--initial-branch=main"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let root = repo_root(&repo).expect("repository root");
+        assert_eq!(repo_root(&sub).expect("subdirectory root"), root);
+        let _ = take_inspected_cwds();
+
+        let mut roots = HashSet::new();
+        let mut rows = Vec::new();
+        for cwd in [&repo, &sub] {
+            if let Some(row) = inspect_if_new_root(cwd, &mut roots) {
+                rows.push(row);
+            }
+        }
+
+        let inspected = take_inspected_cwds();
+        assert_eq!(
+            inspected,
+            vec![root.clone()],
+            "expected one inspection of the repository root, got {inspected:?}"
+        );
+        assert_eq!(rows.len(), 1, "a second cwd in the same root added a row");
+        let checkout = rows.pop().expect("root row").expect("inspection succeeds");
+        assert_eq!(checkout.root, root);
+    }
+
     #[test]
     fn checks_never_treat_missing_or_pending_evidence_as_passed() {
         assert_eq!(checks(&[]), Checks::None);
