@@ -1990,12 +1990,39 @@ fn paneflow_socket_path() -> Option<String> {
 /// constraint C4 mandates the terminal must never fail to open because
 /// of AI-hook wiring.
 ///
-/// Factored out of `TerminalState::new` so the helper is independently
-/// testable - the extraction side-effect lives in `ai_hooks::extract`
-/// (already unit-tested in US-008); this glue only layers the env
-/// mutations on top of a returned `PathBuf`.
+/// The extraction side-effect lives in `ai_hooks::extract` (unit-tested
+/// there against a `TempDir`); this glue only layers the env mutations on
+/// top of the returned `PathBuf`, see [`inject_ai_hook_env_from`].
 fn inject_ai_hook_env(env: &mut std::collections::HashMap<String, String>) {
-    let bin_dir = match crate::ai_hooks::extract::ensure_binaries_extracted() {
+    inject_ai_hook_env_from(env, ai_hook_bin_dir());
+}
+
+/// Where the shim binaries live for this process: the real per-user cache,
+/// staged by `ensure_binaries_extracted`.
+///
+/// Issue #1049: a test build gets [`TEST_AI_HOOK_BIN_DIR`] instead, so no
+/// test - an env unit test, a live PTY smoke, or a GPUI test that opens a
+/// `TerminalView` - can extract into `~/Library/Caches/paneflow-*` or
+/// re-point its `paneflow` link at the libtest harness.
+fn ai_hook_bin_dir() -> anyhow::Result<std::path::PathBuf> {
+    if cfg!(test) {
+        return Ok(std::path::PathBuf::from(TEST_AI_HOOK_BIN_DIR));
+    }
+    crate::ai_hooks::extract::ensure_binaries_extracted()
+}
+
+/// The bin dir test builds put on `PATH`. It never exists: nothing a test
+/// asserts needs the shims on disk, and `/var/empty` is root-owned, so no
+/// other user can plant binaries there the way they could under `/tmp`.
+const TEST_AI_HOOK_BIN_DIR: &str = "/var/empty/paneflow-test-ai-hook-bin";
+
+/// [`inject_ai_hook_env`] with the extraction result injected, so both the
+/// success and the log-and-skip branch are testable without the real cache.
+fn inject_ai_hook_env_from(
+    env: &mut std::collections::HashMap<String, String>,
+    bin_dir: anyhow::Result<std::path::PathBuf>,
+) {
+    let bin_dir = match bin_dir {
         Ok(p) => p,
         Err(e) => {
             // `{e:#}` emits the full anyhow context chain (each
@@ -3232,20 +3259,18 @@ mod tests {
 
     #[test]
     fn pty_spawn_injects_paneflow_bin_dir_and_prepends_path() {
-        // Skip where the cache dir is unresolvable - the helper silent-fails
-        // (correct behavior), but then there's nothing to assert on.
-        if dirs::cache_dir().is_none() {
-            eprintln!("skip: dirs::cache_dir() unresolvable in this environment");
-            return;
-        }
-
         let env = assemble_pty_env(HashMap::new(), 7, 3, None);
 
         let bin_dir = env
             .get("PANEFLOW_BIN_DIR")
             .expect("PANEFLOW_BIN_DIR must be set in the child env")
             .clone();
-        assert!(!bin_dir.is_empty(), "PANEFLOW_BIN_DIR must not be empty");
+        // Issue #1049: a test that reaches the real extraction writes the
+        // per-user cache and re-points its `paneflow` link at this harness.
+        assert_eq!(
+            bin_dir, TEST_AI_HOOK_BIN_DIR,
+            "tests must inject the test bin dir, never the real per-user cache"
+        );
 
         let path = env.get("PATH").expect("PATH must be set after injection");
         let first = std::env::split_paths(path)
@@ -3255,6 +3280,32 @@ mod tests {
             first,
             PathBuf::from(&bin_dir),
             "PANEFLOW_BIN_DIR must be first on PATH"
+        );
+    }
+
+    /// PRD C4: a failed extraction must never stop the terminal opening. The
+    /// env is left without any AI-hook wiring and the failure is logged.
+    #[test]
+    fn failed_ai_hook_extraction_logs_and_leaves_env_untouched() {
+        crate::diff::capture_logs();
+        let needle = "AI-hook binary extraction failed (issue-1049-sentinel)";
+        let before = crate::diff::captured_logs_count(needle);
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
+
+        inject_ai_hook_env_from(&mut env, Err(anyhow::anyhow!("issue-1049-sentinel")));
+
+        assert_eq!(env.get("PANEFLOW_BIN_DIR"), None);
+        assert_eq!(env.get(AI_HOOK_PATH_ENV), None);
+        assert_eq!(
+            env.get("PATH").map(String::as_str),
+            Some("/usr/bin:/bin"),
+            "a failed extraction must not touch PATH"
+        );
+        let after = crate::diff::captured_logs_count(needle);
+        assert!(
+            after > before,
+            "a failed extraction must warn (before {before}, after {after})"
         );
     }
 
@@ -3389,15 +3440,17 @@ mod tests {
         let mut user = HashMap::new();
         user.insert("PATH".to_string(), "/custom/bin".to_string());
         let env = assemble_pty_env(HashMap::new(), 1, 1, Some(user));
-        let Some(bin_dir) = env.get("PANEFLOW_BIN_DIR") else {
-            eprintln!("skip: PANEFLOW_BIN_DIR unavailable in this environment");
-            return;
-        };
+        let bin_dir = PathBuf::from(TEST_AI_HOOK_BIN_DIR);
+        assert_eq!(
+            env.get("PANEFLOW_BIN_DIR").map(PathBuf::from),
+            Some(bin_dir.clone()),
+            "the injected bin dir must survive a user PATH"
+        );
         let path = env.get("PATH").expect("PATH must be present");
         let mut parts = std::env::split_paths(path);
         assert_eq!(
-            parts.next().as_deref(),
-            Some(std::path::Path::new(bin_dir)),
+            parts.next(),
+            Some(bin_dir),
             "PANEFLOW_BIN_DIR must stay first even when user env sets PATH"
         );
         assert!(
