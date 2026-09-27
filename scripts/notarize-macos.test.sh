@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GPU-free tests for scripts/notarize-macos.sh (issues #715 and #914).
+# GPU-free tests for scripts/notarize-macos.sh (issues #715, #904, and #914).
 # A stub xcrun earlier on PATH stands in for notarytool and stapler.
 # ditto only builds the submission zip locally. No Apple network.
 set -euo pipefail
@@ -207,6 +207,9 @@ case "$cmd" in
             always-fail)
                 echo "notarytool: still unreachable" >&2
                 exit 1
+                ;;
+            always-in-progress)
+                printf '%s\n' '{"status":"In Progress"}'
                 ;;
             submit-fail-once-then-accepted|staple-fail-once)
                 printf '%s\n' '{"status":"Accepted"}'
@@ -456,6 +459,38 @@ grep -F -q "Notarized + stapled:" "$TMP/timeout.out" \
 [ "$(cat "$SLEEP_COUNT_FILE")" -eq 1 ] || fail "timeout slept $(cat "$SLEEP_COUNT_FILE") times, expected 1"
 [ ! -e "$ZIP" ] || fail "submission zip survived a timeout"
 pass "repeated notarytool info failures retry once, then stop at MAX_WAIT_SECONDS without stapling"
+
+# --- parsed In Progress hits the post-case ceiling, not retry_poll --------
+# Clock: start, +30s (In Progress arm, then sleep), +5400s (the arm again,
+# then the ELAPSED check after the case; no further sleep, no stapler).
+# The timeout message names `xcrun stapler staple` as manual recovery;
+# that transcript line is not an invocation.
+run_notarize "$TMP/in-progress-timeout.out" always-in-progress advance
+[ "$rc" -eq 1 ] || fail "always-in-progress exited $rc, expected 1: $(cat "$TMP/in-progress-timeout.out")"
+expect_seq "xcrun notarytool submit;xcrun notarytool info;sleep 30;xcrun notarytool info;" "$TMP/in-progress-timeout.out"
+expect_not_stapled
+grep -F -q "In Progress..." "$TMP/in-progress-timeout.out" \
+    || fail "missing In Progress heartbeat: $(cat "$TMP/in-progress-timeout.out")"
+grep -F -q "notarytool info failed" "$TMP/in-progress-timeout.out" \
+    && fail "In Progress timeout went through an info failure: $(cat "$TMP/in-progress-timeout.out")"
+grep -F -q "[+00:30] In Progress... (next poll in 30s)" "$TMP/in-progress-timeout.out" \
+    || fail "under-budget In Progress did not keep polling: $(cat "$TMP/in-progress-timeout.out")"
+grep -F -q "[+90:00] In Progress... (next poll in 30s)" "$TMP/in-progress-timeout.out" \
+    || fail "at-ceiling In Progress arm did not run: $(cat "$TMP/in-progress-timeout.out")"
+progress_lines="$(grep -c -F "In Progress... (next poll in 30s)" "$TMP/in-progress-timeout.out" || true)"
+[ "$progress_lines" -eq 2 ] || fail "expected two In Progress polls, got $progress_lines: $(cat "$TMP/in-progress-timeout.out")"
+grep -F -q "::error title=Notarization timeout::Submission stub-submission-id still pending after 90 minutes." "$TMP/in-progress-timeout.out" \
+    || fail "timeout was not reported: $(cat "$TMP/in-progress-timeout.out")"
+grep -F -q "xcrun stapler staple $APP" "$TMP/in-progress-timeout.out" \
+    || fail "timeout recovery did not name stapler: $(cat "$TMP/in-progress-timeout.out")"
+grep -F -q "xcrun stapler" "$TOOL_LOG" \
+    && fail "xcrun stapler staple was invoked: $(cat "$TOOL_LOG")"
+grep -F -q "Notarized + stapled:" "$TMP/in-progress-timeout.out" \
+    && fail "In Progress timeout still reported success: $(cat "$TMP/in-progress-timeout.out")"
+[ "$(cat "$INFO_COUNT_FILE")" -eq 2 ] || fail "In Progress timeout polled $(cat "$INFO_COUNT_FILE") times, expected 2"
+[ "$(cat "$SLEEP_COUNT_FILE")" -eq 1 ] || fail "In Progress timeout slept $(cat "$SLEEP_COUNT_FILE") times, expected 1"
+[ ! -e "$ZIP" ] || fail "submission zip survived an In Progress timeout"
+pass "In Progress stays non-terminal until the post-case ceiling, then exits 1 without stapling"
 
 # --- submit exits non-zero once, logs the lost-reply id, then staples -----
 run_notarize "$TMP/submit-once.out" submit-fail-once-then-accepted
