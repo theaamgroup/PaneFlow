@@ -5,6 +5,7 @@
 //! detection reads `.git/HEAD` directly.
 //!
 //! Extracted from `workspace.rs` per US-030 of the src-app refactor PRD.
+//! A reftable `HEAD` placeholder is resolved with one bounded `git symbolic-ref`.
 
 /// Git diff statistics for a workspace directory.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -644,6 +645,9 @@ pub fn resolve_worktree_root(
 /// Returns `(branch_name, true)`. On read failure returns `("", true)` -
 /// the directory is a git repo but the branch is unknown.
 /// Only `refs/heads/` branches are resolved; tags and remote refs return empty.
+///
+/// A reftable repository writes `ref: refs/heads/.invalid` and keeps the real
+/// name in `reftable/`. That placeholder is not a branch (issue #928).
 pub(crate) fn parse_head(git_dir: &std::path::Path) -> (String, bool) {
     let head_path = git_dir.join("HEAD");
     let content = match read_capped(&head_path, 512) {
@@ -662,7 +666,11 @@ pub(crate) fn parse_head(git_dir: &std::path::Path) -> (String, bool) {
         // paste). Drop all control chars at this trust boundary: `is_control()`
         // covers C0 (incl. `\n`/`\r`/ESC 0x1b), DEL (0x7f), and C1 (0x80-0x9f).
         // Pure string filtering - identical on Linux, macOS, and Windows.
-        (branch.chars().filter(|c| !c.is_control()).collect(), true)
+        let branch: String = branch.chars().filter(|c| !c.is_control()).collect();
+        if branch == ".invalid" || git_dir.join("reftable").is_dir() {
+            return (branch_from_symbolic_ref(git_dir), true);
+        }
+        (branch, true)
     } else if content.chars().all(|c| c.is_ascii_hexdigit())
         && (content.len() == 40 || content.len() == 64)
     {
@@ -675,9 +683,43 @@ pub(crate) fn parse_head(git_dir: &std::path::Path) -> (String, bool) {
     }
 }
 
+/// The real branch name behind a reftable `refs/heads/.invalid` placeholder.
+///
+/// `git symbolic-ref` is bounded and isolated the same way as the sidebar's
+/// other git probes. A failure, including a name that is still `.invalid`,
+/// is an unknown branch rather than the placeholder.
+fn branch_from_symbolic_ref(git_dir: &std::path::Path) -> String {
+    let Some(cwd) = git_dir.parent().and_then(|path| path.to_str()) else {
+        return String::new();
+    };
+    let git_dir_arg = git_dir.to_string_lossy();
+    let args = [
+        "--git-dir",
+        git_dir_arg.as_ref(),
+        "symbolic-ref",
+        "--short",
+        "HEAD",
+    ];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let Some(bytes) = git_stdout(cwd, &args, deadline) else {
+        return String::new();
+    };
+    let name: String = String::from_utf8_lossy(&bytes)
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    if name.is_empty() || name == ".invalid" {
+        String::new()
+    } else {
+        name
+    }
+}
+
 /// Detect the current git branch for a working directory.
 ///
-/// Walks up from `cwd` to find `.git`, reads `HEAD` directly (no subprocess).
+/// Walks up from `cwd` to find `.git` and reads `HEAD` directly. A reftable
+/// placeholder is resolved with one bounded `git symbolic-ref --short HEAD`.
 /// Returns `(branch_name, is_git_repo)`.
 /// - Normal branch: `("main", true)`
 /// - Detached HEAD: `("(abc1234)", true)`
@@ -703,6 +745,36 @@ mod tests {
         let (branch, is_repo) = detect_branch(dir.path().to_str().unwrap());
         assert_eq!(branch, "main");
         assert!(is_repo);
+    }
+
+    /// Issue #928: reftable writes `ref: refs/heads/.invalid` into `.git/HEAD`.
+    #[test]
+    fn detect_branch_reftable_repo_is_not_dot_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let status = std::process::Command::new("git")
+            .args([
+                "init",
+                "--ref-format=reftable",
+                "-b",
+                "main",
+                repo.to_str().unwrap(),
+            ])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .status();
+        let Ok(status) = status else {
+            eprintln!("git init failed to spawn; skipping reftable branch test");
+            return;
+        };
+        if !status.success() {
+            eprintln!("installed git has no reftable support; skipping");
+            return;
+        }
+
+        let (branch, is_repo) = detect_branch(repo.to_str().unwrap());
+        assert!(is_repo);
+        assert_eq!(branch, "main");
+        assert_ne!(branch, ".invalid");
     }
 
     #[test]
