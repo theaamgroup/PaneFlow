@@ -36,7 +36,8 @@ pub enum AgentState {
     /// Agent needs user input or approval (permission prompt, elicitation).
     WaitingForInput,
     /// Agent finished its response. Auto-cleared after 5 s by the IPC
-    /// `ai.stop` handler unless overridden by a new state transition.
+    /// `ai.stop` handler unless a later frame moved the state, or a later
+    /// stop replaced the row the timer named (issue #934).
     Finished,
     /// EP-004 US-010 (cli-cockpit): the agent BINARY exited non-zero -
     /// reported by the shim's `ai.exit` frame (the shell's `ChildExit`
@@ -239,6 +240,15 @@ pub struct AgentSession {
     /// against. `None` until a stamped frame lands (frames from a hook
     /// predating the field carry none and are always accepted).
     pub last_event_at_ms: Option<u64>,
+    /// How many `ai.stop` frames have been applied to this row.
+    ///
+    /// The 5 s auto-clear timer captures the value its own stop bumped this
+    /// to and removes the row only while it still matches. A later stop
+    /// bumps it again, so the older timer leaves the newer `Finished` row
+    /// in place (issue #934). Starts at 0, and only an applied stop moves
+    /// it. Not [`Self::last_event_at_ms`]: frames from hooks that predate
+    /// that field leave the watermark `None`.
+    pub stop_generation: u64,
     /// The user dismissed this session's badge from the sidebar tab menu
     /// ("Mark as read", issue #408). `state` stays the truth for everything
     /// that reasons about what the agent is doing - the stall clock, IPC
@@ -263,6 +273,7 @@ impl AgentSession {
             proc_start: None,
             last_result: None,
             last_event_at_ms: None,
+            stop_generation: 0,
             read: false,
         }
     }

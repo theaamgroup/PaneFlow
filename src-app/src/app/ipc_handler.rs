@@ -2548,15 +2548,14 @@ impl PaneFlowApp {
                     // code captured `pid` (None) and the `let Some(pid_key)`
                     // guard short-circuited, so that session's Finished state
                     // never auto-cleared and leaked into the sidebar forever.
-                    let Some(session_key) = upsert_session_state(
+                    // `stop_generation` names THIS stop. A later stop bumps it,
+                    // so the timer captured here cannot clear that newer row.
+                    let Some((session_key, stop_generation)) = apply_hook_stop(
                         &mut ws.agent_sessions,
                         pid,
                         tool,
-                        ai_types::reduce_lifecycle_event(ai_types::AgentLifecycleEvent::Stop {
-                            summary: session_summary.clone(),
-                        }),
+                        session_summary.clone(),
                         read_emitted_at(params),
-                        ai_types::AgentStateSource::Hook,
                     ) else {
                         return stale_frame_response();
                     };
@@ -2620,10 +2619,12 @@ impl PaneFlowApp {
                     }
                     self.sync_attention(cx);
 
-                    // Auto-clear the session 5 s after stop unless something
-                    // else (new prompt_submit, tool_use) bumps it back to
-                    // Thinking. Targets the exact (workspace_id, session_key) so
-                    // sibling sessions in the same workspace are untouched.
+                    // Auto-clear the session 5 s after THIS stop. A later
+                    // prompt_submit / tool_use moves the state off Finished,
+                    // and a later stop bumps `stop_generation`, so either one
+                    // leaves the row in place (issue #934). Targets the exact
+                    // (workspace_id, session_key) so sibling sessions in the
+                    // same workspace are untouched.
                     let ws_id = workspace_id;
                     cx.spawn(
                         async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
@@ -2632,9 +2633,9 @@ impl PaneFlowApp {
                                 let _ = this.update(cx, |app, cx| {
                                     if let Some(ws) =
                                         app.workspaces.iter_mut().find(|ws| ws.id == ws_id)
-                                        && matches!(
-                                            ws.agent_sessions.get(&session_key).map(|s| &s.state),
-                                            Some(ai_types::AgentState::Finished)
+                                        && finished_stop_is_still_current(
+                                            ws.agent_sessions.get(&session_key),
+                                            stop_generation,
                                         )
                                     {
                                         ws.agent_sessions.remove(&session_key);
@@ -3333,6 +3334,49 @@ fn upsert_session_state_with_start(
         }
     }
     Some(key)
+}
+
+/// Apply one `ai.stop` and name it.
+///
+/// Returns the session key and the stop generation the auto-clear timer
+/// must capture. `None` when the frame is rejected, in which case the
+/// generation does not move and no timer is armed. The bump happens only
+/// after the upsert has succeeded, and only on this path: `prompt_submit`
+/// and every other lifecycle frame leave the counter alone.
+fn apply_hook_stop(
+    sessions: &mut std::collections::HashMap<u32, AgentSession>,
+    pid: Option<u32>,
+    tool: crate::agent_launcher::TerminalAgent,
+    summary: Option<String>,
+    emitted_at_ms: Option<u64>,
+) -> Option<(u32, u64)> {
+    let key = upsert_session_state(
+        sessions,
+        pid,
+        tool,
+        ai_types::reduce_lifecycle_event(ai_types::AgentLifecycleEvent::Stop { summary }),
+        emitted_at_ms,
+        ai_types::AgentStateSource::Hook,
+    )?;
+    let generation = match sessions.get_mut(&key) {
+        Some(session) => {
+            session.stop_generation = session.stop_generation.wrapping_add(1);
+            session.stop_generation
+        }
+        // The upsert above just wrote this key.
+        None => 0,
+    };
+    Some((key, generation))
+}
+
+/// Whether the auto-clear timer that captured `stop_generation` may still
+/// remove the row. True only when that session exists, is still
+/// `Finished`, and no later stop has replaced the generation this timer named.
+fn finished_stop_is_still_current(session: Option<&AgentSession>, stop_generation: u64) -> bool {
+    session.is_some_and(|session| {
+        session.state == ai_types::AgentState::Finished
+            && session.stop_generation == stop_generation
+    })
 }
 
 /// Source stamp of a lifecycle frame, when the producing hook set one.
@@ -4744,6 +4788,79 @@ mod tests {
         assert!(
             key >= super::SYNTHETIC_SESSION_PID_BASE,
             "synthetic key lands in the reserved band"
+        );
+    }
+
+    /// Issue #934: stop N, a new prompt, then stop N+1, all inside the 5 s
+    /// auto-clear window. The timer stop N armed must not delete the
+    /// Finished row stop N+1 just wrote. The timer that captured N+1 still
+    /// would. No sleep: both decisions go through the predicate the live
+    /// timer calls.
+    #[test]
+    fn an_older_stop_timer_does_not_clear_a_newer_finished_turn() {
+        use crate::agent_launcher::TerminalAgent;
+        use crate::ai_types::{
+            AgentLifecycleEvent, AgentSession, AgentState, reduce_lifecycle_event,
+        };
+
+        let mut sessions: std::collections::HashMap<u32, AgentSession> =
+            std::collections::HashMap::new();
+        let pid = Some(4242);
+        let tool = TerminalAgent::ClaudeCode;
+
+        let (key, first_stop) = super::apply_hook_stop(&mut sessions, pid, tool, None, Some(1_000))
+            .expect("the first stop applies");
+        assert_eq!(key, 4242);
+        assert_eq!(
+            first_stop, 1,
+            "a new row's first applied stop is generation 1"
+        );
+        assert_eq!(sessions[&key].state, AgentState::Finished);
+        assert_eq!(sessions[&key].stop_generation, first_stop);
+
+        super::upsert_session_state(
+            &mut sessions,
+            pid,
+            tool,
+            reduce_lifecycle_event(AgentLifecycleEvent::PromptSubmit),
+            Some(2_000),
+            ai_types::AgentStateSource::Hook,
+        )
+        .expect("prompt_submit applies");
+        assert_eq!(sessions[&key].state, AgentState::Thinking);
+        assert_eq!(
+            sessions[&key].stop_generation, first_stop,
+            "leaving Finished does not move the stop generation"
+        );
+
+        let (same_key, second_stop) = super::apply_hook_stop(
+            &mut sessions,
+            pid,
+            tool,
+            Some("turn n+1".into()),
+            Some(3_000),
+        )
+        .expect("the second stop applies");
+        assert_eq!(same_key, key);
+        assert_eq!(second_stop, 2);
+        assert_ne!(second_stop, first_stop);
+        assert_eq!(sessions[&key].state, AgentState::Finished);
+        assert_eq!(sessions[&key].stop_generation, second_stop);
+        assert_eq!(sessions[&key].last_result.as_deref(), Some("turn n+1"));
+
+        // The timer scheduled by the first stop, run without waiting 5 s.
+        if super::finished_stop_is_still_current(sessions.get(&key), first_stop) {
+            sessions.remove(&key);
+        }
+        assert!(
+            sessions.contains_key(&key),
+            "an older stop timer must not clear a newer finished turn"
+        );
+        assert_eq!(sessions[&key].state, AgentState::Finished);
+        assert_eq!(sessions[&key].last_result.as_deref(), Some("turn n+1"));
+        assert!(
+            super::finished_stop_is_still_current(sessions.get(&key), second_stop),
+            "a timer that captured the later stop still clears the row it named"
         );
     }
 
