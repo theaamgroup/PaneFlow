@@ -165,6 +165,48 @@ fn font_menu_matches<'a>(
     }
 }
 
+/// Font-family combobox. The accessible name is always the selected family.
+/// While the menu is open the painted child is the typeahead (`Search fonts…`
+/// or `{query}|`); that string is not part of the name.
+fn font_family_trigger(
+    current_font: &str,
+    font_dropdown_open: bool,
+    font_search: &str,
+    ui: crate::theme::UiColors,
+) -> AnimatedHover {
+    let painted = if font_dropdown_open {
+        if font_search.is_empty() {
+            "Search fonts…".to_string()
+        } else {
+            format!("{font_search}|")
+        }
+    } else {
+        current_font.to_string()
+    };
+    let painted_color = if font_dropdown_open && font_search.is_empty() {
+        ui.muted
+    } else {
+        ui.text
+    };
+    select_trigger_with_hover(
+        "terminal-font-family-trigger",
+        ui,
+        lighter_control_hover(ui.subtle),
+        font_dropdown_open,
+        format!("Font family, {current_font}"),
+    )
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .text_size(px(12.))
+            .text_color(painted_color)
+            .truncate()
+            .child(painted),
+    )
+    .child(select_chevron(ui))
+}
+
 /// Font Enter commits. `Default` is the "PaneFlow default" row (JSON null).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FontCommit {
@@ -518,58 +560,28 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let default_font = crate::terminal::element::resolve_font_family(None);
-        let trigger_label = if self.font_dropdown_open {
-            if self.font_search.is_empty() {
-                "Search fonts…".to_string()
-            } else {
-                format!("{}|", self.font_search)
-            }
-        } else {
-            current_font.clone()
-        };
-        let trigger_label_color = if self.font_dropdown_open && self.font_search.is_empty() {
-            ui.muted
-        } else {
-            ui.text
-        };
-
         let font_open = self.font_dropdown_open;
-        let trigger_hover_bg = lighter_control_hover(ui.subtle);
-        let mut trigger = select_trigger_with_hover(
-            "terminal-font-family-trigger",
-            ui,
-            trigger_hover_bg,
-            font_open,
-            format!("Font family, {trigger_label}"),
-        )
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
+        // The accessible name is the selected family. The typeahead string is
+        // only the painted child (`font_family_trigger`).
+        let mut trigger = font_family_trigger(&current_font, font_open, &self.font_search, ui)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.open_font_dropdown(!font_open, window, cx);
+                }),
+            )
+            // Keyboard / assistive-tech activation (issue #361): the pointer opens
+            // on press above, so this arm takes only the `ClickEvent::Keyboard`
+            // GPUI synthesizes from Space / Enter on the focused trigger. Carrying
+            // a click listener is also what puts `accesskit::Action::Click` on the
+            // node for VoiceOver.
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if !matches!(event, ClickEvent::Keyboard(_)) {
+                    return;
+                }
                 this.open_font_dropdown(!font_open, window, cx);
-            }),
-        )
-        // Keyboard / assistive-tech activation (issue #361): the pointer opens
-        // on press above, so this arm takes only the `ClickEvent::Keyboard`
-        // GPUI synthesizes from Space / Enter on the focused trigger. Carrying
-        // a click listener is also what puts `accesskit::Action::Click` on the
-        // node for VoiceOver.
-        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-            if !matches!(event, ClickEvent::Keyboard(_)) {
-                return;
-            }
-            this.open_font_dropdown(!font_open, window, cx);
-        }))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_size(px(12.))
-                .text_color(trigger_label_color)
-                .truncate()
-                .child(trigger_label),
-        )
-        .child(select_chevron(ui));
+            }));
 
         if self.font_dropdown_open {
             let default_label = font_default_label(&default_font);
@@ -1170,5 +1182,36 @@ mod tests {
         );
         assert!(open);
         assert_eq!(search, "zzz");
+    }
+
+    /// Issue #918: opening the font menu and typing used to replace the
+    /// trigger's accessible name with the placeholder or the query plus the
+    /// painted caret. The name stays the selected family.
+    #[test]
+    fn font_family_trigger_name_keeps_the_current_font_while_searching() {
+        let ui = crate::theme::ui_colors();
+        let current_font = "JetBrains Mono";
+        let font_dropdown_open = true;
+        let font_search = "mono";
+
+        let trigger = font_family_trigger(current_font, font_dropdown_open, font_search, ui);
+        let node = written_a11y(&trigger);
+        let expected = format!("Font family, {current_font}");
+        assert_eq!(node.is_expanded(), Some(true));
+        assert_eq!(
+            node.label(),
+            Some(expected.as_str()),
+            "the open trigger must keep the selected font, not the query"
+        );
+
+        let row = include_str!("terminal.rs")
+            .split("fn terminal_font_family_row(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn terminal_cursor_color_row(").next())
+            .expect("font family row");
+        assert!(
+            row.contains("font_family_trigger(&current_font, font_open, &self.font_search, ui)"),
+            "the font row must name the trigger with the current font while searching"
+        );
     }
 }
