@@ -931,13 +931,6 @@ pub(crate) fn worktree_has_live_process_cwd(
     Ok(false)
 }
 
-/// `git worktree prune` - drops references whose directory no longer exists.
-/// Git-native guarantee: a worktree whose directory still exists is untouched
-/// (US-009 AC5), so this is safe to run blindly after a removal.
-pub fn prune(repo_root: &Path) -> Result<(), String> {
-    run_git(repo_root, &["worktree", "prune"], GIT_DEADLINE).map(|_| ())
-}
-
 /// Copy top-level `.env*` FILES from `src_root` into `dst_root`, skipping any
 /// that already exist there (a tracked `.env.example` arrives via checkout -
 /// don't clobber it). Best-effort by design (US-007): a missing source dir or
@@ -1422,7 +1415,7 @@ mod tests {
         let scan = source_slice(
             source,
             "fn worktree_has_live_process_cwd(",
-            "\npub fn prune(",
+            "\npub fn copy_env_files(",
         );
 
         assert!(

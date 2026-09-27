@@ -785,20 +785,16 @@ fn check_checkout_removable(
     Ok(())
 }
 
-/// The deleting half of [`remove_checkout`]: `git worktree remove` (which
-/// refuses by itself a checkout that turned dirty since the check) and the
-/// prune that drops the administrative entry. The BRANCH IS NEVER DELETED.
+/// The deleting half of [`remove_checkout`]: `git worktree remove`, which
+/// refuses by itself a checkout that turned dirty since the check and deletes
+/// that checkout's administrative entry. A repository-wide prune does not
+/// follow. A sibling whose directory is only temporarily missing would lose
+/// its HEAD, index, and reflog (issue #938). The BRANCH IS NEVER DELETED.
 fn remove_validated_checkout(
     repo_root: &std::path::Path,
     path: &std::path::Path,
 ) -> Result<(), String> {
-    use crate::workspace::worktree;
-    worktree::remove_worktree(repo_root, path)?;
-    // The directory is gone; drop the administrative entry with it, so a
-    // later `worktree add` for the same branch is not refused by a stale
-    // record.
-    let _ = worktree::prune(repo_root);
-    Ok(())
+    crate::workspace::worktree::remove_worktree(repo_root, path)
 }
 
 // A probe still running on smol's pool when a test returns is dropped off
@@ -841,6 +837,7 @@ impl Drop for SuppressCheckoutProbes {
 mod tests {
     use super::{
         CheckoutGit, SuppressCheckoutProbes, WorktreeStates, removal_refusal, remove_checkout,
+        remove_validated_checkout,
     };
     use crate::workspace::GitDiffStats;
     use gpui::AppContext;
@@ -1142,6 +1139,116 @@ mod tests {
             "the branch is never deleted: {branches}"
         );
         assert!(git(&repo_root, &["status", "--porcelain"]).is_empty());
+    }
+
+    /// Issue #938: `git worktree remove` already drops the entry it removed.
+    /// A repository-wide `git worktree prune` must not follow, or a sibling
+    /// whose directory is only temporarily missing loses its registration.
+    #[test]
+    fn removing_a_checkout_keeps_a_missing_sibling_worktree_entry() {
+        let git = |cwd: &Path, args: &[&str]| -> String {
+            let mut cmd = crate::workspace::worktree::git_command();
+            cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .arg("-C")
+                .arg(cwd)
+                .args(args);
+            let out = cmd.output().expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        git(&repo_root, &["init", "-q"]);
+        git(
+            &repo_root,
+            &["config", "user.email", "paneflow-tests@example.invalid"],
+        );
+        git(&repo_root, &["config", "user.name", "PaneFlow Tests"]);
+        std::fs::write(repo_root.join("README.md"), "test\n").expect("tracked file");
+        git(&repo_root, &["add", "."]);
+        git(
+            &repo_root,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "fixture",
+            ],
+        );
+
+        let kept = tmp.path().join("kept");
+        let missing = tmp.path().join("missing");
+        let kept_arg = kept.to_string_lossy().into_owned();
+        let missing_arg = missing.to_string_lossy().into_owned();
+        git(
+            &repo_root,
+            &["worktree", "add", "-q", &kept_arg, "-b", "feat/kept"],
+        );
+        git(
+            &repo_root,
+            &["worktree", "add", "-q", &missing_arg, "-b", "feat/missing"],
+        );
+
+        let gitfile = std::fs::read_to_string(missing.join(".git")).expect("sibling gitfile");
+        let gitdir = gitfile
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("gitdir:"))
+            .expect("gitdir line")
+            .trim();
+        let admin = {
+            let raw = PathBuf::from(gitdir);
+            if raw.is_absolute() {
+                raw
+            } else {
+                missing.join(raw)
+            }
+        };
+        assert!(
+            admin.is_dir(),
+            "the sibling is registered at {}",
+            admin.display()
+        );
+        let worktrees = repo_root.join(".git").join("worktrees");
+        assert!(
+            std::fs::canonicalize(&admin)
+                .expect("admin dir")
+                .starts_with(std::fs::canonicalize(&worktrees).expect("worktrees dir")),
+            "registration must be .git/worktrees/<id>, got {}",
+            admin.display()
+        );
+
+        let aside = tmp.path().join("missing-aside");
+        std::fs::rename(&missing, &aside).expect("move the sibling aside");
+        assert!(
+            !missing.exists(),
+            "the sibling directory is missing while it stays registered"
+        );
+        assert!(
+            admin.is_dir(),
+            "moving the directory must not drop {}",
+            admin.display()
+        );
+
+        remove_validated_checkout(&repo_root, &kept).expect("remove the other checkout");
+        assert!(
+            !kept.exists(),
+            "git worktree remove deletes the checkout it was given"
+        );
+        assert!(
+            admin.is_dir(),
+            "removing {} must keep the missing sibling's administrative entry at {}",
+            kept.display(),
+            admin.display()
+        );
     }
 
     #[test]
