@@ -381,6 +381,7 @@ mod tests {
             let second_id = second.id;
             app.workspaces = vec![first, second];
 
+            let _bootstrap = crate::diff::SuppressDiffBootstrap::arm();
             app.restore_review_layout(&diff_pane(&repo, &checkout), cx);
 
             let subjects = app.review_grid_subjects(cx);
