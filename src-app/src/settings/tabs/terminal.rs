@@ -35,6 +35,7 @@ use crate::settings::components::{
     select_listbox, select_option, select_trigger_with_hover, setting_card, setting_text,
     toggle_switch,
 };
+use crate::terminal::element::{MIN_APCA_CONTRAST, ensure_minimum_contrast};
 use crate::ui_primitives::{AnimatedHover, AnimatedHoverExt};
 
 use crate::{PaneFlowApp, TerminalDropdown};
@@ -774,14 +775,16 @@ impl PaneFlowApp {
                 swatch_grid = swatch_grid.child(swatch_row);
             }
 
-            let scheme_bg = if uses_theme {
-                Hsla::from(gpui::rgb(0x2fd7f2))
+            // `accent` and `text` are independent tokens. Lift the label off
+            // the fill the same way the shortcuts tab does.
+            let scheme_bg = if uses_theme { ui.accent } else { ui.subtle };
+            let scheme_text = if uses_theme {
+                ensure_minimum_contrast(ui.text, ui.accent, MIN_APCA_CONTRAST)
             } else {
-                ui.subtle
+                ui.text
             };
-            let scheme_text = if uses_theme { gpui::black() } else { ui.text };
             let scheme_hover_bg = if uses_theme {
-                scheme_bg
+                lighter_control_hover(ui.accent)
             } else {
                 lighter_control_hover(ui.subtle)
             };

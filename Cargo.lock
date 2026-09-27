@@ -4601,6 +4601,7 @@ name = "paneflow-ai-hook"
 version = "0.7.2"
 dependencies = [
  "interprocess",
+ "libc",
  "paneflow-ipc-client",
  "serde_json",
  "tempfile",

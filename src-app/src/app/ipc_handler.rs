@@ -793,6 +793,19 @@ fn requested_workspace_id(params: &serde_json::Value) -> Result<Option<u64>, Jso
     })
 }
 
+/// Optional `surface_id`. Absent is `Ok(None)`: the caller did not name a
+/// pane. A present value that is not a non-negative integer is `-32602`,
+/// not a signal to use the active pane (issues #1020, #1021, #1022).
+fn requested_surface_id(params: &serde_json::Value) -> Result<Option<u64>, JsonRpcError> {
+    let Some(value) = params.get("surface_id") else {
+        return Ok(None);
+    };
+    value
+        .as_u64()
+        .map(Some)
+        .ok_or_else(|| JsonRpcError::invalid_params("'surface_id' must be a non-negative integer"))
+}
+
 /// Extract an optional bounded integer param, distinguishing ABSENT from
 /// MALFORMED or OUT OF RANGE.
 ///
@@ -1446,22 +1459,31 @@ impl PaneFlowApp {
     /// Resolve a `surface.*` target from the request params to a terminal
     /// entity (US-003/US-004). Precedence: explicit `surface_id` → `name` →
     /// the active workspace's first leaf. Returns a structured `-32602` error
-    /// when the target is missing, unknown, or an ambiguous name.
+    /// when the target is missing, unknown, or an ambiguous name. A present
+    /// `surface_id` that is not a non-negative integer, or a present `name`
+    /// that is not a string, is that error and does not fall back (issue #1022).
     fn resolve_surface(
         &self,
         params: &serde_json::Value,
         cx: &App,
     ) -> Result<gpui::Entity<TerminalView>, JsonRpcError> {
-        if let Some(sid) = params.get("surface_id").and_then(|s| s.as_u64()) {
+        if let Some(sid) = requested_surface_id(params)? {
             return self.find_surface_terminal_by_id(sid, cx).ok_or_else(|| {
                 JsonRpcError::invalid_params(format!("surface_id {sid} not found"))
             });
         }
-        if let Some(name) = params
-            .get("name")
-            .and_then(|n| n.as_str())
-            .filter(|n| !n.is_empty())
-        {
+        // An empty string is a string and still means "not a name". JSON null
+        // and any other non-string are invalid params, not the active pane.
+        let name = match params.get("name") {
+            None => None,
+            Some(value) => {
+                let Some(name) = value.as_str() else {
+                    return Err(JsonRpcError::invalid_params("'name' must be a string"));
+                };
+                (!name.is_empty()).then_some(name)
+            }
+        };
+        if let Some(name) = name {
             let meta = self.collect_surface_meta(cx);
             let matches: Vec<&SurfaceMeta> = meta.iter().filter(|m| m.name == name).collect();
             match matches.as_slice() {
@@ -2136,6 +2158,14 @@ impl PaneFlowApp {
                 ipc_deferred_response()
             }
             "surface.send_text" => {
+                // Issues #1020/#1021: a present non-integer `surface_id` is
+                // invalid params, not the active pane. Before the scripting
+                // gate, so a closed gate cannot mask it, and before a terminal
+                // is chosen, so nothing is written.
+                let surface_id = match requested_surface_id(params) {
+                    Ok(surface_id) => surface_id,
+                    Err(error) => return error.into_value(),
+                };
                 // US-012 (cli-hardening-followup-2026-Q3): same-UID RCE
                 // primitive gate. See ipc.rs module doc for the blast-radius
                 // rationale. Default off. EP-003 US-010 (agent-control-plane)
@@ -2180,9 +2210,7 @@ impl PaneFlowApp {
                 // surface_id the active workspace's first terminal is used - the
                 // same default routing as `surface.send_keystroke`
                 // (`find_first_terminal` skips diff leaves).
-                let target: Option<Entity<TerminalView>> = if let Some(sid) =
-                    params.get("surface_id").and_then(|s| s.as_u64())
-                {
+                let target: Option<Entity<TerminalView>> = if let Some(sid) = surface_id {
                     match self.find_surface_terminal_by_id(sid, cx) {
                         Some(t) => Some(t),
                         None => {
@@ -2283,10 +2311,16 @@ impl PaneFlowApp {
                 })
             }
             "surface.send_keystroke" => {
+                // Same rejection as `surface.send_text`: before the scripting
+                // gate inside `surface_send_keystroke`, and before a terminal
+                // is chosen (issues #1020, #1021).
+                let surface_id = match requested_surface_id(params) {
+                    Ok(surface_id) => surface_id,
+                    Err(error) => return error.into_value(),
+                };
                 let unrestricted = self.cached_config.ai_unrestricted_enabled();
                 // Route by surface_id if provided, otherwise use active terminal
-                let terminal = if let Some(sid) = params.get("surface_id").and_then(|s| s.as_u64())
-                {
+                let terminal = if let Some(sid) = surface_id {
                     self.find_surface_terminal_by_id(sid, cx)
                 } else if let Some(ws) = self.active_workspace()
                     && let Some(root) = &ws.active_tab().root
@@ -3610,6 +3644,41 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("{malformed} must be rejected, not defaulted"));
             assert_eq!(error.code, JsonRpcError::INVALID_PARAMS, "{malformed}");
+        }
+    }
+
+    /// Issues #1020/#1021/#1022: an absent `surface_id` is not required.
+    #[test]
+    fn requested_surface_id_absent_is_none_and_u64_is_honoured() {
+        assert_eq!(requested_surface_id(&serde_json::json!({})).unwrap(), None);
+        assert_eq!(
+            requested_surface_id(&serde_json::json!({"surface_id": 0})).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            requested_surface_id(&serde_json::json!({"surface_id": 42})).unwrap(),
+            Some(42)
+        );
+    }
+
+    /// `"42"`, `-1`, and `1.5` used to be read as "no id" and routed to the
+    /// active pane. They are invalid params instead.
+    #[test]
+    fn requested_surface_id_rejects_string_negative_and_float() {
+        for malformed in [
+            serde_json::json!({"surface_id": "42"}),
+            serde_json::json!({"surface_id": -1}),
+            serde_json::json!({"surface_id": 1.5}),
+            serde_json::json!({"surface_id": null}),
+        ] {
+            let error = requested_surface_id(&malformed)
+                .err()
+                .unwrap_or_else(|| panic!("{malformed} must be rejected, not treated as absent"));
+            assert_eq!(error.code, JsonRpcError::INVALID_PARAMS, "{malformed}");
+            assert_eq!(
+                error.message, "'surface_id' must be a non-negative integer",
+                "{malformed}"
+            );
         }
     }
 
@@ -6124,5 +6193,272 @@ mod tests {
         assert!(ws.tabs()[1].can_add_pane());
         assert_eq!(ws.tabs()[1].pane_count(), 1);
         assert_eq!(ws.pane_count(), MAX_PANES + 1);
+    }
+
+    /// One blank app plus the active pane a malformed id must not type into.
+    /// `try_write_to_pty` sets `keyboard_input_sent` before queueing bytes;
+    /// `should_close_on_exit` is that flag while `exited` is still `None`.
+    fn ipc_app_with_active_terminal(
+        cx: &mut gpui::VisualTestContext,
+    ) -> (
+        gpui::Entity<crate::PaneFlowApp>,
+        gpui::Entity<crate::terminal::TerminalView>,
+    ) {
+        use gpui::AppContext;
+
+        let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+        let pane = cx.new(|cx| Pane::new(terminal.clone(), 1, cx));
+        let workspace = Workspace::with_layout_and_id(
+            1,
+            "ws",
+            std::path::PathBuf::new(),
+            crate::layout::LayoutTree::Leaf(pane),
+        );
+        let app = cx.new(|cx| {
+            let mut app = crate::app::sidebar::customize_menu::tests::blank_paneflow_app(cx);
+            app.workspaces = vec![workspace];
+            app.active_idx = 0;
+            app
+        });
+        (app, terminal)
+    }
+
+    fn dispatch_surface(
+        app: &gpui::Entity<crate::PaneFlowApp>,
+        cx: &mut gpui::VisualTestContext,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let (response_tx, _response_rx) = mpsc::channel();
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.handle_surface_method(method, &params, &response_tx, cx)
+            })
+        })
+    }
+
+    fn resolved_surface_id(
+        app: &gpui::Entity<crate::PaneFlowApp>,
+        cx: &mut gpui::VisualTestContext,
+        params: serde_json::Value,
+    ) -> u64 {
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.resolve_surface(&params, cx)
+                    .unwrap_or_else(|error| panic!("resolve_surface failed: {error:?}"))
+                    .entity_id()
+                    .as_u64()
+            })
+        })
+    }
+
+    fn assert_surface_id_type_error(result: &serde_json::Value) {
+        assert_eq!(result["_jsonrpc_error"]["code"], -32602, "{result}");
+        assert_eq!(
+            result["_jsonrpc_error"]["message"], "'surface_id' must be a non-negative integer",
+            "{result}"
+        );
+    }
+
+    /// No IPC write has reached this display terminal. There is no child PTY;
+    /// the write flag is the side effect `try_write_to_pty` sets first.
+    fn assert_no_pty_write(
+        terminal: &gpui::Entity<crate::terminal::TerminalView>,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        let idle = cx.update(|_, cx| {
+            let terminal = terminal.read(cx);
+            terminal.terminal.exited.is_none() && !terminal.terminal.should_close_on_exit()
+        });
+        assert!(
+            idle,
+            "a rejected surface_id must not write to the active pane"
+        );
+    }
+
+    /// Issue #1020: `{"surface_id":"42","text":"x","submit":true}` is -32602
+    /// before the scripting gate, and the active pane receives no bytes.
+    #[gpui::test]
+    fn surface_send_text_rejects_a_non_integer_surface_id_without_writing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let (app, terminal) = ipc_app_with_active_terminal(cx);
+        assert_no_pty_write(&terminal, cx);
+        for surface_id in [
+            serde_json::json!("42"),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+        ] {
+            let result = dispatch_surface(
+                &app,
+                cx,
+                "surface.send_text",
+                serde_json::json!({
+                    "surface_id": surface_id,
+                    "text": "x",
+                    "submit": true,
+                }),
+            );
+            assert_surface_id_type_error(&result);
+            assert_no_pty_write(&terminal, cx);
+        }
+
+        // Gate open. A check that ran after the gate would type "x" and submit.
+        cx.update(|_, cx| {
+            app.update(cx, |app, _cx| {
+                app.cached_config.ai_unrestricted = Some(true);
+            });
+        });
+        let result = dispatch_surface(
+            &app,
+            cx,
+            "surface.send_text",
+            serde_json::json!({"surface_id": "42", "text": "x", "submit": true}),
+        );
+        assert_surface_id_type_error(&result);
+        assert_no_pty_write(&terminal, cx);
+    }
+
+    /// Issue #1021: a string `surface_id` is -32602 before a keystroke is sent.
+    #[gpui::test]
+    fn surface_send_keystroke_rejects_a_string_surface_id(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let (app, terminal) = ipc_app_with_active_terminal(cx);
+        let result = dispatch_surface(
+            &app,
+            cx,
+            "surface.send_keystroke",
+            serde_json::json!({"surface_id": "42", "keystroke": "ctrl-c"}),
+        );
+        assert_surface_id_type_error(&result);
+        assert_no_pty_write(&terminal, cx);
+
+        cx.update(|_, cx| {
+            app.update(cx, |app, _cx| {
+                app.cached_config.ai_unrestricted = Some(true);
+            });
+        });
+        let result = dispatch_surface(
+            &app,
+            cx,
+            "surface.send_keystroke",
+            serde_json::json!({"surface_id": "42", "keystroke": "ctrl-c"}),
+        );
+        assert_surface_id_type_error(&result);
+        assert_no_pty_write(&terminal, cx);
+    }
+
+    /// Issue #1022: `surface.read` rejects a string id before falling back.
+    #[gpui::test]
+    fn surface_read_rejects_a_string_surface_id(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let (app, _terminal) = ipc_app_with_active_terminal(cx);
+        let result = dispatch_surface(
+            &app,
+            cx,
+            "surface.read",
+            serde_json::json!({"surface_id": "42"}),
+        );
+        assert_surface_id_type_error(&result);
+        assert!(
+            result.get("_ipc_deferred").is_none(),
+            "a bad surface_id must not start a scrollback read: {result}"
+        );
+    }
+
+    /// Issue #1022: a non-string `name` is -32602. An absent id, an empty
+    /// name, and a real numeric id still resolve to the active pane.
+    #[gpui::test]
+    fn resolve_surface_rejects_a_non_string_name_and_absent_id_falls_back(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let (app, terminal) = ipc_app_with_active_terminal(cx);
+        let sid = terminal.entity_id().as_u64();
+
+        for name in [
+            serde_json::json!(null),
+            serde_json::json!(1),
+            serde_json::json!(true),
+        ] {
+            let params = serde_json::json!({"name": name});
+            let error = cx.update(|_, cx| {
+                app.update(cx, |app, cx| {
+                    app.resolve_surface(&params, cx)
+                        .expect_err("a non-string name must not fall back")
+                })
+            });
+            assert_eq!(error.code, JsonRpcError::INVALID_PARAMS, "{params}");
+            assert_eq!(error.message, "'name' must be a string", "{params}");
+
+            let status = dispatch_surface(&app, cx, "surface.status", params);
+            assert_eq!(status["_jsonrpc_error"]["code"], -32602, "{status}");
+            assert_eq!(
+                status["_jsonrpc_error"]["message"], "'name' must be a string",
+                "{status}"
+            );
+        }
+
+        assert_eq!(
+            resolved_surface_id(&app, cx, serde_json::json!({})),
+            sid,
+            "absent id falls back"
+        );
+        assert_eq!(
+            resolved_surface_id(&app, cx, serde_json::json!({"name": ""})),
+            sid,
+            "an empty name is not a name"
+        );
+        assert_eq!(
+            resolved_surface_id(&app, cx, serde_json::json!({"surface_id": sid})),
+            sid,
+            "a numeric surface_id still resolves"
+        );
+
+        let idle = dispatch_surface(&app, cx, "surface.status", serde_json::json!({}));
+        assert_eq!(idle["surface_id"], sid, "{idle}");
+        assert!(idle.get("_jsonrpc_error").is_none(), "{idle}");
+
+        // Absent id is not required: this reaches the existing gate, not the
+        // type error, and does not write.
+        let unnamed = dispatch_surface(
+            &app,
+            cx,
+            "surface.send_text",
+            serde_json::json!({"text": "", "submit": false}),
+        );
+        let message = unnamed["_jsonrpc_error"]["message"].as_str().unwrap_or("");
+        assert_ne!(
+            message, "'surface_id' must be a non-negative integer",
+            "{unnamed}"
+        );
+        if super::ipc_scripting_enabled() {
+            assert_eq!(message, "Missing 'text' parameter", "{unnamed}");
+        } else {
+            assert!(message.contains("surface.send_text disabled"), "{unnamed}");
+        }
+        assert_no_pty_write(&terminal, cx);
+
+        // Gate open, no id, body rejected before the PTY write. Reaching the
+        // CR/LF error means the active pane was chosen (otherwise the arm
+        // returns "No active terminal" first).
+        cx.update(|_, cx| {
+            app.update(cx, |app, _cx| {
+                app.cached_config.ai_unrestricted = Some(true);
+            });
+        });
+        let routed = dispatch_surface(
+            &app,
+            cx,
+            "surface.send_text",
+            serde_json::json!({"text": "a\nb", "submit": false, "paste": false}),
+        );
+        assert_eq!(
+            routed["_jsonrpc_error"]["message"],
+            "text contains CR or LF; multiline surface.send_text requires active bracketed paste",
+            "{routed}"
+        );
+        assert_no_pty_write(&terminal, cx);
     }
 }
