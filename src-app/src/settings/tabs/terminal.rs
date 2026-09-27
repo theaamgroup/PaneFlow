@@ -130,6 +130,147 @@ fn cursor_color_swatch(
         })
 }
 
+fn font_default_label(default_font: &str) -> String {
+    format!("PaneFlow default - {default_font}")
+}
+
+struct FontMenuMatches<'a> {
+    default_matches: bool,
+    families: Vec<&'a str>,
+}
+
+/// Rows the font menu paints, in order. The default row is first when its
+/// label matches; other families follow, skipping the default face itself.
+fn font_menu_matches<'a>(
+    search: &str,
+    default_font: &str,
+    mono_font_names: &'a [String],
+) -> FontMenuMatches<'a> {
+    let folded = search.to_lowercase();
+    let default_matches = folded.is_empty()
+        || font_default_label(default_font)
+            .to_lowercase()
+            .contains(&folded);
+    let families = mono_font_names
+        .iter()
+        .filter(|name| {
+            name.as_str() != default_font
+                && (folded.is_empty() || name.to_lowercase().contains(&folded))
+        })
+        .map(String::as_str)
+        .collect();
+    FontMenuMatches {
+        default_matches,
+        families,
+    }
+}
+
+/// Font Enter commits. `Default` is the "PaneFlow default" row (JSON null).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FontCommit {
+    Default,
+    Family(String),
+}
+
+impl FontCommit {
+    pub(crate) fn config_value(self) -> Value {
+        match self {
+            Self::Default => Value::Null,
+            Self::Family(name) => Value::String(name),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FontKeyEffect {
+    Ignored,
+    Redraw,
+    Select(FontCommit),
+}
+
+/// First row Enter commits for a non-empty query.
+///
+/// The menu has no highlight index, so the highlight is the first row
+/// [`font_menu_matches`] would paint. An empty query lists every family
+/// and is not a choice. No row means Enter must not store the query as a
+/// family name.
+fn highlighted_font(
+    search: &str,
+    default_font: &str,
+    mono_font_names: &[String],
+) -> Option<FontCommit> {
+    if search.is_empty() {
+        return None;
+    }
+    let matches = font_menu_matches(search, default_font, mono_font_names);
+    if matches.default_matches {
+        Some(FontCommit::Default)
+    } else {
+        matches
+            .families
+            .first()
+            .map(|name| FontCommit::Family((*name).to_string()))
+    }
+}
+
+fn typeable_key_char(keystroke: &gpui::Keystroke) -> Option<&str> {
+    let ch = keystroke.key_char.as_deref()?;
+    if ch.is_empty()
+        || keystroke.modifiers.control
+        || keystroke.modifiers.platform
+        || ch.chars().any(char::is_control)
+    {
+        None
+    } else {
+        Some(ch)
+    }
+}
+
+/// Key handling for the open font-family menu.
+///
+/// Enter commits [`highlighted_font`]. Tab and other control characters
+/// (`"\n"`, `"\t"`) are not inserted into `search`.
+pub(crate) fn apply_font_typeahead_key(
+    search: &mut String,
+    open: &mut bool,
+    keystroke: &gpui::Keystroke,
+    default_font: &str,
+    mono_font_names: &[String],
+) -> FontKeyEffect {
+    if !*open {
+        return FontKeyEffect::Ignored;
+    }
+    match keystroke.key.as_str() {
+        "escape" => {
+            *open = false;
+            search.clear();
+            FontKeyEffect::Redraw
+        }
+        "backspace" => {
+            search.pop();
+            FontKeyEffect::Redraw
+        }
+        "enter" if !keystroke.modifiers.control && !keystroke.modifiers.platform => {
+            match highlighted_font(search, default_font, mono_font_names) {
+                Some(commit) => {
+                    *open = false;
+                    search.clear();
+                    FontKeyEffect::Select(commit)
+                }
+                None => FontKeyEffect::Ignored,
+            }
+        }
+        _ => {
+            if let Some(ch) = typeable_key_char(keystroke) {
+                search.push_str(ch);
+                FontKeyEffect::Redraw
+            } else {
+                FontKeyEffect::Ignored
+            }
+        }
+    }
+}
+
 impl PaneFlowApp {
     pub(crate) fn render_terminal_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // US-016: read the cached config (no per-frame `load_config()`).
@@ -431,18 +572,9 @@ impl PaneFlowApp {
         .child(select_chevron(ui));
 
         if self.font_dropdown_open {
-            let search = self.font_search.to_lowercase();
-            let default_label = format!("PaneFlow default - {default_font}");
-            let default_matches =
-                search.is_empty() || default_label.to_lowercase().contains(&search);
-            let filtered: Vec<&String> = self
-                .mono_font_names
-                .iter()
-                .filter(|name| {
-                    name.as_str() != default_font.as_str()
-                        && (search.is_empty() || name.to_lowercase().contains(&search))
-                })
-                .collect();
+            let default_label = font_default_label(&default_font);
+            let menu_rows =
+                font_menu_matches(&self.font_search, &default_font, &self.mono_font_names);
 
             let mut menu = select_listbox("terminal-font-dropdown", ui).on_mouse_down_out(
                 cx.listener(|this, _, _w, cx| {
@@ -454,7 +586,7 @@ impl PaneFlowApp {
                 }),
             );
 
-            if default_matches {
+            if menu_rows.default_matches {
                 menu = menu.child(
                     select_option(
                         ("terminal-font-default", 0usize),
@@ -478,9 +610,9 @@ impl PaneFlowApp {
                 );
             }
 
-            for (i, name) in filtered.iter().enumerate() {
-                let name_owned = (*name).clone();
-                let is_current = **name == current_font;
+            for (i, name) in menu_rows.families.iter().enumerate() {
+                let name_owned = (*name).to_string();
+                let is_current = current_font == *name;
                 menu = menu.child(
                     select_option(("terminal-font", i), is_current, ui)
                         .cursor(CursorStyle::Arrow)
@@ -500,12 +632,12 @@ impl PaneFlowApp {
                                 .min_w_0()
                                 .truncate()
                                 .text_color(ui.text)
-                                .child((*name).clone()),
+                                .child((*name).to_string()),
                         ),
                 );
             }
 
-            if !default_matches && filtered.is_empty() {
+            if !menu_rows.default_matches && menu_rows.families.is_empty() {
                 menu = menu.child(
                     div()
                         .px(px(8.))
@@ -985,5 +1117,58 @@ mod tests {
             row.contains("cursor_color_swatch("),
             "the open picker must use the accessible swatches"
         );
+    }
+
+    fn typeahead_key(spec: &str) -> gpui::Keystroke {
+        gpui::Keystroke::parse(spec)
+            .expect("typeahead keystroke")
+            .with_simulated_ime()
+    }
+
+    /// Issue #915: Enter commits the first font the query matches and does
+    /// not store the key's newline. Tab's character is not inserted either.
+    /// A query that matches nothing does not become a font name.
+    #[test]
+    fn enter_picks_the_highlighted_font_and_does_not_insert_a_newline() {
+        let fonts = vec![
+            "Fira Code".to_string(),
+            "JetBrainsMono Nerd Font".to_string(),
+            "Menlo".to_string(),
+        ];
+        let default_font = "JetBrainsMono Nerd Font";
+        let mut search = "fira".to_string();
+        let mut open = true;
+
+        let tab = typeahead_key("tab");
+        assert_eq!(tab.key_char.as_deref(), Some("\t"));
+        assert_eq!(
+            apply_font_typeahead_key(&mut search, &mut open, &tab, default_font, &fonts),
+            FontKeyEffect::Ignored
+        );
+        assert!(open);
+        assert_eq!(search, "fira", "tab must not insert into the query");
+
+        let enter = typeahead_key("enter");
+        assert_eq!(enter.key, "enter");
+        assert_eq!(enter.key_char.as_deref(), Some("\n"));
+        assert_eq!(
+            apply_font_typeahead_key(&mut search, &mut open, &enter, default_font, &fonts),
+            FontKeyEffect::Select(FontCommit::Family("Fira Code".to_string()))
+        );
+        assert!(!open, "picking a font closes the menu");
+        assert!(
+            !search.contains('\n') && !search.contains('\t'),
+            "search must not contain a newline or tab, search={search:?}"
+        );
+
+        search = "zzz".to_string();
+        open = true;
+        assert_eq!(
+            apply_font_typeahead_key(&mut search, &mut open, &enter, default_font, &fonts),
+            FontKeyEffect::Ignored,
+            "enter with no match must not invent a font name"
+        );
+        assert!(open);
+        assert_eq!(search, "zzz");
     }
 }
