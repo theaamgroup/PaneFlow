@@ -133,8 +133,9 @@ impl PaneFlowApp {
     ///
     /// The one door for a path chosen from a list: the picker's rows come
     /// from a listing read when it opened, and between then and the click the
-    /// directory can have been removed. A refusal reaches the user as a toast
-    /// and leaves the tab as it was. Returns whether it bound.
+    /// directory can have been removed, or the path is not valid UTF-8. A
+    /// refusal reaches the user as a toast and leaves the tab as it was.
+    /// Returns whether it bound.
     pub(crate) fn bind_tab_to_checkout(
         &mut self,
         ws_idx: usize,
@@ -151,10 +152,20 @@ impl PaneFlowApp {
         };
         // A same-path rebind returns inside `set_tab_worktree` without
         // writing. It still has to retire a checkout that is in flight:
-        // the user just chose this directory again (issue #937).
-        self.bump_tab_binding(ws_idx, tab_idx);
-        self.set_tab_worktree(ws_idx, tab_idx, Some(path), cx);
-        true
+        // the user just chose this directory again (issue #937). A path
+        // that is not valid UTF-8 is not a rebind: `set_tab_worktree`
+        // refuses it, and bumping here would retire the in-flight checkout
+        // the user did not replace (issue #1025).
+        if path.to_str().is_some() {
+            self.bump_tab_binding(ws_idx, tab_idx);
+        }
+        match self.set_tab_worktree(ws_idx, tab_idx, Some(path), cx) {
+            Ok(()) => true,
+            Err(message) => {
+                self.show_toast(message, cx);
+                false
+            }
+        }
     }
 
     /// Every checkout worth probing: each workspace root, plus the worktree of
@@ -238,25 +249,36 @@ impl PaneFlowApp {
     /// keeps the shell it already has, because moving a live process between
     /// checkouts is not something PaneFlow can do behind the user's back. What
     /// changes immediately is the row's identity and where the next pane lands.
+    ///
+    /// A path that is not valid UTF-8 is refused before the tab, the binding
+    /// generation, the session, or a git probe changes. The session field is a
+    /// `String`, so a lossy path would persist U+FFFD and could not be
+    /// restored (issue #1025). Callers show the error with the worktree toast.
     pub(crate) fn set_tab_worktree(
         &mut self,
         ws_idx: usize,
         tab_idx: usize,
         worktree: Option<std::path::PathBuf>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Result<(), String> {
+        if worktree
+            .as_ref()
+            .is_some_and(|path| path.to_str().is_none())
+        {
+            return Err("That worktree path is not valid UTF-8".to_string());
+        }
         let active_idx = self.active_idx;
         let (is_active_tab, ws_id, tab_id) = {
             let Some(ws) = self.workspaces.get_mut(ws_idx) else {
-                return;
+                return Ok(());
             };
             let is_active_tab = ws_idx == active_idx && ws.active_tab_idx() == tab_idx;
             let ws_id = ws.id;
             let Some(tab) = ws.tab_mut(tab_idx) else {
-                return;
+                return Ok(());
             };
             if tab.worktree == worktree {
-                return;
+                return Ok(());
             }
             let tab_id = tab.id;
             tab.worktree = worktree.clone();
@@ -267,11 +289,12 @@ impl PaneFlowApp {
         self.worktree_states.bump_binding_generation(tab_id);
         // Probe the new checkout now rather than waiting up to 30 s for the
         // poll: a row that names a branch only after half a minute reads as
-        // broken.
-        if let Some(path) = worktree
+        // broken. `to_str` is `Some`: a non-UTF-8 path already returned.
+        if let Some(path) = worktree.as_ref()
+            && let Some(cwd) = path.to_str()
             && !checkout_probes_suppressed()
         {
-            Self::spawn_initial_git_stats(ws_id, path.to_string_lossy().into_owned(), cx);
+            Self::spawn_initial_git_stats(ws_id, cwd.to_owned(), cx);
         }
         // The git surfaces follow the tab's checkout: Diff mode is rebuilt
         // when the tab is the one on screen - switching tab already does
@@ -281,6 +304,7 @@ impl PaneFlowApp {
         }
         self.save_session(cx);
         cx.notify();
+        Ok(())
     }
 
     /// Refresh what the branch picker offers for a workspace's repository -
@@ -378,7 +402,7 @@ impl PaneFlowApp {
             .map(|entry| entry.path.clone());
         match placed {
             Some(path) if path == repo_root => {
-                self.set_tab_worktree(ws_idx, tab_idx, None, cx);
+                let _ = self.set_tab_worktree(ws_idx, tab_idx, None, cx);
                 return;
             }
             Some(path) if path.is_dir() => {
@@ -474,7 +498,7 @@ impl PaneFlowApp {
             return;
         }
         if path.as_path() == repo_root {
-            self.set_tab_worktree(ws_idx, tab_idx, None, cx);
+            let _ = self.set_tab_worktree(ws_idx, tab_idx, None, cx);
         } else {
             // Through the same gate as the fast path, which re-checks that
             // the directory git resolved the branch to still exists.
@@ -652,7 +676,7 @@ impl PaneFlowApp {
             })
             .collect();
         for (ws_idx, tab_idx) in orphaned {
-            self.set_tab_worktree(ws_idx, tab_idx, None, cx);
+            let _ = self.set_tab_worktree(ws_idx, tab_idx, None, cx);
         }
         self.prune_worktree_states();
         let on_repo: Vec<usize> = self
@@ -918,14 +942,27 @@ mod tests {
         let exists_at = gate
             .find("crate::workspace::existing_worktree_dir(Some(path))")
             .expect("the gate checks the directory still exists");
+        let utf8_guard = gate
+            .find("path.to_str().is_some()")
+            .expect("a non-UTF-8 path must not bump the binding generation");
+        let bump_at = gate
+            .find("self.bump_tab_binding(ws_idx, tab_idx)")
+            .expect("a same-path rebind still bumps");
         let set_at = gate
             .find("self.set_tab_worktree(ws_idx, tab_idx, Some(path), cx)")
             .expect("the gate is what binds");
-        assert!(exists_at < set_at, "{gate}");
+        assert!(
+            exists_at < utf8_guard && utf8_guard < bump_at && bump_at < set_at,
+            "refuse a non-UTF-8 path before bumping, and bump before the bind: {gate}"
+        );
+        assert!(
+            gate.contains("self.show_toast(message, cx)"),
+            "the bind error is shown with the worktree toast: {gate}"
+        );
         assert_eq!(
             gate.matches("self.show_toast(").count(),
-            1,
-            "the refusal reaches the user as a toast: {gate}"
+            2,
+            "each refusal reaches the user as a toast: {gate}"
         );
     }
 
@@ -946,6 +983,79 @@ mod tests {
             set[active_at..].contains("self.reconcile_diff_after_workspace_change(cx);"),
             "Diff mode must rebuild when the visible tab rebinds: {set}"
         );
+    }
+
+    /// Issue #1025: a checkout whose name is not valid UTF-8 cannot be stored
+    /// on the session (`TabSession::worktree` is a `String`) or passed to git.
+    /// The bind returns that error and leaves the tab alone.
+    #[gpui::test]
+    fn a_non_utf8_worktree_bind_is_refused_and_the_tab_is_unchanged(cx: &mut gpui::TestAppContext) {
+        use std::os::unix::ffi::OsStrExt;
+
+        // APFS rejects a directory whose name is not valid UTF-8 (EILSEQ).
+        // The bind API takes a `PathBuf`, and the refusal is `to_str()`, so
+        // the fixture is that path. A real directory is not required.
+        let parent = tempfile::tempdir().expect("tempdir");
+        let path = parent
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"wt-\xFF\xFE"));
+        assert!(
+            path.to_str().is_none(),
+            "the fixture name must not be valid UTF-8"
+        );
+
+        let root = tempfile::tempdir().expect("workspace root");
+        let _probes = SuppressCheckoutProbes::arm();
+        let window = cx.add_empty_window();
+        let app = window.new(blank_paneflow_app);
+        app.update(window, |app, cx| {
+            let ws = crate::workspace::Workspace::empty_with_cwd_and_id(
+                7,
+                "repo",
+                root.path().to_path_buf(),
+            );
+            let tab_id = ws.tabs()[0].id;
+            app.workspaces.push(ws);
+            app.active_idx = 0;
+            // `save_session` writes session-dev.json. Holding a restore makes
+            // it return before `session_path()`, so a regression that still
+            // saves cannot latch `PANEFLOW_HOME`.
+            app.session_restore = hold_session_save();
+
+            let before = app.workspaces[0].tabs()[0].worktree.clone();
+            let generation = app.worktree_states.binding_generation(tab_id);
+            let err = app
+                .set_tab_worktree(0, 0, Some(path.clone()), cx)
+                .expect_err("a non-UTF-8 worktree must be refused");
+            assert!(
+                err.contains("not valid UTF-8"),
+                "the error must say the path is not valid UTF-8: {err}"
+            );
+            assert_eq!(
+                app.workspaces[0].tabs()[0].worktree,
+                before,
+                "a refused bind must not change the tab"
+            );
+            assert_eq!(
+                app.worktree_states.binding_generation(tab_id),
+                generation,
+                "a refused bind must not retire an in-flight checkout"
+            );
+
+            // A path that is already in memory must not be probed or saved
+            // as U+FFFD. The bind above refuses to put one there.
+            app.workspaces[0].tab_mut(0).expect("tab").worktree = Some(path);
+            assert!(
+                app.workspaces[0].bound_tab_worktrees().is_empty(),
+                "git probes must skip a non-UTF-8 worktree"
+            );
+            let saved = app.workspaces[0].serialize_tabs_without_scrollback(cx);
+            assert_eq!(
+                saved[0].worktree, None,
+                "the session must omit a non-UTF-8 worktree"
+            );
+        });
+        cx.run_until_parked();
     }
 
     fn state(branch: &str, insertions: usize) -> CheckoutGit {
