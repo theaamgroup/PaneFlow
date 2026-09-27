@@ -505,11 +505,12 @@ facility: the pinned GPUI predates `App::set_reduce_motion`. It is written at
 startup, from the Settings toggle, and on config hot-reload, so it needs no
 restart, and it defaults to `false`.
 
-**Four animations honor it today**: `animated_hover` settles instantly
+**Five animations honor it today**: `animated_hover` settles instantly
 (`ui_primitives.rs:322-336`), the primary sidebar toggles without the slide
 (`main.rs:1726`), `panel_empty_state`'s
-scanning spinner does not start (`ui_primitives.rs:859`), and `menu_reveal`
-mounts every menu at rest (`ui_primitives.rs::menu_reveal`). Still ignoring it: the pane header button hover, the
+scanning spinner does not start (`ui_primitives.rs:859`), `menu_reveal`
+mounts every menu at rest (`ui_primitives.rs::menu_reveal`), and the pane header button hover
+settles in the same frame (`pane.rs`). Still ignoring it: the
 drop-overlay glide, toasts, and the comet-trail loader.
 The config description promises a static frame for decorative animations; that
 promise is **Proposed** until the rest read the flag. Feedback is never
@@ -1194,7 +1195,7 @@ review would raise anywhere.
    both variants.
 2. `macos_chrome_material` on and off.
 3. `reduce_motion` on: every animation **you touched** settles without
-   interpolation. Do not attest more than that — 4.8 lists four animations
+   interpolation. Do not attest more than that — 4.8 lists three animations
    that still ignore the flag (menus fade in through `menu_reveal` and snap
    under the flag), so "nothing moves" is not yet true of the app.
 4. The 800 by 500 minimum window, with the primary sidebar hidden and a right
@@ -1242,7 +1243,7 @@ behavior.
 - Custom user themes are not loaded. New palettes ship as presets in
   `theme/builtin.rs` with both variants, a `UiColors`, and a syntax palette.
 - `window_backdrop` is read once at startup.
-- `reduce_motion` reaches only four animations (4.8) and does not follow the
+- `reduce_motion` reaches only five animations (4.8) and does not follow the
   macOS system setting.
 - The seven accessibility gaps in 7.5, of which the missing focus ring is the
   most consequential.
