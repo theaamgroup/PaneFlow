@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use gpui::{AppContext, Context, Entity, Pixels, Point, WeakEntity};
 
+use paneflow_config::schema::LayoutNode;
+
 use crate::diff::ReviewSubject;
 use crate::layout::LayoutTree;
 use crate::pane::Pane;
@@ -31,6 +33,11 @@ pub(crate) struct ReviewRailMenu {
 pub(crate) struct ReviewState {
     pub(crate) layout: Option<LayoutTree>,
     pub(crate) saved_layout: Option<LayoutTree>,
+    /// Issue #932: the raw session `review_layout`, held only while Review is
+    /// disabled so the grid is not opened. `saved_layout` is the zoom park
+    /// and is not this node. The next save writes it back when no live grid
+    /// was rebuilt.
+    pub(crate) retained_layout: Option<LayoutNode>,
     /// Issue #475: weak, like every other transient pane reference in the
     /// app (`PendingClose`, the pane palette).
     /// The read chokepoint `review_active_pane` already treats this as a
@@ -57,6 +64,7 @@ impl ReviewState {
         Self {
             layout: None,
             saved_layout: None,
+            retained_layout: None,
             active_pane: None,
             collapsed: HashSet::new(),
             rail_menu: None,
