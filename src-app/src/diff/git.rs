@@ -1162,10 +1162,11 @@ pub struct ColumnLoad {
     /// are shown as stubs rather than loaded, bounding peak RAM.
     pub diff: WorktreeDiff,
     /// Per-file Git-native diffstat for the same semantic as `diff`, plus
-    /// untracked files. Used for Review's sidebar/global counters so they match
-    /// `git diff --numstat` instead of drifting with renderer hunk details.
+    /// untracked files. Keyed by `(change, path)` so a tracked deletion and
+    /// the untracked file left by `git rm --cached` each keep their own
+    /// counts. Review's sidebar uses these instead of renderer hunk details.
     /// `Err` (never an empty map) when a git read fails or times out.
-    pub file_stats: Result<HashMap<String, FileDiffStat>, String>,
+    pub file_stats: Result<HashMap<(FileChange, String), FileDiffStat>, String>,
 }
 
 /// Load one Review column: fingerprint, diff, and file stats of `worktree_dir`
@@ -1423,20 +1424,37 @@ fn compute_diff_against_within(
 }
 
 /// Per-file diffstat of the working tree against `base`, charged against
-/// `budget`. A failed or timed-out numstat, untracked scan, stat, or
+/// `budget`. Tracked rows are `git diff --numstat -M` joined to
+/// `--name-status -M` on `(change, path)`. An untracked row is stored under
+/// [`FileChange::Added`] and does not replace a tracked row for that path.
+/// A failed or timed-out numstat, name-status, untracked scan, stat, or
 /// working-tree read is an `Err`, never a partial or empty map that reads as
 /// "no changes".
 fn compute_file_stats_against_within(
     budget: &GitBudget,
     worktree_dir: &Path,
     base: &str,
-) -> Result<HashMap<String, FileDiffStat>, String> {
-    let mut stats = budget
+) -> Result<HashMap<(FileChange, String), FileDiffStat>, String> {
+    let by_path = budget
         .run(
             worktree_dir,
-            &["diff", "--numstat", "-z", "--no-color", base, "--"],
+            // `-M` matches name-status. Without it, `diff.renames=false` or
+            // `copies` counts a different path set than the file rows.
+            &["diff", "--numstat", "-M", "-z", "--no-color", base, "--"],
         )
         .map(|out| parse_numstat_z(&out))?;
+    let name_status = budget.run(
+        worktree_dir,
+        &["diff", "--name-status", "-M", "-z", "--no-color", base],
+    )?;
+
+    let mut stats = HashMap::new();
+    for (change, path, _) in parse_name_status_z(&name_status) {
+        let Some(stat) = by_path.get(&path).copied() else {
+            continue;
+        };
+        stats.insert((change, path), stat);
+    }
 
     let remaining = MAX_FILE_COUNT.saturating_sub(stats.len());
     if remaining == 0 {
@@ -1449,9 +1467,16 @@ fn compute_file_stats_against_within(
         log::debug!("git: untracked file stats truncated at {remaining}");
     }
     for path in untracked {
-        if is_skipped_name(&path) || is_too_large_within(budget, worktree_dir, &path)? {
+        // `(Added, path)` is only a tracked addition. A deletion (or any
+        // other tracked change) for the same path is a different key, so
+        // `git rm --cached` keeps both stats.
+        let key = (FileChange::Added, path);
+        if stats.contains_key(&key) {
+            continue;
+        }
+        if is_skipped_name(&key.1) || is_too_large_within(budget, worktree_dir, &key.1)? {
             stats.insert(
-                path,
+                key,
                 FileDiffStat {
                     added: 0,
                     removed: 0,
@@ -1459,13 +1484,13 @@ fn compute_file_stats_against_within(
             );
             continue;
         }
-        let (text, is_binary) = load_working_text_within(budget, worktree_dir, &path)?;
+        let (text, is_binary) = load_working_text_within(budget, worktree_dir, &key.1)?;
         let added = if is_binary {
             0
         } else {
             u32::try_from(text.lines().count()).unwrap_or(u32::MAX)
         };
-        stats.insert(path, FileDiffStat { added, removed: 0 });
+        stats.insert(key, FileDiffStat { added, removed: 0 });
     }
 
     Ok(stats)
@@ -1877,18 +1902,90 @@ pub(crate) mod tests {
 
         let stats = load_column(root, "HEAD").file_stats.expect("file stats");
         assert_eq!(
-            stats.get("tracked.txt"),
+            stats.get(&(FileChange::Modified, "tracked.txt".to_string())),
             Some(&FileDiffStat {
                 added: 1,
                 removed: 0
             })
         );
         assert_eq!(
-            stats.get("untracked.txt"),
+            stats.get(&(FileChange::Added, "untracked.txt".to_string())),
             Some(&FileDiffStat {
                 added: 2,
                 removed: 0
             })
+        );
+    }
+
+    #[test]
+    fn an_untracked_copy_of_a_deleted_path_keeps_both_stats() {
+        // `git rm --cached` keeps the worktree file: name-status reports a
+        // deletion and the same path is untracked. The deleted row must keep
+        // the committed deletion, not the untracked line count.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(test_git(root, &["init"]), "git init is required");
+        assert!(test_git(root, &["config", "core.autocrlf", "false"]));
+        std::fs::write(root.join("foo.txt"), "one\ntwo\nthree\n").unwrap();
+        assert!(test_git(root, &["add", "foo.txt"]));
+        assert!(test_git(
+            root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "-m",
+                "init",
+            ],
+        ));
+        assert!(
+            test_git(root, &["rm", "--cached", "foo.txt"]),
+            "git rm --cached"
+        );
+        assert!(
+            root.join("foo.txt").is_file(),
+            "git rm --cached must keep the worktree file"
+        );
+        std::fs::write(root.join("foo.txt"), "one\ntwo\nthree\nfour\nfive\n").unwrap();
+
+        let load = load_column(root, "HEAD");
+        assert_eq!(load.diff.error, None, "diff error");
+        let rows: Vec<_> = load
+            .diff
+            .files
+            .iter()
+            .map(|f| (f.change, f.path.as_str()))
+            .collect();
+        let deleted = load
+            .diff
+            .files
+            .iter()
+            .find(|f| f.path == "foo.txt" && f.change == FileChange::Deleted)
+            .unwrap_or_else(|| panic!("deleted row missing from {rows:?}"));
+        let untracked = load
+            .diff
+            .files
+            .iter()
+            .find(|f| f.path == "foo.txt" && f.change == FileChange::Added)
+            .unwrap_or_else(|| panic!("untracked row missing from {rows:?}"));
+        let stats = load.file_stats.expect("file stats");
+        assert_eq!(
+            stats.get(&(deleted.change, deleted.path.clone())),
+            Some(&FileDiffStat {
+                added: 0,
+                removed: 3
+            }),
+            "deleted row stats={stats:?}"
+        );
+        assert_eq!(
+            stats.get(&(untracked.change, untracked.path.clone())),
+            Some(&FileDiffStat {
+                added: 5,
+                removed: 0
+            }),
+            "untracked row stats={stats:?}"
         );
     }
 
@@ -2054,7 +2151,7 @@ pub(crate) mod tests {
         let live = compute_file_stats_against_within(&GitBudget::for_column(), root, "HEAD")
             .expect("live budget");
         assert_eq!(
-            live.get("ghost.txt"),
+            live.get(&(FileChange::Added, "ghost.txt".to_string())),
             Some(&FileDiffStat {
                 added: 1,
                 removed: 0
@@ -2284,7 +2381,7 @@ pub(crate) mod tests {
         assert!(load.diff.files.iter().any(|f| f.path == "tracked.txt"));
         let stats = load.file_stats.expect("file stats");
         assert_eq!(
-            stats.get("ghost.txt"),
+            stats.get(&(FileChange::Added, "ghost.txt".to_string())),
             Some(&FileDiffStat {
                 added: 1,
                 removed: 0
@@ -2354,6 +2451,8 @@ pub(crate) mod tests {
         std::process::Command::new("git")
             .args(args)
             .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .output()
             .map(|out| out.status.success())

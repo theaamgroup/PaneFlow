@@ -68,7 +68,7 @@ impl DiffView {
                     .iter()
                     .map(|f| {
                         let (added, removed) = file_stats
-                            .get(&f.path)
+                            .get(&(f.change, f.path.clone()))
                             .map(|stat| (stat.added, stat.removed))
                             .unwrap_or_else(|| f.line_counts());
                         FileEntry {
