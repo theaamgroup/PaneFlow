@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GPU-free tests for scripts/notarize-macos.sh (issue #715).
+# GPU-free tests for scripts/notarize-macos.sh (issues #715 and #914).
 # A stub xcrun earlier on PATH stands in for notarytool and stapler.
 # ditto only builds the submission zip locally. No Apple network.
 set -euo pipefail
@@ -22,6 +22,10 @@ grep -F -x 'POLL_INTERVAL=30' "$SCRIPT_DIR/notarize-macos.sh" >/dev/null \
     || { echo "FAIL: POLL_INTERVAL=30 missing; update the sleep assertion" >&2; exit 1; }
 grep -F -x "MAX_WAIT_SECONDS=\$((90 * 60))" "$SCRIPT_DIR/notarize-macos.sh" >/dev/null \
     || { echo "FAIL: MAX_WAIT_SECONDS changed; update the date stub's 5400" >&2; exit 1; }
+grep -F -x 'APPLE_RETRY_ATTEMPTS=3' "$SCRIPT_DIR/notarize-macos.sh" >/dev/null \
+    || { echo "FAIL: APPLE_RETRY_ATTEMPTS=3 missing" >&2; exit 1; }
+grep -F -x 'APPLE_RETRY_BACKOFF_SECONDS=5' "$SCRIPT_DIR/notarize-macos.sh" >/dev/null \
+    || { echo "FAIL: APPLE_RETRY_BACKOFF_SECONDS=5 missing; update the sleep assertion" >&2; exit 1; }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/notarize-macos-test.XXXXXX")"
 cleanup_test() {
@@ -54,6 +58,8 @@ STAPLE_LOG="$TMP/staple.log"
 INFO_COUNT_FILE="$TMP/info-count"
 DATE_COUNT_FILE="$TMP/date-count"
 SLEEP_COUNT_FILE="$TMP/sleep-count"
+SUBMIT_COUNT_FILE="$TMP/submit-count"
+STAPLE_ATTEMPT_FILE="$TMP/staple-attempt-count"
 
 cat > "$STUB_BIN/xcrun" <<'EOF'
 #!/usr/bin/env bash
@@ -70,6 +76,15 @@ if [ "${1:-}" = "stapler" ]; then
         exit 2
     fi
     printf '%s %s\n' "$action" "$target" >> "$STAPLE_LOG"
+    if [ "$action" = "staple" ] && [ "${NOTARY_STUB_MODE:-}" = "staple-fail-once" ]; then
+        n=$(cat "$STAPLE_ATTEMPT_FILE")
+        n=$((n + 1))
+        printf '%s\n' "$n" > "$STAPLE_ATTEMPT_FILE"
+        if [ "$n" -eq 1 ]; then
+            echo "stapler: transient staple error" >&2
+            exit 1
+        fi
+    fi
     exit 0
 fi
 
@@ -131,6 +146,18 @@ case "$cmd" in
     submit)
         [ "$output_format" = "json" ] || { echo "xcrun stub: submit without json" >&2; exit 2; }
         [ -n "$positional" ] || { echo "xcrun stub: submit missing zip" >&2; exit 2; }
+        if [ "${NOTARY_STUB_MODE:-}" = "submit-fail-once-then-accepted" ]; then
+            n=$(cat "$SUBMIT_COUNT_FILE")
+            n=$((n + 1))
+            printf '%s\n' "$n" > "$SUBMIT_COUNT_FILE"
+            if [ "$n" -eq 1 ]; then
+                # Upload reached the stub and the reply carries an id, but the
+                # command still fails. The script must log that id and retry.
+                echo "notarytool: transient submit error" >&2
+                printf '%s\n' '{"id":"stub-lost-reply-id"}'
+                exit 1
+            fi
+        fi
         printf '%s\n' '{"id":"stub-submission-id"}'
         ;;
     info)
@@ -180,6 +207,9 @@ case "$cmd" in
             always-fail)
                 echo "notarytool: still unreachable" >&2
                 exit 1
+                ;;
+            submit-fail-once-then-accepted|staple-fail-once)
+                printf '%s\n' '{"status":"Accepted"}'
                 ;;
             *)
                 echo "xcrun stub: unknown NOTARY_STUB_MODE=${NOTARY_STUB_MODE:-}" >&2
@@ -258,6 +288,8 @@ run_notarize() {
     printf '0\n' > "$INFO_COUNT_FILE"
     printf '0\n' > "$DATE_COUNT_FILE"
     printf '0\n' > "$SLEEP_COUNT_FILE"
+    printf '0\n' > "$SUBMIT_COUNT_FILE"
+    printf '0\n' > "$STAPLE_ATTEMPT_FILE"
     rc=0
     env PATH="$STUB_BIN:${PATH}" \
         APPLE_ID="$APPLE_ID" \
@@ -268,6 +300,8 @@ run_notarize() {
         INFO_COUNT_FILE="$INFO_COUNT_FILE" \
         DATE_COUNT_FILE="$DATE_COUNT_FILE" \
         SLEEP_COUNT_FILE="$SLEEP_COUNT_FILE" \
+        SUBMIT_COUNT_FILE="$SUBMIT_COUNT_FILE" \
+        STAPLE_ATTEMPT_FILE="$STAPLE_ATTEMPT_FILE" \
         NOTARY_STUB_MODE="$mode" \
         NOTARY_STUB_DATE="$date_mode" \
         bash "$SCRIPT_DIR/notarize-macos.sh" "$APP" >"$log" 2>&1 || rc=$?
@@ -422,5 +456,47 @@ grep -F -q "Notarized + stapled:" "$TMP/timeout.out" \
 [ "$(cat "$SLEEP_COUNT_FILE")" -eq 1 ] || fail "timeout slept $(cat "$SLEEP_COUNT_FILE") times, expected 1"
 [ ! -e "$ZIP" ] || fail "submission zip survived a timeout"
 pass "repeated notarytool info failures retry once, then stop at MAX_WAIT_SECONDS without stapling"
+
+# --- submit exits non-zero once, logs the lost-reply id, then staples -----
+run_notarize "$TMP/submit-once.out" submit-fail-once-then-accepted
+[ "$rc" -eq 0 ] || fail "submit-fail-once-then-accepted exited $rc: $(cat "$TMP/submit-once.out")"
+expect_seq "xcrun notarytool submit;sleep 5;xcrun notarytool submit;xcrun notarytool info;xcrun stapler staple;xcrun stapler validate;spctl --assess;" "$TMP/submit-once.out"
+expect_stapled
+assert_credentials "$TMP/submit-once.out"
+grep -F -q "notarytool submit: attempt 1/3 failed - retrying (submission id: stub-lost-reply-id)" "$TMP/submit-once.out" \
+    || fail "missing submit retry with lost-reply id: $(cat "$TMP/submit-once.out")"
+grep -F -q "notarytool submit: attempt 2/3 ok (submission id: stub-submission-id)" "$TMP/submit-once.out" \
+    || fail "successful submit id was not logged: $(cat "$TMP/submit-once.out")"
+grep -F -q "Submission ID: stub-submission-id" "$TMP/submit-once.out" \
+    || fail "polling did not use the successful submission id: $(cat "$TMP/submit-once.out")"
+grep -F -q "xcrun notarytool info stub-lost-reply-id" "$TOOL_LOG" \
+    && fail "polled the lost-reply submission instead of the successful one: $(cat "$TOOL_LOG")"
+grep -F -q "Notarized + stapled: $APP (submission_id=stub-submission-id)" "$TMP/submit-once.out" \
+    || fail "script did not finish after a retried submit: $(cat "$TMP/submit-once.out")"
+[ "$(cat "$SUBMIT_COUNT_FILE")" -eq 2 ] || fail "expected 2 submits, got $(cat "$SUBMIT_COUNT_FILE")"
+[ "$(cat "$SLEEP_COUNT_FILE")" -eq 1 ] || fail "submit retry slept $(cat "$SLEEP_COUNT_FILE") times, expected 1"
+pass "a single failed notarytool submit retries, logs both submission ids, and staples"
+
+# --- stapler staple fails once, then the ticket is stapled ----------------
+run_notarize "$TMP/staple-once.out" staple-fail-once
+[ "$rc" -eq 0 ] || fail "staple-fail-once exited $rc: $(cat "$TMP/staple-once.out")"
+expect_seq "xcrun notarytool submit;xcrun notarytool info;xcrun stapler staple;sleep 5;xcrun stapler staple;xcrun stapler validate;spctl --assess;" "$TMP/staple-once.out"
+staple1="$(sed -n '1p' "$STAPLE_LOG")"
+staple2="$(sed -n '2p' "$STAPLE_LOG")"
+validate="$(sed -n '3p' "$STAPLE_LOG")"
+[ "$staple1" = "staple $APP" ] || fail "first staple record was '$staple1'"
+[ "$staple2" = "staple $APP" ] || fail "second staple record was '$staple2'"
+[ "$validate" = "validate $APP" ] || fail "stapler validate record was '$validate'"
+[ "$(awk 'END { print NR }' "$STAPLE_LOG")" -eq 3 ] \
+    || fail "expected 3 stapler records, got: $(cat "$STAPLE_LOG")"
+grep -F -q "stapler staple: attempt 1/3 failed - retrying" "$TMP/staple-once.out" \
+    || fail "missing staple retry: $(cat "$TMP/staple-once.out")"
+grep -F -q "Accepted by Apple" "$TMP/staple-once.out" \
+    || fail "Accepted was not reported before staple retry: $(cat "$TMP/staple-once.out")"
+grep -F -q "Notarized + stapled: $APP (submission_id=stub-submission-id)" "$TMP/staple-once.out" \
+    || fail "script did not finish after a retried staple: $(cat "$TMP/staple-once.out")"
+[ "$(cat "$STAPLE_ATTEMPT_FILE")" -eq 2 ] || fail "expected 2 staple attempts, got $(cat "$STAPLE_ATTEMPT_FILE")"
+[ "$(cat "$SLEEP_COUNT_FILE")" -eq 1 ] || fail "staple retry slept $(cat "$SLEEP_COUNT_FILE") times, expected 1"
+pass "a single failed stapler staple retries and then validates"
 
 echo "All tests passed."
