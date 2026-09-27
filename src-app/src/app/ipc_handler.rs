@@ -408,12 +408,13 @@ fn log_unrestricted_pty_write(
     );
 }
 
-/// `surface.send_keystroke` once the caller has resolved `terminal`.
+/// `surface.send_keystroke` once the caller has resolved `terminal` and
+/// type-checked `keystroke` with [`requested_keystroke`].
 /// Free-access (`unrestricted`) writes emit [`log_unrestricted_pty_write`].
 fn surface_send_keystroke(
     unrestricted: bool,
     scripting_enabled: bool,
-    params: &serde_json::Value,
+    keystroke: Option<&str>,
     terminal: Option<&Entity<TerminalView>>,
     cx: &App,
 ) -> serde_json::Value {
@@ -427,10 +428,7 @@ fn surface_send_keystroke(
         }
         .into_value();
     }
-    let keystroke = params
-        .get("keystroke")
-        .and_then(|k| k.as_str())
-        .unwrap_or("");
+    let keystroke = keystroke.unwrap_or("");
     if keystroke.is_empty() {
         return JsonRpcError::invalid_params("Missing 'keystroke' parameter").into_value();
     }
@@ -804,6 +802,20 @@ fn requested_surface_id(params: &serde_json::Value) -> Result<Option<u64>, JsonR
         .as_u64()
         .map(Some)
         .ok_or_else(|| JsonRpcError::invalid_params("'surface_id' must be a non-negative integer"))
+}
+
+/// Optional `keystroke`. Absent is `Ok(None)`, which `surface_send_keystroke`
+/// reports as missing after the scripting gate, as before. A present value
+/// that is not a string, `null` included, is `-32602`: it used to be coerced
+/// to `""` and reported as missing (issue #1046).
+fn requested_keystroke(params: &serde_json::Value) -> Result<Option<&str>, JsonRpcError> {
+    let Some(value) = params.get("keystroke") else {
+        return Ok(None);
+    };
+    value
+        .as_str()
+        .map(Some)
+        .ok_or_else(|| JsonRpcError::invalid_params("'keystroke' must be a string"))
 }
 
 /// The typed payload params of `surface.send_text`.
@@ -2353,9 +2365,13 @@ impl PaneFlowApp {
             "surface.send_keystroke" => {
                 // Same rejection as `surface.send_text`: before the scripting
                 // gate inside `surface_send_keystroke`, and before a terminal
-                // is chosen (issues #1020, #1021).
+                // is chosen (issues #1020, #1021, #1046).
                 let surface_id = match requested_surface_id(params) {
                     Ok(surface_id) => surface_id,
+                    Err(error) => return error.into_value(),
+                };
+                let keystroke = match requested_keystroke(params) {
+                    Ok(keystroke) => keystroke,
                     Err(error) => return error.into_value(),
                 };
                 let unrestricted = self.cached_config.ai_unrestricted_enabled();
@@ -2373,7 +2389,7 @@ impl PaneFlowApp {
                 surface_send_keystroke(
                     unrestricted,
                     ipc_scripting_enabled(),
-                    params,
+                    keystroke,
                     terminal.as_ref(),
                     cx,
                 )
@@ -3722,6 +3738,38 @@ mod tests {
         }
     }
 
+    /// Issue #1046: an absent `keystroke` is left to the missing check.
+    #[test]
+    fn requested_keystroke_absent_is_none_and_string_is_honoured() {
+        assert_eq!(requested_keystroke(&serde_json::json!({})).unwrap(), None);
+        assert_eq!(
+            requested_keystroke(&serde_json::json!({"keystroke": "ctrl-c"})).unwrap(),
+            Some("ctrl-c")
+        );
+        assert_eq!(
+            requested_keystroke(&serde_json::json!({"keystroke": ""})).unwrap(),
+            Some("")
+        );
+    }
+
+    /// `5`, `["a"]`, `{}`, and `null` used to read as `""` and reply
+    /// "Missing 'keystroke' parameter". They are a type error instead.
+    #[test]
+    fn requested_keystroke_rejects_number_array_object_and_null() {
+        for malformed in [
+            serde_json::json!({"keystroke": 5}),
+            serde_json::json!({"keystroke": ["a"]}),
+            serde_json::json!({"keystroke": {}}),
+            serde_json::json!({"keystroke": null}),
+        ] {
+            let error = requested_keystroke(&malformed)
+                .err()
+                .unwrap_or_else(|| panic!("{malformed} must be rejected, not treated as absent"));
+            assert_eq!(error.code, JsonRpcError::INVALID_PARAMS, "{malformed}");
+            assert_eq!(error.message, "'keystroke' must be a string", "{malformed}");
+        }
+    }
+
     /// Issue #1023: absent keys keep today's defaults; valid values are read.
     #[test]
     fn send_text_params_absent_are_defaults_and_valid_values_are_honoured() {
@@ -4397,7 +4445,7 @@ mod tests {
     /// AC #4 corollary: even when scripting IS enabled,
     /// `surface.send_keystroke` must reject CR/LF bytes with
     /// `-32602 Invalid params` to defuse the CRLF-injection bypass.
-    /// Mirrors the rejection at `ipc_handler.rs:503-508`.
+    /// Mirrors the CR/LF rejection in `surface_send_keystroke`.
     #[test]
     fn send_keystroke_crlf_rejection_shape() {
         let err = JsonRpcError::invalid_params("keystroke must not contain CR or LF bytes");
@@ -4427,13 +4475,15 @@ mod tests {
         let cx = cx.add_empty_window();
         let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
         let surface_id = terminal.entity_id().as_u64();
-        let params = serde_json::json!({"keystroke": "ctrl-c"});
+        let keystroke = Some("ctrl-c");
 
         let (closed, env_only, free_access) = cx.update(|_, cx| {
-            let closed = super::surface_send_keystroke(false, false, &params, Some(&terminal), cx);
-            let env_only = super::surface_send_keystroke(false, true, &params, Some(&terminal), cx);
+            let closed =
+                super::surface_send_keystroke(false, false, keystroke, Some(&terminal), cx);
+            let env_only =
+                super::surface_send_keystroke(false, true, keystroke, Some(&terminal), cx);
             let free_access =
-                super::surface_send_keystroke(true, false, &params, Some(&terminal), cx);
+                super::surface_send_keystroke(true, false, keystroke, Some(&terminal), cx);
             // Same record `surface.send_text` emits after a granted write.
             super::log_unrestricted_pty_write("surface.send_text", surface_id, 5, true, false);
             (closed, env_only, free_access)
@@ -6507,6 +6557,52 @@ mod tests {
         );
         assert_surface_id_type_error(&result);
         assert_no_pty_write(&terminal, cx);
+    }
+
+    /// Issue #1046: a non-string `keystroke` is -32602 with a type message,
+    /// not "Missing 'keystroke' parameter", with the gate closed and open.
+    #[gpui::test]
+    fn surface_send_keystroke_rejects_a_non_string_keystroke_without_writing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let (app, terminal) = ipc_app_with_active_terminal(cx);
+        for unrestricted in [false, true] {
+            // Gate closed: a check after the gate would reply -32601.
+            cx.update(|_, cx| {
+                app.update(cx, |app, _cx| {
+                    app.cached_config.ai_unrestricted = Some(unrestricted);
+                });
+            });
+            for keystroke in [serde_json::json!(5), serde_json::Value::Null] {
+                let result = dispatch_surface(
+                    &app,
+                    cx,
+                    "surface.send_keystroke",
+                    serde_json::json!({"keystroke": keystroke}),
+                );
+                assert_eq!(result["_jsonrpc_error"]["code"], -32602, "{result}");
+                assert_eq!(
+                    result["_jsonrpc_error"]["message"], "'keystroke' must be a string",
+                    "{result}"
+                );
+                assert_no_pty_write(&terminal, cx);
+            }
+        }
+
+        // Positive control: with the gate still open, a valid keystroke on
+        // the same fixture reaches `try_write_to_pty`, so the no-write
+        // assertions above can fail. A bare `"a"` would not: it parses to no
+        // PTY bytes and replies an error without writing.
+        let result = dispatch_surface(
+            &app,
+            cx,
+            "surface.send_keystroke",
+            serde_json::json!({"keystroke": "ctrl-c"}),
+        );
+        assert_eq!(result["sent"], true, "{result}");
+        let wrote = cx.update(|_, cx| terminal.read(cx).terminal.should_close_on_exit());
+        assert!(wrote, "a valid keystroke must set the PTY write flag");
     }
 
     /// Issue #1022: `surface.read` rejects a string id before falling back.
