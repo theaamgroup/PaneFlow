@@ -41,7 +41,9 @@ use paneflow_agent_config::claude_hooks::{
     paneflow_hook_program_token, reconcile_matcher_hooks_replacing_invalid_container,
     remove_matcher_hooks_lenient, render_bare_hook_command, render_hook_command, HookConfigError,
 };
-use paneflow_agent_config::{read_optional_text, with_config_lock, write_json_atomic};
+use paneflow_agent_config::{
+    read_optional_text, with_config_lock, write_json_atomic, write_text_atomic,
+};
 use std::env;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -51,6 +53,9 @@ pub(crate) enum InvalidJsonPolicy {
     Replace,
     Refuse,
 }
+
+/// Splice a JSONC config, or `Ok(None)` to keep the strict-JSON installer.
+pub(crate) type JsoncEdit = fn(&str) -> std::io::Result<Option<String>>;
 
 #[cfg(not(test))]
 pub(crate) type HookLease = paneflow_agent_config::ConfigLease;
@@ -274,6 +279,8 @@ pub(crate) struct InstalledHookConfig {
     pub(crate) path: PathBuf,
     pub(crate) created_file: bool,
     pub(crate) created_directory: bool,
+    /// The file was edited as JSONC. Cleanup must splice, not reserialize.
+    pub(crate) jsonc: bool,
     pub(crate) lease: HookLease,
 }
 
@@ -283,6 +290,38 @@ pub(crate) fn install_hook_config_file(
     label: &str,
     merge: impl FnOnce(&mut serde_json::Value) -> std::io::Result<()>,
     invalid_json: InvalidJsonPolicy,
+) -> std::io::Result<InstalledHookConfig> {
+    install_hook_config_file_impl(directory, filename, label, merge, invalid_json, None)
+}
+
+/// Like [`install_hook_config_file`], but `jsonc_edit` may splice a commented
+/// file. `Ok(None)` from the editor keeps the strict-JSON path, including its
+/// refusal of text that is neither JSON nor JSONC.
+pub(crate) fn install_hook_config_file_parsing_jsonc(
+    directory: &Path,
+    filename: &str,
+    label: &str,
+    merge: impl FnOnce(&mut serde_json::Value) -> std::io::Result<()>,
+    invalid_json: InvalidJsonPolicy,
+    jsonc_edit: JsoncEdit,
+) -> std::io::Result<InstalledHookConfig> {
+    install_hook_config_file_impl(
+        directory,
+        filename,
+        label,
+        merge,
+        invalid_json,
+        Some(jsonc_edit),
+    )
+}
+
+fn install_hook_config_file_impl(
+    directory: &Path,
+    filename: &str,
+    label: &str,
+    merge: impl FnOnce(&mut serde_json::Value) -> std::io::Result<()>,
+    invalid_json: InvalidJsonPolicy,
+    jsonc_edit: Option<JsoncEdit>,
 ) -> std::io::Result<InstalledHookConfig> {
     if config_dir_is_symlink(directory) {
         return Err(std::io::Error::new(
@@ -315,6 +354,16 @@ pub(crate) fn install_hook_config_file(
         let existing = read_optional_text(&path)?;
         let created_file = existing.is_none();
         let existing = existing.unwrap_or_default();
+        if let Some(edit) = jsonc_edit {
+            if !created_file {
+                if let Some(updated) = edit(&existing)? {
+                    if updated != existing {
+                        write_text_atomic(&path, &updated)?;
+                    }
+                    return Ok((false, true));
+                }
+            }
+        }
         let mut root = if existing.trim().is_empty() {
             serde_json::json!({})
         } else {
@@ -337,10 +386,10 @@ pub(crate) fn install_hook_config_file(
         if created_file {
             lease.mark_created()?;
         }
-        Ok(created_file)
+        Ok((created_file, false))
     });
-    let created_file = match result {
-        Ok(created_file) => created_file,
+    let (created_file, jsonc) = match result {
+        Ok(installed) => installed,
         Err(error) => {
             if !directory_existed {
                 let _ = std::fs::remove_dir(directory);
@@ -352,6 +401,7 @@ pub(crate) fn install_hook_config_file(
         path,
         created_file,
         created_directory: !directory_existed,
+        jsonc,
         lease,
     })
 }
