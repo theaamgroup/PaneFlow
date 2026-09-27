@@ -193,11 +193,13 @@ fn cursor_color_override_from_config(terminal_config: &TerminalConfig) -> Option
 
 /// Strip control characters from an OSC 52 clipboard payload so a hostile PTY
 /// program can't plant a paste-injection (U-023). Keeps TAB and LF (legitimate
-/// in clipboard text); drops CR (the byte that commits a line on paste into a
-/// non-bracketed context), ESC (the ANSI intro), every other C0 control, DEL,
-/// and the C1 range (U+0080-U+009F). Applied symmetrically to the Store (write)
-/// and Load (read) paths so they can't drift apart again - `char::is_control()`
-/// already covers C0 + DEL + C1.
+/// in clipboard text, including a multi-line yank); drops CR, ESC (the ANSI
+/// intro), every other C0 control, DEL, and the C1 range (U+0080-U+009F).
+/// Dropping CR is not what makes a later paste safe: LF stays in the clipboard
+/// on purpose, and a non-bracketed paste refuses multi-line text instead of
+/// turning those LFs into CRs that would run each line. Applied symmetrically
+/// to the Store (write) and Load (read) paths so they can't drift apart again
+/// - `char::is_control()` already covers C0 + DEL + C1.
 pub(super) fn sanitize_osc52(text: &str) -> String {
     text.chars()
         .filter(|&c| c == '\t' || c == '\n' || !c.is_control())
@@ -1362,6 +1364,9 @@ pub enum TerminalEvent {
     /// A mouse selection was auto-copied to the clipboard on mouse release.
     /// Consumed by `PaneFlowApp` to surface a "Copied" toast.
     SelectionCopied,
+    /// A multi-line paste was not written because bracketed paste is off and
+    /// this path has no confirmation UI. `PaneFlowApp` shows an error toast.
+    PasteRefused,
     /// Cmd/Ctrl-click on a `.md`/`.markdown` path detected by the file-path
     /// scanner. The receiver opens it in the external editor, same as any
     /// other file path, with no line or column. The path is the canonical

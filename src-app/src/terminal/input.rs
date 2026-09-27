@@ -68,6 +68,35 @@ pub(super) fn wrap_bracketed_paste(text: &str) -> String {
     format!("\x1b[200~{}\x1b[201~", sanitize_bracketed_paste(text))
 }
 
+/// Bytes to write for one paste, or `None` when it must not be written.
+///
+/// Bracketed paste keeps newlines as text. A non-bracketed paste rewrites
+/// LF to CR, which submits every line, so multi-line text is refused on
+/// that path. There is no confirm UI here (issue #885): the caller does
+/// not write the paste. A single line, including one trailing break
+/// (`"echo ok\n"`), is still written.
+fn paste_payload(text: &str, mode: Modes) -> Option<String> {
+    if mode.contains(Modes::BRACKETED_PASTE) {
+        return Some(sanitize_bracketed_paste(text));
+    }
+    if non_bracketed_multiline_paste(text) {
+        return None;
+    }
+    Some(text.replace("\r\n", "\r").replace('\n', "\r"))
+}
+
+/// `true` when a non-bracketed paste would submit more than one line.
+///
+/// One trailing break is still a single line. Anything after the first
+/// break (`"a\nb"`, `"a\nb\n"`, `"a\r\nb"`) would run as another command.
+fn non_bracketed_multiline_paste(text: &str) -> bool {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let Some(newline) = normalized.find('\n') else {
+        return false;
+    };
+    !normalized[newline + 1..].is_empty()
+}
+
 fn ghostty_modifiers(modifiers: gpui::Modifiers) -> ghostty::Modifiers {
     let mut result = ghostty::Modifiers::empty();
     if modifiers.shift {
@@ -1196,7 +1225,7 @@ impl TerminalView {
                     paths_to_pty_text(ext_paths.paths(), self.terminal.shell_quoting)
             {
                 let mode = self.terminal.session_backend().modes();
-                self.write_paste_text(&text, mode);
+                self.write_paste_text(&text, mode, cx);
                 return;
             }
         }
@@ -1204,7 +1233,7 @@ impl TerminalView {
         // Text paste (normal Ctrl+V)
         if let Some(text) = clipboard.text() {
             let mode = self.terminal.session_backend().modes();
-            self.write_paste_text(&text, mode);
+            self.write_paste_text(&text, mode, cx);
             return;
         }
 
@@ -1226,11 +1255,11 @@ impl TerminalView {
         &mut self,
         paths: &ExternalPaths,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         if let Some(text) = paths_to_pty_text(paths.paths(), self.terminal.shell_quoting) {
             let mode = self.terminal.session_backend().modes();
-            self.write_paste_text(&text, mode);
+            self.write_paste_text(&text, mode, cx);
         }
     }
 
@@ -1238,11 +1267,15 @@ impl TerminalView {
     /// payload itself when the surface has bracketed paste active. Only the
     /// non-bracketed newline rewrite stays here, because that one is an
     /// interactive-paste convention, not a protocol rule.
-    pub(super) fn write_paste_text(&self, text: &str, mode: Modes) {
-        let payload = if mode.contains(Modes::BRACKETED_PASTE) {
-            sanitize_bracketed_paste(text)
-        } else {
-            text.replace("\r\n", "\r").replace('\n', "\r")
+    ///
+    /// Multi-line text on that path is not rewritten into CR-terminated
+    /// commands. Nothing on this path can ask the user to confirm, so the
+    /// paste is refused and surfaced as a toast (issue #885).
+    pub(super) fn write_paste_text(&self, text: &str, mode: Modes, cx: &mut Context<Self>) {
+        let Some(payload) = paste_payload(text, mode) else {
+            log::warn!("refusing a multi-line paste while bracketed paste is off");
+            cx.emit(TerminalEvent::PasteRefused);
+            return;
         };
         self.terminal.write_ghostty_paste(payload);
     }
@@ -1641,6 +1674,55 @@ mod tests {
         // Exactly one opener and one closer survive (the wrapper's own).
         assert_eq!(wrapped.matches("\x1b[200~").count(), 1);
         assert_eq!(wrapped.matches("\x1b[201~").count(), 1);
+    }
+
+    /// Issue #885: `"a\nb\n"` must not be written as `a\rb\r` when bracketed
+    /// paste is off and the user has not confirmed. There is no confirm UI
+    /// on this path, so the paste is not written. A single line still is,
+    /// and bracketed paste still carries the newlines.
+    #[gpui::test]
+    fn non_bracketed_multiline_paste_is_not_written_as_cr_without_confirmation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let refused = super::paste_payload("a\nb\n", Modes::empty());
+        assert!(
+            refused.is_none(),
+            "multi-line paste must not be written as CR-terminated lines without confirmation, got {refused:?}"
+        );
+        assert_eq!(
+            super::paste_payload("echo ok", Modes::empty()).as_deref(),
+            Some("echo ok"),
+            "a single-line paste must still be written"
+        );
+        let bracketed = super::paste_payload("a\nb\n", Modes::BRACKETED_PASTE)
+            .expect("bracketed paste is written");
+        assert!(
+            bracketed.contains("a\nb\n") && !bracketed.contains('\r'),
+            "bracketed paste must keep newlines and must not turn them into CR, got {bracketed:?}"
+        );
+
+        let cx = cx.add_empty_window();
+        let refused_view = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+        refused_view.update(cx, |view, cx| {
+            assert!(
+                !view.terminal.should_close_on_exit(),
+                "a fresh terminal has not accepted user input"
+            );
+            view.write_paste_text("a\nb\n", Modes::empty(), cx);
+            assert!(
+                !view.terminal.should_close_on_exit(),
+                "write_paste_text must not send a\\nb\\n when bracketed paste is off"
+            );
+        });
+
+        let single_line = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+        single_line.update(cx, |view, cx| {
+            view.write_paste_text("echo ok", Modes::empty(), cx);
+            assert!(
+                view.terminal.should_close_on_exit(),
+                "a single-line paste must still reach the terminal"
+            );
+        });
     }
 
     // US-021: shell-quoting of file-manager paths for paste.
