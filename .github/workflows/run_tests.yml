@@ -132,8 +132,14 @@ jobs:
               # public_json_schema_covers_every_config_field reads schemas/
               # public_configuration_schema_doc_mentions_schema_keys reads
               # docs/user/configuration/schema.md
+              # claude_md_action_count_matches_the_actions_macro reads
+              # docs/user/keybindings.md.
+              # deny_policy_carries_no_entry_the_graph_cannot_match reads
+              # deny.toml (issue #873).
               - 'schemas/**'
               - 'docs/user/configuration/schema.md'
+              - 'docs/user/keybindings.md'
+              - 'deny.toml'
               - 'examples/**'
               # The -sys build script and its tests read native/libghostty
               # (manifest, bindings, header, archive, build-info) and the
