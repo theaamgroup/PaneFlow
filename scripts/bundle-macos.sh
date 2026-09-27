@@ -14,12 +14,18 @@
 #
 # Arguments:
 #   --version <string>       Version to stamp into Info.plist (required).
+#                            The binary's `--version` output must contain
+#                            `paneflow <string>` as a whole token.
 #   --arch aarch64           Target architecture (required). This fork is
 #                            Apple Silicon only; nothing else is accepted.
 #   --target-dir <path>      Directory containing the built `paneflow` binary.
 #                            Defaults to target/aarch64-apple-darwin/release,
 #                            which a plain `cargo build --release` (no
 #                            `--target`) never writes.
+#   --allow-version-mismatch Skip the binary version check. The CI render
+#                            smoke stamps `0.0.0-ci`, and local dev signing
+#                            stamps `0.0.0`, on a binary that prints its
+#                            real Cargo version.
 #
 # Signing, notarization, and .dmg creation are intentionally out of scope -
 # see US-015 (codesign + notarytool) and US-016 (hdiutil .dmg).
@@ -33,16 +39,34 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 VERSION=""
 ARCH=""
 TARGET_DIR=""
+ALLOW_VERSION_MISMATCH=0
 
 usage() {
     cat >&2 <<EOF
-Usage: $0 --version <ver> --arch aarch64 [--target-dir <path>]
+Usage: $0 --version <ver> --arch aarch64 [--target-dir <path>] [--allow-version-mismatch]
 EOF
 }
 
 die() {
     echo "error: $*" >&2
     exit 1
+}
+
+# 0 when $1 contains the whitespace-delimited tokens "paneflow" and $2, in
+# that order. Dots and hyphens stay inside the version token, so 0.7.2 does
+# not match 0.7.20 or 0.7.2-dev.
+output_has_paneflow_version() {
+    printf '%s\n' "$1" | awk -v version="$2" '
+        BEGIN { found = 0 }
+        {
+            for (i = 1; i < NF; i++) {
+                if ($i == "paneflow" && $(i + 1) == version) {
+                    found = 1
+                }
+            }
+        }
+        END { exit(found ? 0 : 1) }
+    '
 }
 
 while [ "$#" -gt 0 ]; do
@@ -61,6 +85,10 @@ while [ "$#" -gt 0 ]; do
             [ "$#" -ge 2 ] || die "--target-dir requires an argument"
             TARGET_DIR="$2"
             shift 2
+            ;;
+        --allow-version-mismatch)
+            ALLOW_VERSION_MISMATCH=1
+            shift
             ;;
         -h|--help)
             usage
@@ -95,6 +123,17 @@ ICNS_SRC="$REPO_ROOT/assets/PaneFlow.icns"
 [ -f "$BIN" ]              || die "release binary not found at $BIN (did you run 'cargo build --release --target $TRIPLE -p paneflow-app'?)"
 [ -f "$INFO_PLIST_SRC" ]   || die "Info.plist template not found at $INFO_PLIST_SRC"
 [ -f "$ICNS_SRC" ]         || die "PaneFlow.icns not found at $ICNS_SRC (scripts/build-icons.sh generates it from the macOS icon master)"
+
+# Refuse a stale binary under a newly stamped version (issue #902). Checked
+# before the bundle directory is replaced, so a mismatch leaves dist untouched.
+if [ "$ALLOW_VERSION_MISMATCH" -eq 0 ]; then
+    version_status=0
+    version_output="$("$BIN" --version 2>&1)" || version_status=$?
+    if ! output_has_paneflow_version "$version_output" "$VERSION"; then
+        printed_shown="$(printf '%s' "$version_output" | tr '\n' ' ')"
+        die "version mismatch: saw ${BIN} print '${printed_shown}' (exit ${version_status}); requested version ${VERSION} (expected whole token 'paneflow ${VERSION}')"
+    fi
+fi
 
 # --- Assemble bundle ------------------------------------------------------
 APP="$REPO_ROOT/dist/PaneFlow.app"
