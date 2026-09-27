@@ -64,6 +64,7 @@ const SYNTHETIC_USER_PREFIXES: [&str; 8] = [
 
 // US-013: per-line JSONL read cap, centralized (see `crate::limits`).
 use crate::limits::MAX_LINE_BYTES;
+use crate::pi_sessions::{CappedLine, read_capped_line};
 
 /// Cap rendered first-user-message labels at this character count.
 const LABEL_MAX_CHARS: usize = 80;
@@ -358,7 +359,7 @@ fn read_session_meta_inner(path: &Path, cwd_filter: Option<&str>) -> Option<Sess
         .unwrap_or("")
         .to_string();
 
-    let scan = scan_head_for_title(&mut reader);
+    let scan = scan_head_for_title(&mut reader, path);
 
     // A rollout whose only line is `session_meta` is a thread the user opened
     // and closed without sending anything. It has no title and nothing to
@@ -390,38 +391,25 @@ struct RolloutScan {
 /// Scan the head of a rollout for the first human-authored message, bounded by
 /// [`TITLE_SCAN_LIMIT`] lines AND [`TITLE_SCAN_BYTES`].
 ///
-/// Signature is concrete on `BufReader<File>` rather than the
-/// generic `R: BufRead` it used to be: the `by_ref().take()`
-/// pattern needed by US-010 for the per-line byte cap fails to
-/// type-check against `&mut R` (the compiler auto-derefs to `R`
-/// and the move blocks the borrow). The only call site already
-/// passes a `BufReader<File>`, so the generic was vestigial.
-fn scan_head_for_title(reader: &mut BufReader<fs::File>) -> RolloutScan {
+/// Oversized lines are skipped, including a [`MAX_LINE_BYTES`] cut inside a
+/// multibyte character. `read_line` used to return `InvalidData` there and
+/// abort the scan, so a later title was lost and a row with no earlier body
+/// record was dropped.
+fn scan_head_for_title(reader: &mut BufReader<fs::File>, path: &Path) -> RolloutScan {
     let mut scan = RolloutScan::default();
-    let mut buf = String::new();
     let mut budget = TITLE_SCAN_BYTES;
     for _ in 0..TITLE_SCAN_LIMIT {
-        if budget == 0 {
+        // `read_capped_line` always takes a full [`MAX_LINE_BYTES`]; the
+        // oversized check is only exact while that much budget remains.
+        if budget < MAX_LINE_BYTES {
             break;
         }
-        buf.clear();
-        // US-010 (cli-hardening-followup-2026-Q3): cap each line read.
-        // Oversize lines fall through to `serde_json::from_str` which
-        // errors and the loop `continue`s -- the scan moves on to the
-        // next chunk without OOMing.
-        let n = match reader
-            .by_ref()
-            .take(MAX_LINE_BYTES.min(budget))
-            .read_line(&mut buf)
-        {
-            Ok(n) => n,
-            Err(_) => break,
+        let line = match read_capped_line(reader, path, &mut budget) {
+            Some(CappedLine::Line(line)) => line,
+            Some(CappedLine::Oversized) => continue,
+            Some(CappedLine::Eof) | None => break,
         };
-        if n == 0 {
-            break;
-        }
-        budget = budget.saturating_sub(n as u64);
-        let trimmed = buf.trim_end();
+        let trimmed = line.trim_end();
         if !trimmed.starts_with('{') {
             continue;
         }
@@ -702,6 +690,28 @@ mod tests {
         .expect("write fixture");
         let meta = read_session_meta(&path).expect("meta");
         assert_eq!(meta.summary.as_deref(), Some("ship it"));
+    }
+
+    #[test]
+    fn codex_title_scan_survives_an_oversized_multibyte_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rollout.jsonl");
+        // U+3042 is 3 bytes and 64 KiB % 3 == 1, so the cap splits a character.
+        let oversized = "\u{3042}".repeat((MAX_LINE_BYTES as usize / 3) + 8);
+        assert!(oversized.len() > MAX_LINE_BYTES as usize);
+        assert!(!oversized.is_char_boundary(MAX_LINE_BYTES as usize));
+        let session_id = "019dc9ea-38d7-7372-9cc4-253ce944d41b";
+        let session_meta = format!(
+            r#"{{"type":"session_meta","payload":{{"id":"{session_id}","cwd":"/home/arthur/dev/paneflow","timestamp":"2026-04-26T13:11:03.694Z"}}}}"#
+        );
+        let user_msg = r#"{"type":"event_msg","payload":{"type":"user_message","message":"Still here","images":[]}}"#;
+        std::fs::write(&path, format!("{session_meta}\n{oversized}\n{user_msg}\n"))
+            .expect("write fixture");
+
+        let meta = read_session_meta(&path).expect("oversized line must not drop the row");
+        assert_eq!(meta.session_id, session_id);
+        assert_eq!(meta.summary.as_deref(), Some("Still here"));
+        assert_ne!(meta.summary.as_deref(), Some(session_id));
     }
 
     /// A sub-agent thread carries its own `payload.id` and would otherwise
