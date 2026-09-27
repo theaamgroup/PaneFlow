@@ -115,6 +115,7 @@ impl Drop for CodexHookConfigGuard {
             &self.project_dir,
             self.created_hooks_file,
             self.created_project_dir,
+            true,
             remove_codex_hooks,
             &mut self.hooks_lease,
         );

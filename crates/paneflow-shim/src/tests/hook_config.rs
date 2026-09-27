@@ -160,6 +160,50 @@ fn install_at_refuses_symlinked_config_file() {
 }
 
 #[test]
+fn cleanup_does_not_follow_a_project_file_swapped_for_a_symlink() {
+    use std::os::unix::fs::symlink;
+
+    // #892: install refuses a project-file symlink, but the checkout can
+    // replace the real file afterwards. The outside file keeps a user key
+    // beside the PaneFlow hooks so a followed cleanup rewrites it. An
+    // only-hooks file would be unlinked as a symlink instead, and the
+    // target bytes would stay put.
+    let td = tempfile::TempDir::new().unwrap();
+    let claude_dir = td.path().join(".claude");
+    let guard = HookConfigGuard::install_at(&claude_dir)
+        .expect("install_at into an empty tempdir must succeed");
+
+    let mut outside_root = read_settings(&claude_dir);
+    outside_root["permissions"] = json!({ "allow": ["Bash(ls:*)"] });
+    let outside = td.path().join("outside.json");
+    std::fs::write(
+        &outside,
+        format!("{}\n", serde_json::to_string_pretty(&outside_root).unwrap()),
+    )
+    .unwrap();
+    let original = std::fs::read(&outside).unwrap();
+
+    let link = claude_dir.join("settings.local.json");
+    std::fs::remove_file(&link).unwrap();
+    symlink(&outside, &link).unwrap();
+
+    drop(guard);
+
+    assert_eq!(
+        std::fs::read(&outside).unwrap(),
+        original,
+        "the outside file must not be rewritten through the link"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link itself must be left in place"
+    );
+}
+
+#[test]
 fn install_at_preserves_existing_user_hooks_and_permissions() {
     let td = tempfile::TempDir::new().unwrap();
     let claude_dir = td.path().join(".claude");
@@ -478,7 +522,15 @@ fn cleanup_keeps_the_directory_when_the_file_delete_fails() {
     // A read-only parent directory makes `remove_file` fail with EACCES.
     std::fs::set_permissions(&file_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
 
-    cleanup_hook_config_file(&path, &directory, true, true, drop_every_key, &mut lease);
+    cleanup_hook_config_file(
+        &path,
+        &directory,
+        true,
+        true,
+        false,
+        drop_every_key,
+        &mut lease,
+    );
 
     let file_survived = path.exists();
     let directory_survived = directory.exists();

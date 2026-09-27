@@ -186,6 +186,7 @@ impl Drop for HookConfigGuard {
             &self.directory,
             self.created_file,
             self.created_directory,
+            true,
             remove_paneflow_hooks,
             &mut self.lease,
         );
