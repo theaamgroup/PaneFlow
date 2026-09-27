@@ -240,14 +240,13 @@ pub struct AgentSession {
     /// against. `None` until a stamped frame lands (frames from a hook
     /// predating the field carry none and are always accepted).
     pub last_event_at_ms: Option<u64>,
-    /// How many `ai.stop` frames have been applied to this row.
+    /// Token of the `ai.stop` the auto-clear timer is allowed to clear.
     ///
-    /// The 5 s auto-clear timer captures the value its own stop bumped this
-    /// to and removes the row only while it still matches. A later stop
-    /// bumps it again, so the older timer leaves the newer `Finished` row
-    /// in place (issue #934). Starts at 0, and only an applied stop moves
-    /// it. Not [`Self::last_event_at_ms`]: frames from hooks that predate
-    /// that field leave the watermark `None`.
+    /// Issued from a process-wide counter, not by adding one to this field.
+    /// A removed row's replacement starts at 0, and adding one there would
+    /// reissue token 1 while the old timer still holds it (issue #934).
+    /// `prompt_submit` does not move it. Not [`Self::last_event_at_ms`]:
+    /// frames from hooks that predate that field leave the watermark `None`.
     pub stop_generation: u64,
     /// The user dismissed this session's badge from the sidebar tab menu
     /// ("Mark as read", issue #408). `state` stays the truth for everything

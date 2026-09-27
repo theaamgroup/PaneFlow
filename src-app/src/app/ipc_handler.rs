@@ -14,6 +14,7 @@
 //! verbatim, with an identical method-not-found catch-all in every handler.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, BackgroundExecutor, Context, Entity};
@@ -3336,13 +3337,20 @@ fn upsert_session_state_with_start(
     Some(key)
 }
 
+/// Stop tokens handed to auto-clear timers. A replaced row builds a new
+/// `AgentSession` whose field starts at 0, so adding one to that field would
+/// reissue token 1 while an older timer still holds it (issue #934).
+fn next_stop_generation() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Apply one `ai.stop` and name it.
 ///
 /// Returns the session key and the stop generation the auto-clear timer
-/// must capture. `None` when the frame is rejected, in which case the
-/// generation does not move and no timer is armed. The bump happens only
-/// after the upsert has succeeded, and only on this path: `prompt_submit`
-/// and every other lifecycle frame leave the counter alone.
+/// must capture. `None` when the frame is rejected, in which case no token
+/// is issued and no timer is armed. Only this path names a stop:
+/// `prompt_submit` and every other lifecycle frame leave the token alone.
 fn apply_hook_stop(
     sessions: &mut std::collections::HashMap<u32, AgentSession>,
     pid: Option<u32>,
@@ -3358,14 +3366,9 @@ fn apply_hook_stop(
         emitted_at_ms,
         ai_types::AgentStateSource::Hook,
     )?;
-    let generation = match sessions.get_mut(&key) {
-        Some(session) => {
-            session.stop_generation = session.stop_generation.wrapping_add(1);
-            session.stop_generation
-        }
-        // The upsert above just wrote this key.
-        None => 0,
-    };
+    let generation = next_stop_generation();
+    let session = sessions.get_mut(&key)?;
+    session.stop_generation = generation;
     Some((key, generation))
 }
 
@@ -4811,10 +4814,6 @@ mod tests {
         let (key, first_stop) = super::apply_hook_stop(&mut sessions, pid, tool, None, Some(1_000))
             .expect("the first stop applies");
         assert_eq!(key, 4242);
-        assert_eq!(
-            first_stop, 1,
-            "a new row's first applied stop is generation 1"
-        );
         assert_eq!(sessions[&key].state, AgentState::Finished);
         assert_eq!(sessions[&key].stop_generation, first_stop);
 
@@ -4842,7 +4841,6 @@ mod tests {
         )
         .expect("the second stop applies");
         assert_eq!(same_key, key);
-        assert_eq!(second_stop, 2);
         assert_ne!(second_stop, first_stop);
         assert_eq!(sessions[&key].state, AgentState::Finished);
         assert_eq!(sessions[&key].stop_generation, second_stop);
@@ -4862,6 +4860,38 @@ mod tests {
             super::finished_stop_is_still_current(sessions.get(&key), second_stop),
             "a timer that captured the later stop still clears the row it named"
         );
+
+        // session_end drops the row while its timer is still pending. A new
+        // same-tool stop with no pid reuses that synthetic key and used to
+        // restart the counter at 1, so the old timer matched the new row.
+        sessions.clear();
+        let (synthetic, old_token) =
+            super::apply_hook_stop(&mut sessions, None, tool, Some("old".into()), Some(4_000))
+                .expect("a no-pid stop mints a synthetic row");
+        sessions.remove(&synthetic);
+        let (rebuilt, new_token) = super::apply_hook_stop(
+            &mut sessions,
+            None,
+            tool,
+            Some("rebuilt".into()),
+            Some(5_000),
+        )
+        .expect("the next no-pid stop reuses the synthetic key");
+        assert_eq!(rebuilt, synthetic);
+        assert_ne!(new_token, old_token);
+        assert_ne!(new_token, first_stop);
+        if super::finished_stop_is_still_current(sessions.get(&rebuilt), old_token) {
+            sessions.remove(&rebuilt);
+        }
+        assert!(
+            sessions.contains_key(&rebuilt),
+            "a timer from the removed row must not clear the session that reused its key"
+        );
+        assert_eq!(sessions[&rebuilt].last_result.as_deref(), Some("rebuilt"));
+        assert!(super::finished_stop_is_still_current(
+            sessions.get(&rebuilt),
+            new_token
+        ));
     }
 
     #[test]
