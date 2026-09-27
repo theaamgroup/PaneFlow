@@ -1666,16 +1666,20 @@ impl GhosttySession {
         regex: bool,
         cancelled: &AtomicBool,
     ) -> crate::search::SearchResult {
-        self.search_scan(query, regex, cancelled, None).0
+        self.search_scan(query, regex, cancelled, None, SupersededScan::Truncate)
+            .0
     }
 
     /// The scan behind [`Self::search_with_cancel`], with the reason it
-    /// stopped. The second element is `Some(reason)` only when the runtime
-    /// could not answer a `SearchChunk`, the engine failed one, or the grid
-    /// kept moving between chunks - never for a cancel, a superseding search,
-    /// or the cell budget, which are ordinary truncation. Issue #362: a
-    /// caller that has to tell a wedged runtime from a finished-but-capped
-    /// scan reads it; the UI search drops it.
+    /// stopped. The second element is `Some(reason)` when the runtime could
+    /// not answer a `SearchChunk`, the engine failed one, or the grid kept
+    /// moving between chunks. A find-bar scan ([`SupersededScan::Truncate`])
+    /// still leaves it `None` for a cancel, a newer search, or the cell
+    /// budget: those are ordinary truncation and the UI drops the reason.
+    /// Scrollback search reports a newer search as
+    /// `Some("superseded by a newer search")`, so `surface.search` does not
+    /// call that `truncated` (issue #920). Issue #362: a caller that has to
+    /// tell a wedged runtime from a finished-but-capped scan reads the reason.
     ///
     /// `captured_lines`, when set, records each row's text the first time that
     /// line number is read. Scrollback search keeps those strings so it does
@@ -1689,6 +1693,7 @@ impl GhosttySession {
         regex: bool,
         cancelled: &AtomicBool,
         mut captured_lines: Option<&mut HashMap<i32, String>>,
+        on_supersede: SupersededScan,
     ) -> (crate::search::SearchResult, Option<String>) {
         let mut search = match fresh_search(query, regex) {
             SearchStart::Ready(search) => search,
@@ -1709,10 +1714,22 @@ impl GhosttySession {
         // scan with `truncated: false`.
         let mut attempt = 1u8;
         loop {
-            if cancelled.load(Ordering::Acquire)
-                || self.inner.search_generation.load(Ordering::Acquire) != generation
-            {
-                return (search_result_from_ghostty(search.finish(true)), None);
+            if cancelled.load(Ordering::Acquire) {
+                // A find-bar cancel stays truncation. Scrollback search does
+                // not share that flag; a cancelled IPC scan must not be
+                // reported as `truncated` either (issue #920).
+                let reason = match on_supersede {
+                    SupersededScan::Truncate => None,
+                    SupersededScan::Error => Some("cancelled".to_owned()),
+                };
+                return (search_result_from_ghostty(search.finish(true)), reason);
+            }
+            if self.inner.search_generation.load(Ordering::Acquire) != generation {
+                let reason = match on_supersede {
+                    SupersededScan::Truncate => None,
+                    SupersededScan::Error => Some("superseded by a newer search".to_owned()),
+                };
+                return (search_result_from_ghostty(search.finish(true)), reason);
             }
             let remaining = ghostty::MAX_SEARCH_CELLS.saturating_sub(scanned_cells);
             if remaining == 0 {
@@ -1797,8 +1814,13 @@ impl GhosttySession {
             return Ok((Vec::new(), false));
         }
         let mut texts = HashMap::new();
-        let (search, failure) =
-            self.search_scan(query, false, &AtomicBool::new(false), Some(&mut texts));
+        let (search, failure) = self.search_scan(
+            query,
+            false,
+            &AtomicBool::new(false),
+            Some(&mut texts),
+            SupersededScan::Error,
+        );
         if let Some(reason) = failure {
             return Err(reason);
         }
@@ -1990,6 +2012,14 @@ const RUNTIME_UNANSWERED: &str =
 /// pass returns the hits. A frame that is still moving on the last pass is
 /// an error, not a finished scan. Issue #884.
 const MAX_SEARCH_FRAME_ATTEMPTS: u8 = 4;
+
+/// How a scan reports that a newer search replaced its generation.
+enum SupersededScan {
+    /// Find bar. `truncated` is enough; the UI drops the reason.
+    Truncate,
+    /// `surface.search`. An error, never `truncated: true` (issue #920).
+    Error,
+}
 
 enum SearchStart {
     Ready(ghostty::SearchEngine),
@@ -6964,5 +6994,86 @@ printf 'PANEFLOW_FINAL_LINE_%s\\n' MARKER; exit\n"
             expected.iter().map(String::as_str).collect::<Vec<_>>(),
             "a matching row was skipped or merged: {found:?}"
         );
+    }
+
+    /// Issue #920: a find-bar search that starts while `surface.search` is
+    /// still scanning must not come back as `truncated: true`. That flag is
+    /// the cap or the cell budget. The superseded scan is an error, or it
+    /// finishes and returns every match.
+    #[test]
+    fn surface_search_is_not_truncated_by_a_concurrent_find_bar_search() {
+        let cols = 2_048;
+        let chunk_rows = ghostty::SEARCH_CHUNK_CELLS / cols;
+        let total_lines = chunk_rows + 8;
+        let (session, pending, _events) =
+            GhosttySession::pending(TerminalWindowSize::new(cols, 4, 8, 16));
+        session
+            .start_display(pending, 10_000)
+            .expect("display runtime");
+        let mut bytes = Vec::new();
+        let mut expected = Vec::new();
+        for index in 0..total_lines {
+            let marker = format!("{index:04}");
+            if index % 10 == 0 || index + 1 == total_lines {
+                expected.push(marker.clone());
+                bytes.extend(format!("needle-{marker}\r\n").into_bytes());
+            } else {
+                bytes.extend(format!("plain-{marker}\r\n").into_bytes());
+            }
+        }
+        session.write_output(&bytes);
+
+        let started = std::sync::Arc::new(AtomicBool::new(false));
+        let finder = session.clone();
+        let started_hook = std::sync::Arc::clone(&started);
+        session.set_search_chunk_hook_for_test(Some(std::sync::Arc::new(move || {
+            if started_hook.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            let finder = finder.clone();
+            let handle = std::thread::spawn(move || {
+                finder.search_with_cancel("needle", false, &AtomicBool::new(false));
+            });
+            handle
+                .join()
+                .expect("find-bar search must finish before the scrollback scan continues");
+        })));
+
+        let scanned = session.search_scrollback("needle", 64);
+        session.set_search_chunk_hook_for_test(None);
+        session.shutdown();
+
+        assert!(
+            started.load(Ordering::Acquire),
+            "the find-bar search must start while a later chunk is still pending"
+        );
+        match scanned {
+            Ok((found, truncated)) => {
+                assert!(
+                    !truncated,
+                    "a superseded scan must not report truncated: {found:?}"
+                );
+                let mut found_markers = Vec::new();
+                for (_line, text) in &found {
+                    assert!(
+                        text.starts_with("needle-"),
+                        "line text is not a match: {text:?}"
+                    );
+                    found_markers.push(
+                        text.strip_prefix("needle-")
+                            .expect("prefix checked above")
+                            .to_owned(),
+                    );
+                }
+                found_markers.sort_unstable();
+                assert_eq!(
+                    found_markers, expected,
+                    "a finished scan must return every matching line: {found:?}"
+                );
+            }
+            Err(reason) => {
+                assert_eq!(reason, "superseded by a newer search");
+            }
+        }
     }
 }
