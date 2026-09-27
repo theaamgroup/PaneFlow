@@ -380,7 +380,7 @@ fn menu_label(label: &'static str, ui: crate::theme::UiColors) -> AnyElement {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::source_probe::source_slice;
 
     /// Issue #105 meets issue #349: the menu is not a back door to Settings.
@@ -613,7 +613,9 @@ mod tests {
         );
     }
 
-    fn blank_paneflow_app(cx: &mut gpui::Context<crate::PaneFlowApp>) -> crate::PaneFlowApp {
+    pub(crate) fn blank_paneflow_app(
+        cx: &mut gpui::Context<crate::PaneFlowApp>,
+    ) -> crate::PaneFlowApp {
         use std::sync::atomic::{AtomicU64, AtomicUsize};
         use std::sync::{Arc, Mutex};
 

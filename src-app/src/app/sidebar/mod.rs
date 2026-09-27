@@ -1036,26 +1036,29 @@ impl PaneFlowApp {
     /// rather than in the caller: the first click of a double-click already ran
     /// the single-click branch, which selected the workspace and focused one of
     /// its terminals. Claiming focus last is what survives that.
-    fn begin_workspace_rename(
+    pub(crate) fn begin_workspace_rename(
         &mut self,
         index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.commit_rename(cx);
-        if let Some(title) = self
+        // The value is the workspace id, not `index`. The row can move before
+        // commit; the editor has to follow that workspace (issue #935).
+        let Some((workspace_id, title)) = self
             .workspaces
             .get(index)
-            .map(|workspace| workspace.title.clone())
-        {
-            self.rename_text = title;
-            // Seeded, so the editor opens with the whole existing name
-            // selected. Set after `commit_rename`, which clears the flag.
-            self.rename_seeded = true;
-            self.renaming_idx = Some(index);
-            self.sidebar_rename_focus.focus(window, cx);
-            cx.notify();
-        }
+            .map(|workspace| (workspace.id, workspace.title.clone()))
+        else {
+            return;
+        };
+        self.rename_text = title;
+        // Seeded, so the editor opens with the whole existing name
+        // selected. Set after `commit_rename`, which clears the flag.
+        self.rename_seeded = true;
+        self.renaming_idx = Some(workspace_id);
+        self.sidebar_rename_focus.focus(window, cx);
+        cx.notify();
     }
 
     /// Cache key for the memoized rail order. It has to fold EVERY input the
@@ -1485,7 +1488,7 @@ impl PaneFlowApp {
                     this.dismiss_transient_surfaces();
                     this.begin_workspace_rename(idx, window, cx);
                 } else {
-                    let was_renaming = this.renaming_idx == Some(idx);
+                    let was_renaming = this.renaming_idx == Some(ws_id);
                     this.commit_rename(cx);
                     this.dismiss_transient_surfaces();
                     // Issue #78: a single click on the row is a workspace-level
@@ -1527,7 +1530,7 @@ impl PaneFlowApp {
                 // A row is on GPUI's dispatch path only while it tracks
                 // `sidebar_rename_focus`, which it does only while its own
                 // rename is live, so any other key event is a stale one.
-                if this.renaming_idx != Some(idx) {
+                if this.renaming_idx != Some(ws_id) {
                     return;
                 }
                 // Issue #79: stop every key the editor consumes. Escape in
@@ -1573,7 +1576,7 @@ impl PaneFlowApp {
         // One handle is enough - `renaming_idx` and `renaming_tab` share
         // `rename_text`, so at most one editor is live - but every row taking
         // it would leave many elements claiming one handle in a single frame.
-        let row_shell = if self.renaming_idx == Some(idx) {
+        let row_shell = if self.renaming_idx == Some(ws_id) {
             row_shell.track_focus(&self.sidebar_rename_focus)
         } else {
             row_shell
@@ -1604,10 +1607,10 @@ impl PaneFlowApp {
         // The whole workspace, whatever the fold: the number answers "how
         // many agents are working here", which no tab row repeats.
         let running = ai_types::running_session_count(ws.agent_sessions.values());
-        let running_count = (self.renaming_idx != Some(i))
+        let running_count = (self.renaming_idx != Some(ws_id))
             .then(|| running_agent_count_badge(running, ws.running_subagents.total(), ws_id, ui))
             .flatten();
-        let title_el = if self.renaming_idx == Some(i) {
+        let title_el = if self.renaming_idx == Some(ws_id) {
             let (editor_bg, editor_body) =
                 rename_editor_skin(&self.rename_text, self.rename_seeded, ui);
             div()
@@ -1811,7 +1814,7 @@ impl PaneFlowApp {
         let title = tab_row_title(tab, tab_idx, cx);
         let is_active_tab = tab_idx == ws.active_tab_idx();
         let is_active_workspace = ws_idx == self.active_idx;
-        let is_renaming = self.renaming_tab == Some((ws_idx, tab_idx));
+        let is_renaming = self.renaming_tab == Some((ws_id, tab_id));
 
         // Per-tab activity (US-012) and per-pane identity (US-013) are read in
         // one walk of the tab's leaves: `AgentSession::surface_id` holds a
@@ -2101,7 +2104,7 @@ impl PaneFlowApp {
             .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
                 // Same as the folder row: only the row whose rename is live
                 // tracks the focus handle that puts it on the dispatch path.
-                if this.renaming_tab != Some((ws_idx, tab_idx)) {
+                if this.renaming_tab != Some((ws_id, tab_id)) {
                     return;
                 }
                 match rename_key_action(
