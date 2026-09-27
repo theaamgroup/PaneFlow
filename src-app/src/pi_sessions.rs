@@ -187,16 +187,17 @@ fn user_summary_from_value(value: &Value) -> Option<String> {
     content_to_string(content).and_then(|s| clean_session_label(&s, 120))
 }
 
-enum CappedLine {
+pub(crate) enum CappedLine {
     Eof,
     Oversized,
     Line(String),
 }
 
-/// One capped line. Bytes are decoded lossily: `read_line` returns
-/// `InvalidData` when [`MAX_LINE_BYTES`] splits a multibyte character, and
-/// that error used to abort the file after a header was already parsed.
-fn read_capped_line<R: BufRead>(
+/// One capped line, shared with the Claude and Codex session readers.
+/// Bytes are decoded lossily: `read_line` returns `InvalidData` when
+/// [`MAX_LINE_BYTES`] splits a multibyte character, and that error used to
+/// abort the file after a header was already parsed.
+pub(crate) fn read_capped_line<R: BufRead>(
     reader: &mut R,
     path: &Path,
     budget: &mut u64,
@@ -235,9 +236,8 @@ fn read_capped_line<R: BufRead>(
 }
 
 /// Discard the rest of an oversized line in bounded chunks, charging every
-/// byte against `budget`. Returns `None` (the caller skips the file) when the
-/// budget runs out before the newline, so a single huge line costs at most
-/// [`HEADER_SCAN_BYTES`] of I/O.
+/// byte against `budget`. Returns `None` when the budget runs out before the
+/// newline, so one huge line costs at most the remaining scan budget.
 fn drain_oversized_line<R: BufRead>(reader: &mut R, budget: &mut u64) -> Option<()> {
     loop {
         if *budget == 0 {
