@@ -144,10 +144,10 @@ actions!(
 #[cfg(test)]
 mod tests {
     /// `CLAUDE.md` quotes the size of the `actions!` block twice - "N GPUI
-    /// action types" in the architecture tree and "N actions total" under
-    /// Keybindings - and both were left behind when `ShowSystemInfo` landed
-    /// (#190). Count the real block and read the real doc off disk, so the
-    /// next action cannot drift the number again.
+    /// action types" and "N actions total" - and both were left behind when
+    /// `ShowSystemInfo` landed (#190). `ARCHITECTURE.md` quotes "N GPUI
+    /// action types" in the workspace tree. Count the real block and read
+    /// those docs, so the next action cannot drift the numbers again.
     ///
     /// `docs/user/keybindings.md` quotes the same "N actions total" and says
     /// this test fails if it drifts, so it is read here too.
@@ -165,6 +165,15 @@ mod tests {
                 "CLAUDE.md says `{quoted} {phrase}` but `actions!` declares {declared}"
             );
         }
+
+        let architecture_md = include_str!("../../../ARCHITECTURE.md");
+        let phrase = "GPUI action types";
+        let quoted = number_before(architecture_md, phrase)
+            .unwrap_or_else(|| panic!("ARCHITECTURE.md must say `N {phrase}`"));
+        assert_eq!(
+            quoted, declared,
+            "ARCHITECTURE.md says `{quoted} {phrase}` but `actions!` declares {declared}"
+        );
 
         let keybindings_md = include_str!("../../../docs/user/keybindings.md");
         let phrase = "actions total";
