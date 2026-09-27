@@ -5,11 +5,11 @@
 //!
 //! Extracted from `main.rs` per US-017 of the src-app refactor PRD.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{App, AppContext, Context, Entity, Focusable, Window};
 use paneflow_config::schema::LayoutNode;
@@ -484,6 +484,9 @@ impl PaneFlowApp {
             self.focus_restored_session(window, cx);
             return;
         }
+        // Issue #878: one probe cache for every batch of this restore. The
+        // per-batch deadline is armed when that batch actually runs.
+        start_restore_cwd_probes();
         if let Some(pending) = &self.session_restore {
             log::info!(
                 "restoring session: {} workspace(s), mode={:?}",
@@ -507,6 +510,9 @@ impl PaneFlowApp {
     }
 
     fn restore_next_workspace_batch(&mut self, cx: &mut Context<Self>) -> bool {
+        // A fresh 250 ms budget for this frame. Paths already probed earlier
+        // in the restore stay cached, so a dead mount is not stat'd again.
+        refresh_restore_cwd_probe_deadline();
         for _ in 0..STARTUP_RESTORE_BATCH {
             let Some(ws_session) = self
                 .session_restore
@@ -525,6 +531,10 @@ impl PaneFlowApp {
     }
 
     fn finish_session_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Review layout probes run after this and keep a per-call timeout.
+        // Dropping the cache here stops an exhausted restore deadline from
+        // treating a live review worktree as missing.
+        end_restore_cwd_probes();
         let pending = self.session_restore.take();
         let restored_workspaces = !self.workspaces.is_empty();
         if !restored_workspaces {
@@ -628,6 +638,10 @@ impl PaneFlowApp {
         ws_session: &paneflow_config::schema::WorkspaceSession,
         cx: &mut Context<Self>,
     ) -> Workspace {
+        // Stat every cwd this workspace will restore before any one of them
+        // can spend the batch deadline. A live directory answers during the
+        // same wait as a dead mount. Issue #878.
+        warm_restore_cwd_probes(ws_session);
         let mut cwd = restored_workspace_cwd(&ws_session.cwd);
         let mut title = ws_session.title.clone();
         if should_repair_restored_root_terminal(&title, &cwd) {
@@ -970,8 +984,248 @@ fn persisted_dir_is_live(path: &Path) -> bool {
 /// directory answers in microseconds; only a dead network or cloud mount
 /// runs this out, and such a cwd is treated as unavailable rather than
 /// letting `stat` pin the render thread for the mount's own timeout.
+///
+/// During startup restore this is also the shared budget for one batch:
+/// every probe in that frame stops at the same instant (issue #878).
 pub(crate) const RESTORED_CWD_PROBE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(250);
+
+/// Below this, the batch budget is treated as spent. A shorter `stat` would
+/// time out a live directory whose helper thread has not been scheduled yet
+/// and, if cached, would keep it unavailable for the rest of the restore.
+const RESTORE_CWD_PROBE_SLACK: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Probe outcomes for the startup restore on this thread. Absent outside
+/// restore, so other callers (and the review pass after restore finishes)
+/// still stat every path on its own.
+struct RestoreCwdProbes {
+    /// Wall-clock end of the current batch's probe budget.
+    deadline: Instant,
+    /// `true` only when `stat` answered that the path is a directory.
+    /// A timeout is `false` and is not probed again this restore.
+    cache: HashMap<PathBuf, bool>,
+}
+
+thread_local! {
+    static RESTORE_CWD_PROBES: std::cell::RefCell<Option<RestoreCwdProbes>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static CWD_PROBE_SPAWNS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_cwd_probe_spawn() {
+    CWD_PROBE_SPAWNS.with(|spawns| spawns.set(spawns.get().saturating_add(1)));
+}
+
+#[cfg(test)]
+fn reset_cwd_probe_spawns() {
+    CWD_PROBE_SPAWNS.with(|spawns| spawns.set(0));
+}
+
+#[cfg(test)]
+fn cwd_probe_spawns() -> u64 {
+    CWD_PROBE_SPAWNS.with(|spawns| spawns.get())
+}
+
+fn start_restore_cwd_probes() {
+    RESTORE_CWD_PROBES.with(|slot| {
+        *slot.borrow_mut() = Some(RestoreCwdProbes {
+            deadline: Instant::now() + RESTORED_CWD_PROBE_TIMEOUT,
+            cache: HashMap::new(),
+        });
+    });
+}
+
+fn end_restore_cwd_probes() {
+    RESTORE_CWD_PROBES.with(|slot| *slot.borrow_mut() = None);
+}
+
+fn refresh_restore_cwd_probe_deadline() {
+    RESTORE_CWD_PROBES.with(|slot| {
+        if let Some(probes) = slot.borrow_mut().as_mut() {
+            probes.deadline = Instant::now() + RESTORED_CWD_PROBE_TIMEOUT;
+        }
+    });
+}
+
+fn expire_restore_cwd_probe_deadline() {
+    RESTORE_CWD_PROBES.with(|slot| {
+        if let Some(probes) = slot.borrow_mut().as_mut() {
+            probes.deadline = Instant::now();
+        }
+    });
+}
+
+fn restore_cwd_probes_active() -> bool {
+    RESTORE_CWD_PROBES.with(|slot| slot.borrow().is_some())
+}
+
+fn cached_restore_cwd_probe(path: &Path) -> Option<bool> {
+    RESTORE_CWD_PROBES.with(|slot| slot.borrow().as_ref()?.cache.get(path).copied())
+}
+
+fn remember_restore_cwd_probe(path: &Path, live: bool) {
+    RESTORE_CWD_PROBES.with(|slot| {
+        if let Some(probes) = slot.borrow_mut().as_mut() {
+            probes.cache.insert(path.to_path_buf(), live);
+        }
+    });
+}
+
+/// How long this call may block, or `None` when the batch budget is spent.
+/// Outside a restore the requested timeout is unchanged.
+fn restore_cwd_probe_budget(requested: std::time::Duration) -> Option<std::time::Duration> {
+    RESTORE_CWD_PROBES.with(|slot| {
+        let probes = slot.borrow();
+        let Some(probes) = probes.as_ref() else {
+            return Some(requested);
+        };
+        let remaining = probes.deadline.saturating_duration_since(Instant::now());
+        if remaining < RESTORE_CWD_PROBE_SLACK {
+            None
+        } else {
+            Some(remaining.min(requested))
+        }
+    })
+}
+
+/// Installs a fresh probe cache for the scope and puts back whatever was
+/// there. Tests use this; production restore keeps the cache from
+/// [`start_restore_cwd_probes`] until [`end_restore_cwd_probes`].
+#[cfg(test)]
+#[must_use]
+struct RestoreCwdProbeGuard {
+    previous: Option<RestoreCwdProbes>,
+}
+
+#[cfg(test)]
+impl RestoreCwdProbeGuard {
+    fn enter() -> Self {
+        let fresh = RestoreCwdProbes {
+            deadline: Instant::now() + RESTORED_CWD_PROBE_TIMEOUT,
+            cache: HashMap::new(),
+        };
+        let previous = RESTORE_CWD_PROBES.with(|slot| slot.borrow_mut().replace(fresh));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RestoreCwdProbeGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        RESTORE_CWD_PROBES.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// Paths [`restore_one_workspace`] will stat: the workspace cwd, each bound
+/// worktree, and the cwd of the surface each pane actually spawns.
+fn restore_cwd_probe_paths(ws: &paneflow_config::schema::WorkspaceSession) -> HashSet<PathBuf> {
+    let mut paths = HashSet::new();
+    paths.insert(PathBuf::from(&ws.cwd));
+    for tab in ws.tabs.iter().take(MAX_TABS_PER_WORKSPACE) {
+        if let Some(worktree) = tab.worktree.as_deref().filter(|path| !path.is_empty()) {
+            paths.insert(PathBuf::from(worktree));
+        }
+        if let Some(layout) = tab.layout.as_ref() {
+            collect_layout_probe_cwds(layout, &mut paths);
+        }
+    }
+    paths
+}
+
+fn collect_layout_probe_cwds(node: &LayoutNode, paths: &mut HashSet<PathBuf>) {
+    match node {
+        LayoutNode::Pane { surfaces } => {
+            if let Some(cwd) = probed_surface_cwd(surfaces) {
+                paths.insert(PathBuf::from(cwd));
+            }
+        }
+        LayoutNode::Split { children, .. } => {
+            for child in children {
+                collect_layout_probe_cwds(child, paths);
+            }
+        }
+    }
+}
+
+/// The cwd `spawn_pane_from_surfaces` will stat: the first non-markdown
+/// candidate that has one. Later surfaces in the pane are not built.
+fn probed_surface_cwd(surfaces: &[paneflow_config::schema::SurfaceDefinition]) -> Option<&str> {
+    for index in restore_candidate_order(surfaces) {
+        let surface = &surfaces[index];
+        if surface.surface_type.as_deref() == Some("markdown") {
+            continue;
+        }
+        return surface.cwd.as_deref().filter(|cwd| !cwd.is_empty());
+    }
+    None
+}
+
+/// Start one `stat` per uncached path, then wait out a single batch budget.
+/// Threads are already running, so a live directory answers while a dead
+/// mount holds the one timeout. A second dead path does not add another.
+fn warm_restore_cwd_probes(ws: &paneflow_config::schema::WorkspaceSession) {
+    if !restore_cwd_probes_active()
+        || restore_cwd_probe_budget(RESTORED_CWD_PROBE_TIMEOUT).is_none()
+    {
+        return;
+    }
+    let mut inflight = Vec::new();
+    for path in restore_cwd_probe_paths(ws) {
+        if cached_restore_cwd_probe(&path).is_some() {
+            continue;
+        }
+        match spawn_cwd_probe(&path) {
+            Some(rx) => inflight.push((path, rx)),
+            None => remember_restore_cwd_probe(&path, false),
+        }
+    }
+    join_restore_cwd_probes(inflight);
+}
+
+fn join_restore_cwd_probes(inflight: Vec<(PathBuf, std::sync::mpsc::Receiver<bool>)>) {
+    let mut inflight = inflight.into_iter();
+    while let Some((path, rx)) = inflight.next() {
+        let wait = restore_cwd_probe_budget(RESTORED_CWD_PROBE_TIMEOUT)
+            .unwrap_or(std::time::Duration::ZERO);
+        match rx.recv_timeout(wait) {
+            Ok(live) => remember_restore_cwd_probe(&path, live),
+            Err(_) => {
+                // The threads were started together, so this wait is the
+                // whole batch budget. Anything still blocked has missed it.
+                let waited = wait >= RESTORE_CWD_PROBE_SLACK;
+                if waited {
+                    remember_restore_cwd_probe(&path, false);
+                    log_cwd_probe_timeout(&path, wait);
+                }
+                expire_restore_cwd_probe_deadline();
+                for (path, rx) in inflight {
+                    match rx.try_recv() {
+                        Ok(live) => remember_restore_cwd_probe(&path, live),
+                        Err(_) if waited => {
+                            remember_restore_cwd_probe(&path, false);
+                            log_cwd_probe_timeout(&path, RESTORED_CWD_PROBE_TIMEOUT);
+                        }
+                        Err(_) => {}
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
+fn log_cwd_probe_timeout(path: &Path, timeout: std::time::Duration) {
+    log::warn!(
+        "session restore: cwd {} did not answer stat within {timeout:?}; treating it as unavailable",
+        path.display()
+    );
+}
 
 /// Probe a persisted cwd off the render thread with a deadline. `stat` on
 /// an unmounted SMB/NFS/iCloud volume can block for tens of seconds, and
@@ -979,8 +1233,30 @@ pub(crate) const RESTORED_CWD_PROBE_TIMEOUT: std::time::Duration =
 /// helper thread and a late answer counts as "not a directory". As with
 /// the git untracked-stats helper, a stalled thread is left to unwind on
 /// its own once the filesystem finally answers.
+///
+/// While a restore is in progress, the outcome is remembered for that
+/// restore and the wait is capped by the batch deadline. A second surface
+/// on a path that already timed out does not stat again. A live directory
+/// that was actually probed still returns true. Outside restore, every call
+/// probes on its own (issue #878).
 pub(crate) fn persisted_dir_is_live_within(path: &Path, timeout: std::time::Duration) -> bool {
-    probe_persisted_dir_within(path, timeout).unwrap_or(false)
+    if let Some(live) = cached_restore_cwd_probe(path) {
+        return live;
+    }
+    let Some(budget) = restore_cwd_probe_budget(timeout) else {
+        return false;
+    };
+    match probe_persisted_dir_within(path, budget) {
+        Some(live) => {
+            remember_restore_cwd_probe(path, live);
+            live
+        }
+        None => {
+            remember_restore_cwd_probe(path, false);
+            expire_restore_cwd_probe_deadline();
+            false
+        }
+    }
 }
 
 /// The same bounded probe with the timeout kept apart from a definite
@@ -1006,31 +1282,41 @@ pub(super) enum ProbeOutcome {
     TimedOut,
 }
 
-/// Probe `path` on a helper thread with a deadline.
-pub(super) fn start_persisted_dir_probe(path: &Path, timeout: std::time::Duration) -> ProbeOutcome {
+/// Spawn the helper that stats `path`. `None` means the thread did not start;
+/// the caller treats the path as unavailable. The join handle is dropped so
+/// a `stat` that outlives the deadline can unwind on its own.
+fn spawn_cwd_probe(path: &Path) -> Option<std::sync::mpsc::Receiver<bool>> {
     let (tx, rx) = std::sync::mpsc::channel();
     let probed = path.to_path_buf();
-    let spawned = std::thread::Builder::new()
+    match std::thread::Builder::new()
         .name("session-cwd-probe".to_string())
         .spawn(move || {
             let _ = tx.send(persisted_dir_is_live(&probed));
-        });
-    if let Err(err) = spawned {
-        log::warn!(
-            "session restore: could not spawn cwd probe for {}: {err}; treating it as unavailable",
-            path.display()
-        );
-        // The closure (and its sender) was dropped with the error, so
-        // nothing is left running.
-        return ProbeOutcome::TimedOut;
+        }) {
+        Ok(_) => {
+            #[cfg(test)]
+            note_cwd_probe_spawn();
+            Some(rx)
+        }
+        Err(err) => {
+            log::warn!(
+                "session restore: could not spawn cwd probe for {}: {err}; treating it as unavailable",
+                path.display()
+            );
+            None
+        }
     }
+}
+
+/// Probe `path` on a helper thread with a deadline.
+pub(super) fn start_persisted_dir_probe(path: &Path, timeout: std::time::Duration) -> ProbeOutcome {
+    let Some(rx) = spawn_cwd_probe(path) else {
+        return ProbeOutcome::TimedOut;
+    };
     match rx.recv_timeout(timeout) {
         Ok(is_dir) => ProbeOutcome::Answered(is_dir),
         Err(_) => {
-            log::warn!(
-                "session restore: cwd {} did not answer stat within {timeout:?}; treating it as unavailable",
-                path.display()
-            );
+            log_cwd_probe_timeout(path, timeout);
             ProbeOutcome::TimedOut
         }
     }
@@ -2307,6 +2593,137 @@ mod tests {
             "tab worktree probe blocked the caller for {elapsed:?} (bound {bound:?})"
         );
         assert_eq!(restored, None, "a stalled worktree stat drops the binding");
+    }
+
+    /// Issue #878: N surfaces on one dead mount must stat it once per restore.
+    /// A second batch deadline reuses that timeout, and a different dead path
+    /// in the same batch does not start another probe. Removing the cache
+    /// makes the post-refresh loop spawn again.
+    #[test]
+    fn restore_probes_a_stalled_cwd_once() {
+        struct ClearStalled(PathBuf, PathBuf);
+        impl Drop for ClearStalled {
+            fn drop(&mut self) {
+                let first = &self.0;
+                let second = &self.1;
+                STALLED_STAT_PATHS
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .retain(|path| path != first && path != second);
+            }
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let stalled = tmp.path().join("unmounted-volume");
+        let stalled_str = stalled.to_string_lossy().into_owned();
+        let other = tmp.path().join("other-unmounted");
+        let other_str = other.to_string_lossy().into_owned();
+        let live = tmp.path().join("live");
+        std::fs::create_dir_all(&live).expect("live dir");
+        let live_str = live.to_string_lossy().into_owned();
+        let fallback = tmp.path().join("fallback");
+        std::fs::create_dir_all(&fallback).expect("fallback dir");
+
+        {
+            let mut stalled_paths = STALLED_STAT_PATHS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            stalled_paths.push(stalled.clone());
+            stalled_paths.push(other.clone());
+        }
+        let _clear = ClearStalled(stalled.clone(), other.clone());
+
+        {
+            let _batch = RestoreCwdProbeGuard::enter();
+            reset_cwd_probe_spawns();
+            assert_eq!(
+                restored_workspace_cwd(&live_str),
+                live,
+                "a live directory is unchanged by the restore probe"
+            );
+            assert_eq!(
+                restored_workspace_cwd(&live_str),
+                live,
+                "a cached live result stays live"
+            );
+            assert_eq!(
+                cwd_probe_spawns(),
+                1,
+                "the first live probe must run, and the second must not"
+            );
+        }
+
+        let _batch = RestoreCwdProbeGuard::enter();
+        reset_cwd_probe_spawns();
+        let surfaces = 8;
+        let started = std::time::Instant::now();
+        for _ in 0..surfaces {
+            assert_eq!(
+                resolved_surface_cwd(Some(&stalled_str), &fallback),
+                fallback,
+                "a stalled surface cwd falls back"
+            );
+        }
+        assert_eq!(
+            restored_tab_worktree("ws", Some(&stalled_str)),
+            None,
+            "a stalled worktree binding is dropped"
+        );
+        assert_ne!(
+            restored_workspace_cwd(&stalled_str),
+            stalled,
+            "a stalled workspace cwd falls back"
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(
+            cwd_probe_spawns(),
+            1,
+            "{surfaces} surfaces sharing one stalled cwd must spawn one probe"
+        );
+        assert!(
+            elapsed < STALLED_STAT_DELAY / 2,
+            "those surfaces blocked the caller for {elapsed:?}"
+        );
+
+        let started = std::time::Instant::now();
+        assert_eq!(
+            resolved_surface_cwd(Some(&other_str), &fallback),
+            fallback,
+            "a second dead path in the same batch is unavailable"
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(
+            cwd_probe_spawns(),
+            1,
+            "the shared batch deadline must not spawn another probe"
+        );
+        assert!(
+            elapsed < RESTORED_CWD_PROBE_TIMEOUT / 2,
+            "the second dead path waited {elapsed:?}"
+        );
+
+        refresh_restore_cwd_probe_deadline();
+        for _ in 0..surfaces {
+            assert_eq!(
+                resolved_surface_cwd(Some(&stalled_str), &fallback),
+                fallback
+            );
+        }
+        assert_eq!(
+            cwd_probe_spawns(),
+            1,
+            "a new batch deadline must reuse the cached timeout"
+        );
+
+        let live_again = tmp.path().join("live-again");
+        std::fs::create_dir_all(&live_again).expect("second live dir");
+        let live_again_str = live_again.to_string_lossy().into_owned();
+        assert_eq!(
+            resolved_surface_cwd(Some(&live_again_str), &fallback),
+            live_again,
+            "a live directory on a fresh batch deadline still probes live"
+        );
+        assert_eq!(cwd_probe_spawns(), 2);
     }
 
     /// Issue #521: the click-time probe on a recent row tells a definite
