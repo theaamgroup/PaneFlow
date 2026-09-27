@@ -34,7 +34,7 @@
 use std::env;
 use std::ffi::OsString;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -61,31 +61,59 @@ use hooks::{
 
 /// Opt-in diagnostic logging for the sidebar-status hook chain. Mirrors
 /// `paneflow-ai-hook`'s `diagnose()`: appends one line to `$PANEFLOW_HOOK_LOG`
-/// when set and non-empty, a silent no-op otherwise. Deliberately NOT stderr -
-/// the shim sits in front of the agent's TUI and stderr noise would corrupt
-/// it (and Claude Code surfaces hook stderr in its UI). The app, shim, agent,
-/// and ai-hook all honour the same env var, so one file captures the whole
-/// pipeline and shows exactly where the chain stops.
+/// when that path is absolute, a silent no-op otherwise (unset, empty, or
+/// relative). Deliberately NOT stderr - the shim sits in front of the agent's
+/// TUI and stderr noise would corrupt it (and Claude Code surfaces hook
+/// stderr in its UI). The app, shim, agent, and ai-hook all honour the same
+/// env var, so one file captures the whole pipeline and shows exactly where
+/// the chain stops.
 ///
 /// EP-002 US-004 (agent-control-plane-hardening): `pub(crate)` so the hook
 /// installer (`hooks.rs`) can pinpoint WHICH `None` branch it took - the
 /// top-level `install_hook_guard = None` line alone cannot tell a persistent-
 /// hook skip from a filesystem refusal.
 pub(crate) fn diagnose(msg: &str) {
-    let Some(path) = env::var_os("PANEFLOW_HOOK_LOG") else {
+    diagnose_to(
+        msg,
+        env::var_os("PANEFLOW_HOOK_LOG").as_deref().map(Path::new),
+    );
+}
+
+/// Append one diagnostic line when `log_path` is an absolute regular file.
+///
+/// A relative path is never opened: it would be created in the agent's cwd.
+/// #1027: `O_NOFOLLOW` fails the open with ELOOP when the final component is
+/// a symlink, and `O_NONBLOCK` keeps a FIFO from blocking before the agent
+/// starts. The line is written only when the opened descriptor is a regular
+/// file.
+fn diagnose_to(msg: &str, log_path: Option<&Path>) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let Some(log_path) = log_path else {
         return;
     };
-    if path.is_empty() {
+    if log_path.as_os_str().is_empty() || !log_path.is_absolute() {
         return;
     }
-    // One atomic append (whole line incl. newline) so concurrent writers
-    // (app, shim, ai-hook) don't interleave or drop lines.
-    let line = format!("paneflow-shim[{}]: {msg}\n", std::process::id());
-    let _ = std::fs::OpenOptions::new()
+    let mut file = match std::fs::OpenOptions::new()
         .append(true)
         .create(true)
-        .open(&path)
-        .and_then(|mut f| f.write_all(line.as_bytes()));
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(log_path)
+    {
+        Ok(file) => file,
+        Err(_) => return,
+    };
+    if !file
+        .metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_file())
+    {
+        return;
+    }
+    // One `write_all` of the whole line so concurrent writers (app, shim,
+    // ai-hook) don't interleave mid-line.
+    let line = format!("paneflow-shim[{}]: {msg}\n", std::process::id());
+    let _ = file.write_all(line.as_bytes());
 }
 
 fn main() -> ExitCode {
@@ -465,3 +493,43 @@ mod hook_config_tests;
 #[cfg(test)]
 #[path = "tests/notify.rs"]
 mod notify_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnose_ignores_a_relative_log_path() {
+        let relative = PathBuf::from(format!("relative-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&relative);
+        diagnose_to("ignored", Some(&relative));
+        let created = relative.exists();
+        let _ = std::fs::remove_file(&relative);
+        assert!(
+            !created,
+            "relative PANEFLOW_HOOK_LOG must not be opened against the cwd"
+        );
+    }
+
+    #[test]
+    fn diagnose_does_not_follow_a_symlink() {
+        let directory = tempfile::TempDir::new().expect("temp directory");
+        let target = directory.path().join("target.log");
+        std::fs::write(&target, "untouched").expect("create target");
+        let link = directory.path().join("hook.log");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+        diagnose_to("ignored", Some(&link));
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read target"),
+            "untouched",
+            "diagnostics must not follow a symlinked PANEFLOW_HOOK_LOG"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("symlink metadata")
+                .file_type()
+                .is_symlink(),
+            "diagnostics must not replace a symlinked PANEFLOW_HOOK_LOG"
+        );
+    }
+}

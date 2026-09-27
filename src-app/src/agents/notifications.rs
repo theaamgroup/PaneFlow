@@ -136,7 +136,9 @@ pub(crate) fn fire_program_notification(
     }
     executor
         .spawn(async move {
-            let _ = smol::unblock(move || show_desktop_notification(notification)).await;
+            warn_if_desktop_notification_failed(
+                smol::unblock(move || show_desktop_notification(notification)).await,
+            );
         })
         .detach();
 }
@@ -164,7 +166,9 @@ pub(crate) fn fire_desktop_notification(
 
     executor
         .spawn(async move {
-            let _ = smol::unblock(move || show_desktop_notification(notification)).await;
+            warn_if_desktop_notification_failed(
+                smol::unblock(move || show_desktop_notification(notification)).await,
+            );
         })
         .detach();
 }
@@ -214,6 +218,12 @@ pub(crate) fn stalled_notification_body(workspace_title: &str, silent_secs: u64)
         "{}: no activity for {silent_secs} s",
         notification_context_body(workspace_title, None)
     )
+}
+
+fn warn_if_desktop_notification_failed(result: Result<(), String>) {
+    if let Err(error) = result {
+        log::warn!("desktop notification failed: {error}");
+    }
 }
 
 fn show_desktop_notification(notification: DesktopNotification) -> Result<(), String> {
@@ -393,5 +403,26 @@ mod tests {
         );
         assert_eq!(attention.summary, "Claude Code needs input");
         assert_eq!(attention.body, "Approve edit?");
+    }
+
+    #[test]
+    fn a_failed_desktop_notification_is_logged() {
+        crate::diff::capture_logs();
+        let error = "bundle-id-denied-1029";
+        let needle = format!("desktop notification failed: {error}");
+        let before = crate::diff::captured_logs_count("desktop notification failed");
+
+        warn_if_desktop_notification_failed(Ok(()));
+        assert_eq!(
+            crate::diff::captured_logs_count("desktop notification failed"),
+            before,
+            "a successful show() is not a warning"
+        );
+
+        warn_if_desktop_notification_failed(Err(error.to_string()));
+        assert!(
+            crate::diff::captured_logs_contain(&needle),
+            "a permission or bundle-id failure must be logged"
+        );
     }
 }
