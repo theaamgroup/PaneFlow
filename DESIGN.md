@@ -329,7 +329,6 @@ to the surfaces named:
 | `hsl(40 85% 55%)`, `hsl(0 62% 56%)` | Callout warning and error | Severity hues independent of preset |
 | `#232323` / `#ffffff` | Settings card fill, keyed on `background.l > 0.5` | Card sits one step above `base` in either lightness |
 | `0x2d8c4a` / `0x5cff8a` / `0x021608` (and its inset shadow pair) | About dialog CRT credit plate | **Contextual** period piece, `app/about_dialog.rs:187-258` |
-| `0x89b4facc` on `0x1e1e2e` | Terminal copy-mode `COPY` badge | **Migration**: a leftover Catppuccin pair, `terminal/view.rs:1935-1936` |
 | `0x383838` | Dark terminal panel ground (`codex_panel_background_for_terminal`) | **Migration**: the light arm already uses `subtle`, `terminal/element/mod.rs:230-236` |
 | `0x2fd7f2` | Settings ▸ Terminal, the "uses theme" scheme chip | **Migration**: should be `accent`, `settings/tabs/terminal.rs:593-598` |
 
@@ -1018,7 +1017,9 @@ visible text already names it — which still carries `Role::Button`.
 
 | Control | Role | State |
 | --- | --- | --- |
-| Icon buttons, sidebar actions, menu triggers, nav rows | `Role::Button` | `aria_label`; `a11y_disabled` where a control can be disabled |
+| Icon buttons, sidebar actions, menu triggers | `Role::Button` | `aria_label`; `a11y_disabled` where a control can be disabled |
+| Settings section nav | `Role::Tab` in a `TabList` | `aria_selected` on the open section |
+| Terminal copy-mode badge | `Role::Status` | `aria_label` "Copy mode"; the plate is `ui.accent` with a contrast-safe label |
 | Settings toggles (`toggle_switch`) | `Role::Switch` | `aria_toggled`, `tab_index(0)` |
 | Select triggers | `Role::ComboBox` | `aria_label` (visible value; setting title too when the row has one), `aria_expanded`, `tab_index(0)` |
 | Diff branch chip | `Role::ComboBox` | accessible name includes the current branch, `aria_expanded`, `tab_index(0)`; the click arm accepts only `ClickEvent::Keyboard` |
