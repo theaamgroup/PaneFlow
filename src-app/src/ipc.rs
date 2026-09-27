@@ -236,6 +236,15 @@ impl IpcStatus {
         }
     }
 
+    /// A status that never starts the socket thread. Persist tests need the
+    /// field without binding the user's IPC socket.
+    #[cfg(test)]
+    pub(crate) fn disabled_for_test() -> Self {
+        Self {
+            state: Arc::new(AtomicU8::new(IPC_STATE_DISABLED)),
+        }
+    }
+
     pub(crate) fn state(&self) -> IpcState {
         match self.state.load(Ordering::Acquire) {
             IPC_STATE_DISABLED => IpcState::Disabled,
