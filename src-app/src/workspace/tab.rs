@@ -50,6 +50,11 @@ pub struct Tab {
     /// The branch is derived for display. Persisted as `TabSession::worktree`;
     /// a path that no longer exists at restore is dropped.
     pub worktree: Option<std::path::PathBuf>,
+    /// `pathconf` answer for the bound worktree, filled on the first prefix
+    /// miss and keyed by that path (issue #930). A byte-exact split never
+    /// probes; a later miss reuses this; a rebind to a different path probes
+    /// once more instead of keeping the previous volume's answer.
+    volume_case_fold: std::cell::RefCell<Option<(std::path::PathBuf, bool)>>,
 }
 
 impl Tab {
@@ -62,6 +67,7 @@ impl Tab {
             root,
             saved_layout: None,
             worktree: None,
+            volume_case_fold: std::cell::RefCell::new(None),
         }
     }
 
@@ -99,12 +105,23 @@ impl Tab {
     /// outside back to the worktree. That last clause is the whole safety
     /// property: without it a `cd` in one pane leaks into every pane opened
     /// after it, and the binding is decoration.
+    ///
+    /// The volume's case-fold probe runs only when `cwd` is not already a
+    /// byte-exact path inside the worktree, and the answer is cached on this
+    /// tab (issue #930). Evaluating it eagerly called `pathconf` on the UI
+    /// thread for every split, which stalls when the checkout sits on a
+    /// wedged network mount.
     pub fn confine_cwd(&self, inherited: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
         let Some(worktree) = self.worktree.as_ref() else {
             return inherited;
         };
+        let cache = &self.volume_case_fold;
         match inherited {
-            Some(cwd) if cwd_is_inside_worktree(worktree, &cwd, volume_folds_case(worktree)) => {
+            Some(cwd)
+                if cwd_is_inside_worktree(worktree, &cwd, || {
+                    cached_volume_folds_case(cache, worktree)
+                }) =>
+            {
                 Some(cwd)
             }
             _ => Some(worktree.clone()),
@@ -310,15 +327,17 @@ pub(crate) fn apply_pane_rename_to_tab(tab: &mut Tab, new_name: Option<&str>) {
 /// resolved: the prefix it walks out of says nothing about where it lands,
 /// and resolving it means touching the filesystem on a path that may not
 /// exist.
-/// `fold_case` says whether the volume holding `worktree` treats two spellings
-/// that differ only by case as one directory. It does on the default macOS
-/// volume and does not on a case-sensitive one, where `feat` and `FEAT` are
-/// two checkouts and folding would let a pane in the wrong one keep its cwd
-/// (PR #372 review).
+/// `fold_case` reports whether the volume holding `worktree` treats two
+/// spellings that differ only by case as one directory. It does on the
+/// default macOS volume and does not on a case-sensitive one, where `feat`
+/// and `FEAT` are two checkouts and folding would let a pane in the wrong
+/// one keep its cwd (PR #372 review). Invoked only after the byte-exact
+/// prefix check misses, so the common split never pays for a `pathconf`
+/// on the UI thread (issue #930).
 fn cwd_is_inside_worktree(
     worktree: &std::path::Path,
     cwd: &std::path::Path,
-    fold_case: bool,
+    fold_case: impl FnOnce() -> bool,
 ) -> bool {
     if cwd
         .components()
@@ -326,11 +345,12 @@ fn cwd_is_inside_worktree(
     {
         return false;
     }
-    // Byte-exact is the common answer and costs nothing.
+    // Byte-exact is the common answer and costs nothing. Do not ask
+    // `fold_case` before this: that probe is `pathconf` on the worktree.
     if cwd.starts_with(worktree) {
         return true;
     }
-    if !fold_case {
+    if !fold_case() {
         return false;
     }
     let mut actual = cwd.components();
@@ -345,6 +365,11 @@ fn cwd_is_inside_worktree(
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    static CASE_PROBE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Whether the volume holding `path` folds case, from
 /// `pathconf(_PC_CASE_SENSITIVE)`: 1 is case-sensitive, 0 folds. Anything else
 /// (an unsupported volume, or a path that is gone) is read as case-sensitive,
@@ -352,6 +377,8 @@ fn cwd_is_inside_worktree(
 /// checkout in - the same fail-closed direction as the rest of `confine_cwd`.
 fn volume_folds_case(path: &std::path::Path) -> bool {
     use std::os::unix::ffi::OsStrExt as _;
+    #[cfg(test)]
+    CASE_PROBE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
         return false;
     };
@@ -359,6 +386,24 @@ fn volume_folds_case(path: &std::path::Path) -> bool {
     // and `pathconf` only reads it.
     let answer = unsafe { libc::pathconf(c_path.as_ptr(), libc::_PC_CASE_SENSITIVE) };
     answer == 0
+}
+
+/// Remember `volume_folds_case(worktree)` on `cache`. A hit for the same path
+/// does not probe again; a different path (the tab was rebound) replaces it.
+fn cached_volume_folds_case(
+    cache: &std::cell::RefCell<Option<(std::path::PathBuf, bool)>>,
+    worktree: &std::path::Path,
+) -> bool {
+    let hit = cache
+        .borrow()
+        .as_ref()
+        .and_then(|(cached, folds)| (cached.as_path() == worktree).then_some(*folds));
+    if let Some(folds) = hit {
+        return folds;
+    }
+    let folds = volume_folds_case(worktree);
+    *cache.borrow_mut() = Some((worktree.to_path_buf(), folds));
+    folds
 }
 
 /// A tab binding that can still be honoured: the path, when it is a directory
@@ -502,27 +547,27 @@ mod tests {
         let folded = std::path::PathBuf::from("/repo.worktrees/FEAT/src");
 
         assert!(
-            cwd_is_inside_worktree(&worktree, &folded, true),
+            cwd_is_inside_worktree(&worktree, &folded, || true),
             "on a case-folding volume a case variant is the same directory"
         );
         // PR #372 review: on a case-sensitive volume `feat` and `FEAT` are two
         // checkouts, so the same spelling must not be treated as inside.
         assert!(
-            !cwd_is_inside_worktree(&worktree, &folded, false),
+            !cwd_is_inside_worktree(&worktree, &folded, || false),
             "on a case-sensitive volume a case variant is a different checkout"
         );
         // The exact spelling is inside either way, and costs no case compare.
         assert!(cwd_is_inside_worktree(
             &worktree,
             &worktree.join("src"),
-            false
+            || false
         ));
 
         // A path that walks out through `..` is not inside, however its
         // literal prefix reads, on either kind of volume.
         for fold in [true, false] {
             assert!(
-                !cwd_is_inside_worktree(&worktree, &worktree.join("../feat-billing"), fold),
+                !cwd_is_inside_worktree(&worktree, &worktree.join("../feat-billing"), || fold),
                 "a `..` escape is never inside (fold_case={fold})"
             );
             // Case folding must not swallow a genuinely different sibling.
@@ -530,7 +575,7 @@ mod tests {
                 !cwd_is_inside_worktree(
                     &worktree,
                     std::path::Path::new("/repo.worktrees/feats"),
-                    fold
+                    || fold
                 ),
                 "a longer sibling name is outside, case-folded or not (fold_case={fold})"
             );
@@ -564,6 +609,57 @@ mod tests {
         assert!(
             !volume_folds_case(&dir.path().join("no-such-directory")),
             "a path that cannot be probed must not enable case folding"
+        );
+    }
+
+    #[test]
+    fn confine_cwd_skips_the_case_probe_for_a_byte_exact_cwd() {
+        // Issue #930: the case probe used to run as an argument, before the
+        // byte-exact shortcut. An inherited cwd under the worktree must not
+        // call it. A prefix miss probes once; the next miss uses the cache.
+        let worktree = std::path::PathBuf::from("/repo.worktrees/feat-login");
+        let mut tab = Tab::restored("login", None, Some(worktree.clone()));
+        CASE_PROBE_CALLS.with(|calls| calls.set(0));
+
+        let inside = worktree.join("src/auth");
+        assert_eq!(tab.confine_cwd(Some(inside.clone())), Some(inside));
+        assert_eq!(
+            CASE_PROBE_CALLS.with(std::cell::Cell::get),
+            0,
+            "a byte-exact cwd under the worktree must not pathconf"
+        );
+
+        assert_eq!(
+            tab.confine_cwd(Some(std::path::PathBuf::from("/repo"))),
+            Some(worktree.clone())
+        );
+        assert_eq!(
+            CASE_PROBE_CALLS.with(std::cell::Cell::get),
+            1,
+            "the first prefix miss is the one that probes"
+        );
+        assert_eq!(
+            tab.confine_cwd(Some(std::path::PathBuf::from(
+                "/repo.worktrees/feat-billing"
+            ))),
+            Some(worktree)
+        );
+        assert_eq!(
+            CASE_PROBE_CALLS.with(std::cell::Cell::get),
+            1,
+            "a later prefix miss reuses the cached volume answer"
+        );
+
+        let rebound = std::path::PathBuf::from("/other/checkout");
+        tab.worktree = Some(rebound.clone());
+        assert_eq!(
+            tab.confine_cwd(Some(std::path::PathBuf::from("/repo"))),
+            Some(rebound)
+        );
+        assert_eq!(
+            CASE_PROBE_CALLS.with(std::cell::Cell::get),
+            2,
+            "rebinding the worktree must not reuse the previous volume's answer"
         );
     }
 }
