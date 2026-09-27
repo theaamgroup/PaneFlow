@@ -2563,7 +2563,13 @@ fn run_runtime(
         }
         let received = match mailbox.recv_timeout(wait) {
             Ok(message) => {
-                match handle_terminal_command(&inner, &mut terminal, &mut publish_gate, message) {
+                match handle_terminal_command(
+                    &inner,
+                    &mut terminal,
+                    &mut publish_gate,
+                    pty_writer.queue(),
+                    message,
+                ) {
                     CommandOutcome::Handled => Ok(None),
                     CommandOutcome::Unhandled(message) => Ok(Some(message)),
                 }
@@ -2821,10 +2827,14 @@ enum CommandOutcome {
 
 /// Services the commands that only touch the terminal grid, so the PTY-backed
 /// and display-only runtimes share one implementation.
+///
+/// `pty_input` receives engine replies those commands queue, such as a mode
+/// 2031 color-scheme report. A display-only session passes `None`.
 fn handle_terminal_command(
     inner: &SessionInner,
     terminal: &mut ghostty::DisplayTerminal,
     gate: &mut PublishGate,
+    pty_input: &mut Option<PtyInputQueue>,
     message: RuntimeMessage,
 ) -> CommandOutcome {
     match message {
@@ -3006,12 +3016,24 @@ fn handle_terminal_command(
                     "Ghostty color palette could not be updated: {error}"
                 );
             }
-            if let Err(error) = terminal.set_appearance(appearance) {
-                let _ = inner
-                    .events_tx
-                    .unbounded_send(GhosttyUiEvent::RuntimeFailed(format!(
-                        "Ghostty appearance update failed: {error}"
-                    )));
+            match terminal.set_appearance(appearance) {
+                Ok(()) => {
+                    // The report is queued on the terminal. The next VT feed
+                    // is the only other drain, and a theme switch may not
+                    // produce one.
+                    if let Err(error) = handle_engine_events(inner, terminal, pty_input) {
+                        let _ = inner
+                            .events_tx
+                            .unbounded_send(GhosttyUiEvent::RuntimeFailed(error));
+                    }
+                }
+                Err(error) => {
+                    let _ = inner
+                        .events_tx
+                        .unbounded_send(GhosttyUiEvent::RuntimeFailed(format!(
+                            "Ghostty appearance update failed: {error}"
+                        )));
+                }
             }
         }
         RuntimeMessage::SearchChunk {
@@ -3165,7 +3187,7 @@ fn run_display_runtime(
         };
         count_runtime_loop_message(true);
         let CommandOutcome::Unhandled(message) =
-            handle_terminal_command(&inner, &mut terminal, &mut publish_gate, message)
+            handle_terminal_command(&inner, &mut terminal, &mut publish_gate, &mut None, message)
         else {
             continue;
         };
