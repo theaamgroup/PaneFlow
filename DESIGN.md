@@ -330,7 +330,8 @@ to the surfaces named:
 | `#232323` / `#ffffff` | Settings card fill, keyed on `background.l > 0.5` | Card sits one step above `base` in either lightness |
 | `0x2d8c4a` / `0x5cff8a` / `0x021608` (and its inset shadow pair) | About dialog CRT credit plate | **Contextual** period piece, `app/about_dialog.rs:187-258` |
 | `0x383838` | Dark terminal panel ground (`codex_panel_background_for_terminal`) | **Migration**: the light arm already uses `subtle`, `terminal/element/mod.rs:230-236` |
-| `0x2fd7f2` | Settings ▸ Terminal, the "uses theme" scheme chip | **Migration**: should be `accent`, `settings/tabs/terminal.rs:593-598` |
+
+The Settings ▸ Terminal scheme chip uses `ui.accent`.
 
 The sidebar's drop affordances are **not** blue. Only the pane split preview
 is; the swap preview, the sidebar placeholder, and the reorder line are all
