@@ -308,7 +308,7 @@ hardened-runtime binary, use the `.debug` entitlements:
 
 ```bash
 cargo build --release --target aarch64-apple-darwin -p paneflow-app
-bash scripts/bundle-macos.sh --version 0.0.0 --arch aarch64
+bash scripts/bundle-macos.sh --allow-version-mismatch --version 0.0.0 --arch aarch64
 
 # Provide your secrets via env (replace with real values):
 export APPLE_DEVELOPER_CERT_P12="$(base64 -i ~/secrets/dev-id.p12)"
@@ -323,6 +323,8 @@ bash scripts/sign-macos.sh \
 ```
 
 Then `lldb -- dist/PaneFlow.app/Contents/MacOS/paneflow`.
+
+`--allow-version-mismatch` is required because this dev-signing flow stamps `0.0.0` on a real binary whose `--version` output is the Cargo package version.
 
 Use a plain `N.N.N` version here. `bundle-macos.sh` substitutes `--version`
 verbatim into both `CFBundleVersion` and `CFBundleShortVersionString`, and
