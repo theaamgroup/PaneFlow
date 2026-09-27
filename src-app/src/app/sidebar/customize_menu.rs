@@ -517,7 +517,7 @@ mod tests {
             .expect("config write lock was not acquired");
 
         let cx = cx.add_empty_window();
-        let app = cx.new(|cx| blank_paneflow_app(cx));
+        let app = cx.new(blank_paneflow_app);
         let started = Instant::now();
         app.update(cx, |this, cx| {
             this.toggle_sidebar_show(super::SidebarShowLine::Diffstat, cx);
