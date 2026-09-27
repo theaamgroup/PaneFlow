@@ -811,9 +811,12 @@ fn requested_surface_id(params: &serde_json::Value) -> Result<Option<u64>, JsonR
 struct SendTextParams<'a> {
     /// Absent is `""`: the arm's missing-text / bare-submit rule decides.
     text: &'a str,
-    /// Absent is `false`: inject without a CR.
+    /// Absent is `false`: inject without a CR. `submit: true` is the ONLY
+    /// sanctioned submission path (US-005), and the arm writes the CR only
+    /// after the scripting gate, so a CR can never be sent silently.
     submit: bool,
-    /// Absent is `None`: bracketed paste is auto-decided per target.
+    /// An explicit value forces / forbids bracketed paste (the CLI `--paste`
+    /// override); absent is `None`, auto-decided per target.
     paste: Option<bool>,
 }
 
@@ -2231,13 +2234,6 @@ impl PaneFlowApp {
                     }
                     .into_value();
                 }
-                // US-005 (orchestration-v2): `submit: true` is the ONLY
-                // sanctioned submission path. It is unreachable unless the gate
-                // above passed (env OR free-access), so a CR can never be sent
-                // silently; the default stays strict inject-without-CR.
-                // EP-001 US-002 (agent-control-plane-hardening): an explicit
-                // `paste` param forces / forbids bracketed paste (the CLI
-                // `--paste` override); absent, it is auto-decided per target.
                 // EP-001 US-003: an empty payload is a no-op EXCEPT as a bare
                 // submit (`send --submit ""` presses Enter on an agent prompt
                 // that is already filled). Only then is the historical text-required guard
@@ -6471,6 +6467,17 @@ mod tests {
                 assert_no_pty_write(&terminal, cx);
             }
         }
+
+        // Positive control: a well-typed bare submit on the same fixture does
+        // reach `try_write_to_pty`, so the no-write assertions above can fail.
+        dispatch_surface(
+            &app,
+            cx,
+            "surface.send_text",
+            serde_json::json!({"text": "", "submit": true}),
+        );
+        let wrote = cx.update(|_, cx| terminal.read(cx).terminal.should_close_on_exit());
+        assert!(wrote, "a valid submit must set the PTY write flag");
     }
 
     /// Issue #1021: a string `surface_id` is -32602 before a keystroke is sent.
