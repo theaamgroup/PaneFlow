@@ -248,4 +248,77 @@ mod tests {
         assert_eq!(bounded_recent_text("0123456789", 5), "");
         assert_eq!(bounded_recent_text("old\nrecent", 6), "recent");
     }
+
+    /// Issue #900: `transcript_window_reads_only_the_rows_the_window_covers`
+    /// compares text on a five-line fixture, below one blank-walk chunk, so a
+    /// whole-history `trimmed_rows(start..history_rows)` returns the same
+    /// page. This fixture keeps several thousand history rows and bounds the
+    /// rows [`DisplayTerminal::grid_lines`] actually returns.
+    #[test]
+    fn transcript_window_bounds_rows_read_from_a_long_history() {
+        use crate::{DisplayTerminal, TerminalAppearance, WindowSize};
+
+        const VIEWPORT_ROWS: usize = 8;
+        const FED_LINES: usize = 5_000;
+        const WINDOW_LINES: usize = 4;
+        const WINDOW_OFFSET: usize = 200;
+        // One blank-screen chunk is 64 rows and the screen is `VIEWPORT_ROWS`.
+        // A whole-history read of the retained page is up to 4000 rows.
+        const MAX_ROWS_READ: usize = 128;
+
+        let size = WindowSize::new(40, VIEWPORT_ROWS, 8, 16).expect("valid terminal size");
+        let mut terminal = DisplayTerminal::new(size, 10_000, TerminalAppearance::default())
+            .expect("terminal must initialize");
+        terminal
+            .set_scrollback_max_bytes(None)
+            .expect("byte budget must lift");
+
+        let mut fixture = Vec::with_capacity(FED_LINES * 8);
+        for line in 0..FED_LINES {
+            fixture.extend_from_slice(format!("L{line:04}\r\n").as_bytes());
+        }
+        terminal.feed(&fixture).expect("fixture must parse");
+
+        let history_rows = terminal.scrollback_rows().expect("scrollback rows");
+        assert!(
+            history_rows > 3_000,
+            "fixture must retain several thousand history rows, got {history_rows}"
+        );
+
+        crate::grid::reset_grid_lines_rows_read();
+        let window = terminal
+            .transcript_window(WINDOW_LINES, WINDOW_OFFSET)
+            .expect("transcript window");
+        let rows_read = crate::grid::grid_lines_rows_read();
+
+        assert_eq!(window.returned, WINDOW_LINES);
+        let lines: Vec<&str> = window.text.lines().collect();
+        assert_eq!(lines.len(), WINDOW_LINES);
+        let numbers: Vec<usize> = lines
+            .iter()
+            .map(|line| {
+                assert!(
+                    line.starts_with('L') && line.len() == 5,
+                    "window row is not a fed line: {line}"
+                );
+                line[1..].parse::<usize>().expect("fed line number")
+            })
+            .collect();
+        for pair in numbers.windows(2) {
+            assert_eq!(
+                pair[1],
+                pair[0] + 1,
+                "window rows must be contiguous, got {numbers:?}"
+            );
+        }
+        assert!(
+            rows_read >= window.returned,
+            "row counter saw {rows_read}, window returned {}",
+            window.returned
+        );
+        assert!(
+            rows_read <= MAX_ROWS_READ,
+            "window of {WINDOW_LINES} rows read {rows_read} grid rows from {history_rows} history rows; a whole-history read must fail"
+        );
+    }
 }

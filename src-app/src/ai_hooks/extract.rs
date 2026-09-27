@@ -1451,36 +1451,45 @@ mod tests {
     fn wrapped_stems_match_shim_detect_list() {
         // The shim crate mirrors `TerminalAgent::binary()` in its
         // `detect_tool_from_stem` accept-list (it can't depend on this
-        // crate). This pin breaks whenever an agent is added/renamed here
-        // so the mirror in `paneflow-shim/src/detect.rs` gets updated in
-        // the same change.
+        // crate). Read that list from source: a literal here only trips
+        // when the app side changes, so dropping one `WRAPPED_TOOLS` entry
+        // would still pass.
         let binaries: Vec<&str> = crate::agent_launcher::TerminalAgent::ALL
             .iter()
             .map(|a| a.binary())
             .collect();
+        let wrapped = wrapped_tools_from_detect_source(include_str!(
+            "../../../crates/paneflow-shim/src/detect.rs"
+        ));
         assert_eq!(
-            binaries,
-            vec![
-                "claude",
-                "codex",
-                "opencode",
-                "pi",
-                "hermes",
-                "grok",
-                "amp",
-                "cursor-agent",
-                "gemini",
-                "kiro-cli",
-                "agy",
-                "copilot",
-                "codebuddy",
-                "droid",
-                "qodercli",
-                "openclaw",
-                "dsh",
-                "muse",
-            ],
+            binaries, wrapped,
+            "TerminalAgent::binary() and WRAPPED_TOOLS drifted"
         );
+    }
+
+    /// String literals inside `detect.rs`'s `WRAPPED_TOOLS` array, comment-blind.
+    fn wrapped_tools_from_detect_source(src: &str) -> Vec<&str> {
+        let marker = "WRAPPED_TOOLS: &[&str] = &[";
+        let start = src
+            .find(marker)
+            .expect("detect.rs must define WRAPPED_TOOLS");
+        let after = &src[start + marker.len()..];
+        let end = after.find("];").expect("WRAPPED_TOOLS must close with ];");
+        let mut tools = Vec::new();
+        for piece in after[..end].split(',') {
+            let code = piece.split("//").next().unwrap_or("").trim();
+            if code.is_empty() {
+                continue;
+            }
+            let name = code
+                .strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix('"'))
+                .unwrap_or_else(|| panic!("WRAPPED_TOOLS entry is not a string literal: {code}"));
+            assert!(!name.is_empty(), "empty WRAPPED_TOOLS entry");
+            tools.push(name);
+        }
+        assert!(!tools.is_empty(), "WRAPPED_TOOLS parsed empty");
+        tools
     }
 
     #[test]

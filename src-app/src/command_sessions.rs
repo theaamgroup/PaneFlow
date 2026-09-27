@@ -47,7 +47,7 @@ pub(crate) fn read_gemini_sessions_for_cwd(
     read_command_sessions(
         CommandSessionConfig {
             agent: SessionAgent::Gemini,
-            program: "gemini",
+            program: list_program("gemini"),
             args: &["--list-sessions"],
             allow_numeric_ids: true,
             scope: CommandScope::CurrentDirectory,
@@ -64,7 +64,7 @@ pub(crate) fn read_cursor_sessions_for_cwd(
     read_command_sessions(
         CommandSessionConfig {
             agent: SessionAgent::Cursor,
-            program: "cursor-agent",
+            program: list_program("cursor-agent"),
             args: &["ls"],
             allow_numeric_ids: false,
             scope: CommandScope::CurrentDirectory,
@@ -81,7 +81,7 @@ pub(crate) fn read_kiro_sessions_for_cwd(
     read_command_sessions(
         CommandSessionConfig {
             agent: SessionAgent::Kiro,
-            program: "kiro-cli",
+            program: list_program("kiro-cli"),
             args: &["chat", "--list-sessions"],
             allow_numeric_ids: false,
             scope: CommandScope::CurrentDirectory,
@@ -98,7 +98,7 @@ pub(crate) fn read_grok_sessions_for_cwd(
     read_command_sessions(
         CommandSessionConfig {
             agent: SessionAgent::Grok,
-            program: "grok",
+            program: list_program("grok"),
             args: &["sessions", "list", "--limit", "100"],
             allow_numeric_ids: false,
             scope: CommandScope::CurrentDirectory,
@@ -115,7 +115,7 @@ pub(crate) fn read_hermes_sessions_for_cwd(
     read_command_sessions(
         CommandSessionConfig {
             agent: SessionAgent::Hermes,
-            program: "hermes",
+            program: list_program("hermes"),
             args: &["sessions", "list", "--source", "cli", "--limit", "100"],
             allow_numeric_ids: false,
             scope: CommandScope::LineMustMentionCwd,
@@ -532,6 +532,29 @@ fn line_mentions_cwd(line: &str, cwd: &str) -> bool {
         from = start + line[start..].chars().next().map_or(1, char::len_utf8);
     }
     false
+}
+
+// Test seam so a budget test can point every command-backed reader at one
+// hanging program. Absent on the production path, which keeps the vendor name.
+#[cfg(test)]
+thread_local! {
+    static LIST_PROGRAM_OVERRIDE: std::cell::Cell<Option<&'static str>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_list_program_override(program: Option<&'static str>) {
+    LIST_PROGRAM_OVERRIDE.with(|slot| slot.set(program));
+}
+
+fn list_program(program: &'static str) -> &'static str {
+    #[cfg(test)]
+    {
+        if let Some(program) = LIST_PROGRAM_OVERRIDE.with(|slot| slot.get()) {
+            return program;
+        }
+    }
+    program
 }
 
 fn is_path_boundary(c: char) -> bool {

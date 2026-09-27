@@ -1207,6 +1207,11 @@ mod tests {
                 "{} icon path `{p}` is not under an embedded asset root",
                 agent.display_name()
             );
+            assert!(
+                crate::assets::Assets::get(p).is_some(),
+                "{} icon `{p}` is not an embedded asset",
+                agent.display_name()
+            );
         }
     }
 
