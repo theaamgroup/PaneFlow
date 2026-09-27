@@ -488,6 +488,42 @@ fn redact_crash_event(event: &mut sentry::protocol::Event<'_>) {
 /// attach. Issue #398 adds `before_send` so free-text panic/exception
 /// messages get their home-directory paths redacted too. Issue #656 extends
 /// that hook to stack-frame paths and debug-image names.
+/// Whether this launch may start crash reporting.
+///
+/// An absent file, a missing `crash_reporting` field, `null`, and `true`
+/// keep the default-on switch. A file that exists but cannot be read, is
+/// not a JSON object, or sets `crash_reporting` to anything other than
+/// `true` or `null` stays off. The parsed config treats an invalid file as
+/// defaults and `None` as consent, which would send reports after an
+/// explicit opt-out (issue #879).
+fn crash_reporting_consent() -> bool {
+    let Some(path) = paneflow_config::loader::config_path() else {
+        return true;
+    };
+    crash_reporting_consent_at(&path)
+}
+
+fn crash_reporting_consent_at(path: &std::path::Path) -> bool {
+    match paneflow_config::loader::read_config_string(path) {
+        Ok(None) => true,
+        Ok(Some(text)) => crash_reporting_consent_in(&text),
+        Err(_) => false,
+    }
+}
+
+fn crash_reporting_consent_in(text: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    match object.get("crash_reporting") {
+        None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(true)) => true,
+        Some(_) => false,
+    }
+}
+
 fn crash_reporting_options() -> sentry::ClientOptions {
     sentry::ClientOptions::new()
         .maybe_release(sentry::release_name!())
@@ -1122,9 +1158,26 @@ mod crash_reporting_tests {
             );
         }
         assert!(
-            before_init.contains(".crash_reporting_enabled()"),
+            before_init.contains("crash_reporting_consent()"),
             "the init must be gated on the crash_reporting config switch"
         );
+    }
+
+    /// Issue #879: an unreadable file or a non-boolean value must not turn
+    /// reporting on. An absent field still does.
+    #[test]
+    fn crash_reporting_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("paneflow.json");
+
+        std::fs::write(&path, "{\"crash_reporting\": false,}").expect("write");
+        assert!(!super::crash_reporting_consent_at(&path));
+
+        std::fs::write(&path, "{\"crash_reporting\": \"false\"}").expect("write");
+        assert!(!super::crash_reporting_consent_at(&path));
+
+        std::fs::write(&path, "{}").expect("write");
+        assert!(super::crash_reporting_consent_at(&path));
     }
 }
 
@@ -2888,14 +2941,13 @@ fn main() {
     // Issue #204: crash reporting initializes here - after every CLI
     // intercept above (`hooks`, the scriptable verbs, the unknown-verb
     // error) has already exited - so only a real GUI launch
-    // ever starts Sentry. The `crash_reporting` config switch (`None`-is-on,
-    // like `review_enabled`) is the user's opt-out, and
-    // `crash_reporting_options()` keeps `send_default_pii` off. Keep the
-    // guard alive for the entire process so panic events are flushed before
-    // Paneflow exits. The DSN is intentionally part of the binary.
-    let _sentry_guard = paneflow_config::loader::load_config()
-        .crash_reporting_enabled()
-        .then(|| {
+    // ever starts Sentry. Consent is read from the raw file so an invalid
+    // document or a non-boolean `crash_reporting` fails closed (issue #879).
+    // An absent file or field still defaults on. `crash_reporting_options()`
+    // keeps `send_default_pii` off. Keep the guard alive for the entire
+    // process so panic events are flushed before Paneflow exits. The DSN is
+    // intentionally part of the binary.
+    let _sentry_guard = crash_reporting_consent().then(|| {
             sentry::init((
                 "https://51b669778f3bb5da02eefb8ee8794ccb@o4510421488173056.ingest.us.sentry.io/4512005402656768",
                 crash_reporting_options(),
