@@ -27,6 +27,7 @@ pub mod view;
 
 pub(crate) use pty_session::TerminalSessionBackend;
 pub use pty_session::TerminalState;
+pub(crate) use pty_session::cap_scrollback_at_char_boundary;
 #[cfg(test)]
 pub(crate) use pty_session::{
     start_render_content_timing_probe, take_render_content_lock_durations,
