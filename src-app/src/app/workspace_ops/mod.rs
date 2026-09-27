@@ -588,6 +588,23 @@ fn restored_tab_slot(recorded_index: usize, last_index: usize) -> usize {
     recorded_index.min(last_index)
 }
 
+/// Where a closed pane spawns when it is restored into `destination`.
+///
+/// Undo inserts into whichever tab is active now, not the tab the pane was
+/// closed from. [`crate::workspace::Tab::confine_cwd`] keeps a recorded
+/// directory that is still inside that tab's worktree and pulls anything
+/// else back to the checkout (issue #890). An unbound tab returns the
+/// recorded cwd unchanged, including `None`.
+fn cwd_for_restored_pane(
+    destination: &crate::workspace::Tab,
+    record: &ClosedPaneRecord,
+) -> Option<std::path::PathBuf> {
+    let recorded = match &record.surface {
+        ClosedSurfaceRecord::Terminal { cwd, .. } => cwd.clone(),
+    };
+    destination.confine_cwd(recorded)
+}
+
 /// After `workspaces.remove(removed_idx)`, map the previous `active_idx` onto
 /// the remaining `len` slots. Closing a workspace before the active one
 /// decrements; closing at or past the new last index clamps; an empty list is 0.
@@ -618,21 +635,26 @@ fn active_idx_after_workspace_remove(active_idx: usize, removed_idx: usize, len:
 /// is what makes verbatim safe here and nowhere else; the plain extract is the
 /// fallback when the budget released the capture or the engine did not
 /// answer.
+///
+/// `spawn_cwd` is where that shell starts. The record's own cwd is not used
+/// for the spawn (issue #890); the record stays intact so a later refusal can
+/// push it back.
 fn restore_closed_surface_record(
     tab: &ClosedSurfaceRecord,
     ws_id: u64,
+    spawn_cwd: Option<std::path::PathBuf>,
     cx: &mut Context<PaneFlowApp>,
 ) -> crate::pane::PaneSurface {
     match tab {
         ClosedSurfaceRecord::Terminal {
-            cwd,
+            cwd: _,
             scrollback,
             replay,
             custom_name,
             font_size,
             agent_context,
         } => {
-            let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, cwd.clone(), None, cx));
+            let terminal = cx.new(|cx| TerminalView::with_cwd(ws_id, spawn_cwd, None, cx));
             terminal.update(cx, |view, _| {
                 view.terminal.custom_name = custom_name.clone();
                 view.terminal.font_size_override = *font_size;
@@ -1097,9 +1119,10 @@ impl PaneFlowApp {
             return source_cwd;
         };
         // A bound tab confines every pane opened in it to its worktree (issue
-        // #347). This is the single choke point every in-app pane creation
-        // goes through, which is why the rule lives here rather than being
-        // repeated at each call site.
+        // #347). Splits and the empty-tab respawn come through here. Undo
+        // close pane calls `Tab::confine_cwd` on the destination tab directly
+        // (issue #890) so a missing recorded cwd is not replaced by the
+        // workspace root below.
         let confined = ws.active_tab().confine_cwd(source_cwd);
         confined.or_else(|| {
             Some(ws.cwd.as_str())
@@ -1376,8 +1399,12 @@ impl PaneFlowApp {
     }
 
     /// Rebuild a closed pane by splitting it back in beside the focused one.
-    /// Unchanged behaviour: this is the original `UndoClosePane` body, lifted
-    /// out so the action handler can branch on the record kind.
+    ///
+    /// The new shell starts at the recorded cwd after
+    /// [`crate::workspace::Tab::confine_cwd`] on the tab it is inserted into
+    /// (issue #890). The rest is the original
+    /// `UndoClosePane` body, lifted out so the action handler can branch on
+    /// the record kind.
     fn restore_closed_pane(
         &mut self,
         record: ClosedPaneRecord,
@@ -1414,7 +1441,10 @@ impl PaneFlowApp {
         }
         self.active_idx = idx;
         let ws_id = record.workspace_id;
-        let surface = restore_closed_surface_record(&record.surface, ws_id, cx);
+        // The pane lands in the tab that is active now. Confine before the
+        // surface is built so the PTY never starts outside that worktree.
+        let spawn_cwd = cwd_for_restored_pane(self.workspaces[idx].active_tab(), &record);
+        let surface = restore_closed_surface_record(&record.surface, ws_id, spawn_cwd, cx);
         let new_pane = self.create_pane_with_existing_surface(surface, ws_id, cx);
 
         // Insert via split from the currently focused pane
@@ -2304,6 +2334,71 @@ mod tests {
             refusal.contains("push_closed_record(ClosedRecord::Pane(record)")
                 && refusal.contains("Maximum pane count reached"),
             "the popped record must be restored before the pane-cap toast: {refusal}"
+        );
+    }
+
+    /// Issue #890: undo close pane inserts into whichever tab is active now.
+    /// A recorded cwd outside that tab's worktree must spawn in the worktree.
+    #[test]
+    fn undo_close_pane_into_a_bound_tab_is_confined_to_its_worktree() {
+        let worktree = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        assert!(
+            !outside.path().starts_with(worktree.path())
+                && !worktree.path().starts_with(outside.path()),
+            "the recorded cwd must sit outside the destination worktree"
+        );
+
+        let destination =
+            crate::workspace::Tab::restored("feat/x", None, Some(worktree.path().to_path_buf()));
+        let record = ClosedPaneRecord {
+            workspace_id: 1,
+            surface: ClosedSurfaceRecord::Terminal {
+                agent_context: None,
+                cwd: Some(outside.path().to_path_buf()),
+                scrollback: None,
+                replay: None,
+                custom_name: None,
+                font_size: None,
+            },
+        };
+
+        let spawned = cwd_for_restored_pane(&destination, &record);
+        assert_eq!(
+            spawned.as_deref(),
+            Some(worktree.path()),
+            "a pane restored into a bound tab must spawn in that tab's worktree"
+        );
+
+        // The helper above is the spawn cwd only if restore actually uses it
+        // before building the surface. A call that was removed would leave
+        // `TerminalView::with_cwd` on the raw record.
+        let src = include_str!("mod.rs");
+        let restore = source_slice(
+            src,
+            "fn restore_closed_pane(",
+            "fn restore_closed_tab_record(",
+        );
+        let flat_restore: String = restore.chars().filter(|c| !c.is_whitespace()).collect();
+        let confine_at = flat_restore
+            .find("cwd_for_restored_pane(self.workspaces[idx].active_tab(),&record)")
+            .expect("undo-close pane must confine through the destination tab");
+        let build_at = flat_restore
+            .find("restore_closed_surface_record(")
+            .expect("closed surface reconstruction site");
+        assert!(
+            confine_at < build_at,
+            "confine the recorded cwd before building the surface: {restore}"
+        );
+        let surface = source_slice(
+            src,
+            "fn restore_closed_surface_record(",
+            "pub(crate) fn workspace_limit_reached(",
+        );
+        let flat_surface: String = surface.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            flat_surface.contains("TerminalView::with_cwd(ws_id,spawn_cwd,None,cx)"),
+            "the restored shell must spawn at the confined cwd: {surface}"
         );
     }
 
