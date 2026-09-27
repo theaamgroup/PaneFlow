@@ -94,14 +94,17 @@ impl PaneFlowApp {
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
-                let checkout = cx
-                    .background_spawn(async move { model::inspect(&cwd) })
+                let mut seen = roots;
+                let (checkout, seen) = cx
+                    .background_spawn(async move {
+                        let checkout = model::inspect_if_new_root(&cwd, &mut seen);
+                        (checkout, seen)
+                    })
                     .await;
-                if let Ok(c) = &checkout
-                    && !roots.insert(c.root.clone())
-                {
+                roots = seen;
+                let Some(checkout) = checkout else {
                     continue;
-                }
+                };
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
