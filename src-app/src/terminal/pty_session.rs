@@ -2581,7 +2581,7 @@ impl ScrollbackReader {
 /// output), so the index is raised to a boundary first. The tail is the
 /// original tail, so the partial-escape strip is only a guard against grid
 /// text that already ended mid-sequence.
-pub(super) fn cap_scrollback_at_char_boundary(result: &mut String, max_chars: usize) {
+pub(crate) fn cap_scrollback_at_char_boundary(result: &mut String, max_chars: usize) {
     if result.len() <= max_chars {
         return;
     }
