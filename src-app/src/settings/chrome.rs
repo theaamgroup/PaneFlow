@@ -137,6 +137,59 @@ const NAV_GROUPS: &[NavGroup] = &[
     },
 ];
 
+/// One settings-nav row. `Role::Tab` plus `aria_selected` is the state
+/// VoiceOver can hear: AccessKit maps a tab's selected flag to the radio
+/// value, and ignores that flag on a button.
+fn settings_nav_row(
+    item: &NavItem,
+    is_active: bool,
+    row_background: gpui::Hsla,
+    ui: crate::theme::UiColors,
+) -> gpui::Stateful<gpui::Div> {
+    // Every section row renders in full-strength text (white) at one
+    // weight, active or not: the pill fill alone marks the open
+    // section visually, so nothing about the label reflows when it changes.
+    //
+    // The fill is the rail's continuous-corner skin, not a rounded
+    // rect with an animated tint: the settings nav is a rail like
+    // the workspace one, so it borrows the same silhouette and the
+    // same instant hover.
+    squircle_skin(
+        div()
+            .id(SharedString::from(format!("settings-nav-{}", item.label)))
+            .role(Role::Tab)
+            .aria_label(item.label)
+            .aria_selected(is_active)
+            .mx(px(8.))
+            .px(px(8.))
+            .py(px(6.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.)),
+        SharedString::from(format!("settings-nav-{}-group", item.label)),
+        ROW_RADIUS,
+        is_active.then_some(row_background),
+        (!is_active).then_some(row_background),
+    )
+    .child(
+        svg()
+            .size(px(15.))
+            .flex_none()
+            .path(item.icon)
+            .text_color(ui.muted),
+    )
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .text_size(px(13.))
+            .text_color(ui.text)
+            .truncate()
+            .child(item.label),
+    )
+}
+
 /// Human page title shown as the content H1.
 pub(crate) fn section_title(section: SettingsSection) -> &'static str {
     match section {
@@ -168,8 +221,11 @@ impl PaneFlowApp {
         let search = self.render_settings_search(ui, window, cx);
 
         // ── Section list (scrollable, filtered by the search query) ─────
+        // TabList so the rows below are one group. AccessKit speaks
+        // `aria-selected` on a tab (as the radio value); a button drops it.
         let mut list = div()
             .id("settings-nav-list")
+            .role(Role::TabList)
             .flex_1()
             .min_h_0()
             .min_w_0()
@@ -207,55 +263,17 @@ impl PaneFlowApp {
             for it in items {
                 let section = it.section;
                 let is_active = section == active;
-                // Every section row renders in full-strength text (white) at one
-                // weight, active or not: the pill fill alone marks the open
-                // section, so nothing about the label reflows when it changes.
-                //
-                // The fill is the rail's continuous-corner skin, not a rounded
-                // rect with an animated tint: the settings nav is a rail like
-                // the workspace one, so it borrows the same silhouette and the
-                // same instant hover.
-                let row = squircle_skin(
-                    div()
-                        .id(SharedString::from(format!("settings-nav-{}", it.label)))
-                        .role(Role::Button)
-                        .aria_label(it.label)
-                        .mx(px(8.))
-                        .px(px(8.))
-                        .py(px(6.))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.)),
-                    SharedString::from(format!("settings-nav-{}-group", it.label)),
-                    ROW_RADIUS,
-                    is_active.then_some(row_background),
-                    (!is_active).then_some(row_background),
-                )
-                .child(
-                    svg()
-                        .size(px(15.))
-                        .flex_none()
-                        .path(it.icon)
-                        .text_color(ui.muted),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(px(13.))
-                        .text_color(ui.text)
-                        .truncate()
-                        .child(it.label),
-                );
-                let row = if is_active {
-                    row.into_any_element()
-                } else {
-                    row.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                // A click on the open section is a no-op: switching would
+                // reset that page's scroll and popovers. The selected state
+                // is what tells assistive tech the row is current.
+                let row = settings_nav_row(it, is_active, row_background, ui).on_click(
+                    cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        if is_active {
+                            return;
+                        }
                         this.select_settings_section(section, window, cx);
-                    }))
-                    .into_any_element()
-                };
+                    }),
+                );
                 list = list.child(row);
             }
         }
@@ -556,5 +574,54 @@ impl PaneFlowApp {
         }
         self.settings_focus.focus(window, cx);
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #918: every settings section was a button with no selected
+    /// state, so VoiceOver could not tell which page was open.
+    #[test]
+    fn settings_nav_marks_the_active_section_selected() {
+        let ui = crate::theme::ui_colors();
+        let row_background = crate::app::constants::sidebar_tab_hover_background();
+        let mut saw_general = false;
+        let mut labels = Vec::new();
+
+        for group in NAV_GROUPS {
+            for item in group.items {
+                let is_active = item.section == SettingsSection::General;
+                let row = settings_nav_row(item, is_active, row_background, ui);
+                let mut node = gpui::accesskit::Node::new(gpui::accesskit::Role::Unknown);
+                gpui::Element::write_a11y_info(&row, &mut node);
+                let selected = if item.label == "General" {
+                    saw_general = true;
+                    Some(true)
+                } else {
+                    Some(false)
+                };
+                assert_eq!(node.is_selected(), selected, "section {}", item.label);
+                assert_eq!(node.label(), Some(item.label));
+                labels.push(item.label);
+            }
+        }
+
+        assert!(saw_general, "General must be one of the nav rows");
+        assert!(
+            labels.len() > 1,
+            "the inactive sections must report selected = false"
+        );
+
+        let rail = include_str!("chrome.rs")
+            .split("fn render_settings_nav(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn render_settings_search(").next())
+            .expect("settings nav");
+        assert!(
+            rail.contains("settings_nav_row(it, is_active, row_background, ui)"),
+            "the rail must render the row that carries the selected state"
+        );
     }
 }
