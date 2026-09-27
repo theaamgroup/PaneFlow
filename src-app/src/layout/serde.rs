@@ -27,6 +27,13 @@ enum ScrollbackCapture {
     Omit,
 }
 
+/// Keep the newest complete lines of an oldest-first undo transcript that
+/// fit in `budget` bytes. A head truncate drops the screen undo replays
+/// (issue #939).
+fn cap_scrollback_to_budget(text: &mut String, budget: usize) {
+    crate::terminal::cap_scrollback_at_char_boundary(text, budget);
+}
+
 impl LayoutTree {
     /// Serialize the layout tree to a `LayoutNode` (config schema type).
     ///
@@ -107,15 +114,7 @@ impl LayoutTree {
                                             (remaining_bytes, scrollback.as_mut())
                                         {
                                             let budget = remaining.get();
-                                            if text.len() > budget {
-                                                let mut boundary = budget.min(text.len());
-                                                while boundary > 0
-                                                    && !text.is_char_boundary(boundary)
-                                                {
-                                                    boundary -= 1;
-                                                }
-                                                text.truncate(boundary);
-                                            }
+                                            cap_scrollback_to_budget(text, budget);
                                             remaining.set(budget.saturating_sub(text.len()));
                                             if text.is_empty() {
                                                 scrollback = None;
@@ -290,6 +289,13 @@ mod tests {
     fn empty_tree_has_zero_leaves() {
         assert_eq!(LayoutTree::empty().leaf_count(), 0);
         assert!(LayoutTree::empty().collect_leaves().is_empty());
+    }
+
+    #[test]
+    fn budgeted_scrollback_capture_keeps_the_newest_output() {
+        let mut text = "old\nmid\nnew\n".to_string();
+        super::cap_scrollback_to_budget(&mut text, 4);
+        assert_eq!(text, "new\n");
     }
 
     #[gpui::test]
