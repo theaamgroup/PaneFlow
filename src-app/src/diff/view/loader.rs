@@ -62,8 +62,8 @@ impl DiffView {
                 let syntax = SYNTAX_HIGHLIGHT_ENABLED
                     .then(|| super::super::syntax::DiffSyntax::from_theme(&theme));
                 let row_caches = build_file_row_caches(&diff.files, syntax.as_ref());
-                let rows = build_rows_for_mode_with_caches(&diff.files, mode, &row_caches);
-                let files = diff
+                let mut rows = build_rows_for_mode_with_caches(&diff.files, mode, &row_caches);
+                let mut files: Vec<FileEntry> = diff
                     .files
                     .iter()
                     .map(|f| {
@@ -81,6 +81,11 @@ impl DiffView {
                         }
                     })
                     .collect();
+                if diff.truncated {
+                    let notice = super::super::git::truncation_notice();
+                    append_truncation_notice(&mut rows, &notice);
+                    files.push(truncation_file_entry(notice));
+                }
                 log::debug!(
                     "diff: ({bc}) built {} rows for {} in {:?}",
                     match &rows {
@@ -94,7 +99,7 @@ impl DiffView {
                 let attribution = crate::agent_sessions::attribution_for_column(&cwd, &bc);
                 Built::Loaded {
                     rows,
-                    file_count: diff.files.len(),
+                    file_count: files.len(),
                     files,
                     files_full: diff.files,
                     row_caches,
@@ -203,11 +208,17 @@ impl DiffView {
             mode.label(),
             build.generation
         );
+        let truncation_notice = build.truncation_notice.clone();
         cx.spawn(async move |this, cx| {
             let files = build.files.clone();
             let row_caches = build.row_caches.clone();
             let rows = smol::unblock(move || {
-                build_rows_for_mode_with_caches(files.as_ref(), mode, row_caches.as_ref())
+                let mut rows =
+                    build_rows_for_mode_with_caches(files.as_ref(), mode, row_caches.as_ref());
+                if let Some(notice) = truncation_notice {
+                    append_truncation_notice(&mut rows, &notice);
+                }
+                rows
             })
             .await;
             let _ = cx.update(|cx| {
@@ -229,6 +240,8 @@ struct LazyModeBuild {
     generation: u64,
     files: Arc<Vec<super::super::git::FileDiff>>,
     row_caches: Arc<Vec<FileRowCache>>,
+    /// Sentence shown when the file list was capped. Not one of `files`.
+    truncation_notice: Option<String>,
 }
 
 /// What a finished lazy mode build may do with its rows.
@@ -253,6 +266,7 @@ impl Column {
         let ColumnState::Loaded {
             files_full,
             row_caches,
+            files,
             ..
         } = &self.state
         else {
@@ -263,6 +277,7 @@ impl Column {
             generation: self.generation,
             files: files_full.clone(),
             row_caches: row_caches.clone(),
+            truncation_notice: listed_truncation_notice(files),
         };
         self.loading_mode = Some(mode);
         Some(build)
@@ -311,6 +326,58 @@ impl Column {
             }
         }
     }
+}
+
+/// The capped-list sentence, painted as its own header. The anchor path is not
+/// a [`super::super::git::FileDiff`], so copying that row does not emit a diff.
+fn append_truncation_notice(rows: &mut BuiltModeRows, notice: &str) {
+    let header = super::super::rows::HeaderParts {
+        dir_prefix: "".into(),
+        basename: notice.into(),
+        added: 0,
+        removed: 0,
+    };
+    match rows {
+        BuiltModeRows::Unified { rows, anchors } => {
+            anchors.push((notice.to_string(), rows.len()));
+            rows.push(DisplayRow {
+                kind: RowKind::FileHeader,
+                text: format!("{notice}   +0 -0").into(),
+                old_no: None,
+                new_no: None,
+                syntax_runs: Vec::new(),
+                header: Some(header),
+                fold_key: None,
+                fold_base_start: None,
+                fold_new_start: None,
+                fold_count: 0,
+                folded_rows: Vec::new(),
+            });
+        }
+        BuiltModeRows::Split { rows, anchors } => {
+            anchors.push((notice.to_string(), rows.len()));
+            rows.push(SplitRow::Header(header));
+        }
+    }
+}
+
+fn truncation_file_entry(notice: String) -> FileEntry {
+    FileEntry {
+        path: notice,
+        change: super::super::git::FileChange::Modified,
+        old_path: None,
+        added: 0,
+        removed: 0,
+        is_binary: true,
+    }
+}
+
+fn listed_truncation_notice(files: &[FileEntry]) -> Option<String> {
+    let notice = super::super::git::truncation_notice();
+    files
+        .iter()
+        .any(|entry| entry.path == notice)
+        .then_some(notice)
 }
 
 #[cfg(test)]

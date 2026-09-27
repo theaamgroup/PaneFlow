@@ -24,26 +24,67 @@ use super::git::{FileChange, FileDiff};
 /// single `@@` block so the output is always a valid unified diff.
 const CONTEXT: u32 = 3;
 
+/// Git C-quote for one diff-header token (`a/path`, `b/path`, or a bare
+/// rename path). Newline, tab, `"`, and `\` are quoted so a special byte
+/// cannot break the header into a second line. Any other name stays raw.
+fn quote_diff_path(prefix: &str, path: &str) -> String {
+    let token = format!("{prefix}{path}");
+    if !path
+        .bytes()
+        .any(|b| matches!(b, b'\n' | b'\t' | b'"' | b'\\'))
+    {
+        return token;
+    }
+    let mut quoted = String::with_capacity(token.len() + 2);
+    quoted.push('"');
+    for c in token.chars() {
+        match c {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\t' => quoted.push_str("\\t"),
+            '\r' => quoted.push_str("\\r"),
+            c if c.is_control() => {
+                let code = u32::from(c);
+                quoted.push_str(&format!("\\{code:03o}"));
+            }
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 /// Serialize a whole [`FileDiff`] into a git-style unified diff (raw, no fence).
 /// Suitable for "copy file diff" and for an agent review payload.
 pub(crate) fn file_to_unified(file: &FileDiff) -> String {
     let mut out = String::new();
-    let old_disp = if file.change == FileChange::Renamed {
+    let old_path = if file.change == FileChange::Renamed {
         file.old_path.as_deref().unwrap_or(&file.path)
     } else {
-        &file.path
+        file.path.as_str()
     };
-    let _ = writeln!(out, "diff --git a/{old_disp} b/{}", file.path);
+    let _ = writeln!(
+        out,
+        "diff --git {} {}",
+        quote_diff_path("a/", old_path),
+        quote_diff_path("b/", &file.path),
+    );
 
     if file.change == FileChange::Renamed
         && let Some(old) = &file.old_path
     {
-        let _ = writeln!(out, "rename from {old}");
-        let _ = writeln!(out, "rename to {}", file.path);
+        let _ = writeln!(out, "rename from {}", quote_diff_path("", old));
+        let _ = writeln!(out, "rename to {}", quote_diff_path("", &file.path));
     }
 
     if file.is_binary {
-        let _ = writeln!(out, "Binary files a/{old_disp} b/{} differ", file.path);
+        let _ = writeln!(
+            out,
+            "Binary files {} {} differ",
+            quote_diff_path("a/", old_path),
+            quote_diff_path("b/", &file.path),
+        );
         return out;
     }
 
@@ -70,8 +111,9 @@ pub(crate) fn hunk_to_unified(file: &FileDiff, hunk: &DiffHunk) -> String {
     let tag = hunk_tag(file, hunk);
     if file.is_binary {
         return format!(
-            "{tag}\n```diff\nBinary files a/{p} b/{p} differ\n```\n",
-            p = file.path
+            "{tag}\n```diff\nBinary files {} {} differ\n```\n",
+            quote_diff_path("a/", &file.path),
+            quote_diff_path("b/", &file.path),
         );
     }
     let base_lines = lines_inclusive(&file.base_text);
@@ -91,13 +133,16 @@ pub(crate) fn hunk_to_unified(file: &FileDiff, hunk: &DiffHunk) -> String {
 /// an Added or Deleted file (git's convention).
 fn dev_null_labels(file: &FileDiff) -> (String, String) {
     match file.change {
-        FileChange::Added => ("/dev/null".to_string(), format!("b/{}", file.path)),
-        FileChange::Deleted => (format!("a/{}", file.path), "/dev/null".to_string()),
+        FileChange::Added => ("/dev/null".to_string(), quote_diff_path("b/", &file.path)),
+        FileChange::Deleted => (quote_diff_path("a/", &file.path), "/dev/null".to_string()),
         FileChange::Renamed => (
-            format!("a/{}", file.old_path.as_deref().unwrap_or(&file.path)),
-            format!("b/{}", file.path),
+            quote_diff_path("a/", file.old_path.as_deref().unwrap_or(&file.path)),
+            quote_diff_path("b/", &file.path),
         ),
-        FileChange::Modified => (format!("a/{}", file.path), format!("b/{}", file.path)),
+        FileChange::Modified => (
+            quote_diff_path("a/", &file.path),
+            quote_diff_path("b/", &file.path),
+        ),
     }
 }
 
@@ -110,7 +155,7 @@ pub(crate) fn hunk_tag(file: &FileDiff, hunk: &DiffHunk) -> String {
     } else {
         (hunk.base_row_range.start + 1, hunk.base_row_range.end)
     };
-    format!("{}:L{start}-L{end}", file.path)
+    format!("{}:L{start}-L{end}", quote_diff_path("", &file.path))
 }
 
 /// One merged hunk group: the union row span (already context-expanded) on each
@@ -352,6 +397,87 @@ mod tests {
         assert!(out.contains("rename to new.rs\n"));
         assert!(out.contains("--- a/old.rs\n"));
         assert!(out.contains("+++ b/new.rs\n"));
+    }
+
+    #[test]
+    fn unified_diff_quotes_a_path_with_a_newline() {
+        let mut file = modified("dir/foo\nbar.rs", "a\n", "b\n");
+        let out = file_to_unified(&file);
+        let git_headers = out
+            .lines()
+            .filter(|line| line.starts_with("diff --git"))
+            .count();
+        assert_eq!(
+            git_headers, 1,
+            "a newline must stay inside one header:\n{out}"
+        );
+        assert!(
+            out.contains("diff --git \"a/dir/foo\\nbar.rs\" \"b/dir/foo\\nbar.rs\"\n"),
+            "got:\n{out}"
+        );
+        assert!(out.contains("--- \"a/dir/foo\\nbar.rs\"\n"), "got:\n{out}");
+        assert!(out.contains("+++ \"b/dir/foo\\nbar.rs\"\n"), "got:\n{out}");
+
+        file.change = FileChange::Renamed;
+        file.old_path = Some("old\nname.rs".to_string());
+        let renamed = file_to_unified(&file);
+        assert_eq!(
+            renamed
+                .lines()
+                .filter(|line| line.starts_with("diff --git"))
+                .count(),
+            1,
+            "got:\n{renamed}"
+        );
+        assert!(
+            renamed.contains("rename from \"old\\nname.rs\"\n"),
+            "got:\n{renamed}"
+        );
+        assert!(
+            renamed.contains("rename to \"dir/foo\\nbar.rs\"\n"),
+            "got:\n{renamed}"
+        );
+
+        let tag = hunk_tag(&file, &file.hunks[0]);
+        assert_eq!(tag.lines().count(), 1, "{tag:?}");
+        assert_eq!(tag, "\"dir/foo\\nbar.rs\":L1-L1");
+
+        let tab = file_to_unified(&modified("has\ttab.rs", "a\n", "b\n"));
+        assert!(
+            tab.contains("diff --git \"a/has\\ttab.rs\" \"b/has\\ttab.rs\"\n"),
+            "got:\n{tab}"
+        );
+        let quoted = file_to_unified(&modified("has\"q.rs", "a\n", "b\n"));
+        assert!(
+            quoted.contains("diff --git \"a/has\\\"q.rs\" \"b/has\\\"q.rs\"\n"),
+            "got:\n{quoted}"
+        );
+        let slashed = file_to_unified(&modified("has\\slash.rs", "a\n", "b\n"));
+        assert!(
+            slashed.contains("diff --git \"a/has\\\\slash.rs\" \"b/has\\\\slash.rs\"\n"),
+            "got:\n{slashed}"
+        );
+        let plain = file_to_unified(&modified("my file.rs", "a\n", "b\n"));
+        assert!(
+            plain.contains("diff --git a/my file.rs b/my file.rs\n"),
+            "a name with no special character stays unquoted:\n{plain}"
+        );
+
+        let mut binary = modified("bin\nary.png", "", "");
+        binary.is_binary = true;
+        let binary_out = file_to_unified(&binary);
+        assert_eq!(
+            binary_out
+                .lines()
+                .filter(|line| line.starts_with("diff --git"))
+                .count(),
+            1,
+            "got:\n{binary_out}"
+        );
+        assert!(
+            binary_out.contains("Binary files \"a/bin\\nary.png\" \"b/bin\\nary.png\" differ\n"),
+            "got:\n{binary_out}"
+        );
     }
 
     #[test]

@@ -100,10 +100,14 @@ impl FileDiff {
 
 /// The diff of one worktree against a resolved base ref. `error` is `Some` when
 /// the diff could not be computed (e.g. base ref not found, no merge base).
+/// `truncated` means changed paths past the file cap were omitted. That notice
+/// is not a [`FileDiff`]: copying the list must not emit a diff for a path
+/// that does not exist.
 #[derive(Clone, Debug, Default)]
 pub struct WorktreeDiff {
     pub files: Vec<FileDiff>,
     pub error: Option<String>,
+    pub truncated: bool,
 }
 
 /// Git-native per-file diffstat for one file.
@@ -1104,6 +1108,11 @@ pub(crate) const MAX_FILE_BYTES: u64 = 512 * 1024;
 /// stops and shows a truncation row.
 const MAX_FILE_COUNT: usize = 200;
 
+/// On-screen sentence for [`WorktreeDiff::truncated`]. Not a file path.
+pub(crate) fn truncation_notice() -> String {
+    format!("… more files not shown (truncated at {MAX_FILE_COUNT})")
+}
+
 /// Lockfiles and other large, low-signal generated files - never worth a
 /// line-by-line diff and a prime OOM trigger (`Cargo.lock` alone is ~12k lines).
 const SKIP_FILENAMES: &[&str] = &[
@@ -1141,16 +1150,18 @@ fn is_too_large(worktree_dir: &Path, rel_path: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// A "not shown" stub: rendered as a single notice row, never loaded/diffed.
-fn stub_file(path: String, change: FileChange) -> FileDiff {
+/// A text file that is listed but not loaded (lockfile or over the size cap).
+/// Not binary, so copying it does not say "Binary files". A rename keeps
+/// `old_path` so the unified text still has `rename from` / `rename to`.
+fn stub_file(path: String, change: FileChange, old_path: Option<String>) -> FileDiff {
     FileDiff {
         path,
         change,
-        old_path: None,
+        old_path,
         base_text: String::new(),
         new_text: String::new(),
         hunks: Vec::new(),
-        is_binary: true,
+        is_binary: false,
     }
 }
 
@@ -1162,8 +1173,9 @@ pub struct ColumnLoad {
     /// The diff of the worktree against `base_ref`:
     /// `merge-base(HEAD, base_ref)..working-tree`, including uncommitted
     /// changes. `error` is set (rather than panicking) when the base ref or
-    /// merge base cannot be resolved. Oversized / lockfile / over-count files
-    /// are shown as stubs rather than loaded, bounding peak RAM.
+    /// merge base cannot be resolved. Oversized / lockfile files are stubs
+    /// rather than loaded. Past the file cap, [`WorktreeDiff::truncated`] is
+    /// set instead of inventing a file.
     pub diff: WorktreeDiff,
     /// Per-file Git-native diffstat for the same semantic as `diff`, plus
     /// untracked files. Keyed by `(change, path)` so a tracked deletion and
@@ -1214,6 +1226,7 @@ fn load_column_within(budget: &GitBudget, worktree_dir: &Path, base_ref: &str) -
         Err(e) => WorktreeDiff {
             files: Vec::new(),
             error: Some(e.clone()),
+            truncated: false,
         },
     };
     let file_stats = merge_base
@@ -1249,6 +1262,7 @@ fn compute_diff_against_within(
             return WorktreeDiff {
                 files: Vec::new(),
                 error: Some(e),
+                truncated: false,
             };
         }
     };
@@ -1282,6 +1296,7 @@ fn compute_diff_against_within(
                 return WorktreeDiff {
                     files: Vec::new(),
                     error: Some(e),
+                    truncated: false,
                 };
             }
         };
@@ -1293,6 +1308,7 @@ fn compute_diff_against_within(
                     return WorktreeDiff {
                         files: Vec::new(),
                         error: Some(e),
+                        truncated: false,
                     };
                 }
             };
@@ -1315,6 +1331,7 @@ fn compute_diff_against_within(
                 return WorktreeDiff {
                     files: Vec::new(),
                     error: Some(e),
+                    truncated: false,
                 };
             }
         }
@@ -1336,6 +1353,7 @@ fn compute_diff_against_within(
             return WorktreeDiff {
                 files: Vec::new(),
                 error: Some(e),
+                truncated: false,
             };
         }
     };
@@ -1350,6 +1368,7 @@ fn compute_diff_against_within(
             return WorktreeDiff {
                 files: Vec::new(),
                 error: Some("git diff exceeded its deadline".to_string()),
+                truncated: false,
             };
         }
         // Skip lockfiles and oversized files: emit a stub, never load/diff/
@@ -1363,13 +1382,14 @@ fn compute_diff_against_within(
                     return WorktreeDiff {
                         files: Vec::new(),
                         error: Some(e),
+                        truncated: false,
                     };
                 }
             }
         };
         if too_large {
             log::debug!("git: skip (lockfile/large) {path}");
-            files.push(stub_file(path, change));
+            files.push(stub_file(path, change, old_path));
             continue;
         }
         log::debug!("git: load {path}");
@@ -1383,7 +1403,7 @@ fn compute_diff_against_within(
             _ => match blobs.get(base_lookup) {
                 Some(blob) if blob.too_large => {
                     log::debug!("git: skip (oversized base blob) {path}");
-                    files.push(stub_file(path, change));
+                    files.push(stub_file(path, change, old_path));
                     continue;
                 }
                 Some(blob) => (blob.text.clone(), blob.is_binary),
@@ -1398,6 +1418,7 @@ fn compute_diff_against_within(
                     return WorktreeDiff {
                         files: Vec::new(),
                         error: Some(e),
+                        truncated: false,
                     };
                 }
             },
@@ -1409,7 +1430,7 @@ fn compute_diff_against_within(
         // columns. Stub it instead, bounding retained RAM symmetrically.
         if base_text.len() as u64 > MAX_FILE_BYTES || new_text.len() as u64 > MAX_FILE_BYTES {
             log::debug!("git: skip (oversized post-load) {path}");
-            files.push(stub_file(path, change));
+            files.push(stub_file(path, change, old_path));
             continue;
         }
         let is_binary = base_bin || new_bin;
@@ -1429,15 +1450,13 @@ fn compute_diff_against_within(
         });
     }
 
-    if truncated {
-        // Visible notice, not a silent cap (NFR). Rendered as a stub row.
-        files.push(stub_file(
-            format!("… more files not shown (truncated at {MAX_FILE_COUNT})"),
-            FileChange::Modified,
-        ));
+    // `truncated` is the on-screen notice (NFR). It is not a file: copying
+    // the column must not emit a diff for a path that does not exist.
+    WorktreeDiff {
+        files,
+        error: None,
+        truncated,
     }
-
-    WorktreeDiff { files, error: None }
 }
 
 /// Per-file diffstat of the working tree against `base`, charged against
@@ -2632,6 +2651,137 @@ pub(crate) mod tests {
             show_count == 0,
             "one worktree diff of {} files must not issue one git show per file (got {show_count} show calls), commands={cmds:?}",
             files.len()
+        );
+    }
+
+    #[test]
+    fn a_stubbed_rename_keeps_its_old_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(test_git(root, &["init"]), "git init is required");
+        assert!(test_git(root, &["config", "core.autocrlf", "false"]));
+        std::fs::create_dir_all(root.join("old")).unwrap();
+        std::fs::write(root.join("old").join("Cargo.lock"), "a\n").unwrap();
+        std::fs::write(root.join("package-lock.json"), "lock\n").unwrap();
+        std::fs::write(root.join("big.txt"), "small\n").unwrap();
+        assert!(test_git(
+            root,
+            &["add", "old/Cargo.lock", "package-lock.json", "big.txt"]
+        ));
+        assert!(test_git(
+            root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "-m",
+                "init",
+            ],
+        ));
+        std::fs::create_dir_all(root.join("new")).unwrap();
+        assert!(
+            test_git(root, &["mv", "old/Cargo.lock", "new/Cargo.lock"]),
+            "git mv must record the rename"
+        );
+        std::fs::write(root.join("package-lock.json"), "lock\nchanged\n").unwrap();
+        std::fs::write(
+            root.join("big.txt"),
+            vec![b'y'; MAX_FILE_BYTES as usize + 8],
+        )
+        .unwrap();
+
+        let diff = compute_diff_against_within(&GitBudget::for_column(), root, "HEAD");
+        assert_eq!(diff.error, None, "diff failed: {:?}", diff.error);
+        let paths: Vec<&str> = diff.files.iter().map(|file| file.path.as_str()).collect();
+
+        let rename = diff
+            .files
+            .iter()
+            .find(|file| file.path == "new/Cargo.lock")
+            .unwrap_or_else(|| panic!("missing renamed lockfile, got {paths:?}"));
+        assert_eq!(rename.change, FileChange::Renamed);
+        assert_eq!(rename.old_path.as_deref(), Some("old/Cargo.lock"));
+        assert!(!rename.is_binary, "a renamed text stub is not binary");
+        let unified = super::super::extract::file_to_unified(rename);
+        assert!(
+            unified.contains("rename from old/Cargo.lock\n"),
+            "got:\n{unified}"
+        );
+        assert!(
+            unified.contains("rename to new/Cargo.lock\n"),
+            "got:\n{unified}"
+        );
+        assert!(
+            !unified.contains("Binary files"),
+            "a stubbed rename must not say Binary files:\n{unified}"
+        );
+
+        let lock = diff
+            .files
+            .iter()
+            .find(|file| file.path == "package-lock.json")
+            .unwrap_or_else(|| panic!("missing lockfile, got {paths:?}"));
+        assert!(lock.old_path.is_none());
+        assert!(!lock.is_binary, "a lockfile stub is not binary");
+        let lock_diff = super::super::extract::file_to_unified(lock);
+        assert!(
+            !lock_diff.contains("Binary files"),
+            "a stubbed text file must not say Binary files:\n{lock_diff}"
+        );
+
+        let big = diff
+            .files
+            .iter()
+            .find(|file| file.path == "big.txt")
+            .unwrap_or_else(|| panic!("missing oversized file, got {paths:?}"));
+        assert!(
+            !big.is_binary,
+            "a text file over the size cap is not binary"
+        );
+        let big_diff = super::super::extract::file_to_unified(big);
+        assert!(
+            !big_diff.contains("Binary files"),
+            "a size-capped text file must not say Binary files:\n{big_diff}"
+        );
+    }
+
+    #[test]
+    fn truncation_is_a_flag_not_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(test_git(root, &["init"]), "git init is required");
+        assert!(test_git(
+            root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ));
+        for index in 0..=MAX_FILE_COUNT {
+            std::fs::write(root.join(format!("f{index}.txt")), "x\n").unwrap();
+        }
+
+        let diff = compute_diff_against_within(&GitBudget::for_column(), root, "HEAD");
+        assert_eq!(diff.error, None, "diff failed: {:?}", diff.error);
+        assert!(diff.truncated, "a file list past the cap must set the flag");
+        assert_eq!(diff.files.len(), MAX_FILE_COUNT);
+        assert!(
+            diff.files
+                .iter()
+                .all(|file| !file.path.contains("more files not shown")),
+            "truncation must not be a FileDiff: {:?}",
+            diff.files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>()
         );
     }
 }
