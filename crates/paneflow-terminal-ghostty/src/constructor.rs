@@ -182,6 +182,7 @@ impl DisplayTerminal {
             terminal,
             snapshot_cache: Default::default(),
             callbacks,
+            pending_clear: false,
             _not_send_or_sync: PhantomData,
         })
     }
