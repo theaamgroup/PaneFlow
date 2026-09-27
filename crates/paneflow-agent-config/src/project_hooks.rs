@@ -380,6 +380,7 @@ mod tests {
                 .args(args)
                 .current_dir(cwd)
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_SYSTEM", "/dev/null")
                 .env("GIT_AUTHOR_NAME", "t")
                 .env("GIT_AUTHOR_EMAIL", "t@example.com")
@@ -528,6 +529,22 @@ mod tests {
         assert_eq!(git_checkout_root(&worktree), Some(worktree));
     }
 
+    /// A fresh temp directory still looks like a checkout when `TMPDIR` sits
+    /// inside a repo. The not-a-repo assertion cannot tell those apart.
+    fn skip_if_git_ancestor(path: &Path, test_name: &str) -> bool {
+        let inherited = path
+            .ancestors()
+            .skip(1)
+            .any(|ancestor| ancestor.join(".git").exists());
+        if inherited {
+            eprintln!(
+                "skipping {test_name}: an ancestor of {} already has .git",
+                path.display()
+            );
+        }
+        inherited
+    }
+
     /// No `.git` entry on the walk is "no checkout", which the caller treats
     /// as "stop at cwd".
     #[test]
@@ -535,6 +552,12 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let dir = temp.path().join("loose").join("src");
         std::fs::create_dir_all(&dir).unwrap();
+        if skip_if_git_ancestor(
+            &dir,
+            "git_checkout_root_is_none_when_no_ancestor_has_dot_git",
+        ) {
+            return;
+        }
         assert_eq!(git_checkout_root(&dir), None);
     }
 
