@@ -1166,8 +1166,13 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
 
     cx.on_action(|_: &OpenHelp, cx| {
         with_active_paneflow_window(cx, |app, _window, cx| {
-            if let Err(e) = crate::external_open::open_http_url(
+            if let Err(e) = crate::external_open::open_http_url_in(
                 "https://github.com/theaamgroup/paneflow#readme",
+                cx,
+                |app, err, cx| {
+                    log::warn!("Help > PaneFlow Help: could not open browser: {err}");
+                    app.show_toast(format!("Could not open help: {err}"), cx);
+                },
             ) {
                 log::warn!("Help > PaneFlow Help: could not open browser: {e}");
                 app.show_toast(format!("Could not open help: {e}"), cx);
@@ -1185,8 +1190,13 @@ pub(crate) fn install_macos_menu_action_fallbacks(cx: &mut gpui::App) {
     // that handler). Toast on failure, same as Help > PaneFlow Help.
     cx.on_action(|_: &ReportIssue, cx| {
         with_active_paneflow_window(cx, |app, _window, cx| {
-            if let Err(e) = crate::external_open::open_http_url(
+            if let Err(e) = crate::external_open::open_http_url_in(
                 "https://github.com/theaamgroup/paneflow/issues/new",
+                cx,
+                |app, err, cx| {
+                    log::warn!("PaneFlow > Report an Issue: could not open browser: {err}");
+                    app.show_toast(format!("Could not open GitHub: {err}"), cx);
+                },
             ) {
                 log::warn!("PaneFlow > Report an Issue: could not open browser: {e}");
                 app.show_toast(format!("Could not open GitHub: {e}"), cx);
