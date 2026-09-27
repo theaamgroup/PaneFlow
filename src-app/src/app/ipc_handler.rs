@@ -385,6 +385,79 @@ fn send_text_from_pty_write<E: ToString>(result: Result<(), E>) -> Result<(), Js
     result.map_err(|err| JsonRpcError::internal_error(err.to_string()))
 }
 
+/// Audit record for a PTY write granted by AI free-access. Warn, not info:
+/// the default launch filter starts at `warn` and would drop an info record
+/// (issue #880). `submit` / `paste` are the send_text axes; a keystroke
+/// write passes `false` for both.
+fn log_unrestricted_pty_write(
+    method: &'static str,
+    surface_id: u64,
+    length: u64,
+    submit: bool,
+    paste: bool,
+) {
+    tracing::warn!(
+        target: "paneflow::ipc::unrestricted",
+        method,
+        surface_id,
+        length,
+        submit,
+        paste,
+        "ai_unrestricted: authorized PTY write to pane"
+    );
+}
+
+/// `surface.send_keystroke` once the caller has resolved `terminal`.
+/// Free-access (`unrestricted`) writes emit [`log_unrestricted_pty_write`].
+fn surface_send_keystroke(
+    unrestricted: bool,
+    scripting_enabled: bool,
+    params: &serde_json::Value,
+    terminal: Option<&Entity<TerminalView>>,
+    cx: &App,
+) -> serde_json::Value {
+    // US-012 (cli-hardening-followup-2026-Q3): same gate as
+    // `surface.send_text`. Even when enabled, CRLF bytes are rejected so a
+    // multi-keystroke payload cannot smuggle a newline-terminated PTY command.
+    if !send_text_gate_open(scripting_enabled, unrestricted) {
+        return JsonRpcError {
+            code: -32601,
+            message: "surface.send_keystroke disabled; set PANEFLOW_IPC_SCRIPTING=1 or enable ai_unrestricted to use".to_string(),
+        }
+        .into_value();
+    }
+    let keystroke = params
+        .get("keystroke")
+        .and_then(|k| k.as_str())
+        .unwrap_or("");
+    if keystroke.is_empty() {
+        return JsonRpcError::invalid_params("Missing 'keystroke' parameter").into_value();
+    }
+    if keystroke.contains('\r') || keystroke.contains('\n') {
+        return JsonRpcError::invalid_params("keystroke must not contain CR or LF bytes")
+            .into_value();
+    }
+    let Some(terminal) = terminal else {
+        return JsonRpcError::invalid_params("No active terminal").into_value();
+    };
+    let surface_id = terminal.entity_id().as_u64();
+    match terminal.read(cx).send_keystroke(keystroke) {
+        Ok(()) => {
+            if unrestricted {
+                log_unrestricted_pty_write(
+                    "surface.send_keystroke",
+                    surface_id,
+                    keystroke.len() as u64,
+                    false,
+                    false,
+                );
+            }
+            serde_json::json!({"sent": true})
+        }
+        Err(e) => JsonRpcError::invalid_params(e).into_value(),
+    }
+}
+
 fn first_command_token(command: &str) -> Option<&str> {
     let command = command.trim_start();
     let mut chars = command.char_indices();
@@ -2182,14 +2255,12 @@ impl PaneFlowApp {
                 // so the octroi is never a silent global open. Re-evaluated per
                 // call, so flipping the mode off leaves no residual capability.
                 if unrestricted {
-                    tracing::info!(
-                        target: "paneflow::ipc::unrestricted",
-                        method = "surface.send_text",
-                        surface_id = wrote_sid,
-                        length = text.len() as u64,
-                        submit = submit,
-                        paste = paste,
-                        "ai_unrestricted: authorized PTY write to pane"
+                    log_unrestricted_pty_write(
+                        "surface.send_text",
+                        wrote_sid,
+                        text.len() as u64,
+                        submit,
+                        paste,
                     );
                 }
                 let submit_mode = if submit && paste && !text.is_empty() {
@@ -2211,32 +2282,7 @@ impl PaneFlowApp {
                 })
             }
             "surface.send_keystroke" => {
-                // US-012 (cli-hardening-followup-2026-Q3): same gate
-                // as `surface.send_text`. Even when enabled, CRLF
-                // bytes are rejected so a multi-keystroke payload
-                // cannot smuggle a newline-terminated PTY command.
                 let unrestricted = self.cached_config.ai_unrestricted_enabled();
-                if !send_text_gate_open(ipc_scripting_enabled(), unrestricted) {
-                    return JsonRpcError {
-                        code: -32601,
-                        message: "surface.send_keystroke disabled; set PANEFLOW_IPC_SCRIPTING=1 or enable ai_unrestricted to use".to_string(),
-                    }
-                    .into_value();
-                }
-                let keystroke = params
-                    .get("keystroke")
-                    .and_then(|k| k.as_str())
-                    .unwrap_or("");
-                if keystroke.is_empty() {
-                    return JsonRpcError::invalid_params("Missing 'keystroke' parameter")
-                        .into_value();
-                }
-                if keystroke.contains('\r') || keystroke.contains('\n') {
-                    return JsonRpcError::invalid_params(
-                        "keystroke must not contain CR or LF bytes",
-                    )
-                    .into_value();
-                }
                 // Route by surface_id if provided, otherwise use active terminal
                 let terminal = if let Some(sid) = params.get("surface_id").and_then(|s| s.as_u64())
                 {
@@ -2249,13 +2295,13 @@ impl PaneFlowApp {
                 } else {
                     None
                 };
-                match terminal {
-                    Some(t) => match t.read(cx).send_keystroke(keystroke) {
-                        Ok(()) => serde_json::json!({"sent": true}),
-                        Err(e) => JsonRpcError::invalid_params(e).into_value(),
-                    },
-                    None => JsonRpcError::invalid_params("No active terminal").into_value(),
-                }
+                surface_send_keystroke(
+                    unrestricted,
+                    ipc_scripting_enabled(),
+                    params,
+                    terminal.as_ref(),
+                    cx,
+                )
             }
             _ => JsonRpcError::method_not_found(format!("Method not found: {method}")).into_value(),
         }
@@ -4124,6 +4170,87 @@ mod tests {
                 .unwrap_or("")
                 .contains("CR or LF"),
         );
+    }
+
+    fn unrestricted_warn_line(line: &str, method: &str) -> bool {
+        line.contains("WARN")
+            && line.contains("paneflow::ipc::unrestricted")
+            && line.contains(method)
+            && line.contains("ai_unrestricted: authorized PTY write to pane")
+    }
+
+    /// Issue #880: free-access keystroke and text writes must leave a
+    /// `paneflow::ipc::unrestricted` record at warn. An info record is dropped
+    /// by the default launch filter.
+    #[tracing_test::traced_test]
+    #[gpui::test]
+    fn unrestricted_keystroke_write_is_logged(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+        let surface_id = terminal.entity_id().as_u64();
+        let params = serde_json::json!({"keystroke": "ctrl-c"});
+
+        let (closed, env_only, free_access) = cx.update(|_, cx| {
+            let closed = super::surface_send_keystroke(false, false, &params, Some(&terminal), cx);
+            let env_only = super::surface_send_keystroke(false, true, &params, Some(&terminal), cx);
+            let free_access =
+                super::surface_send_keystroke(true, false, &params, Some(&terminal), cx);
+            // Same record `surface.send_text` emits after a granted write.
+            super::log_unrestricted_pty_write("surface.send_text", surface_id, 5, true, false);
+            (closed, env_only, free_access)
+        });
+
+        assert_eq!(closed["_jsonrpc_error"]["code"], -32601, "{closed}");
+        assert_eq!(env_only["sent"], true, "{env_only}");
+        assert_eq!(free_access["sent"], true, "{free_access}");
+
+        // The arm repeats `"surface.send_text"` in the log call, so
+        // `production_match_arm` (which stops at the second copy) cannot
+        // bound it. Match on the arm headers instead.
+        let text_arm = include_str!("ipc_handler.rs")
+            .split_once("\"surface.send_text\" =>")
+            .expect("send_text arm")
+            .1
+            .split_once("\"surface.send_keystroke\" =>")
+            .expect("send_keystroke arm")
+            .0;
+        assert!(
+            text_arm.contains("log_unrestricted_pty_write("),
+            "surface.send_text must emit the unrestricted audit record"
+        );
+        assert!(
+            !text_arm.contains("tracing::info!"),
+            "surface.send_text must not log the unrestricted write at info"
+        );
+
+        let surface_field = format!("surface_id={surface_id} ");
+        logs_assert(|lines| {
+            let warn_for = |method: &str| {
+                lines
+                    .iter()
+                    .filter(|line| unrestricted_warn_line(line, method))
+                    .count()
+            };
+            let keystroke_warns = warn_for("surface.send_keystroke");
+            let text_warns = warn_for("surface.send_text");
+            let keystroke_at_info = lines.iter().any(|line| {
+                line.contains("INFO")
+                    && line.contains("paneflow::ipc::unrestricted")
+                    && line.contains("surface.send_keystroke")
+            });
+            let keystroke_names_pane = lines.iter().any(|line| {
+                unrestricted_warn_line(line, "surface.send_keystroke")
+                    && line.contains(&surface_field)
+            });
+            if keystroke_warns == 1 && text_warns == 1 && !keystroke_at_info && keystroke_names_pane
+            {
+                Ok(())
+            } else {
+                Err(format!(
+                    "expected one warn record each for send_keystroke (pane {surface_id}) and send_text; keystroke_warns={keystroke_warns} text_warns={text_warns} info={keystroke_at_info} pane={keystroke_names_pane} lines={lines:?}"
+                ))
+            }
+        });
     }
 
     #[test]
