@@ -163,6 +163,8 @@ fn diagnose(message: &str) {
 }
 
 fn diagnose_to(message: &str, log_path: Option<&Path>) {
+    use std::os::unix::fs::OpenOptionsExt;
+
     let Some(log_path) = log_path else {
         return;
     };
@@ -171,23 +173,27 @@ fn diagnose_to(message: &str, log_path: Option<&Path>) {
     if !log_path.is_absolute() {
         return;
     }
-    // Only ever append to an existing regular file or create a new one;
-    // symlinks are not followed and anything else (directory, FIFO, device)
-    // is skipped rather than written to.
-    let mut options = OpenOptions::new();
-    options.append(true);
-    match std::fs::symlink_metadata(log_path) {
-        Ok(metadata) if metadata.file_type().is_file() => {}
-        Ok(_) => return,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            options.create_new(true);
-        }
+    // #1028: open the final component itself. A stat-then-open can be swapped
+    // for a symlink; `O_NOFOLLOW` fails that open with ELOOP. `O_NONBLOCK`
+    // keeps a FIFO from blocking the hook. Write only when the descriptor is
+    // a regular file (a FIFO, device, or directory is dropped unwritten).
+    let mut file = match OpenOptions::new()
+        .append(true)
+        .create(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(log_path)
+    {
+        Ok(file) => file,
         Err(_) => return,
+    };
+    if !file
+        .metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_file())
+    {
+        return;
     }
     let line = format!("paneflow-ai-hook: {message}\n");
-    let _ = options
-        .open(log_path)
-        .and_then(|mut file| file.write_all(line.as_bytes()));
+    let _ = file.write_all(line.as_bytes());
 }
 
 #[cfg(test)]
@@ -270,17 +276,24 @@ mod tests {
     }
 
     #[test]
-    fn symlinked_hook_log_is_not_followed() {
+    fn diagnose_to_does_not_follow_a_symlink() {
         let directory = tempfile::TempDir::new().expect("temp directory");
         let target = directory.path().join("target.log");
-        std::fs::write(&target, "").expect("create target");
+        std::fs::write(&target, "untouched").expect("create target");
         let link = directory.path().join("hook.log");
         std::os::unix::fs::symlink(&target, &link).expect("create symlink");
         diagnose_to("ignored", Some(&link));
         assert_eq!(
             std::fs::read_to_string(&target).expect("read target"),
-            "",
+            "untouched",
             "diagnostics must not follow a symlinked {HOOK_LOG_ENV}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("symlink metadata")
+                .file_type()
+                .is_symlink(),
+            "diagnostics must not replace a symlinked {HOOK_LOG_ENV}"
         );
     }
 }
