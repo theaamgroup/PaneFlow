@@ -1284,13 +1284,19 @@ impl Pane {
     fn render_surface_title(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         if let Some(rename) = &self.rename {
             let ui = pane_colors();
-            let (editor_bg, editor_body) = if rename.seeded {
-                (ui.accent.opacity(0.3), rename.text.clone())
+            // The seeded wash marks the whole name as selected. A "|" caret
+            // painted into the string would be part of the accessible value
+            // (issue #882).
+            let editor_bg = if rename.seeded {
+                ui.accent.opacity(0.3)
             } else {
-                (ui.overlay, format!("{}|", rename.text))
+                ui.overlay
             };
             return div()
                 .id("pane-header-title-editor")
+                .role(Role::TextInput)
+                .aria_label("Pane name")
+                .aria_value(rename.text.clone())
                 .track_focus(&self.rename_focus)
                 .min_w_0()
                 .flex_1()
@@ -1329,7 +1335,7 @@ impl Pane {
                 .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                     this.commit_rename(window, cx);
                 }))
-                .child(editor_body)
+                .child(rename.text.clone())
                 .into_any_element();
         }
 
@@ -1426,8 +1432,19 @@ impl Pane {
         // the attention orange.
         let has_attention = self.attention.is_some();
         let has_errored = self.errored;
+        // Hue alone is not a state: errored and waiting share a 6 px dot.
+        // The role is what gives the dot an accessibility node (DESIGN.md §7.2).
+        let status_label = if has_errored {
+            "Agent errored"
+        } else {
+            "Agent waiting for input"
+        };
         let status_dot = (has_errored || has_attention).then(|| {
             div()
+                .id("pane-header-status")
+                .role(Role::Status)
+                .aria_label(status_label)
+                .delayed_tooltip(crate::ui_primitives::text_tooltip(status_label))
                 .flex_none()
                 .w(px(6.0))
                 .h(px(6.0))
@@ -1700,10 +1717,20 @@ impl Pane {
                     })),
                 );
         }
-        // Zoom indicator badge
+        // Zoom indicator badge. "Z" alone is not a name; the status role and
+        // label are what assistive tech hears, and the tooltip quotes the
+        // live toggle chord the way the neighboring header buttons do.
         if self.zoomed {
+            let zoom_tooltip = format!(
+                "Pane zoomed ({})",
+                self.binding_label("toggle_zoom", "secondary-shift-z")
+            );
             action_cluster = action_cluster.child(
                 div()
+                    .id("pane-header-zoom")
+                    .role(Role::Status)
+                    .aria_label("Pane zoomed")
+                    .delayed_tooltip(crate::ui_primitives::text_tooltip(zoom_tooltip))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2451,6 +2478,220 @@ mod tests {
                 custom < osc && osc < detected,
                 "custom title must win, followed by OSC title, then the detected-agent fallback"
             );
+        }
+    }
+
+    /// Issue #882: the rename editor, the agent status dot, and the zoom badge
+    /// are header state, so each one has to be a named accessibility node.
+    /// The test platform never activates AccessKit (`debug_a11y_tree_json`
+    /// stays empty) and `Div`'s children are crate-private, so the walk below
+    /// reads the same `SmallVec` GPUI lays out — inline for one or two
+    /// children, spilled past that. A layout drift fails the probe before it
+    /// can pass the pane assertions.
+    #[gpui::test]
+    fn pane_header_state_is_accessible(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        assert_header_walker_reaches_nested_labels();
+
+        let cx = cx.add_empty_window();
+        let pane = {
+            let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+            cx.new(|cx| super::Pane::new(terminal, 1, cx))
+        };
+
+        let errored = pane.update_in(cx, |pane, _window, cx| {
+            pane.set_errored(true, cx);
+            header_nodes(pane, cx)
+        });
+        assert!(
+            errored
+                .iter()
+                .any(|node| node.label.as_deref() == Some("Agent errored")),
+            "errored header nodes: {}",
+            labels_of(&errored)
+        );
+
+        let waiting = pane.update_in(cx, |pane, _window, cx| {
+            pane.set_errored(false, cx);
+            pane.set_attention(Some("Approve the command?".into()), cx);
+            header_nodes(pane, cx)
+        });
+        assert!(
+            waiting
+                .iter()
+                .any(|node| node.label.as_deref() == Some("Agent waiting for input")),
+            "waiting header nodes: {}",
+            labels_of(&waiting)
+        );
+
+        let zoomed = pane.update_in(cx, |pane, _window, cx| {
+            pane.set_attention(None, cx);
+            pane.zoomed = true;
+            header_nodes(pane, cx)
+        });
+        assert!(
+            zoomed
+                .iter()
+                .any(|node| node.label.as_deref() == Some("Pane zoomed")),
+            "zoomed header nodes: {}",
+            labels_of(&zoomed)
+        );
+
+        let (title, renamed) = pane.update_in(cx, |pane, window, cx| {
+            let title = super::Pane::surface_full_title(&pane.surface, cx);
+            pane.begin_rename(window, cx);
+            (title, header_nodes(pane, cx))
+        });
+        let editor = renamed
+            .iter()
+            .find(|node| node.role == Some(gpui::Role::TextInput));
+        assert!(editor.is_some(), "rename header nodes: {renamed:?}");
+        let value = editor.unwrap().value.as_deref().unwrap_or("");
+        assert_eq!(value, title);
+        assert!(
+            !value.ends_with('|'),
+            "rename value must be the seeded title, not the painted caret"
+        );
+    }
+
+    #[derive(Debug)]
+    struct HeaderA11yNode {
+        role: Option<gpui::Role>,
+        label: Option<String>,
+        value: Option<String>,
+    }
+
+    fn labels_of(nodes: &[HeaderA11yNode]) -> String {
+        nodes
+            .iter()
+            .filter_map(|node| node.label.as_deref())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn header_nodes(
+        pane: &mut super::Pane,
+        cx: &mut gpui::Context<super::Pane>,
+    ) -> Vec<HeaderA11yNode> {
+        use gpui::IntoElement as _;
+
+        let mut header = pane.render_header(cx).into_any_element();
+        let mut nodes = Vec::new();
+        collect_any(&mut header, &mut nodes);
+        nodes
+    }
+
+    fn assert_header_walker_reaches_nested_labels() {
+        use gpui::IntoElement as _;
+        use gpui::{InteractiveElement, ParentElement, StatefulInteractiveElement};
+
+        let mut inline = gpui::div()
+            .id("inline-root")
+            .child(
+                gpui::div()
+                    .id("inline-child")
+                    .role(gpui::Role::Status)
+                    .aria_label("inline-probe"),
+            )
+            .into_any_element();
+        let mut spilled = gpui::div()
+            .child(gpui::div())
+            .child(gpui::div())
+            .child(
+                gpui::div()
+                    .id("spilled-child")
+                    .role(gpui::Role::Status)
+                    .aria_label("spilled-probe"),
+            )
+            .into_any_element();
+        let mut nodes = Vec::new();
+        collect_any(&mut inline, &mut nodes);
+        collect_any(&mut spilled, &mut nodes);
+        let labels = labels_of(&nodes);
+        assert!(
+            labels.contains("inline-probe") && labels.contains("spilled-probe"),
+            "header accessibility walker missed a nested label ({labels})"
+        );
+    }
+
+    fn collect_any(element: &mut gpui::AnyElement, out: &mut Vec<HeaderA11yNode>) {
+        // `.child(any_element)` boxes the `AnyElement` again (`Element::into_any`),
+        // so a returned element shows up one wrapper deeper than a div built in
+        // place. Unwrap that layer before reading the real element.
+        if let Some(inner) = element.downcast_mut::<gpui::AnyElement>() {
+            collect_any(inner, out);
+            return;
+        }
+        if let Some(div) = element.downcast_mut::<gpui::Stateful<gpui::Div>>() {
+            push_a11y(div, out);
+            for child in div_children(div) {
+                collect_any(child, out);
+            }
+            return;
+        }
+        if let Some(div) = element.downcast_mut::<gpui::Div>() {
+            push_a11y(div, out);
+            for child in div_children(div) {
+                collect_any(child, out);
+            }
+        }
+    }
+
+    fn push_a11y(element: &impl gpui::Element, out: &mut Vec<HeaderA11yNode>) {
+        let role = element.a11y_role();
+        if role.is_none() {
+            return;
+        }
+        let mut node = gpui::accesskit::Node::new(gpui::accesskit::Role::Unknown);
+        element.write_a11y_info(&mut node);
+        out.push(HeaderA11yNode {
+            role,
+            label: node.label().map(str::to_owned),
+            value: node.value().map(str::to_owned),
+        });
+    }
+
+    /// `Div` stores its children in a `SmallVec<[AnyElement; 2]>` immediately
+    /// after `Interactivity`. `Stateful<Div>` is that `Div` as its only field.
+    /// On this toolchain the inline buffer is laid out *before* the length
+    /// word: two `AnyElement`s, then the `usize`. A length `<= 2` is inline.
+    /// A larger word is the spilled allocation size, and the buffer's first
+    /// bytes are `(ptr, len)` instead.
+    fn div_children<T>(container: &mut T) -> &mut [gpui::AnyElement] {
+        fn align_up(value: usize, align: usize) -> usize {
+            (value + align - 1) & !(align - 1)
+        }
+
+        const INLINE: usize = 2;
+        let element_size = std::mem::size_of::<gpui::AnyElement>();
+        let inline_bytes = element_size * INLINE;
+        let smallvec_align =
+            std::mem::align_of::<usize>().max(std::mem::align_of::<gpui::AnyElement>());
+        let smallvec_offset = align_up(std::mem::size_of::<gpui::Interactivity>(), smallvec_align);
+        let base = std::ptr::from_mut(container).cast::<u8>();
+        // SAFETY: `container` is a `Div` or a `Stateful<Div>` (its only field
+        // is that `Div`). Both put `Interactivity` first and the child
+        // `SmallVec` next. The probe above fails closed when that layout
+        // changes, before any pane assertion can pass on a bad walk.
+        unsafe {
+            let smallvec = base.add(smallvec_offset);
+            let length = smallvec.add(inline_bytes).cast::<usize>().read();
+            if length <= INLINE {
+                if length == 0 {
+                    return &mut [];
+                }
+                return std::slice::from_raw_parts_mut(smallvec.cast(), length);
+            }
+            let ptr = smallvec.cast::<*mut gpui::AnyElement>().read();
+            let len = smallvec
+                .add(std::mem::size_of::<*mut gpui::AnyElement>())
+                .cast::<usize>()
+                .read();
+            if ptr.is_null() || len > 64 {
+                return &mut [];
+            }
+            std::slice::from_raw_parts_mut(ptr, len)
         }
     }
 }
