@@ -75,7 +75,9 @@ use crate::settings::components::{
     section_header_with_action, setting_card,
 };
 use crate::terminal::element::{MIN_APCA_CONTRAST, ensure_minimum_contrast};
-use crate::ui_primitives::{ROW_RADIUS, TooltipDelayExt, squircle_skin, text_tooltip};
+use crate::ui_primitives::{
+    AnimatedHover, ROW_RADIUS, TooltipDelayExt, squircle_skin, text_tooltip,
+};
 use crate::widgets::scrollbar::{self, ScrollableHandle as _};
 use crate::{PaneFlowApp, config_writer, keybindings};
 
@@ -890,58 +892,10 @@ impl PaneFlowApp {
         first: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // The chevron follows the rows actually on the page, not
-        // `collapsed_shortcut_groups`: a query opens every matching section for
-        // its duration (see `shortcut_rows_from`) while leaving the user's fold
-        // state untouched, and the header has to say what is on screen. A
-        // section with no rows under it is folded - one with no *matches* has
-        // no header at all.
-        let collapsed =
-            shortcut_group_span(&self.shortcut_rows, group).is_some_and(|span| span.is_empty());
-
-        let header = squircle_skin(
-            div()
-                .id(("shortcut-group", group as usize))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.))
-                .px(px(8.))
-                .py(px(6.)),
-            format!("shortcut-group-skin-{}", group as usize),
-            ROW_RADIUS,
-            None,
-            Some(ui.subtle),
-        )
-        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-            this.toggle_shortcut_group(group, cx);
-        }))
-        .child(
-            svg()
-                .size(px(11.))
-                .flex_none()
-                .path(if collapsed {
-                    "icons/chevron-right.svg"
-                } else {
-                    "icons/chevron-down.svg"
-                })
-                .text_color(ui.muted),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_size(px(12.))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(ui.text)
-                .truncate()
-                .child(group.label()),
-        )
-        .child(
-            div()
-                .text_size(px(11.))
-                .text_color(ui.muted)
-                .child(count.to_string()),
+        let header = shortcut_group_header_button(&self.shortcut_rows, group, count, ui).on_click(
+            cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                this.toggle_shortcut_group(group, cx);
+            }),
         );
 
         div()
@@ -1003,62 +957,48 @@ impl PaneFlowApp {
                 .child(entry.key.clone())
         };
 
-        let row = squircle_skin(
-            div()
-                .id(("shortcut", idx))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(12.))
-                .px(px(8.))
-                .py(px(10.)),
-            format!("shortcut-squircle-{idx}"),
-            ROW_RADIUS,
-            None,
-            Some(ui.subtle),
-        )
-        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            if fixed {
-                this.disarm_shortcut_recording(cx);
-                return;
-            }
-            // Recording a rebind and capturing a search chord both want the
-            // keyboard; arming one disarms the other.
-            this.set_shortcut_capture(false, cx);
-            this.recording_shortcut_idx = Some(idx);
-            this.settings_focus.focus(window, cx);
-            cx.notify();
-        }))
-        .when(is_recording, |row| {
-            // A click anywhere else is the user moving on - to the search
-            // field, another row, the reset control - and a row left armed
-            // behind them would swallow the next chord they typed there.
-            // Only a mounted row can listen, so an armed row scrolled out
-            // of the viewport relies on the interceptor's focused-field
-            // rule instead (`route_shortcut_keystroke`).
-            row.on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                this.disarm_shortcut_recording(cx);
+        let row = shortcut_rebind_button(idx, entry, is_recording, ui)
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                if fixed {
+                    this.disarm_shortcut_recording(cx);
+                    return;
+                }
+                // Recording a rebind and capturing a search chord both want the
+                // keyboard; arming one disarms the other.
+                this.set_shortcut_capture(false, cx);
+                this.recording_shortcut_idx = Some(idx);
+                this.settings_focus.focus(window, cx);
+                cx.notify();
             }))
-        })
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_size(px(13.))
-                .text_color(ui.text)
-                .truncate()
-                .child(entry.description.clone()),
-        )
-        .children(fixed.then(|| {
-            div()
-                .flex_none()
-                .text_size(px(11.))
-                .text_color(ui.muted)
-                .child("Fixed")
-        }))
-        .child(key_badge)
-        .delayed_tooltip(text_tooltip(entry.description.clone()));
+            .when(is_recording, |row| {
+                // A click anywhere else is the user moving on - to the search
+                // field, another row, the reset control - and a row left armed
+                // behind them would swallow the next chord they typed there.
+                // Only a mounted row can listen, so an armed row scrolled out
+                // of the viewport relies on the interceptor's focused-field
+                // rule instead (`route_shortcut_keystroke`).
+                row.on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                    this.disarm_shortcut_recording(cx);
+                }))
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(13.))
+                    .text_color(ui.text)
+                    .truncate()
+                    .child(entry.description.clone()),
+            )
+            .children(fixed.then(|| {
+                div()
+                    .flex_none()
+                    .text_size(px(11.))
+                    .text_color(ui.muted)
+                    .child("Fixed")
+            }))
+            .child(key_badge)
+            .delayed_tooltip(text_tooltip(entry.description.clone()));
 
         shortcut_card_slice(card_bg, first, last)
             .child(row)
@@ -1095,6 +1035,101 @@ fn shortcut_card_slice(card_bg: gpui::Hsla, first: bool, last: bool) -> Div {
         .when(last, |d| {
             d.rounded_b(SHORTCUT_CARD_RADIUS).pb(SHORTCUT_CARD_INSET)
         })
+}
+
+/// One section header button.
+///
+/// Folded follows the rows actually on the page, not the user's saved set: a
+/// query opens every matching section for its duration (see
+/// [`shortcut_rows_from`]) while leaving that set untouched. A section with
+/// no rows under it is folded; one with no matches has no header at all.
+fn shortcut_group_header_button(
+    rows: &[ShortcutListRow],
+    group: ShortcutGroup,
+    count: usize,
+    ui: crate::theme::UiColors,
+) -> gpui::Stateful<Div> {
+    let collapsed = shortcut_group_span(rows, group).is_some_and(|span| span.is_empty());
+    squircle_skin(
+        div()
+            .id(("shortcut-group", group as usize))
+            .role(Role::Button)
+            .aria_label(group.label())
+            .aria_expanded(!collapsed)
+            .tab_index(0)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .px(px(8.))
+            .py(px(6.)),
+        format!("shortcut-group-skin-{}", group as usize),
+        ROW_RADIUS,
+        None,
+        Some(ui.subtle),
+    )
+    .child(
+        svg()
+            .size(px(11.))
+            .flex_none()
+            .path(if collapsed {
+                "icons/chevron-right.svg"
+            } else {
+                "icons/chevron-down.svg"
+            })
+            .text_color(ui.muted),
+    )
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .text_size(px(12.))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(ui.text)
+            .truncate()
+            .child(group.label()),
+    )
+    .child(
+        div()
+            .text_size(px(11.))
+            .text_color(ui.muted)
+            .child(count.to_string()),
+    )
+}
+
+/// One rebind row. The accessible name is the action plus the binding on
+/// screen, so the armed row says "Press a key…" instead of the old chord.
+/// Fixed rows stay buttons and report disabled.
+fn shortcut_rebind_button(
+    idx: usize,
+    entry: &keybindings::ShortcutEntry,
+    recording: bool,
+    ui: crate::theme::UiColors,
+) -> AnimatedHover {
+    let binding = if recording {
+        "Press a key…"
+    } else {
+        entry.key.as_str()
+    };
+    AnimatedHover::from_element(squircle_skin(
+        div()
+            .id(("shortcut", idx))
+            .role(Role::Button)
+            .aria_label(format!("{}, {binding}", entry.description))
+            .tab_index(0)
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .px(px(8.))
+            .py(px(10.)),
+        format!("shortcut-squircle-{idx}"),
+        ROW_RADIUS,
+        None,
+        Some(ui.subtle),
+    ))
+    .a11y_disabled(entry.fixed)
 }
 
 #[cfg(test)]
@@ -1608,6 +1643,103 @@ mod tests {
         assert_eq!(
             painted.size.width, viewport,
             "a list item that does not span the list is shrink-wrapping its content"
+        );
+    }
+
+    fn written_a11y(element: &impl gpui::Element) -> gpui::accesskit::Node {
+        let mut node = gpui::accesskit::Node::new(gpui::accesskit::Role::Unknown);
+        gpui::Element::write_a11y_info(element, &mut node);
+        node
+    }
+
+    /// Issue #881: section headers and binding rows were role-less divs, so
+    /// VoiceOver never saw them and a fixed row was not disabled.
+    #[test]
+    fn shortcut_rows_are_accessible_buttons() {
+        let entries = keybindings::settings_shortcuts(&HashMap::new());
+        let mut collapsed = HashSet::new();
+        collapsed.insert(ShortcutGroup::Panes);
+        let folded = shortcut_rows_from(&entries, "", false, &collapsed);
+        assert!(
+            shortcut_group_span(&folded, ShortcutGroup::Panes).is_some_and(|span| span.is_empty()),
+            "the Panes header in this fixture must be folded"
+        );
+        let panes_count = folded
+            .iter()
+            .find_map(|row| match row {
+                ShortcutListRow::Header { group, count } if *group == ShortcutGroup::Panes => {
+                    Some(*count)
+                }
+                _ => None,
+            })
+            .expect("folded Panes header");
+        let ui = crate::theme::ui_colors();
+        let header = shortcut_group_header_button(&folded, ShortcutGroup::Panes, panes_count, ui);
+        assert_eq!(
+            gpui::Element::a11y_role(&header),
+            Some(gpui::accesskit::Role::Button),
+            "a folded section header must be a button"
+        );
+        let header_node = written_a11y(&header);
+        assert_eq!(header_node.label(), Some("Panes & splits"));
+        assert_eq!(header_node.is_expanded(), Some(false));
+
+        let (editable_idx, editable) = entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| !entry.fixed)
+            .expect("an editable shortcut");
+        let (fixed_idx, fixed) = entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.fixed)
+            .expect("a fixed shortcut");
+
+        let editable_button = shortcut_rebind_button(editable_idx, editable, false, ui);
+        assert_eq!(
+            gpui::Element::a11y_role(&editable_button),
+            Some(gpui::accesskit::Role::Button)
+        );
+        let editable_node = written_a11y(&editable_button);
+        let editable_label = format!("{}, {}", editable.description, editable.key);
+        assert_eq!(editable_node.label(), Some(editable_label.as_str()));
+        assert!(!editable_label.is_empty());
+        assert!(!editable_node.is_disabled());
+
+        let recording = shortcut_rebind_button(editable_idx, editable, true, ui);
+        let recording_node = written_a11y(&recording);
+        let recording_label = format!("{}, Press a key…", editable.description);
+        assert_eq!(recording_node.label(), Some(recording_label.as_str()));
+
+        let fixed_button = shortcut_rebind_button(fixed_idx, fixed, false, ui);
+        assert_eq!(
+            gpui::Element::a11y_role(&fixed_button),
+            Some(gpui::accesskit::Role::Button)
+        );
+        let fixed_node = written_a11y(&fixed_button);
+        let fixed_label = format!("{}, {}", fixed.description, fixed.key);
+        assert_eq!(fixed_node.label(), Some(fixed_label.as_str()));
+        assert!(!fixed_label.is_empty());
+        assert!(fixed_node.is_disabled());
+
+        let src = include_str!("shortcuts.rs");
+        let header_fn = body(
+            src,
+            "fn render_shortcut_section_header(",
+            "fn render_shortcut_row(",
+        );
+        assert!(
+            header_fn.contains("shortcut_group_header_button("),
+            "section headers must use the accessible button"
+        );
+        let row_fn = body(
+            src,
+            "fn render_shortcut_row(",
+            "/// The section card, sliced",
+        );
+        assert!(
+            row_fn.contains("shortcut_rebind_button("),
+            "binding rows must use the accessible button"
         );
     }
 }
