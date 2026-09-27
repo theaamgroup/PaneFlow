@@ -192,14 +192,16 @@ fn is_symlink(path: &Path) -> bool {
 /// Absolute paths and relative paths that already include a directory
 /// (`./hook`, `bin/hook`) are missing unless that exact file exists. A bare
 /// name is missing unless some `PATH` entry has it. A same-named file in the
-/// process cwd does not count (#682). Matches the Claude shim's staleness
-/// check so the two cannot disagree about the same command.
+/// process cwd does not count (#682). The Claude shim calls
+/// [`hook_program_exists`], so the two cannot disagree about the same command.
 fn hook_program_is_missing(program: &str) -> bool {
     !hook_program_exists(program)
 }
 
 /// Whether `program` names a regular file, or a bare name found on `PATH`.
-fn hook_program_exists(program: &str) -> bool {
+///
+/// The Claude shim's persistent-hook staleness check calls this (#895).
+pub fn hook_program_exists(program: &str) -> bool {
     let search_path = std::env::var_os("PATH");
     hook_program_exists_on_path(program, search_path.as_deref())
 }
@@ -212,7 +214,7 @@ fn hook_program_exists(program: &str) -> bool {
 /// (`./hook`, `bin/hook`). Checking `is_file` on the bare name first would
 /// treat a regular file of that name in the process cwd as installed (#682).
 /// Production passes `std::env::var_os("PATH")`; tests pass a temp directory.
-fn hook_program_exists_on_path(program: &str, search_path: Option<&OsStr>) -> bool {
+pub fn hook_program_exists_on_path(program: &str, search_path: Option<&OsStr>) -> bool {
     let path = Path::new(program);
     if path.is_absolute()
         || path
@@ -447,6 +449,7 @@ mod tests {
     /// name was not on `PATH`. A bare name is present only when some entry of
     /// the provided search path contains it. This test does not create that
     /// file in the cwd or change `PATH`; either one would race other tests.
+    /// The Claude shim's mirror of this test lives here (#895).
     #[test]
     fn a_bare_hook_name_is_found_only_on_the_search_path() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -462,6 +465,11 @@ mod tests {
             "paneflow-ai-hook",
             Some(decoy.as_os_str())
         ));
+        // An empty search-path entry does not invent the program.
+        assert!(!hook_program_exists_on_path(
+            "paneflow-ai-hook",
+            Some(bin.as_os_str())
+        ));
 
         // `is_file` does not require the executable bit.
         std::fs::write(bin.join("paneflow-ai-hook"), b"").unwrap();
@@ -470,6 +478,9 @@ mod tests {
             "paneflow-ai-hook",
             Some(search.as_os_str())
         ));
+        // A bare name is still missing when no search path is supplied, even
+        // after the file exists somewhere else.
+        assert!(!hook_program_exists_on_path("paneflow-ai-hook", None));
 
         // `./paneflow-ai-hook` and `bin/hook` already include a directory, so
         // they use `is_file` on that path and ignore the search path. The
