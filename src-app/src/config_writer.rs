@@ -65,6 +65,13 @@ fn config_write_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Hold [`CONFIG_WRITE_LOCK`] so a test can show a settings caller returned
+/// while `sync_all` is still blocked on the same lock.
+#[cfg(test)]
+pub(crate) fn hold_config_write_lock_for_test() -> MutexGuard<'static, ()> {
+    config_write_guard()
+}
+
 /// Load the raw JSON config.
 ///
 /// Missing file means a fresh empty object. Existing but unreadable, oversized,
@@ -220,6 +227,10 @@ fn apply_top_level_field(json: &mut serde_json::Value, key: &str, value: serde_j
 }
 
 /// Save several top-level config fields in one read-modify-write cycle.
+///
+/// Settings controls do not call this on the GPUI thread (issue #908). It
+/// stays for a caller that must land several keys in one cycle.
+#[allow(dead_code)]
 pub fn save_config_values_checked<const N: usize>(values: [(&str, serde_json::Value); N]) -> bool {
     let Some(path) = paneflow_config::loader::config_path() else {
         log::warn!("config: cannot determine config path, not saving");
