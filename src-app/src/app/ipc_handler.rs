@@ -2916,12 +2916,12 @@ fn end_agent_session(
             subagents_changed: false,
         };
     };
-    // Prefer exact PID removal. Otherwise the tool-name fallback may clear
-    // an unambiguous row: first by explicit surface_id when present,
-    // otherwise by tool only when a single non-errored candidate exists.
-    // This avoids evicting a sibling session of the same agent. It serves
-    // legacy no-PID frames and real-PID frames whose own row is keyed
-    // elsewhere (a folded shell/agent twin, a synthetic legacy key).
+    // Prefer exact PID removal. Otherwise one unambiguous non-errored row
+    // may go: the explicit surface when the frame names one, else the single
+    // same-tool row. A legacy no-PID frame may take that row. A real PID
+    // may take it only when the key is synthetic (SYNTHETIC_SESSION_PID_BASE
+    // and above). A different real PID is a live sibling, and naming a
+    // surface does not make that sibling this process's row.
     //
     // EP-004 US-010: an `Errored` session is SPARED - the shim's `ai.exit`
     // lands just before this frame, and removing the row here would wipe
@@ -2943,6 +2943,7 @@ fn end_agent_session(
         false
     } else if let Some(k) =
         session_end_fallback_candidate(&ws.agent_sessions, tool, explicit_surface_id)
+            .filter(|k| pid.is_none() || is_synthetic_session_key(*k))
     {
         ws.agent_sessions.remove(&k);
         // A real PID names its own subagents; adopting `k` would clear a
@@ -3757,6 +3758,14 @@ mod tests {
             Some(100),
             Some(TerminalAgent::ClaudeCode),
             None,
+        );
+        assert!(
+            !outcome.removed,
+            "a real-PID session_end must not remove a sibling row"
+        );
+        assert!(
+            workspaces[0].agent_sessions.contains_key(&200),
+            "the sibling's live row stays"
         );
         assert!(outcome.subagents_changed);
         let running = &workspaces[0].running_subagents;
