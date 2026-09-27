@@ -988,22 +988,28 @@ impl PaneFlowApp {
             terminal::TerminalEvent::ProgramNotification { title, body } => {
                 // The desktop notification goes out unless this pane is the
                 // one the user is looking at or its workspace is muted.
+                // A pane that is not on screen is limited to one banner per
+                // few seconds; an identical title and body is coalesced, and
+                // the excess is dropped before delivery (issue #909). This
+                // path still ignores `notify_when_agent_waiting` (#240).
                 // Lifecycle observations below still apply when suppressed.
                 let surface_id = terminal.entity_id().as_u64();
                 let muted = self
                     .workspace_id_for_surface(surface_id, cx)
                     .is_some_and(|ws_id| self.workspace_is_muted(ws_id));
                 let seen = self.hosted_surface_is_seen(surface_id, cx) || muted;
-                let pane_title = terminal.read(cx).terminal.title.clone();
-                crate::agents::notifications::fire_program_notification(
-                    crate::agents::notifications::program_notification(
-                        title.clone(),
-                        body.clone(),
-                        &pane_title,
-                    ),
-                    seen,
-                    cx.background_executor().clone(),
-                );
+                if !seen && admit_program_notification_now(surface_id, title, body) {
+                    let pane_title = terminal.read(cx).terminal.title.clone();
+                    crate::agents::notifications::fire_program_notification(
+                        crate::agents::notifications::program_notification(
+                            title.clone(),
+                            body.clone(),
+                            &pane_title,
+                        ),
+                        seen,
+                        cx.background_executor().clone(),
+                    );
+                }
                 if let Some(tool) = terminal.read(cx).terminal.detected_agent
                     && let Some(event) =
                         crate::app::agent_status::notification_lifecycle_event(tool, title, body)
@@ -2138,6 +2144,70 @@ pub(crate) fn retarget_workspace_git_dir(
     (workspace.cwd.clone(), changed)
 }
 
+/// Minimum gap between desktop banners from one surface (issue #909).
+const PROGRAM_NOTIFICATION_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4);
+
+struct AdmittedProgramNotification {
+    at: std::time::Instant,
+    title: String,
+    body: String,
+}
+
+type ProgramNotificationAdmissions =
+    std::sync::Mutex<std::collections::HashMap<u64, AdmittedProgramNotification>>;
+
+fn program_notification_admissions() -> &'static ProgramNotificationAdmissions {
+    static ADMISSIONS: std::sync::OnceLock<ProgramNotificationAdmissions> =
+        std::sync::OnceLock::new();
+    ADMISSIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Whether `surface_id` may post a desktop banner at `now`.
+///
+/// One banner per surface per [`PROGRAM_NOTIFICATION_INTERVAL`]. An identical
+/// title and body still inside that window is coalesced: it is not admitted,
+/// and the window restarts, so a loop of the same payload stays on the banner
+/// already admitted. A different payload waits out the window and does not
+/// move it. Rows older than the window are forgotten, so a quiet surface can
+/// notify again. A `false` result is dropped before `smol::unblock`.
+fn admit_program_notification(
+    recent: &mut std::collections::HashMap<u64, AdmittedProgramNotification>,
+    surface_id: u64,
+    title: &str,
+    body: &str,
+    now: std::time::Instant,
+) -> bool {
+    recent.retain(|_, row| now.saturating_duration_since(row.at) < PROGRAM_NOTIFICATION_INTERVAL);
+    if let Some(prev) = recent.get_mut(&surface_id) {
+        if prev.title == title && prev.body == body {
+            prev.at = now;
+        }
+        return false;
+    }
+    recent.insert(
+        surface_id,
+        AdmittedProgramNotification {
+            at: now,
+            title: title.to_owned(),
+            body: body.to_owned(),
+        },
+    );
+    true
+}
+
+fn admit_program_notification_now(surface_id: u64, title: &str, body: &str) -> bool {
+    let mut recent = program_notification_admissions()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    admit_program_notification(
+        &mut recent,
+        surface_id,
+        title,
+        body,
+        std::time::Instant::now(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3270,6 +3340,69 @@ mod tests {
         assert_eq!(
             workspaces[0].tab_count(),
             crate::workspace::MAX_TABS_PER_WORKSPACE
+        );
+    }
+
+    #[test]
+    fn program_notifications_are_rate_limited_per_surface() {
+        // Issue #909. Bodies differ so a dedup-only gate cannot pass: one
+        // surface inside the window admits a single delivery, and another
+        // surface is still admitted. Removing the limit admits all 100.
+        let mut recent = HashMap::new();
+        let now = std::time::Instant::now();
+        let surface = 7_u64;
+        let mut admitted = 0_usize;
+        for n in 0..100 {
+            if super::admit_program_notification(
+                &mut recent,
+                surface,
+                "notify",
+                &format!("body {n}"),
+                now,
+            ) {
+                admitted += 1;
+            }
+        }
+        assert!(
+            admitted <= 1,
+            "100 notifications from one surface inside the window admitted {admitted}"
+        );
+        assert_eq!(admitted, 1, "the first notification is still delivered");
+        assert!(
+            super::admit_program_notification(&mut recent, 8, "notify", "other surface", now),
+            "a second surface is still admitted"
+        );
+
+        let mut at = now;
+        for _ in 0..5 {
+            at += super::PROGRAM_NOTIFICATION_INTERVAL - std::time::Duration::from_millis(1);
+            assert!(
+                !super::admit_program_notification(&mut recent, surface, "notify", "body 0", at),
+                "an identical title and body stays coalesced while it keeps arriving"
+            );
+        }
+        at += super::PROGRAM_NOTIFICATION_INTERVAL;
+        assert!(
+            super::admit_program_notification(&mut recent, surface, "notify", "body 0", at),
+            "the same payload is admitted again once the window goes quiet"
+        );
+
+        let arm = crate::source_probe::source_slice(
+            include_str!("event_handlers.rs"),
+            "terminal::TerminalEvent::ProgramNotification { title, body } => {",
+            "terminal::TerminalEvent::TitleChanged => {",
+        );
+        let admit_at = arm
+            .find("admit_program_notification_now(")
+            .expect("the handler must rate-limit before delivery");
+        let fire_at = arm.find("fire_program_notification(").expect("delivery");
+        assert!(
+            admit_at < fire_at,
+            "excess notifications are dropped before smol::unblock: {arm}"
+        );
+        assert!(
+            !arm.contains("resolved_notify_when_agent_waiting"),
+            "program notifications must not consult the agent notification setting"
         );
     }
 }
