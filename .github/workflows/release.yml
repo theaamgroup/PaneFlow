@@ -40,7 +40,7 @@ env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
   # Dry-runs are intentionally main-only. Allowing an arbitrary checkout here
   # would execute branch-controlled scripts while release credentials exist.
-  RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref_name }}
+  RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
   RELEASE_MODE: ${{ github.event_name == 'workflow_dispatch' && 'dry-run' || 'release' }}
   TARGET: aarch64-apple-darwin
   ARCH: aarch64
