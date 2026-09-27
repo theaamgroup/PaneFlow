@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use gpui::{
     AnyElement, App, ClickEvent, Context, CursorStyle, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
     Render, ScrollHandle, ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled,
-    Window, anchored, deferred, div, point, prelude::*, px,
+    WeakEntity, Window, anchored, deferred, div, point, prelude::*, px,
 };
 use notify::RecommendedWatcher;
 
@@ -452,6 +453,12 @@ pub struct DiffView {
     column: Column,
 
     focus_handle: FocusHandle,
+    /// Focus handle for the pane's Review-with-agent popover. The pane tracks
+    /// it while that menu is open; it is not the diff surface's own focus.
+    review_menu_focus: FocusHandle,
+    /// Pane that currently shows the review menu for this diff, if any.
+    /// `WeakEntity` so the diff does not keep the pane alive.
+    review_menu_owner: RefCell<Option<WeakEntity<crate::pane::Pane>>>,
     element_id: SharedString,
     watch_epoch: u64,
     mode: ViewMode,
@@ -516,6 +523,8 @@ impl DiffView {
             column,
 
             focus_handle: cx.focus_handle(),
+            review_menu_focus: cx.focus_handle().tab_index(0).tab_stop(true),
+            review_menu_owner: RefCell::new(None),
             element_id,
             watch_epoch: 0,
             mode: ViewMode::Unified,
@@ -529,6 +538,20 @@ impl DiffView {
             h_scroll_drag: None,
             vertical_scrollbar: Default::default(),
         }
+    }
+
+    pub(crate) fn review_menu_focus_handle(&self) -> FocusHandle {
+        self.review_menu_focus.clone()
+    }
+
+    /// Record which pane's review menu is open over this diff. Called from the
+    /// pane while it is rendering, so this only touches the `RefCell`.
+    pub(crate) fn bind_review_menu_owner(&self, pane: WeakEntity<crate::pane::Pane>) {
+        *self.review_menu_owner.borrow_mut() = Some(pane);
+    }
+
+    pub(crate) fn review_menu_owner(&self) -> Option<WeakEntity<crate::pane::Pane>> {
+        self.review_menu_owner.borrow().clone()
     }
 
     pub fn subject(&self) -> ReviewSubject {
