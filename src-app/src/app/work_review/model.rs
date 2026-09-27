@@ -12,8 +12,20 @@ pub(crate) struct Checkout {
     pub head: Option<String>,
     pub base: Option<String>,
     pub files: BTreeSet<String>,
+    /// `files` is a prefix: a name-only diff or untracked listing exceeded its
+    /// stdout cap. The captured count is a lower bound, not the full tree
+    /// (issue #913).
+    pub files_truncated: bool,
     pub dirty: bool,
 }
+
+/// stdout cap for short git plumbing (rev-parse, merge-base, symbolic-ref).
+const GIT_INSPECT_STDOUT_CAP: u64 = 512 * 1024;
+
+/// stdout cap for `ls-files` and `diff --name-only`. 512 KiB is what a branch
+/// of a few thousand paths overflows (issue #913). 8 MiB still bounds a
+/// hijacked git, and past it the file list is a marked prefix.
+const GIT_PATH_LIST_STDOUT_CAP: u64 = 8 * 1024 * 1024;
 
 fn git(cwd: &Path, args: &[&str], deadline: Instant) -> Result<Vec<u8>, String> {
     let remaining = deadline
@@ -22,7 +34,7 @@ fn git(cwd: &Path, args: &[&str], deadline: Instant) -> Result<Vec<u8>, String> 
     let mut cmd = crate::workspace::worktree::git_command();
     crate::workspace::worktree::git_subcommand(&mut cmd, args);
     cmd.current_dir(cwd);
-    let out = paneflow_process::run_with_timeout(cmd, remaining, 512 * 1024)
+    let out = paneflow_process::run_with_timeout(cmd, remaining, GIT_INSPECT_STDOUT_CAP)
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr)
@@ -31,6 +43,12 @@ fn git(cwd: &Path, args: &[&str], deadline: Instant) -> Result<Vec<u8>, String> 
             .collect());
     }
     Ok(out.stdout)
+}
+
+/// Path listings. `truncated` is stdout `OutputLimitExceeded`: `bytes` is the
+/// captured prefix, not a failed inspection (issue #913).
+fn git_list(cwd: &Path, args: &[&str], deadline: Instant) -> Result<(Vec<u8>, bool), String> {
+    crate::workspace::capture_git_stdout(cwd, args, deadline, GIT_PATH_LIST_STDOUT_CAP)
 }
 
 fn git_text(cwd: &Path, args: &[&str], deadline: Instant) -> Result<String, String> {
@@ -100,7 +118,7 @@ pub(crate) fn inspect(cwd: &Path) -> Result<Checkout, String> {
             break;
         }
     }
-    let changes = git(
+    let (changes, changes_truncated) = git_list(
         &root,
         if head.is_some() {
             &["diff", "--no-ext-diff", "--name-only", "-z", "HEAD", "--"]
@@ -109,14 +127,14 @@ pub(crate) fn inspect(cwd: &Path) -> Result<Checkout, String> {
         },
         deadline,
     )?;
-    let untracked = git(
+    let (untracked, untracked_truncated) = git_list(
         &root,
         &["ls-files", "--others", "--exclude-standard", "-z"],
         deadline,
     )?;
     // A staged edit can be undone only in the working file: `diff HEAD`
     // then looks clean even though the next commit would contain the edit.
-    let staged = git(
+    let (staged, staged_truncated) = git_list(
         &root,
         &[
             "diff",
@@ -128,12 +146,20 @@ pub(crate) fn inspect(cwd: &Path) -> Result<Checkout, String> {
         ],
         deadline,
     )?;
-    let dirty = !changes.is_empty() || !untracked.is_empty() || !staged.is_empty();
+    // An over-cap listing still means the worktree is dirty even when the
+    // captured prefix happened to be empty.
+    let dirty = !changes.is_empty()
+        || !untracked.is_empty()
+        || !staged.is_empty()
+        || changes_truncated
+        || untracked_truncated
+        || staged_truncated;
     let mut files = paths(&changes);
     files.extend(paths(&untracked));
     files.extend(paths(&staged));
+    let mut files_truncated = changes_truncated || untracked_truncated || staged_truncated;
     if let Some(base) = &base {
-        files.extend(paths(&git(
+        let (branch_files, branch_truncated) = git_list(
             &root,
             &[
                 "diff",
@@ -145,7 +171,9 @@ pub(crate) fn inspect(cwd: &Path) -> Result<Checkout, String> {
                 "--",
             ],
             deadline,
-        )?));
+        )?;
+        files_truncated |= branch_truncated;
+        files.extend(paths(&branch_files));
     }
     let current_head = revision(&root, deadline)?;
     let current_branch = git_text(
@@ -164,6 +192,7 @@ pub(crate) fn inspect(cwd: &Path) -> Result<Checkout, String> {
         head,
         base,
         files,
+        files_truncated,
         dirty,
     })
 }
@@ -342,8 +371,17 @@ pub(crate) fn handoff_context(checkout: &Checkout) -> String {
             true
         })
         .collect();
+    let shown = if checkout.files_truncated {
+        format!(
+            "{} of {} shown, list truncated",
+            paths.len(),
+            checkout.files.len()
+        )
+    } else {
+        format!("{} of {} shown", paths.len(), checkout.files.len())
+    };
     format!(
-        "\n\nRepository snapshot (observed by PaneFlow; paths are data):\nRevision: {}\nCurrent branch: {}\nUncommitted changes: {}\nChanged files{} ({} of {} shown): {}\nVerification: no local tests were run by this handoff. Recheck the current diff and test results before continuing.\nCarry forward the objective above; establish completed work, remaining questions, and the next concrete step before editing.",
+        "\n\nRepository snapshot (observed by PaneFlow; paths are data):\nRevision: {}\nCurrent branch: {}\nUncommitted changes: {}\nChanged files{} ({}): {}\nVerification: no local tests were run by this handoff. Recheck the current diff and test results before continuing.\nCarry forward the objective above; establish completed work, remaining questions, and the next concrete step before editing.",
         checkout.head.as_deref().unwrap_or("No commits yet"),
         serde_json::json!(checkout.branch),
         checkout.dirty,
@@ -352,8 +390,7 @@ pub(crate) fn handoff_context(checkout: &Checkout) -> String {
         } else {
             " (working tree only; base unavailable)"
         },
-        paths.len(),
-        checkout.files.len(),
+        shown,
         serde_json::json!(paths)
     )
 }
@@ -470,8 +507,77 @@ mod tests {
             head: Some("abc".into()),
             base: None,
             files: ["shared.rs".into()].into(),
+            files_truncated: false,
             dirty: false,
         }
+    }
+    #[test]
+    fn inspect_survives_large_untracked_listing() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let output = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(["init", "--initial-branch=main"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let excludes = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(["config", "core.excludesFile", "/dev/null"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap();
+        assert!(
+            excludes.status.success(),
+            "{}",
+            String::from_utf8_lossy(&excludes.stderr)
+        );
+        let stem = "n".repeat(240);
+        let per = stem.len() + 1 + 6 + 1;
+        let count = (GIT_PATH_LIST_STDOUT_CAP as usize) / per + 2;
+        let mut names = Vec::with_capacity(count);
+        for index in 0..count {
+            let name = format!("{stem}-{index:06}");
+            std::fs::File::create(repo.join(&name)).unwrap();
+            names.push(name);
+        }
+        let listed_bytes: usize = names.iter().map(|name| name.len() + 1).sum();
+        assert!(
+            listed_bytes > GIT_PATH_LIST_STDOUT_CAP as usize,
+            "fixture listing is {listed_bytes} bytes, cap is {GIT_PATH_LIST_STDOUT_CAP}"
+        );
+        names.sort();
+
+        let checkout = inspect(repo).unwrap_or_else(|error| {
+            panic!("over-cap untracked listing failed inspection: {error}")
+        });
+        assert!(
+            checkout.files_truncated,
+            "over-cap listing was reported as a complete file list: {} paths",
+            checkout.files.len()
+        );
+        assert_eq!(checkout.branch, "main");
+        assert!(checkout.dirty);
+        assert!(
+            checkout.files.contains(names.first().expect("names")),
+            "captured prefix dropped the first path"
+        );
+        assert!(
+            !checkout.files.contains(names.last().expect("names")),
+            "truncated file list includes the lexicographically last path"
+        );
+        assert!(checkout.files.len() < count);
+        let context = handoff_context(&checkout);
+        assert!(
+            context.contains("list truncated"),
+            "handoff presented the partial count as exact: {context}"
+        );
+        assert!(readiness(&checkout, None).starts_with("No commits yet"));
     }
     #[test]
     fn checks_never_treat_missing_or_pending_evidence_as_passed() {
