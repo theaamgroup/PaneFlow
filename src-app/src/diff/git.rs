@@ -13,7 +13,7 @@
 //! from base". Base text comes from one `git cat-file --batch` of
 //! `<merge-base>:<path>` specs, new text from the working-tree file on disk.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -1254,6 +1254,19 @@ fn compute_diff_against_within(
     };
 
     let mut changes = parse_name_status_z(&name_status);
+    // `diff.autoRefreshIndex=false` stops the index rewrite, and it also makes
+    // a stat-only touch look modified. `--numstat` omits those (no added or
+    // removed lines). Drop them before the file cap so they cannot hide a
+    // real change.
+    if let Ok(numstat) = budget.run(
+        worktree_dir,
+        &["diff", "--numstat", "-M", "-z", "--no-color", base, "--"],
+    ) {
+        let content_changed: HashSet<String> = parse_numstat_z(&numstat).into_keys().collect();
+        changes.retain(|(change, path, _)| {
+            *change != FileChange::Modified || content_changed.contains(path)
+        });
+    }
     let mut truncated = changes.len() > MAX_FILE_COUNT;
     if changes.len() > MAX_FILE_COUNT + 1 {
         changes.truncate(MAX_FILE_COUNT + 1);
@@ -2319,7 +2332,8 @@ pub(crate) mod tests {
         // The command-line flag is what has to suppress the rewrite.
         assert!(test_git(root, &["config", "diff.autoRefreshIndex", "true"]));
         std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
-        assert!(test_git(root, &["add", "tracked.txt"]));
+        std::fs::write(root.join("real.txt"), "a\n").unwrap();
+        assert!(test_git(root, &["add", "tracked.txt", "real.txt"]));
         assert!(test_git(
             root,
             &[
@@ -2361,6 +2375,18 @@ pub(crate) mod tests {
         assert_eq!(
             before, after,
             "column_fingerprint must not rewrite a stat-dirty .git/index"
+        );
+        std::fs::write(root.join("real.txt"), "a\nb\n").unwrap();
+        let diff = compute_diff_against_within(&GitBudget::for_column(), root, "HEAD");
+        assert_eq!(diff.error, None);
+        let paths: Vec<&str> = diff.files.iter().map(|file| file.path.as_str()).collect();
+        assert!(
+            paths.contains(&"real.txt"),
+            "a content change must stay in the file list, got {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"tracked.txt"),
+            "a stat-only touch must not take a file-list slot, got {paths:?}"
         );
 
         // The index is still stat-dirty, so a porcelain diff without the flag
