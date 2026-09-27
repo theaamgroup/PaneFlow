@@ -1999,24 +1999,22 @@ fn inject_ai_hook_env(env: &mut std::collections::HashMap<String, String>) {
 
 /// Where the shim binaries live for this process: the real per-user cache,
 /// staged by `ensure_binaries_extracted`.
-#[cfg(not(test))]
+///
+/// Issue #1049: a test build gets [`TEST_AI_HOOK_BIN_DIR`] instead, so no
+/// test - an env unit test, a live PTY smoke, or a GPUI test that opens a
+/// `TerminalView` - can extract into `~/Library/Caches/paneflow-*` or
+/// re-point its `paneflow` link at the libtest harness.
 fn ai_hook_bin_dir() -> anyhow::Result<std::path::PathBuf> {
+    if cfg!(test) {
+        return Ok(std::path::PathBuf::from(TEST_AI_HOOK_BIN_DIR));
+    }
     crate::ai_hooks::extract::ensure_binaries_extracted()
 }
 
-/// Issue #1049: every test build routes here instead, so no test - an env
-/// unit test, a live PTY smoke, or a GPUI test that opens a `TerminalView` -
-/// can extract into `~/Library/Caches/paneflow-*` or re-point its `paneflow`
-/// link at the libtest harness. The path is never created: nothing a test
-/// asserts needs the shims on disk, and an absent `PATH` entry is inert.
-#[cfg(test)]
-fn ai_hook_bin_dir() -> anyhow::Result<std::path::PathBuf> {
-    // Named, never called: keeps the production provider's signature checked
-    // against this one, and keeps it live for dead-code analysis in tests.
-    let _production: fn() -> anyhow::Result<std::path::PathBuf> =
-        crate::ai_hooks::extract::ensure_binaries_extracted;
-    Ok(tests::test_ai_hook_bin_dir())
-}
+/// The bin dir test builds put on `PATH`. It never exists: nothing a test
+/// asserts needs the shims on disk, and `/var/empty` is root-owned, so no
+/// other user can plant binaries there the way they could under `/tmp`.
+const TEST_AI_HOOK_BIN_DIR: &str = "/var/empty/paneflow-test-ai-hook-bin";
 
 /// [`inject_ai_hook_env`] with the extraction result injected, so both the
 /// success and the log-and-skip branch are testable without the real cache.
@@ -3259,12 +3257,6 @@ mod tests {
     // against the pure `assemble_pty_env`.
     // -----------------------------------------------------------------
 
-    /// The bin dir every test build injects in place of the real extraction
-    /// (issue #1049). Unique per test process and never created.
-    pub(super) fn test_ai_hook_bin_dir() -> PathBuf {
-        std::env::temp_dir().join(format!("paneflow-test-ai-hook-bin-{}", std::process::id()))
-    }
-
     #[test]
     fn pty_spawn_injects_paneflow_bin_dir_and_prepends_path() {
         let env = assemble_pty_env(HashMap::new(), 7, 3, None);
@@ -3276,17 +3268,9 @@ mod tests {
         // Issue #1049: a test that reaches the real extraction writes the
         // per-user cache and re-points its `paneflow` link at this harness.
         assert_eq!(
-            PathBuf::from(&bin_dir),
-            test_ai_hook_bin_dir(),
+            bin_dir, TEST_AI_HOOK_BIN_DIR,
             "tests must inject the test bin dir, never the real per-user cache"
         );
-        if let Some(cache) = crate::runtime_paths::cache_dir() {
-            assert!(
-                !Path::new(&bin_dir).starts_with(&cache),
-                "PANEFLOW_BIN_DIR {bin_dir} must not be under the real cache {}",
-                cache.display()
-            );
-        }
 
         let path = env.get("PATH").expect("PATH must be set after injection");
         let first = std::env::split_paths(path)
@@ -3456,7 +3440,7 @@ mod tests {
         let mut user = HashMap::new();
         user.insert("PATH".to_string(), "/custom/bin".to_string());
         let env = assemble_pty_env(HashMap::new(), 1, 1, Some(user));
-        let bin_dir = test_ai_hook_bin_dir();
+        let bin_dir = PathBuf::from(TEST_AI_HOOK_BIN_DIR);
         assert_eq!(
             env.get("PANEFLOW_BIN_DIR").map(PathBuf::from),
             Some(bin_dir.clone()),
