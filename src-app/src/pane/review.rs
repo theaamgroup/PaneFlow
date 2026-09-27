@@ -8,6 +8,7 @@ impl Pane {
         self.bind_review_menu_owner(cx);
         let focus = self.review_menu_focus(cx);
         let claim = focus.clone();
+        let claim_pending = self.review_menu_needs_focus.clone();
         let mut menu = crate::settings::components::menu_surface(div().id("pane-review-menu"), ui)
             .absolute()
             .top(px(PANE_HEADER_HEIGHT))
@@ -33,13 +34,15 @@ impl Pane {
                     .text_size(px(12.))
                     .child("Review in a new agent tab"),
             )
-            // The header button and `DiffReviewWithAgent` only toggle the flag.
-            // Claim this handle while the menu is up so its key handler is on
-            // the dispatch path. A diff that still holds focus is closed by
-            // `DiffDismiss` → `dismiss_overlays` instead.
+            // Claim focus once, on the frame the menu opens. Later frames
+            // must not pull it back after the user moves to another control.
+            // A diff that still holds focus is closed by `DiffDismiss`.
             .child(
                 canvas(
                     move |_bounds, window, cx| {
+                        if !claim_pending.replace(false) {
+                            return;
+                        }
                         if !claim.contains_focused(window, cx) {
                             claim.focus(window, cx);
                         }
@@ -81,6 +84,11 @@ impl Pane {
         diff.read(cx).bind_review_menu_owner(owner);
     }
 
+    pub(super) fn toggle_review_menu(&mut self) {
+        self.review_menu_open = !self.review_menu_open;
+        self.review_menu_needs_focus.set(self.review_menu_open);
+    }
+
     /// Drop the popover without moving focus. `dismiss_overlays` focuses the
     /// diff itself; the menu's own close path restores focus separately so it
     /// does not re-enter the diff entity from inside the diff's update.
@@ -89,6 +97,7 @@ impl Pane {
             return;
         }
         self.review_menu_open = false;
+        self.review_menu_needs_focus.set(false);
         cx.notify();
     }
 

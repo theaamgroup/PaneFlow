@@ -375,6 +375,9 @@ pub struct Pane {
     /// Inline header rename. `None` when the title is a label, not an editor.
     rename: Option<PaneRename>,
     review_menu_open: bool,
+    /// One-shot. The menu claims focus on the frame it opens. Later frames
+    /// do not pull focus back if the user has moved it (issue #883).
+    review_menu_needs_focus: Rc<Cell<bool>>,
     review_picks: [bool; 4],
     rename_focus: FocusHandle,
     /// Ghostty-style unfocused dim: `true` when this pane is NOT the focused
@@ -439,6 +442,7 @@ impl Pane {
             close_armed: false,
             rename: None,
             review_menu_open: false,
+            review_menu_needs_focus: Rc::new(Cell::new(false)),
             review_picks: [true, false, false, false],
             rename_focus: cx.focus_handle(),
             dimmed: false,
@@ -1712,7 +1716,7 @@ impl Pane {
                         ui.text.opacity(0.1),
                     )
                     .on_click(cx.listener(|this, _, _window, cx| {
-                        this.review_menu_open = !this.review_menu_open;
+                        this.toggle_review_menu();
                         cx.notify();
                     })),
                 );
@@ -2065,7 +2069,7 @@ impl Render for Pane {
             .on_action(
                 cx.listener(|this, _: &crate::DiffReviewWithAgent, _window, cx| {
                     if matches!(this.surface, PaneSurface::Diff(_)) {
-                        this.review_menu_open = !this.review_menu_open;
+                        this.toggle_review_menu();
                         cx.notify();
                     }
                 }),
