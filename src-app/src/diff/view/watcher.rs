@@ -534,7 +534,13 @@ impl DiffView {
         cx.spawn(async move |this, cx| {
             let outcome = smol::unblock(move || {
                 let fresh = super::super::git::column_fingerprint(&path, &base);
-                if stored.as_ref() != Some(&fresh) {
+                // A `None` diff or untracked component never matches, even
+                // against itself (issue #891). PartialEq would treat that as
+                // unchanged and skip the reload.
+                if !stored
+                    .as_ref()
+                    .is_some_and(|stored| stored.is_unchanged_against(&fresh))
+                {
                     return Revalidation::Changed;
                 }
                 let cwd = path.to_string_lossy();

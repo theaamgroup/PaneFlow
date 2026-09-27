@@ -373,18 +373,36 @@ fn default_origin_head(budget: &GitBudget, worktree_dir: &Path) -> Option<String
 pub struct ColumnFingerprint {
     head: String,
     base: String,
-    diff_hash: u64,
+    /// `None` when a tracked diff was requested and could not be read.
+    /// An unresolved merge base is `Some(0)`, a stable value, not a failure
+    /// (issue #891).
+    diff_hash: Option<u64>,
     /// `None` when the untracked scan failed or timed out, so it can never
     /// equal the hash of a genuinely empty untracked set.
     untracked_hash: Option<u64>,
 }
 
+impl ColumnFingerprint {
+    /// Both sides are complete and equal. A `None` diff or untracked component
+    /// is a change, including when both sides failed the same way. [`PartialEq`]
+    /// is the wrong check: `None == None`.
+    pub(crate) fn is_unchanged_against(&self, other: &Self) -> bool {
+        self.head == other.head
+            && self.base == other.base
+            && self.diff_hash.is_some()
+            && self.diff_hash == other.diff_hash
+            && self.untracked_hash.is_some()
+            && self.untracked_hash == other.untracked_hash
+    }
+}
+
 /// Compute a [`ColumnFingerprint`] for `worktree_dir` against `base_ref`. Runs
 /// git subprocesses, so callers invoke it off the GPUI main thread (inside the
-/// column build closure / a `smol::unblock`). Failed git reads yield empty or
-/// zero components, and a failed or timed-out untracked scan yields `None`
-/// (never the hash of a real empty set), so unstable repo states fail closed by
-/// not matching a prior complete fingerprint.
+/// column build closure / a `smol::unblock`). Failed rev-parse reads yield
+/// empty strings. A failed or capped tracked diff yields `diff_hash: None`,
+/// and a failed or timed-out untracked scan yields `None` (never the hash of a
+/// real empty set). [`ColumnFingerprint::is_unchanged_against`] treats any
+/// `None` component as changed, so two failed reads do not match.
 pub fn column_fingerprint(worktree_dir: &Path, base_ref: &str) -> ColumnFingerprint {
     // Resolve the worktree's own root first, exactly as `load_column` does. The
     // seed `worktree_dir` may be a SUBDIRECTORY (the workspace opened after a
@@ -413,7 +431,7 @@ fn column_fingerprint_within(
             .unwrap_or_default()
     };
     let diff_hash = if merge_base.is_empty() {
-        0
+        Some(0)
     } else {
         budget
             .run(
@@ -422,7 +440,6 @@ fn column_fingerprint_within(
             )
             .ok()
             .map(|out| hash_bytes(&out))
-            .unwrap_or(0)
     };
     ColumnFingerprint {
         head: rev("HEAD"),
@@ -2076,6 +2093,78 @@ pub(crate) mod tests {
             ..complete.clone()
         };
         assert_ne!(complete, timed_out);
+    }
+
+    #[test]
+    fn oversized_diff_fingerprint_is_never_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(test_git(root, &["init"]), "git init is required");
+        assert!(test_git(
+            root,
+            &[
+                "-c",
+                "user.email=paneflow@example.com",
+                "-c",
+                "user.name=Paneflow",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ));
+
+        let first = column_fingerprint(root, "HEAD");
+        let second = column_fingerprint(root, "HEAD");
+        assert!(
+            first.diff_hash.is_some() && second.diff_hash.is_some(),
+            "a small diff must produce a hash"
+        );
+        assert!(
+            first.is_unchanged_against(&second),
+            "a successful small diff still compares unchanged"
+        );
+
+        // PartialEq treats two `None` diff hashes as equal. Revalidation must
+        // not: a capped `git diff` would otherwise never reload (issue #891).
+        let capped = ColumnFingerprint {
+            diff_hash: None,
+            ..first.clone()
+        };
+        assert!(
+            !capped.is_unchanged_against(&capped),
+            "two fingerprints whose diff could not be read are never unchanged"
+        );
+        let unread = column_fingerprint_within(
+            &GitBudget {
+                deadline_at: Instant::now(),
+            },
+            root,
+            "HEAD",
+            "deadbeef",
+        );
+        assert_eq!(
+            unread.diff_hash, None,
+            "a diff that cannot be read is None, not a zero hash"
+        );
+        let scan_failed = ColumnFingerprint {
+            untracked_hash: None,
+            ..first
+        };
+        assert!(
+            !scan_failed.is_unchanged_against(&scan_failed),
+            "a missing untracked component is never unchanged"
+        );
+
+        let revalidate = include_str!("view/watcher.rs")
+            .split("fn revalidate(")
+            .nth(1)
+            .and_then(|rest| rest.split("#[cfg(test)]").next())
+            .expect("revalidate");
+        assert!(
+            revalidate.contains("is_unchanged_against"),
+            "revalidate must treat an unreadable diff fingerprint as changed"
+        );
     }
 
     #[test]
