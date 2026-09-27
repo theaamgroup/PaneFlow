@@ -274,17 +274,37 @@ fn run_git(repo: &Path, args: &[&str], deadline: Duration) -> Result<String, Str
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// `git config --name-only --get-regexp ^filter\.` for one diff probe.
+///
+/// Drops `GIT_CONFIG`. `git config` reads it as `--file`; `git diff` does
+/// not, so an inherited file can hide the repository's filters.
+fn git_filter_listing_command(dir: &Path) -> Command {
+    let mut cmd = git_command();
+    cmd.current_dir(dir);
+    cmd.env_remove("GIT_CONFIG");
+    cmd.args([
+        "-c",
+        "alias.config=",
+        "config",
+        "--name-only",
+        "--get-regexp",
+        r"^filter\.",
+    ]);
+    cmd
+}
+
 /// `-c` values that blank `filter.<name>.clean` and `filter.<name>.process`
 /// for one read-only `git diff`.
 ///
 /// The listing is a direct [`git_command`] spawn, not a diff runner: those
 /// call back here, and `git config` must not recurse into filter
-/// neutralization. Exit code 1 means the pattern matched nothing. A name
-/// that is not `[A-Za-z0-9_-]+` refuses the diff: it cannot be passed as
-/// `-c` and must not be left runnable. Smudge is left configured.
-/// `required=false` is set because an empty `clean` with
-/// `filter.<name>.required=true` (Git LFS) makes
-/// `git diff` exit 128 instead of skipping the command.
+/// neutralization. [`git_filter_listing_command`] drops `GIT_CONFIG` so the
+/// names match the config `git diff` will use. Exit code 1 means the pattern
+/// matched nothing. A name that is not `[A-Za-z0-9_-]+` refuses the diff: it
+/// cannot be passed as `-c` and must not be left runnable. Smudge is left
+/// configured. `required=false` is set because an empty `clean` with
+/// `filter.<name>.required=true` (Git LFS) makes `git diff` exit 128 instead
+/// of skipping the command.
 ///
 /// `Ok` is only exit 0 (names) or exit 1 (none). Any other failure is `Err`
 /// so the caller does not run a diff whose filters could not be listed.
@@ -295,16 +315,7 @@ pub(crate) fn git_diff_clean_filter_overrides(
     if deadline.is_zero() {
         return Err("git diff exceeded its deadline".to_string());
     }
-    let mut cmd = git_command();
-    cmd.current_dir(dir);
-    cmd.args([
-        "-c",
-        "alias.config=",
-        "config",
-        "--name-only",
-        "--get-regexp",
-        r"^filter\.",
-    ]);
+    let cmd = git_filter_listing_command(dir);
     let output = paneflow_process::run_with_timeout(cmd, deadline, STDOUT_CAP)
         .map_err(|error| format!("git config --get-regexp ^filter\\. failed: {error}"))?;
     match output.status.code() {
@@ -1515,6 +1526,136 @@ not-a-filter
                 "{unsafe_listing:?} must refuse the diff"
             );
         }
+    }
+
+    #[test]
+    fn filter_discovery_ignores_git_config_env() {
+        // `git config` reads GIT_CONFIG as `--file`; `git diff` ignores it.
+        // A decoy file with no filters must not hide the repo clean command.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        run_git(&repo_root, &["init"], GIT_DEADLINE).expect("git init");
+        run_git(
+            &repo_root,
+            &["config", "user.email", "paneflow-tests@example.invalid"],
+            GIT_DEADLINE,
+        )
+        .expect("git config email");
+        run_git(
+            &repo_root,
+            &["config", "user.name", "PaneFlow Tests"],
+            GIT_DEADLINE,
+        )
+        .expect("git config name");
+        run_git(
+            &repo_root,
+            &["config", "core.autocrlf", "false"],
+            GIT_DEADLINE,
+        )
+        .expect("git config autocrlf");
+        std::fs::write(repo_root.join("tracked.txt"), "one\n").expect("tracked file");
+        std::fs::write(repo_root.join(".gitattributes"), "* filter=x\n").expect("gitattributes");
+        run_git(&repo_root, &["add", "."], GIT_DEADLINE).expect("git add");
+        run_git(
+            &repo_root,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "fixture"],
+            GIT_DEADLINE,
+        )
+        .expect("git commit");
+
+        let marker = tmp.path().join("FILTER_RAN");
+        let marker_script = tmp.path().join("marker.sh");
+        std::fs::write(
+            &marker_script,
+            format!(
+                "#!/bin/sh\nprintf 'ran\\n' >> '{}'\nif [ $# -eq 0 ]; then cat; else cat \"$1\"; fi\nexit 0\n",
+                marker.display()
+            ),
+        )
+        .expect("marker script");
+        let mut permissions = std::fs::metadata(&marker_script)
+            .expect("marker metadata")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&marker_script, permissions).expect("chmod marker");
+        let marker_script_s = marker_script.to_string_lossy();
+        run_git(
+            &repo_root,
+            &["config", "filter.x.clean", &marker_script_s],
+            GIT_DEADLINE,
+        )
+        .expect("config clean filter");
+        let decoy = tmp.path().join("decoy.config");
+        std::fs::write(&decoy, "[user]\n\tname = Decoy\n").expect("decoy config");
+        assert!(!marker.exists(), "setup must not run the clean filter");
+
+        let listing = git_filter_listing_command(&repo_root);
+        assert!(
+            listing
+                .get_envs()
+                .any(|(key, value)| key == "GIT_CONFIG" && value.is_none()),
+            "filter discovery must drop GIT_CONFIG"
+        );
+        let overrides =
+            git_diff_clean_filter_overrides(&repo_root, GIT_DEADLINE).expect("list repo filters");
+        assert_eq!(
+            overrides,
+            vec![
+                "filter.x.clean=".to_string(),
+                "filter.x.process=".to_string(),
+                "filter.x.required=false".to_string(),
+            ]
+        );
+
+        let mut poisoned = git_filter_listing_command(&repo_root);
+        poisoned.env("GIT_CONFIG", &decoy);
+        let poisoned_out = paneflow_process::run_with_timeout(poisoned, GIT_DEADLINE, STDOUT_CAP)
+            .expect("poisoned git config");
+        assert_eq!(
+            poisoned_out.status.code(),
+            Some(1),
+            "GIT_CONFIG decoy should hide repo filters: {}",
+            String::from_utf8_lossy(&poisoned_out.stderr)
+        );
+        assert!(
+            poisoned_out.stdout.is_empty(),
+            "decoy listing must not name a filter"
+        );
+
+        std::fs::write(repo_root.join("tracked.txt"), "one\ntwo\n").expect("dirty worktree");
+        let mut diff = git_command();
+        diff.current_dir(&repo_root);
+        diff.env("GIT_CONFIG", &decoy);
+        git_subcommand(&mut diff, &["diff", "--", "tracked.txt"]);
+        let diff_out = paneflow_process::run_with_timeout(diff, GIT_DEADLINE, STDOUT_CAP)
+            .expect("control git diff");
+        assert!(
+            diff_out.status.success(),
+            "control diff failed: {}",
+            String::from_utf8_lossy(&diff_out.stderr)
+        );
+        assert!(
+            marker.exists(),
+            "git diff must still run the repo clean filter when GIT_CONFIG points elsewhere"
+        );
+        std::fs::remove_file(&marker).expect("clear marker");
+
+        let cwd = repo_root.to_str().expect("utf-8 temp path");
+        let stats = crate::workspace::GitDiffStats::from_cwd_within(
+            cwd,
+            std::time::Instant::now() + crate::workspace::GIT_STATS_SWEEP_DEADLINE,
+        );
+        assert!(
+            !marker.exists(),
+            "sidebar diff stats ran the clean filter: {}",
+            std::fs::read_to_string(&marker).unwrap_or_default()
+        );
+        assert_eq!(
+            (stats.files_changed, stats.insertions, stats.deletions),
+            (1, 1, 0),
+            "sidebar diff did not report the dirty file: {stats:?}"
+        );
     }
 
     #[test]
