@@ -126,6 +126,10 @@ fn find_real_binary_in_excludes_self_dir() {
     let dir = tempfile::TempDir::new().unwrap();
     let fake = dir.path().join("claude");
     std::fs::File::create(&fake).unwrap();
+    // Executable, so deleting the self-dir exclusion would return this
+    // file instead of `None` (issue #894). A non-executable fixture is
+    // already rejected by the exec check and cannot catch that regression.
+    make_executable(&fake);
 
     // The tempdir appears as both the only PATH entry AND as the self
     // dir. The self-exclusion must skip it and yield `None` - otherwise
@@ -149,7 +153,11 @@ fn find_real_binary_in_walks_past_self_dir_to_find_real_binary() {
 
     // Create a fake `claude` in the shim dir too - this would cause
     // infinite recursion in production if self-exclusion didn't work.
-    std::fs::File::create(shim_dir.path().join("claude")).unwrap();
+    // It is executable so the dir exclusion, not the exec check, is
+    // what skips it (issue #894).
+    let shim_claude = shim_dir.path().join("claude");
+    std::fs::File::create(&shim_claude).unwrap();
+    make_executable(&shim_claude);
     let real_fake = real_dir.path().join("claude");
     std::fs::File::create(&real_fake).unwrap();
     make_executable(&real_fake);
@@ -161,6 +169,36 @@ fn find_real_binary_in_walks_past_self_dir_to_find_real_binary() {
         None,
     );
     assert_eq!(found.as_deref(), Some(real_fake.as_path()));
+}
+
+/// Issue #894: mode `0o601` has an execute bit, but not for this user.
+/// The walk must skip it and return the later executable binary.
+#[test]
+fn find_real_binary_in_skips_wrong_class_execute_bit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let early = tempfile::TempDir::new().unwrap();
+    let late = tempfile::TempDir::new().unwrap();
+    let wrong = early.path().join("claude");
+    std::fs::File::create(&wrong).unwrap();
+    let mut perms = std::fs::metadata(&wrong).unwrap().permissions();
+    perms.set_mode(0o601);
+    std::fs::set_permissions(&wrong, perms).unwrap();
+    let real = late.path().join("claude");
+    std::fs::File::create(&real).unwrap();
+    make_executable(&real);
+
+    let found = find_real_binary_in(
+        "claude",
+        vec![early.path().to_owned(), late.path().to_owned()],
+        None,
+        None,
+    );
+    assert_eq!(
+        found.as_deref(),
+        Some(real.as_path()),
+        "a wrong-class execute bit must not shadow the real binary"
+    );
 }
 
 /// Issue #871: two PaneFlow bin dirs on `$PATH` (each an executable

@@ -123,21 +123,14 @@ where
             if !candidate.is_file() {
                 continue;
             }
-            // US-037: on Unix, require the executable bit too. A non-executable
-            // homonym (e.g. a `0644` data file named like the tool) earlier in
-            // `$PATH` would otherwise be returned, and the subsequent spawn
-            // fails `EACCES`/`ENOEXEC` *without* continuing the walk (unlike
-            // `execvp`, which skips it). Skip it here so the real binary later
-            // in `$PATH` is found.
+            // US-037: this process must be able to exec the candidate.
+            // `access(X_OK)` (issue #894), not a `mode & 0o111` bitmask: a
+            // file owned by this user with mode `0o601` has an execute bit
+            // for other users and still returns `EACCES` for us. A bitmask
+            // would return it and never reach the real binary later on PATH.
             #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let executable = std::fs::metadata(&candidate)
-                    .map(|m| m.permissions().mode() & 0o111 != 0)
-                    .unwrap_or(false);
-                if !executable {
-                    continue;
-                }
+            if !crate::hooks::is_executable(&candidate) {
+                continue;
             }
             if is_same_file_as_shim(&self_identity, &candidate) {
                 // US-017: hardlink-loop guard. The shim has no `log`
