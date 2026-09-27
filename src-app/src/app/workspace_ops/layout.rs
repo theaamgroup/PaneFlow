@@ -1,14 +1,14 @@
-//! Layout presets, zoom, and split-equalize.
+//! Layout presets, zoom, split-equalize, and keyboard resize.
 //!
 //! Part of the US-023 workspace_ops decomposition.
 
 use gpui::{Context, Entity, Focusable, Window};
 
-use crate::layout::{LayoutTree, SplitDirection};
+use crate::layout::{KeyboardResize, LayoutTree, SplitDirection};
 use crate::pane::Pane;
 use crate::{
     LayoutEvenHorizontal, LayoutEvenVertical, LayoutMainVertical, LayoutTiled, PaneFlowApp,
-    SplitEqualize, ToggleZoom,
+    PaneGrowHeight, PaneGrowWidth, PaneShrinkHeight, PaneShrinkWidth, SplitEqualize, ToggleZoom,
 };
 
 impl PaneFlowApp {
@@ -163,5 +163,56 @@ impl PaneFlowApp {
             self.save_session(cx);
             cx.notify();
         }
+    }
+
+    fn resize_focused_from_keyboard(
+        &mut self,
+        resize: KeyboardResize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.nav_root() else {
+            return;
+        };
+        if root.resize_focused(resize, window, cx) {
+            self.save_session(cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn handle_pane_grow_width(
+        &mut self,
+        _: &PaneGrowWidth,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resize_focused_from_keyboard(KeyboardResize::GrowWidth, window, cx);
+    }
+
+    pub(crate) fn handle_pane_shrink_width(
+        &mut self,
+        _: &PaneShrinkWidth,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resize_focused_from_keyboard(KeyboardResize::ShrinkWidth, window, cx);
+    }
+
+    pub(crate) fn handle_pane_grow_height(
+        &mut self,
+        _: &PaneGrowHeight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resize_focused_from_keyboard(KeyboardResize::GrowHeight, window, cx);
+    }
+
+    pub(crate) fn handle_pane_shrink_height(
+        &mut self,
+        _: &PaneShrinkHeight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resize_focused_from_keyboard(KeyboardResize::ShrinkHeight, window, cx);
     }
 }

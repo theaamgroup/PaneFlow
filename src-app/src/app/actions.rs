@@ -50,6 +50,13 @@ actions!(
         LayoutMainVertical,
         LayoutTiled,
         SplitEqualize,
+        // Issue #917: keyboard resize of the focused pane. Each step moves the
+        // nearest split on that axis and will not shrink either neighbor
+        // below MIN_PANE_SIZE.
+        PaneGrowWidth,
+        PaneShrinkWidth,
+        PaneGrowHeight,
+        PaneShrinkHeight,
         ToggleSearch,
         ToggleSearchRegex,
         UndoClosePane,
@@ -147,7 +154,7 @@ mod tests {
     #[test]
     fn claude_md_action_count_matches_the_actions_macro() {
         let declared = actions_macro_entries(include_str!("actions.rs"));
-        assert_eq!(declared, 74, "review action surface is pinned");
+        assert_eq!(declared, 78, "review action surface is pinned");
 
         let claude_md = include_str!("../../../CLAUDE.md");
         for phrase in ["GPUI action types", "actions total"] {
