@@ -94,6 +94,27 @@ fn waiting_pane_in_workspace(
     None
 }
 
+/// Focus `pane` in `ws`'s active tab: the body of
+/// [`WorkspaceFocusTarget::Pane`], which Pane Overview selection (through
+/// `teleport_to_surface`) and Jump Next Waiting both reach after making the
+/// owning tab active.
+///
+/// Issue #1052: both callers resolve panes through the zoom-saved tree too,
+/// so the target can be a pane parked in `saved_layout` while another pane
+/// is zoomed. Focus can only land on a rendered pane, so the tab leaves zoom
+/// first (`Tab::reveal_pane`). A free function, not a `PaneFlowApp` method,
+/// because `PaneFlowApp` cannot be constructed in a test.
+fn focus_pane_in_active_tab(
+    ws: &mut Workspace,
+    pane: &gpui::Entity<crate::pane::Pane>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    ws.active_tab_mut().reveal_pane(pane, cx);
+    pane.update(cx, |_p, cx| cx.notify());
+    pane.read(cx).focus_handle(cx).focus(window, cx);
+}
+
 /// Resolve a user-visible workspace position to its storage index.
 fn workspace_at_display_position(display_order: &[usize], position: usize) -> Option<usize> {
     display_order.get(position).copied()
@@ -893,7 +914,7 @@ impl PaneFlowApp {
                         // Focus can only land on a rendered pane (the
                         // invariant `Workspace::focus_first` documents), so the
                         // owning tab has to become visible BEFORE the focus
-                        // call. Same recipe as `focus_surface_by_id`.
+                        // call. Same recipe as `teleport_to_surface`.
                         self.workspaces[idx].set_active_tab(tab_idx);
                         pane.update(cx, |_p, cx| cx.notify());
                         pane.read(cx).focus_handle(cx).focus(window, cx);
@@ -907,8 +928,7 @@ impl PaneFlowApp {
                 }
             }
             WorkspaceFocusTarget::Pane { pane } => {
-                pane.update(cx, |_p, cx| cx.notify());
-                pane.read(cx).focus_handle(cx).focus(window, cx);
+                focus_pane_in_active_tab(&mut self.workspaces[idx], &pane, window, cx);
             }
         }
 
@@ -2285,6 +2305,53 @@ fn editor_search_paths() -> Vec<std::path::PathBuf> {
 mod tests {
     use super::*;
     use crate::source_probe::source_slice;
+
+    /// Issue #1052: the zoom reveal lives in `focus_pane_in_active_tab`, which
+    /// the GPUI regressions in `focus.rs` drive. `PaneFlowApp` cannot be built
+    /// in a test, so the wiring from the explicit-pane activation arm to that
+    /// helper, and from both UI callers to that arm, is pinned on the source.
+    #[test]
+    fn explicit_pane_activation_reveals_through_the_shared_helper() {
+        // Slice only the production half of each file: this test's own
+        // literals sit in the trailing test module and must never be the
+        // match. The cut marker is composed so it cannot match itself either.
+        let marker = format!("\n#[cfg(test)]\n{} tests {{", "mod");
+        let production = |src: &'static str| -> &'static str {
+            let cut = src.rfind(&marker).expect("trailing test module");
+            &src[..cut]
+        };
+        let src = production(include_str!("mod.rs"));
+        let arm = source_slice(
+            src,
+            "WorkspaceFocusTarget::Pane { pane } => {",
+            "\n            }",
+        );
+        assert!(
+            arm.contains("focus_pane_in_active_tab(&mut self.workspaces[idx], &pane, window, cx)"),
+            "the explicit-pane arm focuses through the revealing helper: {arm}"
+        );
+        let helper = source_slice(src, "fn focus_pane_in_active_tab(", "\n}\n");
+        let reveal = helper
+            .find("reveal_pane(pane, cx)")
+            .expect("the helper reveals a zoom-hidden pane");
+        let focus = helper.find(".focus(window, cx)").expect("focus call");
+        assert!(reveal < focus, "reveal before focus: {helper}");
+
+        let focus_src = production(include_str!("focus.rs"));
+        for (start, end) in [
+            (
+                "pub(crate) fn jump_next_session_where(",
+                "pub(crate) fn teleport_to_surface(",
+            ),
+            ("pub(crate) fn teleport_to_surface(", "fn next_in_cycle("),
+        ] {
+            let body = source_slice(focus_src, start, end);
+            assert!(
+                body.contains("WorkspaceFocusTarget::Pane { pane }"),
+                "{start} activates through the explicit-pane arm: {body}"
+            );
+        }
+    }
 
     #[test]
     fn undo_close_pane_refuses_split_when_zoomed_and_keeps_record() {
