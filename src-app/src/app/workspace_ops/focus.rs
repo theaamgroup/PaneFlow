@@ -222,7 +222,12 @@ mod tests {
 
 type SessionPane = (usize, usize, gpui::Entity<crate::pane::Pane>, u64);
 
-fn matching_session_panes(
+/// Every pane whose agent session's presented state matches, as
+/// `(workspace index, tab index, pane, surface id)` in (workspace, tab,
+/// layout) order. Walks `Tab::collect_panes`, so a pane parked in a zoomed
+/// tab's `saved_layout` is included after the rendered ones. Shared with the
+/// sidebar's `WaitingElseFirst` lookup (issue #1072) so the two cannot drift.
+pub(super) fn matching_session_panes(
     workspaces: &[crate::workspace::Workspace],
     state_matches: impl Fn(&crate::ai_types::AgentState) -> bool,
     cx: &gpui::App,
