@@ -118,9 +118,15 @@ VALID="$TMP/valid.dmg"
 create_udzo_dmg "$STAGE" "PaneFlowRetryTest" "$VALID"
 [ -s "$VALID" ] || fail "tiny UDZO image was not created"
 
+# The real hdiutil must accept the tiny image. Its retry may absorb a
+# transient runner-side failure (#1070), so the count is bounded, not exact;
+# the first-try contract is pinned below with a stubbed verify.
 VERIFY_CALLS=0
-verify_dmg "$VALID" >/dev/null 2>&1 || fail "valid tiny DMG failed hdiutil verify"
-[ "$VERIFY_CALLS" -eq 1 ] || fail "valid verify should be one call, got $VERIFY_CALLS"
+run_logged "$TMP/valid-real.out" hdiutil_verify_with_retry "$VALID"
+[ "$rc" -eq 0 ] || fail "valid tiny DMG failed hdiutil verify: $(cat "$TMP/valid-real.out")"
+[ "$VERIFY_CALLS" -ge 1 ] && [ "$VERIFY_CALLS" -le "$HDIUTIL_RETRY_ATTEMPTS" ] \
+    || fail "valid verify: expected 1..$HDIUTIL_RETRY_ATTEMPTS calls, got $VERIFY_CALLS"
+pass "valid image verifies against the real hdiutil (calls=$VERIFY_CALLS)"
 
 TRUNC="$TMP/truncated.dmg"
 head -c 64 "$VALID" > "$TRUNC"
@@ -133,13 +139,25 @@ grep -q "attempt ${HDIUTIL_RETRY_ATTEMPTS}/${HDIUTIL_RETRY_ATTEMPTS}" "$TMP/trun
     || fail "truncated verify did not log exhausting retries"
 pass "truncated image verify exhausts retries and fails (calls=$VERIFY_CALLS)"
 
-# --- valid image: first-try success, no retry -----------------------------
+# --- verify: first-try success, no retry -----------------------------------
+# Exact counts only where every verify is stubbed (#1070): the loop's
+# contract, not the runner's hdiutil, decides the number of calls.
+VERIFIED=""
+hdiutil() {
+    if [ "${1:-}" = "verify" ]; then
+        VERIFY_CALLS=$((VERIFY_CALLS + 1))
+        VERIFIED="$VERIFIED$2 "
+        return 0
+    fi
+    command hdiutil "$@"
+}
 VERIFY_CALLS=0
 run_logged "$TMP/valid.out" hdiutil_verify_with_retry "$VALID"
 [ "$rc" -eq 0 ] || fail "valid image verify failed: $(cat "$TMP/valid.out")"
-[ "$VERIFY_CALLS" -eq 1 ] || fail "valid image should verify once, got $VERIFY_CALLS"
+[ "$VERIFY_CALLS" -eq 1 ] || fail "a verify that succeeds should run once, got $VERIFY_CALLS"
+[ "$VERIFIED" = "$VALID " ] || fail "verify did not run on the image: '$VERIFIED'"
 grep -q "attempt " "$TMP/valid.out" && fail "valid image should not log retries: $(cat "$TMP/valid.out")"
-pass "valid image verifies on the first attempt"
+pass "verify stops after a first-attempt success"
 
 # --- verify: first call fails (EAGAIN), second succeeds -------------------
 VERIFY_CALLS=0
@@ -150,6 +168,7 @@ hdiutil() {
             echo "hdiutil: verify failed - Resource temporarily unavailable" >&2
             return 1
         fi
+        return 0
     fi
     command hdiutil "$@"
 }
@@ -169,13 +188,45 @@ hdiutil() {
 }
 
 # --- create+verify pair, happy path (no signed .app) ----------------------
+# Real hdiutil end to end. As above, the retry may absorb a transient
+# runner-side failure (#1070): bounded count here, exact count stubbed below.
 PAIR_DEST="$TMP/pair-valid.dmg"
 VERIFY_CALLS=0
 run_logged "$TMP/pair-ok.out" create_and_verify_dmg "$STAGE" "PaneFlowRetryTest" "$PAIR_DEST"
 [ "$rc" -eq 0 ] || fail "create+verify of a tiny folder failed: $(cat "$TMP/pair-ok.out")"
 [ -s "$PAIR_DEST" ] || fail "create+verify did not leave a verified image"
+[ "$VERIFY_CALLS" -ge 1 ] && [ "$VERIFY_CALLS" -le "$HDIUTIL_RETRY_ATTEMPTS" ] \
+    || fail "create+verify happy path: expected 1..$HDIUTIL_RETRY_ATTEMPTS verifies, got $VERIFY_CALLS"
+pass "create+verify pair succeeds on a tiny unsigned folder (verify calls=$VERIFY_CALLS)"
+
+# --- create+verify pair: one create, one verify when both succeed ---------
+# Every hdiutil call stubbed, so the exact counts are deterministic.
+PAIR_STUB="$TMP/pair-stub.dmg"
+CREATE_CALLS=0
+VERIFY_CALLS=0
+VERIFIED=""
+hdiutil() {
+    case "${1:-}" in
+        create)
+            CREATE_CALLS=$((CREATE_CALLS + 1))
+            printf 'fake udzo\n' > "${!#}"
+            ;;
+        verify)
+            VERIFY_CALLS=$((VERIFY_CALLS + 1))
+            VERIFIED="$VERIFIED$2 "
+            ;;
+    esac
+    return 0
+}
+run_logged "$TMP/pair-stub.out" create_and_verify_dmg "$STAGE" "PaneFlowRetryTest" "$PAIR_STUB"
+[ "$rc" -eq 0 ] || fail "stubbed create+verify failed: $(cat "$TMP/pair-stub.out")"
+[ -s "$PAIR_STUB" ] || fail "stubbed create+verify did not leave the image"
+[ "$CREATE_CALLS" -eq 1 ] || fail "create+verify happy path should create once, got $CREATE_CALLS"
 [ "$VERIFY_CALLS" -eq 1 ] || fail "create+verify happy path should verify once, got $VERIFY_CALLS"
-pass "create+verify pair succeeds on a tiny unsigned folder"
+[ "$VERIFIED" = "$PAIR_STUB " ] || fail "create+verify did not verify the created image: '$VERIFIED'"
+grep -q "attempt " "$TMP/pair-stub.out" \
+    && fail "create+verify happy path should not log retries: $(cat "$TMP/pair-stub.out")"
+pass "create+verify pair creates and verifies once when both succeed"
 
 # --- create+verify pair: first verify fails (EAGAIN), second succeeds -----
 # Production uses create_and_verify_dmg, not the standalone verify helper.
@@ -184,18 +235,23 @@ pass "create+verify pair succeeds on a tiny unsigned folder"
 PAIR_RETRY="$TMP/pair-retry.dmg"
 CREATE_CALLS=0
 VERIFY_CALLS=0
+# Every hdiutil call is stubbed so the exact counts cannot pick up a real
+# runner-side failure on the retry (#1070).
 hdiutil() {
-    if [ "${1:-}" = "create" ]; then
-        CREATE_CALLS=$((CREATE_CALLS + 1))
-    fi
-    if [ "${1:-}" = "verify" ]; then
-        VERIFY_CALLS=$((VERIFY_CALLS + 1))
-        if [ "$VERIFY_CALLS" -eq 1 ]; then
-            echo "hdiutil: verify failed - Resource temporarily unavailable" >&2
-            return 1
-        fi
-    fi
-    command hdiutil "$@"
+    case "${1:-}" in
+        create)
+            CREATE_CALLS=$((CREATE_CALLS + 1))
+            printf 'fake udzo\n' > "${!#}"
+            ;;
+        verify)
+            VERIFY_CALLS=$((VERIFY_CALLS + 1))
+            if [ "$VERIFY_CALLS" -eq 1 ]; then
+                echo "hdiutil: verify failed - Resource temporarily unavailable" >&2
+                return 1
+            fi
+            ;;
+    esac
+    return 0
 }
 run_logged "$TMP/pair-retry.out" create_and_verify_dmg "$STAGE" "PaneFlowRetryTest" "$PAIR_RETRY"
 [ "$rc" -eq 0 ] || fail "create+verify did not recover after a first-attempt EAGAIN: $(cat "$TMP/pair-retry.out")"
