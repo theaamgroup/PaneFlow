@@ -467,19 +467,171 @@ fn hermes_guard_appends_block_and_strips_on_drop() {
 #[test]
 fn hermes_guard_refuses_when_user_has_hooks_key() {
     // A duplicate top-level `hooks:` key would silently override the
-    // user's own hooks under PyYAML-family last-wins semantics.
+    // user's own hooks under PyYAML-family last-wins semantics. Issue #1056:
+    // every YAML spelling of that key counts, not only a bare `hooks:`.
+    let fixtures = [
+        "hooks:\n  pre_tool_call:\n    - command: \"~/mine.sh\"\n",
+        "\"hooks\":\n  pre_tool_call:\n    - command: \"~/mine.sh\"\n",
+        "'hooks':\n  pre_tool_call:\n    - command: \"~/mine.sh\"\n",
+        "hooks :\n  pre_tool_call:\n    - command: \"~/mine.sh\"\n",
+        "model: x\n\"hooks\" : {pre_tool_call: []}\n",
+        // Pinned on purpose: an empty `hooks: {}` still refuses. Whether
+        // PaneFlow may fill an empty user mapping is a separate policy
+        // follow-up, not part of #1056.
+        "hooks: {}\n",
+        "hooks: {} # mine\n",
+        "hooks: # mine\n  pre_tool_call: []\n",
+        "\"\\u0068ooks\": {}\n",
+        "'it''s': 1\n'hooks' : {}\n",
+        "? hooks\n: {pre_tool_call: []}\n",
+        "---\nhooks:\n  pre_tool_call: []\n",
+        "--- # first document\nmodel: x\nhooks: {}\n",
+        "&mine hooks: {}\n",
+        "!!str hooks: {}\n",
+        "model: x\r\nhooks :\r\n  pre_tool_call: []\r\n",
+        // An indented root cannot take the block, but it does have hooks.
+        "  hooks:\n    pre_tool_call: []\n",
+    ];
+    for user_yaml in fixtures {
+        assert_hermes_install_refused(user_yaml, "user Hermes config already has hooks");
+    }
+}
+
+#[test]
+fn hermes_guard_refuses_config_it_cannot_safely_extend() {
+    // The appended block is a column-0 `hooks:` mapping, so it only extends a
+    // single document whose root is a column-0 block mapping. Anything else,
+    // or anything the line scan cannot read, refuses without writing.
+    let fixtures = [
+        // Line breaks PyYAML honors but `str::lines` does not.
+        "model: x\rhooks: {pre_tool_call: []}\n",
+        "model: x\u{85}hooks: {pre_tool_call: []}\n",
+        "model: x\u{2028}hooks: {pre_tool_call: []}\n",
+        "model: x\u{2029}hooks: {pre_tool_call: []}\n",
+        // Explicit keys whose key sits on the next line, behind properties.
+        "? &k # c\n  hooks\n: {pre_tool_call: []}\n",
+        "? !!str &a  #c\n  \"hooks\"\n: {pre_tool_call: []}\n",
+        // Roots the appended block cannot extend.
+        "{model: x, hooks: {pre_tool_call: []}}\n",
+        "{\"\\x68ooks\": {pre_tool_call: []}}\n",
+        "{model: x}\n",
+        "  model: x\n",
+        "- model: x\n",
+        "just a scalar\n",
+        "--- |\n  hooks: text\n",
+        "model: x\n---\nother: y\n",
+        "model: x\n...\n",
+        // A merge key can pull `hooks` in from an anchor.
+        "base: &base\n  hooks: {}\n<<: *base\n",
+        // Invalid or unreadable input: `hooks:{}` is a plain scalar, not a
+        // key; the alias names no anchor; the key spans two lines.
+        "hooks:{}\n",
+        "*key : {}\n",
+        "\"multi\n  line\": {}\n",
+    ];
+    for user_yaml in fixtures {
+        assert_hermes_install_refused(
+            user_yaml,
+            "user Hermes config is not a single top-level block mapping",
+        );
+    }
+}
+
+fn assert_hermes_install_refused(user_yaml: &str, message: &str) {
     let td = tempfile::TempDir::new().unwrap();
     let dir = td.path().join(".hermes");
     std::fs::create_dir_all(&dir).unwrap();
-    let user_yaml = "hooks:\n  pre_tool_call:\n    - command: \"~/mine.sh\"\n";
     std::fs::write(dir.join("config.yaml"), user_yaml).unwrap();
 
-    assert!(HermesHookConfigGuard::install_at(&dir).is_err());
+    let Err(err) = HermesHookConfigGuard::install_at(&dir) else {
+        panic!("must refuse:\n{user_yaml:?}");
+    };
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{user_yaml:?}");
+    assert!(
+        err.to_string().starts_with(message),
+        "{user_yaml:?} refused with {err}"
+    );
     assert_eq!(
         std::fs::read_to_string(dir.join("config.yaml")).unwrap(),
         user_yaml,
         "refusal must leave the file untouched"
     );
+}
+
+#[test]
+fn hermes_guard_installs_when_hooks_is_not_a_top_level_key() {
+    // `hooks` nested under another mapping, inside a block scalar or a
+    // comment, or as a prefix of a different key is not a duplicate.
+    let fixtures = [
+        "model: x\nprofile:\n  hooks:\n    pre_tool_call: []\n",
+        "notes: |\n  hooks:\n    pre_tool_call: []\n",
+        "notes: >-\n  hooks: folded text\n",
+        "# hooks:\nmodel: x\n",
+        "model: x # hooks: here\n",
+        "hooks_dir: /tmp/hooks\n",
+        "\"hooks_dir\": /tmp/hooks\n",
+        "model: 'hooks: quoted value'\n",
+        "'hooks''': x\n",
+        "",
+        "# comments only\n",
+        "---\nmodel: x\n",
+        "%YAML 1.1\n--- # the only document\nmodel: x\n",
+        "list:\n- a\n- b\nmodel: x\n",
+    ];
+    for user_yaml in fixtures {
+        let td = tempfile::TempDir::new().unwrap();
+        let dir = td.path().join(".hermes");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.yaml"), user_yaml).unwrap();
+
+        let guard = HermesHookConfigGuard::install_at(&dir)
+            .unwrap_or_else(|err| panic!("must install over:\n{user_yaml}\n{err}"));
+        let content = std::fs::read_to_string(dir.join("config.yaml")).unwrap();
+        assert!(content.starts_with(user_yaml) && content.contains(HERMES_BLOCK_BEGIN));
+        drop(guard);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.yaml")).unwrap(),
+            user_yaml
+        );
+    }
+}
+
+#[test]
+fn concurrent_hermes_guards_keep_approvals_until_last_drop() {
+    // Issue #1057: both sessions share one set of managed approvals, so the
+    // first exit must not revoke the consent the second session still uses.
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".hermes");
+    let config = dir.join("config.yaml");
+    let allowlist = dir.join("shell-hooks-allowlist.json");
+    let approvals = || -> Vec<serde_json::Value> {
+        let text = std::fs::read_to_string(&allowlist).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&text).unwrap();
+        root["approvals"].as_array().unwrap().clone()
+    };
+
+    let first = HermesHookConfigGuard::install_at(&dir).unwrap();
+    let managed = approvals();
+    assert_eq!(managed.len(), 5, "every managed hook is approved");
+    let second = HermesHookConfigGuard::install_at(&dir).unwrap();
+    assert_eq!(approvals(), managed, "a second grant must not duplicate");
+
+    drop(first);
+    assert_eq!(
+        approvals(),
+        managed,
+        "the live session keeps every managed approval"
+    );
+    assert!(std::fs::read_to_string(&config)
+        .unwrap()
+        .contains(HERMES_BLOCK_BEGIN));
+
+    drop(second);
+    assert!(
+        !allowlist.exists(),
+        "the last session removes the allowlist the first one created"
+    );
+    assert!(!config.exists());
 }
 
 #[test]
@@ -780,6 +932,126 @@ fn enable_codex_feature_flag_recognizes_equivalent_features_headers() {
             without_hooks_content,
             format!("{header}\nother_flag = false\n"),
             "{header} without hooks must be untouched"
+        );
+    }
+}
+
+#[test]
+fn enable_codex_feature_flag_keeps_inline_and_dotted_enabled_features() {
+    // Issue #1053: `features` spelled as an inline table or as dotted keys is
+    // already the features table. Appending `[features]` would declare it a
+    // second time and make the whole Codex config invalid.
+    let fixtures = [
+        "model = \"gpt-5\"\nfeatures = { hooks = true }\n\n[profiles.default]\nmodel = \"o3\"\n",
+        "model = \"gpt-5\"\nfeatures.hooks = true\n\n[profiles.default]\nmodel = \"o3\"\n",
+        "features = { other = 1, \"hooks\" = true } # inline\n",
+        "\"features\" . hooks = true # dotted, quoted, spaced\nfeatures.other = false\n",
+        "features.codex_hooks = true\n",
+        // A multi-line string that looks like a table header must not end
+        // the root table before the real dotted key.
+        "notes = \"\"\"\n[other]\n\"\"\"\nfeatures.hooks = true\n",
+    ];
+    for original in fixtures {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("config.toml");
+        std::fs::write(&path, original).unwrap();
+
+        assert!(
+            !enable_codex_feature_flag(&path).unwrap(),
+            "an enabled hooks feature must be a no-op:\n{original}"
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, original, "bytes must be unchanged");
+        assert!(
+            !content.contains("[features]") && !content.contains(CODEX_TOML_MARKER),
+            "must not declare features a second time:\n{content}"
+        );
+        let table: toml::Table = toml::from_str(&content).unwrap();
+        assert!(table["features"].is_table(), "{content}");
+    }
+}
+
+#[test]
+fn enable_codex_feature_flag_refuses_unsupported_inline_and_dotted_features() {
+    // Issue #1053: an existing `features` definition that does not enable
+    // hooks cannot be extended by appending a table, so refuse untouched.
+    let fixtures = [
+        "features = { other = true }\n",
+        "features = {}\n",
+        "features = { hooks = false }\n",
+        "features.hooks = false\n",
+        "features.other = true\n",
+        "'features'.other = true\n",
+        "[[features]]\nhooks = true\n",
+        // A `[features.hooks]` table already defines the flag itself.
+        "[features.hooks]\nx = 1\n",
+        "[[features.hooks]]\nx = 1\n",
+        "[features.hooks.deep]\nx = 1\n",
+        "[features.codex_hooks]\nx = 1\n",
+    ];
+    for original in fixtures {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("config.toml");
+        std::fs::write(&path, original).unwrap();
+
+        assert!(
+            enable_codex_feature_flag(&path).is_err(),
+            "an existing features definition without hooks must refuse:\n{original}"
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, original, "a refusal must not write");
+        assert!(toml::from_str::<toml::Table>(&content).is_ok(), "{content}");
+    }
+}
+
+#[test]
+fn enable_codex_feature_flag_refuses_config_it_cannot_read() {
+    // Content the scanner cannot follow is not valid TOML either; appending
+    // to it cannot help, so refuse and leave the bytes alone.
+    for original in ["features = [1, 2\n", "model = \"gpt-5\n"] {
+        assert!(toml::from_str::<toml::Table>(original).is_err());
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("config.toml");
+        std::fs::write(&path, original).unwrap();
+
+        assert!(
+            enable_codex_feature_flag(&path).is_err(),
+            "unreadable config must refuse:\n{original}"
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, original, "a refusal must not write");
+    }
+}
+
+#[test]
+fn enable_codex_feature_flag_ignores_features_keys_that_are_not_root_features() {
+    // `features` nested under another table, or inside a string value, is
+    // not the root features table, so the install still appends one.
+    let fixtures = [
+        "[profiles.default]\nfeatures.hooks = true\n",
+        "[profiles.default]\nfeatures = { hooks = true }\n",
+        "notes = \"features.hooks = true\"\n",
+        "notes = '''\nfeatures = { hooks = true }\n'''\n",
+    ];
+    for original in fixtures {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("config.toml");
+        std::fs::write(&path, original).unwrap();
+
+        assert!(
+            enable_codex_feature_flag(&path).unwrap(),
+            "a non-root features key must not skip the install:\n{original}"
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.starts_with(original) && content.ends_with("[features]\nhooks = true\n"),
+            "the managed block must be appended after the user's bytes:\n{content}"
+        );
+        let table: toml::Table = toml::from_str(&content).unwrap();
+        assert_eq!(
+            table["features"]["hooks"].as_bool(),
+            Some(true),
+            "{content}"
         );
     }
 }
