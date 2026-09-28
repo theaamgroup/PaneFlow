@@ -11,7 +11,7 @@ use paneflow_agent_config::{
 use std::env;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use top_level_keys::yaml_may_have_top_level_hooks;
+use top_level_keys::{top_level_hooks, TopLevelHooks};
 
 pub(crate) const HERMES_BLOCK_BEGIN: &str =
     "# >>> paneflow managed hooks (auto-installed; removed on session end) >>>";
@@ -209,11 +209,21 @@ impl HermesHookConfigGuard {
             let created = existing.is_none();
             let content = existing.unwrap_or_default();
             let mut base = strip_hermes_managed_block(&content).unwrap_or(content);
-            if yaml_may_have_top_level_hooks(&base) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "user Hermes config already has hooks",
-                ));
+            match top_level_hooks(&base) {
+                TopLevelHooks::Absent => {}
+                TopLevelHooks::Present => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "user Hermes config already has hooks",
+                    ));
+                }
+                TopLevelHooks::Unsure => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "user Hermes config is not a single top-level block mapping \
+                         PaneFlow can safely add hooks to",
+                    ));
+                }
             }
             if !base.is_empty() && !base.ends_with('\n') {
                 base.push('\n');

@@ -2,17 +2,34 @@
 //! parser (the shim is size-capped).
 //!
 //! YAML can spell that key as `hooks:`, `"hooks":`, `'hooks':`, `hooks :`,
-//! `? hooks`, with an anchor or tag in front, or inside a flow mapping root,
-//! and any of them turns an appended `hooks:` block into a duplicate key
-//! that silently overrides the user's hooks (#1056). The scan is line based
-//! and conservative: whatever it cannot rule out counts as a match, so the
-//! caller refuses rather than appends.
+//! `? hooks`, or with an anchor or tag in front, and any of them turns an
+//! appended `hooks:` block into a duplicate key that silently overrides the
+//! user's hooks (#1056). The scan is line based and conservative: PaneFlow
+//! only appends to a single document whose root is a column-0 block
+//! mapping, and whatever the scan cannot rule out is `Unsure`.
 
-/// True when `content` defines, or may define, a top-level `hooks` key.
-pub(super) fn yaml_may_have_top_level_hooks(content: &str) -> bool {
+/// What a Hermes config says about a top-level `hooks` key.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum TopLevelHooks {
+    /// An empty file, comments only, or a column-0 block mapping without
+    /// `hooks`: appending the managed block is safe.
+    Absent,
+    /// The root mapping already has a `hooks` key.
+    Present,
+    /// The scan cannot tell, or appending a column-0 `hooks:` block would
+    /// not extend the root mapping: a flow, sequence, scalar, or indented
+    /// root, several documents, line breaks other than `\n`/`\r\n`, alias
+    /// or merge keys, and lines that are not keys.
+    Unsure,
+}
+
+pub(super) fn top_level_hooks(content: &str) -> TopLevelHooks {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
-    let mut root_indent: Option<usize> = None;
-    let mut flow_root = false;
+    if has_other_line_breaks(content) {
+        return TopLevelHooks::Unsure;
+    }
+    let mut root_seen = false;
+    let mut unsure = false;
     for line in content.lines() {
         let line = line.strip_suffix('\r').unwrap_or(line);
         let body = line.trim_start_matches(' ');
@@ -21,57 +38,62 @@ pub(super) fn yaml_may_have_top_level_hooks(content: &str) -> bool {
             if body.starts_with('%') {
                 continue;
             }
-            if let Some(rest) = document_marker(body) {
-                root_indent = None;
-                flow_root = false;
+            if let Some((marker, rest)) = document_marker(body) {
+                // Only a leading `---` with nothing after it keeps a single
+                // document whose root the appended block can extend.
                 let node = strip_properties(rest.trim_start());
-                if starts_flow(node) {
-                    flow_root = true;
-                }
-                if node_may_be_hooks(node) {
-                    return true;
-                }
+                let root_on_marker = !(node.is_empty() || node.starts_with('#'));
+                unsure |= root_seen || marker == "..." || root_on_marker;
+                // A root that starts on the marker line owns the lines below.
+                root_seen |= root_on_marker;
                 continue;
             }
-        }
-        if flow_root {
-            // Keys of a flow mapping root sit at any indentation.
-            if line.contains("hooks") {
-                return true;
-            }
-            continue;
         }
         let node = strip_properties(body.trim_start());
         if node.is_empty() || node.starts_with('#') {
             continue;
         }
-        match root_indent {
-            None => {
-                root_indent = Some(indent);
-                flow_root = starts_flow(node);
+        let kind = classify(node);
+        if !root_seen {
+            root_seen = true;
+            if indent != 0 || !matches!(kind, Line::Key(_)) {
+                // A flow, sequence, scalar, or indented root.
+                unsure = true;
             }
-            // Deeper lines belong to a nested node: a child mapping, a
-            // block scalar, or the continuation of a value.
-            Some(root) if indent > root => continue,
-            Some(_) => {}
+        } else if indent > 0 {
+            // A nested node: a child mapping, a block scalar, or the
+            // continuation of a value.
+            continue;
         }
-        if node_may_be_hooks(node) {
-            return true;
+        match kind {
+            Line::Key(TopLevelHooks::Present) => return TopLevelHooks::Present,
+            Line::Key(TopLevelHooks::Unsure) | Line::Other => unsure = true,
+            Line::Key(TopLevelHooks::Absent) | Line::Entry => {}
         }
     }
-    false
+    if unsure {
+        TopLevelHooks::Unsure
+    } else {
+        TopLevelHooks::Absent
+    }
 }
 
-/// `---` or `...` followed by nothing or whitespace; returns the rest.
-fn document_marker(line: &str) -> Option<&str> {
-    let rest = line
-        .strip_prefix("---")
-        .or_else(|| line.strip_prefix("..."))?;
-    (rest.is_empty() || rest.starts_with([' ', '\t'])).then_some(rest)
+/// PyYAML also breaks lines at a lone `\r`, U+0085, U+2028, and U+2029,
+/// which `str::lines` does not.
+fn has_other_line_breaks(content: &str) -> bool {
+    content.contains(['\u{85}', '\u{2028}', '\u{2029}'])
+        || content
+            .match_indices('\r')
+            .any(|(index, _)| content.as_bytes().get(index + 1) != Some(&b'\n'))
 }
 
-fn starts_flow(node: &str) -> bool {
-    node.starts_with(['{', '['])
+/// `---` or `...` followed by nothing or whitespace: the marker and the rest.
+fn document_marker(line: &str) -> Option<(&str, &str)> {
+    let marker = line
+        .get(..3)
+        .filter(|marker| matches!(*marker, "---" | "..."))?;
+    let rest = &line[3..];
+    (rest.is_empty() || rest.starts_with([' ', '\t'])).then_some((marker, rest))
 }
 
 /// Drops leading `&anchor` and `!tag` node properties.
@@ -83,50 +105,69 @@ fn strip_properties(mut node: &str) -> &str {
     node
 }
 
-/// Whether one line, starting at a top-level node, may be a `hooks` key.
-fn node_may_be_hooks(node: &str) -> bool {
+/// One line at the root's indentation.
+enum Line {
+    /// A mapping key, and whether it is `hooks`.
+    Key(TopLevelHooks),
+    /// A `- ` sequence entry or the `: ` value of an explicit key.
+    Entry,
+    /// Anything else: a scalar, a flow collection, or a continuation.
+    Other,
+}
+
+fn classify(node: &str) -> Line {
     let indicator_then_space = |indicator: char| {
         node.strip_prefix(indicator)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t']))
     };
-    if node.is_empty() || node.starts_with('#') {
-        return false;
-    }
     if indicator_then_space('?') {
-        return explicit_key_may_be_hooks(node[1..].trim_start());
+        return Line::Key(explicit_key(node[1..].trim_start()));
     }
-    // A `: value` line of an explicit key, or a sequence entry.
     if indicator_then_space(':') || indicator_then_space('-') {
-        return false;
+        return Line::Entry;
     }
-    match node.as_bytes()[0] {
-        b'"' | b'\'' => match quoted(node) {
-            Some((key, rest)) => key == "hooks" && rest.trim_start().starts_with(':'),
-            None => true,
+    let key = |name: &str| {
+        Line::Key(if name == "hooks" {
+            TopLevelHooks::Present
+        } else {
+            TopLevelHooks::Absent
+        })
+    };
+    match node.as_bytes().first() {
+        Some(b'"' | b'\'') => match quoted(node) {
+            Some((name, rest)) if rest.trim_start().starts_with(':') => key(&name),
+            // A scalar, or a quoted key that does not close on this line.
+            _ => Line::Other,
         },
         // An alias key may name `hooks`, and a merge key can pull it in.
-        b'*' => true,
-        b'<' if node.starts_with("<<") => true,
-        b'{' | b'[' => node.contains("hooks"),
-        // A root block scalar or a reserved indicator is not a key.
-        b'|' | b'>' | b'@' | b'`' => false,
-        _ => node.starts_with("hooks:") || plain_key(node) == Some("hooks"),
+        Some(b'*') => Line::Key(TopLevelHooks::Unsure),
+        Some(b'<') if node.starts_with("<<") => Line::Key(TopLevelHooks::Unsure),
+        Some(b'{' | b'[' | b'|' | b'>' | b'@' | b'`') | None => Line::Other,
+        Some(_) => plain_key(node).map_or(Line::Other, key),
     }
 }
 
-fn explicit_key_may_be_hooks(key: &str) -> bool {
+fn explicit_key(key: &str) -> TopLevelHooks {
+    let key = strip_properties(key);
     if key.is_empty() || key.starts_with('#') {
         // The key itself sits on the following lines.
-        return true;
+        return TopLevelHooks::Unsure;
     }
-    let key = strip_properties(key);
-    match key.as_bytes().first() {
-        Some(b'"' | b'\'') => quoted(key).is_none_or(|(key, _)| key == "hooks"),
-        Some(b'|' | b'>' | b'{' | b'[' | b'*') | None => true,
-        Some(_) => {
+    let name = match key.as_bytes().first() {
+        Some(b'"' | b'\'') => match quoted(key) {
+            Some((name, _)) => name,
+            None => return TopLevelHooks::Unsure,
+        },
+        Some(b'|' | b'>' | b'{' | b'[' | b'*') => return TopLevelHooks::Unsure,
+        _ => {
             let end = comment_start(key).unwrap_or(key.len());
-            key[..end].trim_end() == "hooks"
+            key[..end].trim_end().to_owned()
         }
+    };
+    if name == "hooks" {
+        TopLevelHooks::Present
+    } else {
+        TopLevelHooks::Absent
     }
 }
 
