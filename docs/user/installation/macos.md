@@ -14,7 +14,7 @@ The steps below package a local source build.
 
 ```bash
 cargo build --release --target aarch64-apple-darwin -p paneflow-app
-scripts/bundle-macos.sh --version 0.7.2 --arch aarch64
+scripts/bundle-macos.sh --version 0.8.0 --arch aarch64
 ```
 
 Keep `--target aarch64-apple-darwin`: the bundle script reads

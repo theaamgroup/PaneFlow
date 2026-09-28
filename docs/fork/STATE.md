@@ -1,8 +1,22 @@
 # PaneFlow fork: current state
 
 Living handoff record: what has landed, how to verify it, and the method rules
-this project has paid for. Updated 2026-09-26 for the removal round tracked in
-#841, on top of the 0.7.2 cut.
+this project has paid for. Updated 2026-09-28 for the 0.8.0 cut.
+
+**2026-09-28: the 0.8.0 cut.** 183 non-merge commits since `v0.7.2`, a minor
+bump because the cut carries breaking changes: the pane-driving CLI verbs and
+their JSON-RPC methods are gone, and the MCP bridge is removed and cleaned off
+users' machines on first launch (#857). It also lands the removal rounds
+tracked in #807 and #841 and the deep-review fixes tracked in #945 and #1035.
+Curated notes live in `docs/releases/v0.8.0.md`.
+
+Pre-flight on the bump branch: `cargo test --workspace --locked
+--no-fail-fast` **2,870 passed, 0 failed, 3 ignored** (the three benchmark
+and performance gates). `cargo clippy --workspace --all-targets --locked --
+-D warnings` exit 0, **WARNING COUNT 1** (`block v0.1.6`); `cargo fmt
+--check` exit 0; `cargo deny check advisories licenses sources` exit 0 ->
+`advisories ok, licenses ok, sources ok`. `cargo build` exit 0.
+`./target/debug/paneflow --version` reports `paneflow 0.8.0`.
 
 **2026-09-23: the 0.7.2 cut.** 83 non-merge commits since `v0.7.1`, a patch
 bump. No new surfaces. The cut fixes pointer hits on cell boundaries, keeps
@@ -122,17 +136,17 @@ even though signed release DMGs are also available.
 | CI | **Done.** `run_tests.yml` macos-15 only; `release.yml` one signed aarch64 lane. Apple secrets proven 2026-08-26; first tag `v0.1.0` published. |
 | 2d. Rename to PanesCLI | **Dropped.** Product stays PaneFlow. |
 | Community files | **Gone.** No `SECURITY.md`, `CONTRIBUTING.md`, or code of conduct. README is the product page; from-source setup is `INSTALL.md`; agent rules live in `AGENTS.md` / `CLAUDE.md`. |
-| Version | **0.7.2** (2026-09-23; tag on `1e6621a0`; notes in `docs/releases/v0.7.2.md`). Before it 0.7.1, 0.7.0, 0.6.1, 0.6.0, 0.5.0 and 0.4.0 (notes under `docs/releases/`), 0.3.1 (the 2026-09-04 deep-review sweep), 0.3.0 (upstream v0.11.0 adopted; #341), 0.2.1, and 0.2.0, the libghostty-vt engine (#184). First release tag `v0.1.0` is on `44150ff` (2026-08-26). Releases before Sparkle carried DMG + `.sha256`; Sparkle-enabled releases add `appcast.xml`. `upstream-fork-point` remains. Fork tag names collide with upstream's; CLAUDE.md's gotchas carry the tag-ownership rule. |
+| Version | **0.8.0** (2026-09-28; notes in `docs/releases/v0.8.0.md`). Before it 0.7.2 (2026-09-23; tag on `1e6621a0`), 0.7.1, 0.7.0, 0.6.1, 0.6.0, 0.5.0 and 0.4.0 (notes under `docs/releases/`), 0.3.1 (the 2026-09-04 deep-review sweep), 0.3.0 (upstream v0.11.0 adopted; #341), 0.2.1, and 0.2.0, the libghostty-vt engine (#184). First release tag `v0.1.0` is on `44150ff` (2026-08-26). Releases before Sparkle carried DMG + `.sha256`; Sparkle-enabled releases add `appcast.xml`. `upstream-fork-point` remains. Fork tag names collide with upstream's; CLAUDE.md's gotchas carry the tag-ownership rule. |
 
 ## Verified green, and how to reproduce it
 
 ```bash
 cargo build                                  # exit 0
-cargo test --workspace                       # exit 0, 2,781 passed, 0 failed, 3 ignored (2026-09-26)
-cargo deny check advisories licenses sources # exit 0 (cargo-deny 0.19.9, 2026-09-26)
+cargo test --workspace                       # exit 0, 2,870 passed, 0 failed, 3 ignored (2026-09-28)
+cargo deny check advisories licenses sources # exit 0 (cargo-deny 0.19.9, 2026-09-28)
 cargo clippy --workspace --all-targets       # exit 0, WARNING COUNT 1 (block v0.1.6)
 cargo fmt --check                            # exit 0
-./target/debug/paneflow --version            # paneflow 0.7.2
+./target/debug/paneflow --version            # paneflow 0.8.0
 ./scripts/win-census.sh                      # STAGE 2b ZERO-CONDITION: 0
 ./scripts/linux-census.sh                    # STAGE 2c ZERO-CONDITION: 0
                                              # negative control: cfg(unix) 176, cfg(macos) 90 (2026-09-26)
