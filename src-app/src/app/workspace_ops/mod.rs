@@ -59,51 +59,39 @@ pub(crate) enum WorkspaceFocusTarget {
 /// selections of the same workspace are stable. Sessions whose `surface_id`
 /// never resolved are skipped: never jump to a guessed pane.
 ///
-/// A free function, not a `PaneFlowApp` method, because `PaneFlowApp` cannot
-/// be constructed in a test - keeping the rule here is what makes it testable.
+/// Issue #1072: a zoomed tab's hidden panes count too. The walk is Jump Next
+/// Waiting's own (`matching_session_panes`, over `Tab::collect_panes`), so
+/// the row click and Cmd+Shift+J find the same waiting panes. Within a tab
+/// the rendered root comes first, so a waiting zoomed pane wins over a hidden
+/// one and the zoom survives. A hidden result must go through
+/// `focus_pane_in_active_tab`, which leaves zoom before focusing.
 fn waiting_pane_in_workspace(
     ws: &Workspace,
     cx: &App,
 ) -> Option<(usize, gpui::Entity<crate::pane::Pane>, u64)> {
-    let waiting: std::collections::HashSet<u64> = ws
-        .agent_sessions
-        .values()
-        // A wait the user marked read (#408) no longer pulls focus.
-        .filter(|s| s.presented_state() == Some(&crate::ai_types::AgentState::WaitingForInput))
-        .filter_map(|s| s.surface_id)
-        .collect();
-    if waiting.is_empty() {
-        return None;
-    }
-    for (tab_idx, tab) in ws.tabs().iter().enumerate() {
-        let Some(root) = tab.root.as_ref() else {
-            continue;
-        };
-        for pane in root.collect_leaves() {
-            let sid = pane
-                .read(cx)
-                .active_terminal_opt()
-                .map(|t| t.entity_id().as_u64());
-            if let Some(sid) = sid
-                && waiting.contains(&sid)
-            {
-                return Some((tab_idx, pane, sid));
-            }
-        }
-    }
-    None
+    focus::matching_session_panes(
+        std::slice::from_ref(ws),
+        // A wait the user marked read (#408) presents no state, so it no
+        // longer pulls focus.
+        |state| *state == crate::ai_types::AgentState::WaitingForInput,
+        cx,
+    )
+    .into_iter()
+    .next()
+    .map(|(_, tab_idx, pane, sid)| (tab_idx, pane, sid))
 }
 
 /// Focus `pane` in `ws`'s active tab: the body of
 /// [`WorkspaceFocusTarget::Pane`], which Pane Overview selection (through
 /// `teleport_to_surface`) and Jump Next Waiting both reach after making the
-/// owning tab active.
+/// owning tab active. The `WaitingElseFirst` arm (sidebar row click,
+/// Cmd+1..9) calls it too, for the same reason (issue #1072).
 ///
-/// Issue #1052: both callers resolve panes through the zoom-saved tree too,
+/// Issue #1052: those callers resolve panes through the zoom-saved tree too,
 /// so the target can be a pane parked in `saved_layout` while another pane
 /// is zoomed. Focus can only land on a rendered pane, so the tab leaves zoom
-/// first (`Tab::reveal_pane`). A free function, not a `PaneFlowApp` method,
-/// because `PaneFlowApp` cannot be constructed in a test.
+/// first (`Tab::reveal_pane`). A free function over `Workspace`, so the
+/// `focus.rs` regressions can drive it on a bare workspace.
 fn focus_pane_in_active_tab(
     ws: &mut Workspace,
     pane: &gpui::Entity<crate::pane::Pane>,
@@ -914,10 +902,12 @@ impl PaneFlowApp {
                         // Focus can only land on a rendered pane (the
                         // invariant `Workspace::focus_first` documents), so the
                         // owning tab has to become visible BEFORE the focus
-                        // call. Same recipe as `teleport_to_surface`.
+                        // call. Same recipe as `teleport_to_surface`. The pane
+                        // may also be parked behind that tab's zoom (#1072);
+                        // the shared helper leaves zoom first, exactly as for
+                        // Jump Next Waiting. Only the owning tab is revealed.
                         self.workspaces[idx].set_active_tab(tab_idx);
-                        pane.update(cx, |_p, cx| cx.notify());
-                        pane.read(cx).focus_handle(cx).focus(window, cx);
+                        focus_pane_in_active_tab(&mut self.workspaces[idx], &pane, window, cx);
                         // Keep the jump cycle coherent: landing on a waiting
                         // pane counts as visiting it, so the next
                         // Cmd+Shift+J continues from here instead of
@@ -2307,9 +2297,12 @@ mod tests {
     use crate::source_probe::source_slice;
 
     /// Issue #1052: the zoom reveal lives in `focus_pane_in_active_tab`, which
-    /// the GPUI regressions in `focus.rs` drive. `PaneFlowApp` cannot be built
-    /// in a test, so the wiring from the explicit-pane activation arm to that
-    /// helper, and from both UI callers to that arm, is pinned on the source.
+    /// the GPUI regressions in `focus.rs` drive on a bare workspace, and the
+    /// #1072 regressions below drive through the real `activate_workspace_at`.
+    /// This source guard complements those behavioural tests: it pins the
+    /// wiring from both activation arms to that helper, from both UI callers
+    /// to the explicit-pane arm, and from the waiting lookup to Jump Next
+    /// Waiting's walk.
     #[test]
     fn explicit_pane_activation_reveals_through_the_shared_helper() {
         // Slice only the production half of each file: this test's own
@@ -2336,6 +2329,32 @@ mod tests {
             .expect("the helper reveals a zoom-hidden pane");
         let focus = helper.find(".focus(window, cx)").expect("focus call");
         assert!(reveal < focus, "reveal before focus: {helper}");
+
+        // Issue #1072: the waiting-pane arm (sidebar row click, Cmd+1..9)
+        // finds panes behind a zoom too, so it must focus through the same
+        // revealing helper, after making the owning tab visible, and never
+        // focus the pane directly.
+        let waiting_arm = source_slice(
+            src,
+            "WorkspaceFocusTarget::WaitingElseFirst => {",
+            "WorkspaceFocusTarget::Pane { pane } => {",
+        );
+        let shown = waiting_arm
+            .find("set_active_tab(tab_idx)")
+            .expect("the waiting arm shows the owning tab");
+        let revealed = waiting_arm
+            .find("focus_pane_in_active_tab(&mut self.workspaces[idx], &pane, window, cx)")
+            .expect("the waiting arm focuses through the revealing helper");
+        assert!(shown < revealed, "tab first, then reveal: {waiting_arm}");
+        assert!(
+            !waiting_arm.contains(".focus(window, cx)"),
+            "no direct focus that bypasses the reveal: {waiting_arm}"
+        );
+        let finder = source_slice(src, "fn waiting_pane_in_workspace(", "\n}\n");
+        assert!(
+            finder.contains("focus::matching_session_panes("),
+            "the waiting lookup shares Jump Next Waiting's walk: {finder}"
+        );
 
         let focus_src = production(include_str!("focus.rs"));
         for (start, end) in [
@@ -2493,9 +2512,10 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════
     // Issue #78: workspace-level selection targets the waiting pane.
     //
-    // `PaneFlowApp` is not constructible in a test, so the routing rule
-    // lives in the free `waiting_pane_in_workspace` and is exercised
-    // directly. Panes are real (`display_only_for_test` - no PTY).
+    // The lookup rule lives in the free `waiting_pane_in_workspace` and is
+    // exercised directly; the #1072 tests further down drive the whole
+    // `WaitingElseFirst` arm on a real `PaneFlowApp` (`app_with_workspaces`).
+    // Panes are real (`display_only_for_test` - no PTY).
     // ═══════════════════════════════════════════════════════════════════
 
     fn waiting_test_pane(
@@ -2702,6 +2722,195 @@ mod tests {
                 .is_none(),
             "an unresolved waiting session must never target a guessed pane"
         );
+    }
+
+    type PaneEntity = gpui::Entity<crate::pane::Pane>;
+
+    fn zoom_test_pane(id: u64, cx: &mut gpui::VisualTestContext) -> (PaneEntity, u64) {
+        let view = cx.new(|cx| TerminalView::display_only_for_test(id, cx));
+        let sid = view.entity_id().as_u64();
+        (cx.new(|cx| crate::pane::Pane::new(view, id, cx)), sid)
+    }
+
+    /// Issue #1072 fixture, the shape #1052's regressions use: tab 0 holds C
+    /// alone, tab 1 holds A and B side by side, zoomed on A exactly as
+    /// `handle_toggle_zoom` leaves it (B parked in `saved_layout`, A alone in
+    /// `root`). `active_tab` picks the visible tab; nothing has focus yet.
+    /// Returns `(ws, c, a, b, b_sid)`.
+    fn zoomed_split_workspace(
+        active_tab: usize,
+        cx: &mut gpui::VisualTestContext,
+    ) -> (Workspace, PaneEntity, PaneEntity, PaneEntity, u64) {
+        let (c, _) = zoom_test_pane(3, cx);
+        let (a, _) = zoom_test_pane(1, cx);
+        let (b, b_sid) = zoom_test_pane(2, cx);
+        let tree =
+            LayoutTree::from_panes_equal(SplitDirection::Vertical, vec![a.clone(), b.clone()])
+                .expect("two panes make a split");
+        let mut ws = Workspace::with_layout_and_id(
+            1,
+            "zoomed",
+            std::path::PathBuf::new(),
+            LayoutTree::Leaf(c.clone()),
+        );
+        assert!(ws.open_tab(crate::workspace::Tab::new("split", Some(tree))));
+        cx.update(|_, cx| a.update(cx, |pane, _| pane.zoomed = true));
+        let tab = ws.tab_mut(1).expect("the split tab");
+        tab.saved_layout = tab.root.take();
+        tab.root = Some(LayoutTree::Leaf(a.clone()));
+        ws.set_active_tab(active_tab);
+        let split = &ws.tabs()[1];
+        assert!(
+            split.is_zoomed() && !split.root.as_ref().expect("zoomed root").contains_leaf(&b),
+            "B starts hidden behind the zoom"
+        );
+        (ws, c, a, b, b_sid)
+    }
+
+    /// Issue #1072: the sidebar row click (and Cmd+1..9) activates the
+    /// workspace with `WaitingElseFirst`. B's agent is waiting while A is
+    /// zoomed, so B sits only in `saved_layout`. The click must find B the
+    /// way Jump Next Waiting does, make B's tab the visible one, leave zoom,
+    /// and focus B, never a hidden pane and never the first-pane fallback.
+    #[gpui::test]
+    fn waiting_else_first_reveals_a_zoom_hidden_waiting_pane(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let (mut ws, c, a, b, b_sid) = zoomed_split_workspace(0, cx);
+        ws.agent_sessions
+            .insert(4321u32, session_waiting_on(Some(b_sid)));
+        cx.update(|window, cx| c.read(cx).focus_handle(cx).focus(window, cx));
+        let app = app_with_workspaces(cx, vec![ws]);
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.activate_workspace_at(0, WorkspaceFocusTarget::WaitingElseFirst, window, cx);
+            });
+        });
+
+        cx.update(|window, cx| {
+            let app = app.read(cx);
+            let ws = &app.workspaces[0];
+            assert_eq!(ws.active_tab_idx(), 1, "B's tab becomes the visible tab");
+            let tab = ws.active_tab();
+            assert!(!tab.is_zoomed(), "reaching a zoom-hidden pane leaves zoom");
+            let root = tab.root.as_ref().expect("a rendered root");
+            assert!(root.contains_leaf(&b), "the rendered root contains B");
+            assert!(root.contains_leaf(&a), "the saved layout came back whole");
+            let first = &ws.tabs()[0];
+            assert!(
+                !first.is_zoomed() && first.root.as_ref().is_some_and(|r| r.contains_leaf(&c)),
+                "the other tab is untouched"
+            );
+            assert!(!a.read(cx).zoomed, "A is no longer flagged zoomed");
+            assert!(
+                b.read(cx).focus_handle(cx).is_focused(window),
+                "B has focus"
+            );
+            assert_eq!(root.focused_pane(window, cx).as_ref(), Some(&b));
+            assert_eq!(
+                app.jump_cursor,
+                Some(b_sid),
+                "landing on B counts as visiting it for the jump cycle"
+            );
+        });
+    }
+
+    fn activate_waiting_else_first(
+        app: &gpui::Entity<PaneFlowApp>,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.activate_workspace_at(0, WorkspaceFocusTarget::WaitingElseFirst, window, cx);
+            });
+        });
+    }
+
+    /// Tab 1 is visible and still zoomed on A, B stays parked, A has focus,
+    /// and the jump cursor reads `cursor`.
+    fn assert_zoom_kept_on_a(
+        app: &gpui::Entity<PaneFlowApp>,
+        a: &PaneEntity,
+        b: &PaneEntity,
+        cursor: Option<u64>,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        cx.update(|window, cx| {
+            let app = app.read(cx);
+            let ws = &app.workspaces[0];
+            assert_eq!(ws.active_tab_idx(), 1, "the zoomed tab is the visible tab");
+            let tab = ws.active_tab();
+            assert!(tab.is_zoomed(), "the zoom stays");
+            let root = tab.root.as_ref().expect("the zoomed root");
+            assert!(root.contains_leaf(a) && !root.contains_leaf(b));
+            assert!(a.read(cx).zoomed, "A is still the zoomed pane");
+            assert!(
+                a.read(cx).focus_handle(cx).is_focused(window),
+                "the rendered zoomed pane has focus"
+            );
+            assert!(!b.read(cx).focus_handle(cx).is_focused(window));
+            assert_eq!(app.jump_cursor, cursor);
+        });
+    }
+
+    /// Guard (passes before and after #1072): with nothing waiting,
+    /// `WaitingElseFirst` still falls back to the first rendered pane of the
+    /// visible tab, and a zoom the user set is left alone. B's agent is live
+    /// but not waiting, so it must not pull focus or unzoom the tab.
+    #[gpui::test]
+    fn waiting_else_first_without_a_waiting_agent_keeps_the_zoom(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let (mut ws, _c, a, b, b_sid) = zoomed_split_workspace(1, cx);
+        let mut thinking = crate::ai_types::AgentSession::new(
+            crate::agent_launcher::TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::Thinking,
+        );
+        thinking.surface_id = Some(b_sid);
+        ws.agent_sessions.insert(4321u32, thinking);
+        let app = app_with_workspaces(cx, vec![ws]);
+
+        activate_waiting_else_first(&app, cx);
+        assert_zoom_kept_on_a(&app, &a, &b, None, cx);
+    }
+
+    /// Issue #1072 tie-break: A (zoomed, rendered) and B (parked) both wait.
+    /// The rendered root is walked first, so the click lands on A and keeps
+    /// the zoom rather than unzooming to reach B. Starts on tab 0 so the tab
+    /// switch is exercised too.
+    #[gpui::test]
+    fn waiting_else_first_prefers_the_rendered_zoomed_waiting_pane(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let (mut ws, c, a, b, b_sid) = zoomed_split_workspace(0, cx);
+        let a_sid = cx.update(|_, cx| {
+            a.read(cx)
+                .active_terminal_opt()
+                .map(|t| t.entity_id().as_u64())
+                .expect("A hosts a terminal")
+        });
+        ws.agent_sessions
+            .insert(4321u32, session_waiting_on(Some(b_sid)));
+        ws.agent_sessions
+            .insert(4322u32, session_waiting_on(Some(a_sid)));
+        cx.update(|window, cx| c.read(cx).focus_handle(cx).focus(window, cx));
+        let app = app_with_workspaces(cx, vec![ws]);
+
+        activate_waiting_else_first(&app, cx);
+        assert_zoom_kept_on_a(&app, &a, &b, Some(a_sid), cx);
+    }
+
+    /// Issue #1072 / #408: a hidden B whose wait the user marked read presents
+    /// no state, so the widened lookup must not unzoom the tab to reach it.
+    #[gpui::test]
+    fn waiting_else_first_ignores_a_marked_read_hidden_wait(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let (mut ws, _c, a, b, b_sid) = zoomed_split_workspace(1, cx);
+        let mut read = session_waiting_on(Some(b_sid));
+        read.read = true;
+        ws.agent_sessions.insert(4321u32, read);
+        let app = app_with_workspaces(cx, vec![ws]);
+
+        activate_waiting_else_first(&app, cx);
+        assert_zoom_kept_on_a(&app, &a, &b, None, cx);
     }
 
     // Pure-Rust tests only - spawning actual binaries is brittle in CI
