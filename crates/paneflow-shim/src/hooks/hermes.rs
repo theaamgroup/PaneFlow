@@ -2,9 +2,9 @@ mod top_level_keys;
 
 use super::owned_files::report_cleanup_failure;
 use super::{
-    home_unavailable, is_paneflow_hook_command, paneflow_ipc_reachable, refuse_symlink,
-    resolve_plain_hook_command, with_last_lease, with_orphan_lease, HookInstall, HookInstallResult,
-    HookInstallSkip, HookLease,
+    config_dir_is_symlink, home_unavailable, is_paneflow_hook_command, paneflow_ipc_reachable,
+    refuse_symlink, resolve_plain_hook_command, with_last_lease, with_orphan_lease, HookInstall,
+    HookInstallResult, HookInstallSkip, HookLease,
 };
 use paneflow_agent_config::{
     home_dir, read_optional_text, with_config_lock, write_json_atomic, write_text_atomic,
@@ -178,7 +178,9 @@ fn revoke_managed_approvals(path: &Path, created: bool) -> std::io::Result<()> {
     else {
         return Ok(());
     };
+    let before = list.len();
     list.retain(|item| !is_managed_approval(item));
+    let removed = list.len() != before;
     let only_empty_approvals = list.is_empty()
         && root
             .as_object()
@@ -189,8 +191,12 @@ fn revoke_managed_approvals(path: &Path, created: bool) -> std::io::Result<()> {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(err),
         }
-    } else {
+    } else if removed {
         write_json_atomic(path, &root)
+    } else {
+        // Nothing to revoke: a rewrite would only reformat the user's file
+        // and could drop a consent Hermes is recording concurrently.
+        Ok(())
     }
 }
 
@@ -208,9 +214,8 @@ pub(crate) struct HermesHookConfigGuard {
 impl HermesHookConfigGuard {
     pub(crate) fn install() -> HookInstallResult<Self> {
         let directory = hermes_config_dir(env::var_os("HERMES_HOME").as_deref())?;
-        let path = directory.join("config.yaml");
         if !paneflow_ipc_reachable() {
-            Self::sweep_orphan(&path);
+            Self::sweep_orphan(&directory);
             return Ok(HookInstall::Skipped(HookInstallSkip::IpcUnavailable));
         }
         let guard = Self::install_at(&directory)?;
@@ -282,8 +287,21 @@ impl HermesHookConfigGuard {
         }
     }
 
-    fn sweep_orphan(path: &Path) {
-        let _ = with_orphan_lease(path, path, |created_file| {
+    /// Both halves of what a crashed session left, each under its own lease
+    /// and in `Drop`'s order: approvals are revoked only when no live
+    /// session holds the allowlist lease (#1075).
+    fn sweep_orphan(directory: &Path) {
+        // `install_at` refuses a symlinked profile directory; so does this.
+        if config_dir_is_symlink(directory) {
+            return;
+        }
+        let allowlist = &allowlist_path(directory);
+        let revoked = with_orphan_lease(allowlist, allowlist, |created_allowlist| {
+            revoke_managed_approvals(allowlist, created_allowlist)
+        });
+        report_cleanup_failure(allowlist, revoked.as_ref().err());
+        let path = &directory.join("config.yaml");
+        let cleaned = with_orphan_lease(path, path, |created_file| {
             let Some(content) = read_optional_text(path)? else {
                 return Ok(());
             };
@@ -297,6 +315,7 @@ impl HermesHookConfigGuard {
                 Ok(())
             }
         });
+        report_cleanup_failure(path, cleaned.as_ref().err());
     }
 }
 
@@ -509,6 +528,197 @@ mod tests {
             "the user's file and entry survive both sessions"
         );
         assert!(!HookLease::acquire(&allowlist).unwrap().is_created());
+    }
+
+    /// SIGKILL before `Drop`: the kernel releases both lease locks, but the
+    /// managed block, the approvals, and the durable created-file markers
+    /// stay. The guard's leases are swapped for leases on an unrelated
+    /// resource so the real ones drop without the guard's cleanup running.
+    fn crash(mut guard: HermesHookConfigGuard, unrelated: &Path) {
+        drop(std::mem::replace(
+            &mut guard.lease,
+            HookLease::acquire(unrelated).unwrap(),
+        ));
+        drop(std::mem::replace(
+            &mut guard.allowlist_lease,
+            HookLease::acquire(unrelated).unwrap(),
+        ));
+        std::mem::forget(guard);
+    }
+
+    fn approvals(allowlist: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(allowlist).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn orphan_sweep_revokes_a_crashed_sessions_approvals_and_keeps_the_users() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join(".hermes");
+        std::fs::create_dir_all(&directory).unwrap();
+        let config = directory.join("config.yaml");
+        let allowlist = allowlist_path(&directory);
+        let user = serde_json::json!({"approvals": [
+            {"event": "pre_tool_call", "command": "/usr/bin/user-hook"}
+        ]});
+        std::fs::write(&allowlist, user.to_string()).unwrap();
+
+        crash(
+            HermesHookConfigGuard::install_at(&directory).unwrap(),
+            &temp.path().join("unrelated"),
+        );
+        assert!(approvals(&allowlist)["approvals"].as_array().unwrap().len() > 1);
+
+        HermesHookConfigGuard::sweep_orphan(&directory);
+        assert!(
+            !config.exists(),
+            "the sweep removes the config.yaml the crashed session created"
+        );
+        assert_eq!(
+            approvals(&allowlist),
+            user,
+            "the sweep revokes the managed approvals and keeps the user's"
+        );
+    }
+
+    #[test]
+    fn orphan_sweep_removes_an_allowlist_a_crashed_session_created() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join(".hermes");
+        std::fs::create_dir_all(&directory).unwrap();
+        let allowlist = allowlist_path(&directory);
+
+        crash(
+            HermesHookConfigGuard::install_at(&directory).unwrap(),
+            &temp.path().join("unrelated"),
+        );
+        assert!(allowlist.exists());
+
+        HermesHookConfigGuard::sweep_orphan(&directory);
+        assert!(
+            !allowlist.exists(),
+            "the sweep removes the allowlist the crashed session created, got {:?}",
+            std::fs::read_to_string(&allowlist).ok()
+        );
+        assert!(
+            !HookLease::acquire(&allowlist).unwrap().is_created(),
+            "the sweep consumes the created-file marker"
+        );
+    }
+
+    #[test]
+    fn orphan_sweep_leaves_a_live_sessions_approvals() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join(".hermes");
+        std::fs::create_dir_all(&directory).unwrap();
+        let config = directory.join("config.yaml");
+        let allowlist = allowlist_path(&directory);
+
+        let live = HermesHookConfigGuard::install_at(&directory).unwrap();
+        HermesHookConfigGuard::sweep_orphan(&directory);
+        assert!(std::fs::read_to_string(&config)
+            .unwrap()
+            .contains(HERMES_BLOCK_BEGIN));
+        let value = approvals(&allowlist);
+        for (event, command) in hermes_managed_approvals() {
+            assert!(
+                value["approvals"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| approval_matches(item, &event, &command)),
+                "a live session keeps its {event} approval, got {value}"
+            );
+        }
+
+        drop(live);
+        assert!(
+            !allowlist.exists(),
+            "the live session, still the last holder, cleans up on exit"
+        );
+    }
+
+    #[test]
+    fn orphan_sweep_leaves_an_allowlist_without_managed_approvals_untouched() {
+        use std::os::unix::fs::MetadataExt;
+
+        // Every IPC-down launch sweeps. A file with nothing to revoke must
+        // not be rewritten: that reformats it, and races a consent Hermes
+        // is writing at the same moment.
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join(".hermes");
+        std::fs::create_dir_all(&directory).unwrap();
+        let allowlist = allowlist_path(&directory);
+        let user = br#"{"approvals":[{"event":"pre_tool_call","command":"/usr/bin/user-hook"}]}"#;
+        std::fs::write(&allowlist, user).unwrap();
+        let inode = std::fs::metadata(&allowlist).unwrap().ino();
+
+        HermesHookConfigGuard::sweep_orphan(&directory);
+        assert_eq!(std::fs::read(&allowlist).unwrap(), user);
+        assert_eq!(
+            std::fs::metadata(&allowlist).unwrap().ino(),
+            inode,
+            "a sweep with nothing to revoke must not replace the file"
+        );
+    }
+
+    #[test]
+    fn orphan_sweep_reports_an_allowlist_it_cannot_parse() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join(".hermes");
+        std::fs::create_dir_all(&directory).unwrap();
+        let allowlist = allowlist_path(&directory);
+        std::fs::write(&allowlist, "not json").unwrap();
+        super::super::owned_files::take_recorded_cleanup_failures();
+
+        HermesHookConfigGuard::sweep_orphan(&directory);
+        let failures = super::super::owned_files::take_recorded_cleanup_failures();
+        assert!(
+            failures
+                .iter()
+                .any(|message| message.contains("Hermes allowlist is not JSON")),
+            "a failed sweep is logged like a failed Drop, got {failures:?}"
+        );
+        assert_eq!(std::fs::read(&allowlist).unwrap(), b"not json");
+    }
+
+    #[test]
+    fn orphan_sweep_does_not_follow_a_symlinked_profile_dir() {
+        use std::os::unix::fs::symlink;
+
+        // `install_at` refuses a symlinked profile directory; the sweep
+        // must not write through one either.
+        let temp = tempfile::TempDir::new().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let config = outside.join("config.yaml");
+        std::fs::write(&config, hermes_managed_block()).unwrap();
+        let approvals: Vec<_> = hermes_managed_approvals()
+            .into_iter()
+            .map(|(event, command)| serde_json::json!({"event": event, "command": command}))
+            .collect();
+        let allowlist = allowlist_path(&outside);
+        std::fs::write(
+            &allowlist,
+            serde_json::json!({ "approvals": approvals }).to_string(),
+        )
+        .unwrap();
+        let config_before = std::fs::read(&config).unwrap();
+        let allowlist_before = std::fs::read(&allowlist).unwrap();
+
+        let link = temp.path().join(".hermes");
+        symlink(&outside, &link).unwrap();
+        HermesHookConfigGuard::sweep_orphan(&link);
+
+        assert_eq!(
+            std::fs::read(&config).unwrap(),
+            config_before,
+            "the config must not be rewritten through the link"
+        );
+        assert_eq!(
+            std::fs::read(&allowlist).unwrap(),
+            allowlist_before,
+            "the allowlist must not be rewritten through the link"
+        );
     }
 
     #[test]

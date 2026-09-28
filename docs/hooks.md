@@ -96,7 +96,7 @@ scan.
 | Cursor | flat hooks.json (`version: 1`) | `~/.cursor/hooks.json` | beforeSubmitPrompt, stop, pre/postToolUse, subagentStart/Stop |
 | OpenCode | TS plugin + `plugin` entry | `~/.config/opencode/plugins/paneflow-status.ts` + `opencode.json` | chat.message, tool.execute.before/after, session.created/status/idle (child sessions as subagents), permission.asked |
 | Pi | TS extension (auto-loaded) | `~/.pi/agent/extensions/paneflow-status.ts` | agent_start/end, tool_execution_start/end |
-| Hermes | marked YAML block | `~/.hermes/config.yaml` | pre/post_llm_call, pre/post_tool_call, pre_approval_request |
+| Hermes | marked YAML block + exact-command approvals | `~/.hermes/{config.yaml,shell-hooks-allowlist.json}` (`$HERMES_HOME` when set) | pre/post_llm_call, pre/post_tool_call, pre_approval_request |
 | Grok | dedicated merged hook file (wholly PaneFlow-owned) | `~/.grok/hooks/paneflow.json` | UserPromptSubmit, Stop, Pre/PostToolUse, PermissionRequest, SubagentStart/Stop |
 | DeepSeek Harness | `--patch` overlay + Claude-compatible bridge | `~/.dsh/paneflow/{hooks.json,paneflow-overlay.yml}` | UserPromptSubmit, Pre/PostToolUse, Stop |
 | Muse Code | managed hook file (`managed_hooks_path` + `managed_hooks_env_vars` merged into `settings.json`; hooks run with a cleared environment) | `~/.config/muse/{paneflow-hooks.json,settings.json}` | UserPromptSubmit, Pre/PostToolUse, PermissionRequest, PostLLMCall (as Stop), Stop |
