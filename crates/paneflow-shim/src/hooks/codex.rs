@@ -1,3 +1,5 @@
+mod features_toml;
+
 use super::owned_files::report_cleanup_failure;
 use super::{
     cleanup_hook_config_file, install_hook_config_file, paneflow_ipc_reachable,
@@ -6,6 +8,7 @@ use super::{
     InvalidJsonPolicy,
 };
 use super::{hook_config_error, resolve_hook_command};
+use features_toml::{codex_features, CodexFeatures};
 use paneflow_agent_config::claude_hooks::{
     command_handler, reconcile_matcher_hooks_replacing_invalid_container,
     remove_matcher_hooks_lenient, MANAGED_MARKER,
@@ -149,14 +152,26 @@ fn enable_codex_feature_flag_unlocked(path: &Path) -> std::io::Result<CodexFeatu
     let existing = read_optional_text(path)?;
     let created_file = existing.is_none();
     let existing = existing.unwrap_or_default();
-    if has_hooks_flag(&existing) {
-        return Ok(CodexFeatureInstall { changed: false });
-    }
-    if has_features_section(&existing) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Codex config already has a features section without hooks",
-        ));
+    // #1053: `features` may already be an inline table or dotted keys, not
+    // only a `[features]` header; any of them makes an appended table a
+    // duplicate declaration that breaks the whole Codex config.
+    match codex_features(&existing) {
+        Some(CodexFeatures::Absent) => {}
+        Some(CodexFeatures::HooksEnabled) => {
+            return Ok(CodexFeatureInstall { changed: false });
+        }
+        Some(CodexFeatures::Unsupported) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Codex config already has a features section without hooks",
+            ));
+        }
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Codex config is not TOML PaneFlow can read; leaving it unchanged",
+            ));
+        }
     }
 
     let mut next = existing;
@@ -190,64 +205,6 @@ fn disable_codex_feature_flag_unlocked(path: &Path) -> std::io::Result<()> {
         std::fs::remove_file(path)
     } else {
         write_text_atomic(path, &block.content)
-    }
-}
-
-fn has_hooks_flag(content: &str) -> bool {
-    let mut in_features = false;
-    content.lines().any(|line| {
-        let line = line.trim_start();
-        if line.starts_with('#') {
-            return false;
-        }
-        let assignment = line.split_once('#').map_or(line, |(value, _)| value);
-        let trimmed = assignment.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            in_features = is_features_table_header(trimmed);
-            return false;
-        }
-        if !in_features {
-            return false;
-        }
-        assignment.split_once('=').is_some_and(|(key, value)| {
-            matches!(key.trim(), "hooks" | "codex_hooks") && value.trim() == "true"
-        })
-    })
-}
-
-fn has_features_section(content: &str) -> bool {
-    content.lines().any(|line| {
-        let line = line.trim_start();
-        if line.starts_with('#') {
-            return false;
-        }
-        let header = line.split_once('#').map_or(line, |(value, _)| value);
-        is_features_table_header(header.trim())
-    })
-}
-
-/// True for `[features]`, `[ features ]`, `["features"]`, and `['features']`.
-/// Nested (`[features.foo]`) and array-of-tables (`[[features]]`) headers
-/// are not the Codex features table.
-fn is_features_table_header(trimmed: &str) -> bool {
-    toml_bare_table_name(trimmed) == Some("features")
-}
-
-fn toml_bare_table_name(header: &str) -> Option<&str> {
-    let inner = header.strip_prefix('[')?.strip_suffix(']')?;
-    if inner.starts_with('[') {
-        return None;
-    }
-    let inner = inner.trim();
-    if inner.len() >= 2
-        && ((inner.starts_with('"') && inner.ends_with('"'))
-            || (inner.starts_with('\'') && inner.ends_with('\'')))
-    {
-        Some(&inner[1..inner.len() - 1])
-    } else if inner.is_empty() {
-        None
-    } else {
-        Some(inner)
     }
 }
 
