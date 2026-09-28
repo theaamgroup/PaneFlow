@@ -740,10 +740,20 @@ struct Element {
     comma: Option<Range<usize>>,
 }
 
+/// Open arrays and objects the span parser follows before it refuses.
+///
+/// The parser recurses once per level, so an unbounded file (100,000 `[`
+/// is about 100 KiB) exhausted the native stack instead of failing (#1054).
+/// Every entry point also runs `serde_json::from_str`, whose default
+/// recursion limit of 128 rejects anything at or past this depth anyway, so
+/// matching it refuses nothing a caller could have succeeded with.
+const MAX_NESTING_DEPTH: usize = 128;
+
 struct Parser<'a> {
     input: &'a str,
     bytes: &'a [u8],
     position: usize,
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -752,6 +762,7 @@ impl<'a> Parser<'a> {
             input,
             bytes: input.as_bytes(),
             position: 0,
+            depth: 0,
         }
     }
 
@@ -768,8 +779,21 @@ impl<'a> Parser<'a> {
     fn parse_value(&mut self) -> Result<Node, JsoncError> {
         self.skip_trivia()?;
         match self.peek() {
-            Some(b'{') => self.parse_object(),
-            Some(b'[') => self.parse_array(),
+            Some(open @ (b'{' | b'[')) => {
+                if self.depth >= MAX_NESTING_DEPTH {
+                    return Err(
+                        self.error(format!("nesting deeper than {MAX_NESTING_DEPTH} levels"))
+                    );
+                }
+                self.depth += 1;
+                let node = if open == b'{' {
+                    self.parse_object()
+                } else {
+                    self.parse_array()
+                };
+                self.depth -= 1;
+                node
+            }
             Some(b'"') => {
                 let start = self.position;
                 self.parse_string()?;
@@ -1205,6 +1229,40 @@ mod tests {
         assert!(remove_entry(duplicate_current, "mcp", "paneflow").is_err());
         assert!(remove_entry(r#"{"mcp":{},"mcp":{}}"#, "mcp", "paneflow").is_err());
         assert!(parse("{/* unterminated").is_err());
+    }
+
+    /// `levels` nested arrays or objects around `1`.
+    fn nested(levels: usize, object: bool) -> String {
+        let (open, close) = if object { ("{\"a\":", "}") } else { ("[", "]") };
+        format!("{}1{}", open.repeat(levels), close.repeat(levels))
+    }
+
+    #[test]
+    fn excessive_nesting_is_an_error_not_a_stack_overflow() {
+        // Issue #1054: the span parser recursed once per level with no budget,
+        // so a small but deep settings file exhausted the native stack.
+        for object in [false, true] {
+            let deep = nested(100_000, object);
+            let inside = format!("{{\"mcp\":{{\"paneflow\":{deep}}}}}");
+            for input in [&deep, &inside] {
+                let parsed = parse(input).unwrap_err();
+                assert!(parsed.to_string().contains("nesting"), "{parsed}");
+                let removed = remove_entry(input, "mcp", "paneflow").unwrap_err();
+                assert!(removed.to_string().contains("nesting"), "{removed}");
+            }
+        }
+    }
+
+    #[test]
+    fn nesting_budget_accepts_what_serde_json_accepts() {
+        for object in [false, true] {
+            // serde_json's default recursion limit admits 127 levels, and
+            // the span parser must not refuse anything below that.
+            assert!(parse(&nested(127, object)).is_ok());
+            let inside = format!("{{\"mcp\":{{\"paneflow\":{}}}}}", nested(125, object));
+            assert!(remove_entry(&inside, "mcp", "paneflow").unwrap().is_some());
+            assert!(parse(&nested(128, object)).is_err());
+        }
     }
 
     fn assert_insert_round_trip(source: &str, path: &[&str], key: &str, value: Value) {
