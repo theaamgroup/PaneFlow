@@ -459,10 +459,10 @@ need it:
   side effect. They did not need separate handling and did not survive to 2c.
 - `TerminalBackendConfig` is gone entirely (#184): a leftover `"backend"` key in
   an old `paneflow.json` is ignored, not mapped (`leftover_terminal_backend_key_is_ignored`).
-- Embed size cap is Mach-O `release-min` (2026-09-26, after the bridge left
-  the embed in #857): 892,704 B measured (shim 539,504 + ai-hook 353,200),
-  `EMBED_SIZE_LIMIT_BYTES = 975_000` = total + 9.2% (slack 82,296 B = 8.4% of
-  the cap). `build.rs` prunes any staged file not in `EMBED_BINARIES`.
+- Embed size cap is Mach-O `release-min` (2026-09-27, main `cd098f39`, after
+  #1068 and #1076 grew the shim): 942,512 B measured (shim 589,360 + ai-hook
+  353,152), `EMBED_SIZE_LIMIT_BYTES = 975_000` = total + 3.4% (slack 32,488 B =
+  3.3% of the cap). `build.rs` prunes any staged file not in `EMBED_BINARIES`.
 
 ## Parallel work
 
