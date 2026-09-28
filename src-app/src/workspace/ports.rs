@@ -688,12 +688,21 @@ mod tests {
         );
     }
 
-    /// Listening socket opened after 1100 held descriptors. A fixed 1024-entry
-    /// buffer does not include it. The held files are closed before the test
-    /// returns so later tests in this process do not inherit them.
+    /// Listening socket numbered above 1100 held descriptors. The kernel lists
+    /// descriptors in ascending order, so a fixed 1024-entry buffer does not
+    /// include it. The held files are closed before the test returns so later
+    /// tests in this process do not inherit them.
+    ///
+    /// Issue #1069: `bind` takes the lowest free number, and other test
+    /// threads close low descriptors while this one runs, so a freshly bound
+    /// listener can land below the held block. The listener is therefore moved
+    /// with `F_DUPFD_CLOEXEC` to the first number above every held descriptor,
+    /// which puts all of them ahead of it whatever the rest of the process does.
     #[cfg(target_os = "macos")]
     #[test]
     fn scan_panes_detects_a_listener_past_the_1024th_descriptor() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
         const HELD_FILES: usize = 1100;
         raise_nofile_soft_limit(16_384);
 
@@ -701,13 +710,33 @@ mod tests {
         for _ in 0..HELD_FILES {
             held.push(std::fs::File::open("/dev/null").expect("open /dev/null"));
         }
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let listener_fd = std::os::fd::AsRawFd::as_raw_fd(&listener);
+        let highest_held = held
+            .iter()
+            .map(AsRawFd::as_raw_fd)
+            .max()
+            .expect("held descriptors");
+        let bound = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = bound.local_addr().unwrap().port();
+        // SAFETY: `bound` owns a live descriptor for the whole call.
+        // F_DUPFD_CLOEXEC only returns a new descriptor (or -1).
+        let moved =
+            unsafe { libc::fcntl(bound.as_raw_fd(), libc::F_DUPFD_CLOEXEC, highest_held + 1) };
         assert!(
-            listener_fd > 1024,
-            "listener fd {listener_fd} is inside the old 1024-descriptor window"
+            moved >= 0,
+            "fcntl(F_DUPFD_CLOEXEC, {}): {}",
+            highest_held + 1,
+            std::io::Error::last_os_error()
         );
+        drop(bound);
+        // SAFETY: `moved` is a fresh descriptor that nothing else owns.
+        let listener = std::net::TcpListener::from(unsafe { OwnedFd::from_raw_fd(moved) });
+        let listener_fd = listener.as_raw_fd();
+        assert!(
+            listener_fd > highest_held && listener_fd > 1024,
+            "listener fd {listener_fd} must sit past all {HELD_FILES} held descriptors \
+             (highest {highest_held}) and the old 1024-descriptor window"
+        );
+        assert_eq!(listener.local_addr().unwrap().port(), port);
 
         let scan = scan_panes(&[(1, std::process::id())], &[]);
         let ports = scan
