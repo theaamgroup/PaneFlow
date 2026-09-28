@@ -537,7 +537,7 @@ thread_local! {
 /// `diagnose` reads the process-global `$PANEFLOW_HOOK_LOG`, which these
 /// tests cannot set while other tests are running.
 #[cfg(test)]
-fn take_recorded_cleanup_failures() -> Vec<String> {
+pub(super) fn take_recorded_cleanup_failures() -> Vec<String> {
     RECORDED_CLEANUP_FAILURES.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
 }
 

@@ -71,22 +71,26 @@ use embed_staging::{
 /// `target/embed/{debug,release}/bin/<target>/`.
 /// Enforced to keep the main PaneFlow binary slim.
 ///
-/// Measured `release-min` sizes (aarch64-apple-darwin Mach-O, 2026-09-26,
-/// after #857 dropped the third helper; `cargo build --profile release-min
-/// --target aarch64-apple-darwin -p paneflow-shim -p paneflow-ai-hook`, the
-/// nested build below):
+/// Measured `release-min` sizes (aarch64-apple-darwin Mach-O, 2026-09-27,
+/// main `cd098f39`; `cargo build --profile release-min --target
+/// aarch64-apple-darwin -p paneflow-shim -p paneflow-ai-hook --target-dir
+/// target/embed-build`, the nested build below):
 ///
 /// ```text
-///   paneflow-shim      539_504 B
-///   paneflow-ai-hook   353_200 B
+///   paneflow-shim      589_360 B
+///   paneflow-ai-hook   353_152 B
 ///   ----------------------------
-///   total              892_704 B
+///   total              942_512 B
 /// ```
 ///
-/// Cap 975_000 B = total + 9.2% (headroom relative to the total);
-/// slack 82_296 B = 8.4% of the cap. Two denominators, two readings:
-/// name the one you mean when you re-baseline. The cap exists so a real
-/// bloat regression fails the build, while strip/LTO jitter does not.
+/// Cap 975_000 B = total + 3.4% (headroom relative to the total);
+/// slack 32_488 B = 3.3% of the cap. Two denominators, two readings:
+/// name the one you mean when you re-baseline. The same tree built from
+/// another checkout path can differ by a few dozen bytes (embedded source
+/// paths), so compare within about 100 B. The 2026-09-26 baseline (shim
+/// 539_504 B, 82_296 B of slack) predates about 49.9 KB of shim growth.
+/// The cap exists so a real bloat regression fails the build, while
+/// strip/LTO jitter does not.
 /// Release builds print the measured total as a `cargo:warning` so the
 /// figures above can be checked against build output, not trusted.
 /// This cap applies to `release-min` staging (a build without
