@@ -30,5 +30,10 @@ libc.workspace = true
 # Wall-clock deadline for synthesized hook children (issue #26).
 paneflow-process.workspace = true
 
+[dev-dependencies]
+# Test oracle for the Codex `config.toml` scanner (#1053). Dev-only, so the
+# size-capped release helper does not link a TOML parser.
+toml = "1"
+
 [lints]
 workspace = true

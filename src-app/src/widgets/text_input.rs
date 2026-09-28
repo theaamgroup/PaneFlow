@@ -630,7 +630,9 @@ impl EntityInputHandler for TextInput {
         if last_layout.text != self.content {
             return None;
         }
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+        // Issue #1059: `localize` already made the point field-relative;
+        // subtracting it from `point` again yielded the field's own left edge.
+        let utf8_index = last_layout.index_for_x(line_point.x)?;
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -1000,5 +1002,93 @@ mod tests {
             filled.id, empty.id,
             "two text inputs must not share an element id"
         );
+    }
+
+    /// Lay `input` out and paint it at a window origin well away from (0, 0),
+    /// the way a real frame does, so `last_layout` and `last_bounds` are the
+    /// widget's own.
+    fn draw_away_from_origin(input: &gpui::Entity<TextInput>, cx: &mut gpui::VisualTestContext) {
+        use gpui::{AvailableSpace, IntoElement, point, px, size};
+
+        cx.draw(
+            point(px(200.), px(40.)),
+            size(
+                AvailableSpace::Definite(px(300.)),
+                AvailableSpace::Definite(px(24.)),
+            ),
+            |_, _| input.clone().into_any_element(),
+        );
+    }
+
+    fn character_index_at(
+        input: &gpui::Entity<TextInput>,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Option<usize> {
+        use gpui::EntityInputHandler;
+
+        input.update_in(cx, |input, window, cx| {
+            input.character_index_for_point(at, window, cx)
+        })
+    }
+
+    /// Issue #1059: macOS asks `characterIndexForPoint:` with a window-space
+    /// point. Each query over a different character of a field that sits away
+    /// from the window origin must return that character's UTF-16 offset.
+    /// `é` is two UTF-8 bytes and `😀` is two UTF-16 units, so byte offsets,
+    /// char counts and UTF-16 offsets all disagree here.
+    #[gpui::test]
+    fn character_index_for_point_hits_the_queried_character(cx: &mut gpui::TestAppContext) {
+        use gpui::{point, px};
+
+        let cx = cx.add_empty_window();
+        let text = "aé😀b";
+        let input = cx.new(|cx| TextInput::new(text, "Find", cx));
+        draw_away_from_origin(&input, cx);
+
+        let (bounds, mids) = input.read_with(cx, |input, _| {
+            let bounds = input.last_bounds.expect("painted bounds");
+            let line = input.last_layout.as_ref().expect("painted line");
+            let starts: Vec<usize> = text
+                .char_indices()
+                .map(|(ix, _)| ix)
+                .chain([text.len()])
+                .collect();
+            let mids: Vec<_> = starts
+                .windows(2)
+                .map(|w| (line.x_for_index(w[0]) + line.x_for_index(w[1])) / 2.)
+                .collect();
+            (bounds, mids)
+        });
+        assert!(
+            bounds.left() >= px(200.) && bounds.top() >= px(40.),
+            "the field is laid out away from the window origin: {bounds:?}"
+        );
+
+        let y = bounds.top() + px(1.);
+        let hits: Vec<Option<usize>> = mids
+            .iter()
+            .map(|&x| character_index_at(&input, point(bounds.left() + x, y), cx))
+            .collect();
+        assert_eq!(
+            hits,
+            vec![Some(0), Some(1), Some(2), Some(4)],
+            "UTF-16 offsets of a, é, 😀, b"
+        );
+    }
+
+    /// Issue #1059: an empty field lays out its placeholder, so the hit test
+    /// keeps declining (NSNotFound) instead of indexing placeholder glyphs.
+    #[gpui::test]
+    fn character_index_for_point_declines_on_an_empty_field(cx: &mut gpui::TestAppContext) {
+        use gpui::{point, px};
+
+        let cx = cx.add_empty_window();
+        let input = cx.new(|cx| TextInput::new("", "Filter files…", cx));
+        draw_away_from_origin(&input, cx);
+
+        let bounds = input.read_with(cx, |input, _| input.last_bounds.expect("painted bounds"));
+        let inside = point(bounds.left() + px(4.), bounds.top() + px(1.));
+        assert_eq!(character_index_at(&input, inside, cx), None);
     }
 }
