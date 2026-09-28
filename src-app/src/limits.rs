@@ -57,10 +57,24 @@ pub(crate) const MAX_OSC52_BYTES: usize = 100 * 1024;
 /// value) both bound a single request/reply to this many bytes.
 pub(crate) const MAX_REQUEST_LEN: u64 = 256 * 1024;
 
-/// Maximum body text returned by `surface.read` before JSON envelope overhead
-/// and optional untrusted-output fencing. Kept below [`MAX_REQUEST_LEN`] so a
-/// legitimate read response cannot exceed the client-side 256 KiB frame cap.
+/// Maximum raw body text returned by `surface.read`, before JSON escaping,
+/// envelope overhead and optional untrusted-output fencing. A raw budget alone
+/// does not bound the frame: escaping can double quote- or backslash-heavy
+/// rows (issue #1060), so the reply is then fitted to [`MAX_IPC_RESULT_BYTES`]
+/// on its encoded length.
 pub(crate) const MAX_IPC_TEXT_BYTES: usize = 240 * 1024;
+
+/// Frame bytes a reply spends outside a handler's `result`: the
+/// `{"jsonrpc":"2.0","result":` prefix, the `,"id":…}` suffix and the trailing
+/// newline. Sized for any request id up to roughly 990 encoded bytes; the
+/// shared IPC client sends integer ids.
+pub(crate) const IPC_ENVELOPE_RESERVE_BYTES: usize = 1024;
+
+/// Ceiling on a handler `result` serialized as compact JSON, so the whole
+/// newline-terminated reply stays inside the [`MAX_REQUEST_LEN`] frame the
+/// IPC client reads.
+pub(crate) const MAX_IPC_RESULT_BYTES: usize =
+    MAX_REQUEST_LEN as usize - IPC_ENVELOPE_RESERVE_BYTES;
 
 /// Shared read/write cap on `session.json` (U-008/U-016, #415). Individually
 /// capped scrollbacks can exceed this limit in aggregate. The writer stops

@@ -987,9 +987,15 @@ fn handle_connection(stream: Stream, request_tx: mpsc::SyncSender<IpcRequest>) {
 /// abort-safely. `true` on success. Request/response and rejection writes
 /// share this path.
 fn write_envelope(writer: &mut Stream, value: &Value) -> bool {
+    push_bytes(writer, encode_frame(value).as_bytes())
+}
+
+/// The exact bytes [`write_envelope`] puts on the wire: compact JSON plus the
+/// terminating newline. Shared so frame-size tests measure the real encoding.
+pub(crate) fn encode_frame(value: &Value) -> String {
     let mut frame = value.to_string();
     frame.push('\n');
-    push_bytes(writer, frame.as_bytes())
+    frame
 }
 
 /// Issue #222: the one `set_recv_timeout` / `set_send_timeout` failure a
