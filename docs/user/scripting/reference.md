@@ -147,7 +147,7 @@ printf '%s\n' '{"jsonrpc":"2.0","method":"system.capabilities","params":{},"id":
 | `system.identify`          | -                                                                                               | `{name, version, protocol}`                              |
 | `surface.list`             | `workspace_id?`                                                                                 | `{surfaces:[{surface_id,name,title,cwd,cmd,workspace,workspace_id,scope,tab_id,tab_title}]}` |
 | `surface.read`             | `surface_id`, `lines?`, `offset?`, `fenced?`, `workspace_id?`                                   | Scrollback, `output_generation`, `truncated`             |
-| `surface.search`           | `surface_id`, `pattern`, `max_matches?`, `workspace_id?`                                        | Case-insensitive substring matches                       |
+| `surface.search`           | `surface_id`, `pattern`, `max_matches?`, `workspace_id?`                                        | Case-insensitive substring matches; `truncated` when capped or trimmed to fit the reply frame |
 | `surface.status`           | `surface_id`                                                                                    | Agent state for one surface                              |
 | `surface.send_text`        | `surface_id`, `text`, `submit?`, `paste?`                                                       | Gated PTY text write; `submit`/`paste` are booleans      |
 | `surface.send_keystroke`   | `surface_id`, `keystroke`                                                                       | Env-gated non-submitting keystroke                       |
@@ -165,7 +165,8 @@ printf '%s\n' '{"jsonrpc":"2.0","method":"system.capabilities","params":{},"id":
 
 Structured failures use JSON-RPC `error` envelopes: `-32602` invalid
 params, `-32601` gated or unknown method, `-32001` permission,
-`-32002` dispatch timeout, and `-32000` backpressure or shutdown.
+`-32002` dispatch timeout, `-32000` backpressure or shutdown, and `-32603`
+internal error, including a reply that would exceed the 256 KiB IPC frame.
 Legacy handler errors are promoted into JSON-RPC `error` envelopes.
 
 ## Pane identity

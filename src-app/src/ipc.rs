@@ -992,10 +992,44 @@ fn write_envelope(writer: &mut Stream, value: &Value) -> bool {
 
 /// The exact bytes [`write_envelope`] puts on the wire: compact JSON plus the
 /// terminating newline. Shared so frame-size tests measure the real encoding.
+///
+/// Issue #1071: the client reads at most [`MAX_REQUEST_LEN`] bytes per reply,
+/// newline included, and rejects a longer frame without parsing it. A reply
+/// that would not fit (an unbudgeted result, or a huge echoed request id) is
+/// replaced by a `-32603` error the client can read.
 pub(crate) fn encode_frame(value: &Value) -> String {
     let mut frame = value.to_string();
     frame.push('\n');
+    if frame.len() > MAX_REQUEST_LEN as usize {
+        log::warn!(
+            "IPC reply of {} bytes exceeds the {MAX_REQUEST_LEN}-byte frame cap; sending -32603",
+            frame.len()
+        );
+        return oversized_reply_frame(value.get("id"));
+    }
     frame
+}
+
+/// The `-32603` frame [`encode_frame`] sends in place of a reply over the
+/// frame cap. It echoes the request id when that still fits, else `null`;
+/// with a `null` id the frame is a fixed, small string.
+fn oversized_reply_frame(id: Option<&Value>) -> String {
+    let error_frame = |id: Value| {
+        let mut frame = json!({
+            "jsonrpc": "2.0",
+            "error": {"code": -32603, "message": "response exceeds IPC frame cap"},
+            "id": id,
+        })
+        .to_string();
+        frame.push('\n');
+        frame
+    };
+    let frame = error_frame(id.cloned().unwrap_or(Value::Null));
+    if frame.len() <= MAX_REQUEST_LEN as usize {
+        frame
+    } else {
+        error_frame(Value::Null)
+    }
 }
 
 /// Issue #222: the one `set_recv_timeout` / `set_send_timeout` failure a
@@ -1356,6 +1390,65 @@ mod peer_closed_tests {
             request_rx.recv_timeout(Duration::from_millis(100)).is_err(),
             "exactly one frame is dispatched, then the handler sees EOF"
         );
+    }
+
+    /// Issue #1071: the server echoes any request id. A raw-socket request
+    /// that fits the request cap but carries a huge id must still get a reply
+    /// frame the capped client can read and parse.
+    #[test]
+    fn huge_request_id_gets_a_reply_that_fits_the_client_frame() {
+        use std::io::{BufRead, BufReader, Read};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("huge-id.sock");
+        let name = path
+            .as_path()
+            .to_fs_name::<GenericFilePath>()
+            .expect("socket name");
+        let listener = ListenerOptions::new()
+            .name(name)
+            .create_sync()
+            .expect("bind listener");
+
+        // Fill the request to exactly the server's read cap. The
+        // `system.identify` result is longer than its method name, so the
+        // echoed reply is over the cap.
+        let shell = json!({"jsonrpc": "2.0", "method": "system.identify", "id": ""}).to_string();
+        let pad = super::MAX_REQUEST_LEN as usize - shell.len() - 1;
+        let request = json!({"jsonrpc": "2.0", "method": "system.identify", "id": "i".repeat(pad)});
+        let mut frame = request.to_string();
+        frame.push('\n');
+        assert_eq!(frame.len(), super::MAX_REQUEST_LEN as usize);
+
+        let mut client = UnixStream::connect(&path).expect("connect");
+        let server = listener.accept().expect("accept");
+        let (request_tx, _request_rx) = mpsc::sync_channel::<IpcRequest>(4);
+        let handler = std::thread::spawn(move || handle_connection(server, request_tx));
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
+        client.write_all(frame.as_bytes()).expect("write request");
+
+        // Read exactly as `paneflow-ipc-client` does.
+        let mut reader = BufReader::new(client.try_clone().expect("clone"));
+        let mut line = String::new();
+        let n = reader
+            .by_ref()
+            .take(paneflow_ipc_client::MAX_FRAME_BYTES as u64)
+            .read_line(&mut line)
+            .expect("read reply");
+        assert!(
+            line.ends_with('\n'),
+            "reply of {n}+ bytes overran the client frame cap"
+        );
+        let reply: serde_json::Value = serde_json::from_str(&line).expect("reply parses");
+        assert_eq!(reply["jsonrpc"], "2.0");
+        assert_eq!(reply["error"]["code"], -32603, "{reply}");
+        assert_eq!(reply["id"], serde_json::Value::Null);
+
+        drop(reader);
+        drop(client);
+        handler.join().expect("handler thread");
     }
 }
 
