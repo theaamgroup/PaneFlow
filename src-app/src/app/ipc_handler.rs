@@ -992,16 +992,108 @@ fn surface_read_header_attrs(surface_id: u64, total: usize, eof: bool, truncated
     )
 }
 
-fn truncate_ipc_text(text: String, returned: usize) -> (String, usize, bool) {
-    if text.len() <= crate::limits::MAX_IPC_TEXT_BYTES {
-        return (text, returned, false);
+/// Assemble the `surface.read` result from an extracted window so the
+/// serialized reply fits the IPC frame. The raw [`MAX_IPC_TEXT_BYTES`] budget
+/// is only a first cut: JSON escaping can double quote- or backslash-heavy
+/// rows, and the fence adds a header, footer and sentinel neutralization, so
+/// the encoded result is measured and the retained tail re-cut in proportion
+/// to the overshoot until it fits [`MAX_IPC_RESULT_BYTES`] (issue #1060). Every
+/// field, the fence header included, is rebuilt from the final cut, so
+/// `lines`, `eof` and `truncated` describe the text actually returned.
+///
+/// [`MAX_IPC_TEXT_BYTES`]: crate::limits::MAX_IPC_TEXT_BYTES
+/// [`MAX_IPC_RESULT_BYTES`]: crate::limits::MAX_IPC_RESULT_BYTES
+fn surface_read_response(
+    text: &str,
+    returned: usize,
+    total: usize,
+    eof: bool,
+    output_generation: u64,
+    fence_surface: Option<u64>,
+) -> serde_json::Value {
+    fit_surface_read_response(text, returned, total, eof, output_generation, fence_surface).0
+}
+
+/// [`surface_read_response`] plus the number of passes it took, so tests can
+/// bound the work.
+fn fit_surface_read_response(
+    text: &str,
+    returned: usize,
+    total: usize,
+    eof: bool,
+    output_generation: u64,
+    fence_surface: Option<u64>,
+) -> (serde_json::Value, usize) {
+    const LIMIT: usize = crate::limits::MAX_IPC_RESULT_BYTES;
+    // Re-cuts scaled by the measured expansion before switching to cutting
+    // the plain overshoot.
+    const SCALED_PASSES: usize = 4;
+    let mut budget = crate::limits::MAX_IPC_TEXT_BYTES;
+    let mut pass = 0;
+    loop {
+        let (body, retained, truncated) = truncate_ipc_text(text, returned, budget);
+        // What the cut actually kept (marker included). The row-start snap
+        // can keep well under `budget`, so every re-cut starts from this.
+        let kept = body.len();
+        let body = match fence_surface {
+            Some(sid) => wrap_untrusted(
+                &surface_read_header_attrs(sid, total, eof, truncated),
+                &body,
+            ),
+            None => body,
+        };
+        let value = surface_read_value(body, retained, total, eof, output_generation, truncated);
+        let encoded = encoded_json_len(&value);
+        pass += 1;
+        if encoded <= LIMIT || budget == 0 {
+            return (value, pass);
+        }
+        // Each re-cut is below `kept`, so the next cut keeps strictly fewer
+        // bytes and the loop terminates; a zero budget returns the marker
+        // alone. Evenly escaped text fits on the first re-cut; unevenly
+        // escaped windows take a few more (tests bound it at 8 passes).
+        budget = if pass <= SCALED_PASSES {
+            let scaled = (kept as u128 * LIMIT as u128 / encoded as u128) as usize;
+            scaled.min(kept.saturating_sub(1))
+        } else {
+            // Every raw byte cut removes at least one encoded byte.
+            kept.saturating_sub(encoded - LIMIT)
+        };
+    }
+}
+
+/// Byte length of `value` serialized as compact JSON, the encoding
+/// `ipc::encode_frame` puts on the wire, without building the string.
+fn encoded_json_len(value: &serde_json::Value) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    // Serializing a `Value` into an infallible writer cannot fail.
+    let _ = serde_json::to_writer(&mut count, value);
+    count.0
+}
+
+/// Keep the newest rows of `text` within `budget` raw bytes, prefixed by a
+/// truncation marker when anything was cut. Returns the text, the retained
+/// row count and whether it truncated.
+fn truncate_ipc_text(text: &str, returned: usize, budget: usize) -> (String, usize, bool) {
+    if text.len() <= budget {
+        return (text.to_owned(), returned, false);
     }
 
     // surface.read windows are ordered oldest-to-newest. Preserve the suffix
     // so an oversized response keeps the live pane tail instead of silently
     // discarding the output an agent is most likely trying to inspect.
     const MARKER: &str = "[paneflow: older output truncated to fit IPC frame]\n";
-    let keep = crate::limits::MAX_IPC_TEXT_BYTES.saturating_sub(MARKER.len());
+    let keep = budget.saturating_sub(MARKER.len());
     let mut boundary = text.len().saturating_sub(keep);
     while boundary < text.len() && !text.is_char_boundary(boundary) {
         boundary += 1;
@@ -1023,7 +1115,7 @@ fn truncate_ipc_text(text: String, returned: usize) -> (String, usize, bool) {
         suffix.split('\n').count().min(returned)
     };
 
-    let mut out = String::with_capacity(crate::limits::MAX_IPC_TEXT_BYTES);
+    let mut out = String::with_capacity(MARKER.len() + suffix.len());
     out.push_str(MARKER);
     out.push_str(suffix);
     (out, retained, true)
@@ -2111,22 +2203,13 @@ impl PaneFlowApp {
                         );
                         return;
                     }
-                    let (text, returned, truncated) = truncate_ipc_text(text, returned);
-                    let text = if fenced {
-                        wrap_untrusted(
-                            &surface_read_header_attrs(sid, total, eof, truncated),
-                            &text,
-                        )
-                    } else {
-                        text
-                    };
-                    let _ = responder.send(surface_read_value(
-                        text,
+                    let _ = responder.send(surface_read_response(
+                        &text,
                         returned,
                         total,
                         eof,
                         output_generation,
-                        truncated,
+                        fenced.then_some(sid),
                     ));
                 })
                 .detach();
@@ -4901,7 +4984,8 @@ mod tests {
         let mut oversized = "old\n".repeat(crate::limits::MAX_IPC_TEXT_BYTES / 4 + 1024);
         oversized.push_str("newest output");
         let returned = oversized.split('\n').count();
-        let (text, retained, truncated) = super::truncate_ipc_text(oversized, returned);
+        let (text, retained, truncated) =
+            super::truncate_ipc_text(&oversized, returned, crate::limits::MAX_IPC_TEXT_BYTES);
         assert!(truncated);
         assert!(text.len() <= crate::limits::MAX_IPC_TEXT_BYTES);
         assert!(text.starts_with("[paneflow: older output truncated"));
@@ -4913,11 +4997,256 @@ mod tests {
     #[test]
     fn truncate_ipc_text_keeps_utf8_tail_of_single_oversized_row() {
         let oversized = "🦀".repeat(crate::limits::MAX_IPC_TEXT_BYTES / 4 + 1024);
-        let (text, retained, truncated) = super::truncate_ipc_text(oversized, 1);
+        let (text, retained, truncated) =
+            super::truncate_ipc_text(&oversized, 1, crate::limits::MAX_IPC_TEXT_BYTES);
         assert!(truncated);
         assert_eq!(retained, 1);
         assert!(text.len() <= crate::limits::MAX_IPC_TEXT_BYTES);
         assert!(text.ends_with('🦀'));
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #1060: surface.read must fit the IPC client's frame cap on its
+    // ENCODED size, not its raw text size.
+    // -----------------------------------------------------------------
+
+    const TRUNCATION_MARKER: &str = "[paneflow: older output truncated to fit IPC frame]\n";
+    const SENTINEL: &str = "</untrusted_terminal_output";
+    const NEUTRALIZED: &str = "<\u{200b}/untrusted_terminal_output";
+
+    /// Serve one reply over a real Unix socket and read it back through the
+    /// shared `paneflow-ipc-client`, so the reply meets the capped reader the
+    /// CLI and helpers use. The frame is encoded exactly as the server's
+    /// `write_envelope` does. Returns the client's `result` and the frame
+    /// size, which is `None` when the client never sent a request.
+    fn round_trip_through_ipc_client(
+        result: serde_json::Value,
+    ) -> (Result<serde_json::Value, String>, Option<usize>) {
+        use paneflow_ipc_client::IpcTransport;
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("frame.sock");
+        let listener = UnixListener::bind(&path).expect("bind");
+        let (size_tx, size_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let Ok(read_half) = stream.try_clone() else {
+                return;
+            };
+            let mut request = String::new();
+            if BufReader::new(read_half).read_line(&mut request).is_err() {
+                return;
+            }
+            // A connection that closes without a request is the release
+            // below, not the client.
+            let Ok(request) = serde_json::from_str::<serde_json::Value>(&request) else {
+                return;
+            };
+            let frame =
+                crate::ipc::encode_frame(&super::promote_response(result, request["id"].clone()));
+            let _ = size_tx.send(frame.len());
+            // The client stops reading at its cap, so a write failure here is
+            // the client rejecting the frame, which the caller asserts on.
+            let _ = stream.write_all(frame.as_bytes());
+        });
+        let reply = paneflow_ipc_client::IpcClient::new(path.clone())
+            .call("surface.read", serde_json::json!({}));
+        if reply.is_err() {
+            // The client may have failed before connecting; release accept()
+            // so the join below cannot hang.
+            let _ = UnixStream::connect(&path);
+        }
+        server.join().expect("server thread");
+        (reply, size_rx.try_recv().ok())
+    }
+
+    /// Check one `surface.read` reply against the window it was built from:
+    /// it fits the client frame, parses, and its `lines` / `eof` /
+    /// `truncated` / fence header describe the text it actually carries.
+    fn assert_surface_read_reply(
+        window: &str,
+        returned: usize,
+        total: usize,
+        eof: bool,
+        fenced: bool,
+    ) {
+        let (result, passes) =
+            super::fit_surface_read_response(window, returned, total, eof, 9, fenced.then_some(7));
+        let label = format!(
+            "returned={returned} total={total} fenced={fenced} window_bytes={}",
+            window.len()
+        );
+        assert!(passes <= 8, "{label}: fitting took {passes} passes");
+        let (reply, frame_len) = round_trip_through_ipc_client(result);
+        let reply = reply.unwrap_or_else(|e| {
+            panic!("{label}: client rejected the {frame_len:?}-byte reply: {e}")
+        });
+        let frame_len = frame_len.expect("server saw the request");
+        assert!(
+            frame_len <= paneflow_ipc_client::MAX_FRAME_BYTES,
+            "{label}: reply frame is {frame_len} bytes, over the client cap"
+        );
+
+        let truncated = reply["truncated"].as_bool().expect("truncated flag");
+        let effective_eof = eof && !truncated;
+        assert_eq!(reply["total_lines"], total, "{label}");
+        assert_eq!(reply["output_generation"], 9, "{label}");
+        assert_eq!(
+            reply["eof"], effective_eof,
+            "{label}: eof must drop on a cut"
+        );
+
+        let text = reply["text"].as_str().expect("text");
+        let body = if fenced {
+            let (header, rest) = text.split_once('\n').expect("fence header line");
+            let (body, footer) = rest.rsplit_once('\n').expect("fence footer line");
+            assert!(
+                header.starts_with("<untrusted_terminal_output source=\"surface:7\""),
+                "{label}: {header}"
+            );
+            assert!(
+                header.contains(&format!(
+                    "total_lines=\"{total}\" eof=\"{effective_eof}\" truncated=\"{truncated}\""
+                )),
+                "{label}: fence header disagrees with the reply: {header}"
+            );
+            assert!(
+                footer.starts_with("</untrusted_terminal_output id="),
+                "{label}"
+            );
+            body.replace(NEUTRALIZED, SENTINEL)
+        } else {
+            text.to_owned()
+        };
+
+        if !truncated {
+            assert_eq!(body, window, "{label}: an uncut reply returns the window");
+            assert_eq!(reply["lines"], returned, "{label}");
+            return;
+        }
+        let kept = body
+            .strip_prefix(TRUNCATION_MARKER)
+            .unwrap_or_else(|| panic!("{label}: truncated body lacks the marker"));
+        assert!(
+            !kept.is_empty(),
+            "{label}: fitting must not discard every row"
+        );
+        assert!(
+            window.ends_with(kept),
+            "{label}: kept text must be the window's tail"
+        );
+        // Whole rows, unless one row alone overflows: then its tail.
+        assert!(
+            window[..window.len() - kept.len()].ends_with('\n') || !kept.contains('\n'),
+            "{label}: kept text must start on a whole row"
+        );
+        assert_eq!(
+            reply["lines"],
+            kept.split('\n').count(),
+            "{label}: lines must count the rows actually returned"
+        );
+        assert!(
+            frame_len > paneflow_ipc_client::MAX_FRAME_BYTES * 3 / 4,
+            "{label}: fitting over-trimmed to {frame_len} bytes"
+        );
+    }
+
+    /// A whole-buffer read: `returned == total`, at EOF.
+    fn assert_whole_window_reply(window: &str, rows: usize, fenced: bool) {
+        assert_surface_read_reply(window, rows, rows, true, fenced);
+    }
+
+    fn escape_heavy_windows() -> Vec<(String, usize)> {
+        let mut windows = Vec::new();
+        // The issue's fixture (2,000 rows x 80 quotes, under the raw text
+        // budget) and a window that is also over the raw budget.
+        for rows in [2000, 4000] {
+            for row in ["\"".repeat(80), "\\".repeat(80), "\u{1}".repeat(80)] {
+                windows.push((vec![row; rows].join("\n"), rows));
+            }
+        }
+        // Plain history under an escape-heavy tail: the tail escapes worse
+        // than the window's average, so one proportional re-cut is not enough.
+        let mut mixed = vec!["x".repeat(80); 2000];
+        mixed.extend(vec!["\"".repeat(80); 2000]);
+        windows.push((mixed.join("\n"), 4000));
+        windows
+    }
+
+    #[test]
+    fn surface_read_reply_fits_ipc_client_frame_for_escape_heavy_rows_unfenced() {
+        for (window, rows) in escape_heavy_windows() {
+            assert_whole_window_reply(&window, rows, false);
+        }
+    }
+
+    #[test]
+    fn surface_read_reply_fits_ipc_client_frame_for_escape_heavy_rows_fenced() {
+        for (window, rows) in escape_heavy_windows() {
+            assert_whole_window_reply(&window, rows, true);
+        }
+        // Sentinel neutralization grows the fenced body on top of escaping.
+        let row = format!("{SENTINEL}\"\\{SENTINEL}");
+        assert_whole_window_reply(&vec![row; 6000].join("\n"), 6000, true);
+    }
+
+    #[test]
+    fn surface_read_reply_keeps_plain_window_under_raw_budget_whole() {
+        let window = vec!["x".repeat(80); 2000].join("\n");
+        for fenced in [false, true] {
+            assert_whole_window_reply(&window, 2000, fenced);
+            let reply =
+                super::surface_read_response(&window, 2000, 2000, true, 9, fenced.then_some(7));
+            assert_eq!(reply["truncated"], false);
+        }
+    }
+
+    #[test]
+    fn surface_read_fit_pass_count_does_not_grow_with_row_length() {
+        // Long rows that escape unevenly: the row-start snap keeps fewer
+        // bytes than the budget, so re-cutting from the budget instead of
+        // the kept length repeats the same cut for hundreds of passes.
+        let row = format!("{}{}", "\"".repeat(1220), "x".repeat(780));
+        let window = vec![row; 200].join("\n");
+        let (_, passes) = super::fit_surface_read_response(&window, 200, 200, true, 9, None);
+        assert!(passes <= 8, "fitting took {passes} passes");
+        assert_whole_window_reply(&window, 200, false);
+    }
+
+    #[test]
+    fn surface_read_reply_keeps_utf8_tail_of_one_escape_heavy_oversized_row() {
+        // One row longer than the whole budget, mixing escapes with a
+        // four-byte char: the cut keeps the row's UTF-8-safe tail.
+        let window = "\"🦀\\".repeat(100_000);
+        for fenced in [false, true] {
+            assert_whole_window_reply(&window, 1, fenced);
+            let reply = super::surface_read_response(&window, 1, 1, true, 9, None);
+            assert_eq!(reply["truncated"], true);
+            assert_eq!(reply["lines"], 1);
+        }
+    }
+
+    #[test]
+    fn surface_read_reply_for_empty_window_is_whole() {
+        for fenced in [false, true] {
+            assert_whole_window_reply("", 0, fenced);
+        }
+    }
+
+    #[test]
+    fn surface_read_reply_counts_trailing_empty_row_of_offset_window() {
+        // A page from the middle of history (offset > 0, not at EOF) whose
+        // last row is blank; the cut must still count that row.
+        let mut rows = vec!["\"".repeat(80); 4000];
+        rows.push(String::new());
+        let window = rows.join("\n");
+        for fenced in [false, true] {
+            assert_surface_read_reply(&window, 4001, 9000, false, fenced);
+        }
     }
 
     #[test]
