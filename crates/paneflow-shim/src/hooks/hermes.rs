@@ -2,8 +2,9 @@ mod top_level_keys;
 
 use super::owned_files::report_cleanup_failure;
 use super::{
-    home_unavailable, paneflow_ipc_reachable, refuse_symlink, resolve_plain_hook_command,
-    with_last_lease, with_orphan_lease, HookInstall, HookInstallResult, HookInstallSkip, HookLease,
+    home_unavailable, is_paneflow_hook_command, paneflow_ipc_reachable, refuse_symlink,
+    resolve_plain_hook_command, with_last_lease, with_orphan_lease, HookInstall, HookInstallResult,
+    HookInstallSkip, HookLease,
 };
 use paneflow_agent_config::{
     home_dir, read_optional_text, with_config_lock, write_json_atomic, write_text_atomic,
@@ -83,6 +84,18 @@ fn allowlist_path(directory: &Path) -> PathBuf {
     directory.join("shell-hooks-allowlist.json")
 }
 
+/// Any PaneFlow approval for a managed Hermes event, whichever build or
+/// hook-binary path granted it. Sessions of different builds share the
+/// lease, so the last holder cannot rely on its own granted set alone.
+fn is_managed_approval(item: &serde_json::Value) -> bool {
+    let text = |key: &str| item.get(key).and_then(|value| value.as_str());
+    text("event").is_some_and(|event| {
+        HERMES_MANAGED_HOOKS
+            .iter()
+            .any(|(managed, _)| *managed == event)
+    }) && text("command").is_some_and(is_paneflow_hook_command)
+}
+
 fn approval_matches(item: &serde_json::Value, event: &str, command: &str) -> bool {
     item.get("event").and_then(|value| value.as_str()) == Some(event)
         && item.get("command").and_then(|value| value.as_str()) == Some(command)
@@ -142,13 +155,11 @@ fn grant_managed_approvals(
     })
 }
 
-/// Remove the managed approvals. The caller holds the config lock: this runs
-/// inside the allowlist's last-lease cleanup, which already took it.
-fn revoke_managed_approvals(
-    path: &Path,
-    created: bool,
-    granted: &[(String, String)],
-) -> std::io::Result<()> {
+/// Remove every PaneFlow approval for a managed event (see
+/// [`is_managed_approval`]); the user's own entries stay. The caller holds
+/// the config lock: this runs inside the allowlist's last-lease cleanup,
+/// which already took it.
+fn revoke_managed_approvals(path: &Path, created: bool) -> std::io::Result<()> {
     let Some(text) = read_optional_text(path)? else {
         return Ok(());
     };
@@ -167,11 +178,7 @@ fn revoke_managed_approvals(
     else {
         return Ok(());
     };
-    list.retain(|item| {
-        !granted
-            .iter()
-            .any(|(event, command)| approval_matches(item, event, command))
-    });
+    list.retain(|item| !is_managed_approval(item));
     let only_empty_approvals = list.is_empty()
         && root
             .as_object()
@@ -265,8 +272,10 @@ impl HermesHookConfigGuard {
         ) {
             Ok(()) => Ok(guard),
             Err(err) => {
-                // Drop strips the managed block. The allowlist write did not
-                // finish, so revoke is a no-op when the file is still absent.
+                // Drop strips the managed block, and only the last holder
+                // revokes approvals: a no-op when the file is absent, while a
+                // file written but not yet marked created keeps only the
+                // user's entries (`{"approvals":[]}` if none).
                 drop(guard);
                 Err(err)
             }
@@ -296,9 +305,7 @@ impl Drop for HermesHookConfigGuard {
         let revoked = with_last_lease(
             &self.allowlist_path,
             &mut self.allowlist_lease,
-            |created_allowlist| {
-                revoke_managed_approvals(&self.allowlist_path, created_allowlist, &self.granted)
-            },
+            |created_allowlist| revoke_managed_approvals(&self.allowlist_path, created_allowlist),
         );
         report_cleanup_failure(&self.allowlist_path, revoked.as_ref().err());
         let cleaned = with_last_lease(&self.path, &mut self.lease, |lease_created_file| {
@@ -436,6 +443,72 @@ mod tests {
             !allowlist.exists(),
             "the next last holder removes the allowlist the crashed session created"
         );
+        assert!(
+            !HookLease::acquire(&allowlist).unwrap().is_created(),
+            "the last holder consumes the created-file marker"
+        );
+    }
+
+    #[test]
+    fn last_holder_revokes_approvals_another_build_granted() {
+        // Debug and release builds (or a versioned-cache fallback) grant
+        // different command strings for the same events, and share the
+        // lease. The last holder must revoke every PaneFlow approval, not
+        // only the set its own session granted.
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join(".hermes");
+        std::fs::create_dir_all(&directory).unwrap();
+        let allowlist = allowlist_path(&directory);
+        let other_build = [(
+            "pre_tool_call".to_string(),
+            "'/Users/me/Library/Application Support/paneflow-dev/bin/paneflow-ai-hook' PreToolUse"
+                .to_string(),
+        )];
+        assert!(is_paneflow_hook_command(&other_build[0].1));
+        for (_, command) in hermes_managed_approvals() {
+            assert!(is_paneflow_hook_command(&command), "{command}");
+        }
+
+        let mut other = HookLease::acquire(&allowlist).unwrap();
+        grant_managed_approvals(&allowlist, &mut other, &other_build).unwrap();
+        let guard = HermesHookConfigGuard::install_at(&directory).unwrap();
+        drop(other);
+        drop(guard);
+        assert!(
+            !allowlist.exists(),
+            "no PaneFlow approval may outlive the last session, got {:?}",
+            std::fs::read_to_string(&allowlist).ok()
+        );
+    }
+
+    #[test]
+    fn concurrent_guards_keep_a_user_allowlist_and_its_entries() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let directory = temp.path().join(".hermes");
+        std::fs::create_dir_all(&directory).unwrap();
+        let allowlist = allowlist_path(&directory);
+        let user = r#"{"approvals":[{"event":"pre_tool_call","command":"/usr/bin/user-hook"}]}"#;
+        std::fs::write(&allowlist, user).unwrap();
+
+        let first = HermesHookConfigGuard::install_at(&directory).unwrap();
+        let second = HermesHookConfigGuard::install_at(&directory).unwrap();
+        assert!(
+            !HookLease::acquire(&allowlist).unwrap().is_created(),
+            "a user-created allowlist never gets a PaneFlow created marker"
+        );
+        drop(first);
+        drop(second);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&allowlist).unwrap()).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"approvals": [
+                {"event": "pre_tool_call", "command": "/usr/bin/user-hook"}
+            ]}),
+            "the user's file and entry survive both sessions"
+        );
+        assert!(!HookLease::acquire(&allowlist).unwrap().is_created());
     }
 
     #[test]
