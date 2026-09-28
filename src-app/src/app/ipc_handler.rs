@@ -1062,6 +1062,34 @@ fn fit_surface_read_response(
     }
 }
 
+/// Assemble the `surface.search` result so the serialized reply fits the IPC
+/// frame (issue #1071). `max_matches` bounds rows, not bytes, and escaping can
+/// double a quote- or backslash-heavy row, so each match's encoded length is
+/// counted against [`MAX_IPC_RESULT_BYTES`]. Matches arrive in scan order,
+/// the order the `max_matches` cap keeps, so the budget likewise keeps the
+/// leading matches, drops the rest and reports `truncated`.
+///
+/// [`MAX_IPC_RESULT_BYTES`]: crate::limits::MAX_IPC_RESULT_BYTES
+fn surface_search_response(matches: Vec<(i32, String)>, truncated: bool) -> serde_json::Value {
+    const LIMIT: usize = crate::limits::MAX_IPC_RESULT_BYTES;
+    // The empty result with the longer flag spelling bounds the fixed part.
+    let mut used = encoded_json_len(&serde_json::json!({"matches": [], "truncated": false}));
+    let found = matches.len();
+    let mut arr = Vec::with_capacity(found);
+    for (line, text) in matches {
+        let entry = serde_json::json!({"line": line, "text": text});
+        // Every entry after the first also spends a separating comma.
+        let cost = encoded_json_len(&entry) + usize::from(!arr.is_empty());
+        if used + cost > LIMIT {
+            break;
+        }
+        used += cost;
+        arr.push(entry);
+    }
+    let truncated = truncated || arr.len() < found;
+    serde_json::json!({"matches": arr, "truncated": truncated})
+}
+
 /// Byte length of `value` serialized as compact JSON, the encoding
 /// `ipc::encode_frame` puts on the wire, without building the string.
 fn encoded_json_len(value: &serde_json::Value) -> usize {
@@ -2269,9 +2297,11 @@ impl PaneFlowApp {
                             .await;
                     // Issue #362: an unanswered or failed runtime is an error,
                     // not `matches=[] truncated=true` - `truncated` means the
-                    // cap or the cell budget cut a scan that did finish, and a
-                    // caller must not read a wedged pane as "pattern absent".
-                    // `surface.read` maps the same failure the same way.
+                    // cap, the cell budget or the reply's byte budget
+                    // (`surface_search_response`, issue #1071) cut a scan that
+                    // did finish, and a caller must not read a wedged pane as
+                    // "pattern absent". `surface.read` maps the same failure
+                    // the same way.
                     let (matches, truncated) = match found {
                         Ok(found) => found,
                         Err(reason) => {
@@ -2284,12 +2314,7 @@ impl PaneFlowApp {
                             return;
                         }
                     };
-                    let arr: Vec<_> = matches
-                        .into_iter()
-                        .map(|(line, text)| serde_json::json!({"line": line, "text": text}))
-                        .collect();
-                    let _ =
-                        responder.send(serde_json::json!({"matches": arr, "truncated": truncated}));
+                    let _ = responder.send(surface_search_response(matches, truncated));
                 })
                 .detach();
                 ipc_deferred_response()
@@ -4733,6 +4758,11 @@ mod tests {
             arm.contains("Err(reason) =>") && arm.contains("internal_error"),
             "an unanswered or failed scan is a JSON-RPC error, not an empty capped result"
         );
+        // Issue #1071: the result is fitted to the IPC frame on encoded size.
+        assert!(
+            arm.contains("surface_search_response(matches, truncated)"),
+            "surface.search must build its result through the frame budget"
+        );
     }
 
     /// Issue #363: `GhosttySession::request` parks its caller on the runtime
@@ -5017,10 +5047,23 @@ mod tests {
     /// Serve one reply over a real Unix socket and read it back through the
     /// shared `paneflow-ipc-client`, so the reply meets the capped reader the
     /// CLI and helpers use. The frame is encoded exactly as the server's
-    /// `write_envelope` does. Returns the client's `result` and the frame
-    /// size, which is `None` when the client never sent a request.
+    /// `write_envelope` does. Returns the client's `result` and the length
+    /// the envelope encodes to BEFORE the frame-cap backstop in
+    /// `ipc::encode_frame` (issue #1071), which is `None` when the client
+    /// never sent a request. The wire frame always fits since that backstop,
+    /// so only the pre-backstop length shows whether the handler's own
+    /// result fit or was replaced by the `-32603` error.
     fn round_trip_through_ipc_client(
         result: serde_json::Value,
+    ) -> (Result<serde_json::Value, String>, Option<usize>) {
+        round_trip_envelope_through_ipc_client(move |id| super::promote_response(result, id))
+    }
+
+    /// [`round_trip_through_ipc_client`] with the whole envelope built by
+    /// `envelope` from the client's request id, so a test can also choose the
+    /// id the server echoes.
+    fn round_trip_envelope_through_ipc_client(
+        envelope: impl FnOnce(serde_json::Value) -> serde_json::Value + Send + 'static,
     ) -> (Result<serde_json::Value, String>, Option<usize>) {
         use paneflow_ipc_client::IpcTransport;
         use std::io::{BufRead, BufReader, Write};
@@ -5037,8 +5080,9 @@ mod tests {
             let Ok(read_half) = stream.try_clone() else {
                 return;
             };
+            let mut reader = BufReader::new(read_half);
             let mut request = String::new();
-            if BufReader::new(read_half).read_line(&mut request).is_err() {
+            if reader.read_line(&mut request).is_err() {
                 return;
             }
             // A connection that closes without a request is the release
@@ -5046,12 +5090,17 @@ mod tests {
             let Ok(request) = serde_json::from_str::<serde_json::Value>(&request) else {
                 return;
             };
-            let frame =
-                crate::ipc::encode_frame(&super::promote_response(result, request["id"].clone()));
-            let _ = size_tx.send(frame.len());
+            let envelope = envelope(request["id"].clone());
+            let _ = size_tx.send(envelope.to_string().len() + 1);
+            let frame = crate::ipc::encode_frame(&envelope);
             // The client stops reading at its cap, so a write failure here is
             // the client rejecting the frame, which the caller asserts on.
             let _ = stream.write_all(frame.as_bytes());
+            // Hold the connection open until the client hangs up, like the
+            // real server's per-connection loop. Closing right after a small
+            // write races the client's post-write SO_RCVTIMEO setsockopt,
+            // which macOS rejects with EINVAL once the peer has gone.
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
         });
         let reply = paneflow_ipc_client::IpcClient::new(path.clone())
             .call("surface.read", serde_json::json!({}));
@@ -5088,7 +5137,7 @@ mod tests {
         let frame_len = frame_len.expect("server saw the request");
         assert!(
             frame_len <= paneflow_ipc_client::MAX_FRAME_BYTES,
-            "{label}: reply frame is {frame_len} bytes, over the client cap"
+            "{label}: reply encodes to {frame_len} bytes, over the client cap"
         );
 
         let truncated = reply["truncated"].as_bool().expect("truncated flag");
@@ -5247,6 +5296,204 @@ mod tests {
         for fenced in [false, true] {
             assert_surface_read_reply(&window, 4001, 9000, false, fenced);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #1071: surface.search and every other reply must fit the IPC
+    // client's frame cap on their encoded size.
+    // -----------------------------------------------------------------
+
+    /// Build the `surface.search` reply for `matches`, read it back through
+    /// the capped client, and check it fits, parses, keeps the leading
+    /// matches in order, and reports `truncated` when it dropped any.
+    fn assert_surface_search_reply(matches: Vec<(i32, String)>, scan_truncated: bool) {
+        let label = format!(
+            "matches={} row_bytes={}",
+            matches.len(),
+            matches.first().map_or(0, |(_, t)| t.len())
+        );
+        let result = super::surface_search_response(matches.clone(), scan_truncated);
+        let encoded = super::encoded_json_len(&result);
+        assert!(
+            encoded <= crate::limits::MAX_IPC_RESULT_BYTES,
+            "{label}: result encodes to {encoded} bytes, over the result budget"
+        );
+        let kept = result["matches"].as_array().expect("matches array").len();
+        if let Some((line, text)) = matches.get(kept) {
+            // Maximality: the first dropped match, with its comma, must not
+            // have fit. The budget counts the flag as `false`, one byte
+            // longer than the `true` a trimmed reply carries.
+            let next = super::encoded_json_len(&serde_json::json!({"line": line, "text": text}));
+            let comma = usize::from(kept > 0);
+            assert!(
+                encoded + 1 + next + comma > crate::limits::MAX_IPC_RESULT_BYTES,
+                "{label}: kept {kept} but match {kept} ({next} bytes) still fit at {encoded}"
+            );
+        }
+        let (reply, frame_len) = round_trip_through_ipc_client(result);
+        let reply = reply.unwrap_or_else(|e| {
+            panic!("{label}: client rejected the {frame_len:?}-byte reply: {e}")
+        });
+        let frame_len = frame_len.expect("server saw the request");
+        assert!(
+            frame_len <= paneflow_ipc_client::MAX_FRAME_BYTES,
+            "{label}: reply encodes to {frame_len} bytes, over the client cap"
+        );
+        let got = reply["matches"].as_array().expect("matches array");
+        assert!(
+            !got.is_empty() || matches.is_empty(),
+            "{label}: every match dropped"
+        );
+        for (i, entry) in got.iter().enumerate() {
+            assert_eq!(entry["line"], matches[i].0, "{label}: match {i} line");
+            assert_eq!(
+                entry["text"],
+                matches[i].1.as_str(),
+                "{label}: match {i} text"
+            );
+        }
+        let dropped = got.len() < matches.len();
+        assert_eq!(
+            reply["truncated"],
+            scan_truncated || dropped,
+            "{label}: kept {} of {}",
+            got.len(),
+            matches.len()
+        );
+        if dropped {
+            assert!(
+                frame_len > paneflow_ipc_client::MAX_FRAME_BYTES * 3 / 4,
+                "{label}: fitting over-trimmed to {frame_len} bytes"
+            );
+        }
+    }
+
+    fn search_matches(row: &str, count: usize) -> Vec<(i32, String)> {
+        (0..count)
+            .map(|i| (i as i32 - 500, row.to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn surface_search_reply_fits_ipc_client_frame_at_max_matches() {
+        // The issue's fixtures at the 1,000-match hard max: quote- and
+        // backslash-heavy rows double on escaping, and 250 plain columns
+        // alone overflow the frame.
+        for row in [
+            "\"".repeat(132),
+            "\\".repeat(132),
+            "x".repeat(250),
+            "\u{1}".repeat(80),
+        ] {
+            assert_surface_search_reply(search_matches(&row, 1000), false);
+            assert_surface_search_reply(search_matches(&row, 1000), true);
+        }
+    }
+
+    #[test]
+    fn surface_search_reply_budget_counts_every_encoded_byte() {
+        // Entries cheaper than the fixed `{"matches":[],"truncated":false}`
+        // part, so leaving that part or the separating commas out of the
+        // count always overshoots the budget instead of hiding in the slack.
+        for row in ["ab", "\\"] {
+            assert_surface_search_reply(search_matches(row, 20_000), false);
+        }
+    }
+
+    #[test]
+    fn surface_search_reply_drops_trailing_matches_and_reports_truncated() {
+        let reply = super::surface_search_response(search_matches(&"\"".repeat(132), 1000), false);
+        let kept = reply["matches"].as_array().expect("matches").len();
+        assert!(kept < 1000, "an oversized page must drop matches");
+        assert_eq!(reply["truncated"], true);
+        assert_eq!(reply["matches"][0]["line"], -500, "the first match is kept");
+    }
+
+    #[test]
+    fn surface_search_reply_under_budget_is_whole() {
+        let matches = search_matches(&"\"".repeat(132), 50);
+        assert_surface_search_reply(matches.clone(), false);
+        let reply = super::surface_search_response(matches, false);
+        assert_eq!(reply["matches"].as_array().expect("matches").len(), 50);
+        assert_eq!(reply["truncated"], false);
+        assert_surface_search_reply(Vec::new(), false);
+    }
+
+    #[test]
+    fn oversized_reply_becomes_frame_cap_error_through_ipc_client() {
+        let result =
+            serde_json::json!({"text": "x".repeat(crate::limits::MAX_REQUEST_LEN as usize)});
+        let (reply, frame_len) = round_trip_through_ipc_client(result);
+        let frame_len = frame_len.expect("server saw the request");
+        assert!(
+            frame_len > paneflow_ipc_client::MAX_FRAME_BYTES,
+            "fixture must overflow the frame, got {frame_len} bytes"
+        );
+        // The client parsed the substitute, so it fit the frame.
+        let err = reply.expect_err("an oversized result must become an error");
+        assert!(
+            err.contains("-32603") && err.contains("response exceeds IPC frame cap"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn reply_of_exactly_the_frame_cap_is_delivered_unchanged() {
+        // The client accepts a frame of exactly its cap when the last byte is
+        // the newline, so the backstop must not fire at the boundary.
+        let (reply, frame_len) = round_trip_envelope_through_ipc_client(|id| {
+            let base = crate::ipc::encode_frame(&super::promote_response(
+                serde_json::json!({"t": ""}),
+                id.clone(),
+            ))
+            .len();
+            let pad = paneflow_ipc_client::MAX_FRAME_BYTES - base;
+            super::promote_response(serde_json::json!({"t": "x".repeat(pad)}), id)
+        });
+        assert_eq!(frame_len, Some(paneflow_ipc_client::MAX_FRAME_BYTES));
+        let reply = reply.expect("a frame of exactly the cap is delivered");
+        let text = reply["t"].as_str().expect("the result, not an error");
+        assert!(text.len() > 200_000 && text.bytes().all(|b| b == b'x'));
+    }
+
+    #[test]
+    fn reply_with_an_id_too_large_to_echo_is_a_null_id_error_that_fits() {
+        // A raw-socket caller may send any id that fits the request cap; the
+        // reply echoing it cannot fit, and neither can an error that echoes it.
+        let huge_id =
+            serde_json::Value::String("i".repeat(crate::limits::MAX_REQUEST_LEN as usize - 20));
+        let (reply, frame_len) = round_trip_envelope_through_ipc_client(move |_| {
+            super::promote_response(serde_json::json!({"pong": true}), huge_id)
+        });
+        let frame_len = frame_len.expect("server saw the request");
+        assert!(
+            frame_len > paneflow_ipc_client::MAX_FRAME_BYTES,
+            "fixture must overflow the frame, got {frame_len} bytes"
+        );
+        // The client parsed the substitute, so it fit the frame.
+        let err = reply.expect_err("the reply must become an error");
+        assert!(err.contains("-32603"), "got {err}");
+
+        let frame = crate::ipc::encode_frame(&super::promote_response(
+            serde_json::json!({"pong": true}),
+            serde_json::Value::String("i".repeat(crate::limits::MAX_REQUEST_LEN as usize - 20)),
+        ));
+        let parsed: serde_json::Value = serde_json::from_str(&frame).expect("frame parses");
+        assert_eq!(parsed["id"], serde_json::Value::Null);
+        assert_eq!(parsed["error"]["code"], -32603);
+    }
+
+    #[test]
+    fn frame_cap_error_echoes_an_id_that_fits() {
+        let result =
+            serde_json::json!({"text": "x".repeat(crate::limits::MAX_REQUEST_LEN as usize)});
+        let frame =
+            crate::ipc::encode_frame(&super::promote_response(result, serde_json::json!("req-7")));
+        assert!(frame.len() <= paneflow_ipc_client::MAX_FRAME_BYTES);
+        let parsed: serde_json::Value = serde_json::from_str(&frame).expect("frame parses");
+        assert_eq!(parsed["id"], "req-7");
+        assert_eq!(parsed["error"]["code"], -32603);
+        assert_eq!(parsed["error"]["message"], "response exceeds IPC frame cap");
     }
 
     #[test]
