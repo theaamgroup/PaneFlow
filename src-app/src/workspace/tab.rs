@@ -152,6 +152,24 @@ impl Tab {
         zoomed_pane
     }
 
+    /// Make `pane` rendered before something focuses it (issue #1052): when
+    /// it sits only in the zoom-saved tree, leave zoom through [`Self::exit_zoom`].
+    /// The zoomed pane itself, a pane of an unzoomed tab, and a pane this tab
+    /// does not own are left alone.
+    pub(crate) fn reveal_pane(&mut self, pane: &Entity<Pane>, cx: &mut App) {
+        let rendered = self
+            .root
+            .as_ref()
+            .is_some_and(|root| root.contains_leaf(pane));
+        let parked = self
+            .saved_layout
+            .as_ref()
+            .is_some_and(|saved| saved.contains_leaf(pane));
+        if !rendered && parked {
+            self.exit_zoom(cx);
+        }
+    }
+
     pub fn pane_count(&self) -> usize {
         // Mirror `serialize`'s precedence, and `contains_pane` / `any_pane`, which
         // both already consult BOTH trees. Under zoom the real layout lives in

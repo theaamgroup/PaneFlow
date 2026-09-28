@@ -154,7 +154,10 @@ impl PaneFlowApp {
     /// visible before `activate_workspace_at` runs. Indices are re-resolved
     /// from `surface_id` here rather than captured by the caller, so a
     /// workspace or tab reorder between render and click cannot teleport the
-    /// user to the wrong pane.
+    /// user to the wrong pane. The surface may also sit in the owning tab's
+    /// zoom-saved tree (Pane Overview lists it); the `WorkspaceFocusTarget::Pane`
+    /// arm then leaves zoom before focusing, so the pane is revealed rather
+    /// than focused while hidden (issue #1052).
     pub(crate) fn teleport_to_surface(
         &mut self,
         surface_id: u64,
@@ -253,7 +256,7 @@ fn matching_session_panes(
 #[cfg(test)]
 mod waiting_navigation_tests {
     use super::*;
-    use gpui::AppContext;
+    use gpui::{AppContext, Focusable};
 
     #[gpui::test]
     fn next_waiting_target_includes_background_tabs(cx: &mut gpui::TestAppContext) {
@@ -294,5 +297,170 @@ mod waiting_navigation_tests {
             next_in_cycle(&order.iter().map(|entry| entry.3).collect::<Vec<_>>(), None),
             Some(sid)
         );
+    }
+
+    type PaneEntity = gpui::Entity<crate::pane::Pane>;
+
+    fn test_pane(id: u64, cx: &mut gpui::VisualTestContext) -> (PaneEntity, u64) {
+        let view = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(id, cx));
+        let sid = view.entity_id().as_u64();
+        (cx.new(|cx| crate::pane::Pane::new(view, id, cx)), sid)
+    }
+
+    /// Issue #1052 fixture: two tabs. Tab 0 holds C alone, unzoomed, and is
+    /// the active tab with C focused. Tab 1 holds A and B side by side, zoomed
+    /// on A exactly as `handle_toggle_zoom` leaves it (B parked in
+    /// `saved_layout`, A alone in `root`). Returns `(ws, c, a, b, b_sid)`.
+    fn zoomed_background_tab(
+        cx: &mut gpui::VisualTestContext,
+    ) -> (
+        crate::workspace::Workspace,
+        PaneEntity,
+        PaneEntity,
+        PaneEntity,
+        u64,
+    ) {
+        let (c, _) = test_pane(3, cx);
+        let (a, _) = test_pane(1, cx);
+        let (b, b_sid) = test_pane(2, cx);
+        let tree = crate::layout::LayoutTree::from_panes_equal(
+            crate::layout::SplitDirection::Vertical,
+            vec![a.clone(), b.clone()],
+        )
+        .expect("two panes make a split");
+        let mut ws = crate::workspace::Workspace::with_layout_and_id(
+            1,
+            "zoomed",
+            std::path::PathBuf::new(),
+            crate::layout::LayoutTree::Leaf(c.clone()),
+        );
+        assert!(ws.open_tab(crate::workspace::Tab::new("split", Some(tree))));
+        cx.update(|window, cx| {
+            a.update(cx, |pane, _| pane.zoomed = true);
+            let tab = ws.tab_mut(1).expect("the split tab");
+            tab.saved_layout = tab.root.take();
+            tab.root = Some(crate::layout::LayoutTree::Leaf(a.clone()));
+            ws.set_active_tab(0);
+            c.read(cx).focus_handle(cx).focus(window, cx);
+        });
+        assert_eq!(ws.active_tab_idx(), 0, "tab 0 starts active");
+        let split = &ws.tabs()[1];
+        let root = split.root.as_ref().expect("zoomed root");
+        assert!(
+            split.is_zoomed() && !root.contains_leaf(&b),
+            "B starts hidden"
+        );
+        (ws, c, a, b, b_sid)
+    }
+
+    /// After activation tab 1 must be the active tab, out of zoom, with a
+    /// rendered root holding B (the whole saved layout back, A included) and
+    /// B owning the focus. Tab 0 is left as it was.
+    fn assert_revealed_and_focused(
+        ws: &crate::workspace::Workspace,
+        c: &PaneEntity,
+        a: &PaneEntity,
+        b: &PaneEntity,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        assert_eq!(ws.active_tab_idx(), 1, "B's tab becomes the active tab");
+        let tab = ws.active_tab();
+        assert!(
+            !tab.is_zoomed(),
+            "activating a zoom-hidden pane leaves zoom"
+        );
+        let root = tab.root.as_ref().expect("a rendered root");
+        assert!(root.contains_leaf(b), "the rendered root contains B");
+        assert!(root.contains_leaf(a), "the saved layout came back whole");
+        let first = &ws.tabs()[0];
+        assert!(
+            !first.is_zoomed() && first.root.as_ref().is_some_and(|r| r.contains_leaf(c)),
+            "the other tab is untouched"
+        );
+        cx.update(|window, cx| {
+            assert!(!a.read(cx).zoomed, "A is no longer flagged zoomed");
+            assert!(
+                b.read(cx).focus_handle(cx).is_focused(window),
+                "B has focus"
+            );
+            assert_eq!(root.focused_pane(window, cx).as_ref(), Some(b));
+        });
+    }
+
+    /// Issue #1052, Pane Overview path: the overview lists B from the
+    /// zoom-saved tree; selecting its card runs `teleport_to_surface`, whose
+    /// body is replayed here (resolve the surface, make its tab active, then
+    /// the shared `WorkspaceFocusTarget::Pane` focus).
+    #[gpui::test]
+    fn pane_overview_selection_reveals_a_zoom_hidden_pane(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let (ws, c, a, b, b_sid) = zoomed_background_tab(cx);
+        let mut workspaces = vec![ws];
+        let selected = cx
+            .update(|window, cx| {
+                crate::app::pane_overview::collect_cards(&workspaces, 0, window, cx)
+            })
+            .into_iter()
+            .find(|card| card.surface_id == b_sid)
+            .expect("the overview lists the zoom-hidden pane")
+            .surface_id;
+        cx.update(|window, cx| {
+            let loc = crate::app::ipc_handler::find_pane_by_surface_id(&workspaces, selected, cx)
+                .expect("the selected surface resolves");
+            assert_eq!((loc.tab_idx, &loc.pane), (1, &b));
+            let ws = &mut workspaces[loc.workspace_idx];
+            ws.set_active_tab(loc.tab_idx);
+            super::super::focus_pane_in_active_tab(ws, &loc.pane, window, cx);
+        });
+        assert_revealed_and_focused(&workspaces[0], &c, &a, &b, cx);
+    }
+
+    /// Issue #1052, Jump Next Waiting path: B hosts the waiting agent, so the
+    /// cycle picks it; `jump_next_session_where`'s body is replayed here.
+    #[gpui::test]
+    fn jump_next_waiting_reveals_a_zoom_hidden_pane(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let (mut ws, c, a, b, b_sid) = zoomed_background_tab(cx);
+        let mut session = crate::ai_types::AgentSession::new(
+            crate::agent_launcher::TerminalAgent::ClaudeCode,
+            crate::ai_types::AgentState::WaitingForInput,
+        );
+        session.surface_id = Some(b_sid);
+        ws.agent_sessions.insert(1, session);
+        let mut workspaces = vec![ws];
+        cx.update(|window, cx| {
+            let order = matching_session_panes(
+                &workspaces,
+                |state| *state == crate::ai_types::AgentState::WaitingForInput,
+                cx,
+            );
+            let ids: Vec<u64> = order.iter().map(|entry| entry.3).collect();
+            let next = next_in_cycle(&ids, None).expect("B is waiting");
+            let (ws_idx, tab_idx, pane, _) = order
+                .into_iter()
+                .find(|entry| entry.3 == next)
+                .expect("the cycle target is in the order");
+            assert_eq!((tab_idx, &pane), (1, &b));
+            let ws = &mut workspaces[ws_idx];
+            ws.set_active_tab(tab_idx);
+            super::super::focus_pane_in_active_tab(ws, &pane, window, cx);
+        });
+        assert_revealed_and_focused(&workspaces[0], &c, &a, &b, cx);
+    }
+
+    /// Activating the pane that is already the zoomed one keeps the zoom: the
+    /// reveal only fires for a pane absent from the rendered root.
+    #[gpui::test]
+    fn activating_the_zoomed_pane_keeps_the_zoom(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let (mut ws, _c, a, _b, _) = zoomed_background_tab(cx);
+        ws.set_active_tab(1);
+        cx.update(|window, cx| super::super::focus_pane_in_active_tab(&mut ws, &a, window, cx));
+        assert_eq!(ws.active_tab_idx(), 1);
+        assert!(ws.is_zoomed(), "the zoomed pane is already rendered");
+        cx.update(|window, cx| {
+            assert!(a.read(cx).zoomed);
+            assert!(a.read(cx).focus_handle(cx).is_focused(window));
+        });
     }
 }
