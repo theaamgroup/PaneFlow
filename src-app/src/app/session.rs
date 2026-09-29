@@ -1078,8 +1078,9 @@ fn stat_persisted_dir(path: &Path) -> PersistedDirStatus {
 }
 
 /// The `<volumes_root>/<name>` mount point `path` lives under, when that
-/// mount point is not a directory. `None` for a path outside
-/// `volumes_root` or on a mounted volume.
+/// mount point is absent or is known not to be a directory. Other stat
+/// errors do not prove that it is unmounted. `None` for those errors,
+/// a path outside `volumes_root`, or a mounted volume.
 fn unmounted_volume(path: &Path, volumes_root: &Path) -> Option<PathBuf> {
     let rest = path.strip_prefix(volumes_root).ok()?;
     let name = match rest.components().next()? {
@@ -1087,7 +1088,11 @@ fn unmounted_volume(path: &Path, volumes_root: &Path) -> Option<PathBuf> {
         _ => return None,
     };
     let volume = volumes_root.join(name);
-    (!volume.is_dir()).then_some(volume)
+    match std::fs::metadata(&volume) {
+        Ok(metadata) if !metadata.is_dir() => Some(volume),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(volume),
+        _ => None,
+    }
 }
 
 /// Longest a persisted cwd probe may hold the restore frame step. A local
@@ -3043,9 +3048,56 @@ mod tests {
             unmounted_volume(&volumes.join("Asleep"), &volumes),
             Some(volumes.join("Asleep"))
         );
+        let non_directory = volumes.join("NotDirectory");
+        std::fs::write(&non_directory, "not a mount").expect("non-directory mount point");
+        assert_eq!(
+            unmounted_volume(&non_directory.join("gone"), &volumes),
+            Some(non_directory)
+        );
         assert_eq!(unmounted_volume(&mounted.join("gone"), &volumes), None);
         assert_eq!(unmounted_volume(&volumes, &volumes), None);
         assert_eq!(unmounted_volume(&tmp.path().join("gone"), &volumes), None);
+    }
+
+    #[test]
+    fn unmounted_volume_does_not_treat_permission_errors_as_absent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let volumes = tmp.path().join("Volumes");
+        let mount = volumes.join("Mounted");
+        std::fs::create_dir_all(&mount).expect("mounted volume");
+        let original = std::fs::metadata(&volumes).unwrap().permissions();
+        std::fs::set_permissions(&volumes, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let metadata = std::fs::metadata(&mount);
+        let result = unmounted_volume(&mount.join("gone"), &volumes);
+        std::fs::set_permissions(&volumes, original).unwrap();
+
+        assert_eq!(
+            metadata.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(result, None, "access errors do not prove a mount is absent");
+    }
+
+    #[test]
+    fn unmounted_volume_does_not_treat_other_stat_errors_as_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let volumes = tmp.path().join("Volumes");
+        std::fs::create_dir(&volumes).expect("volumes root");
+        let mount = volumes.join("Loop");
+        std::os::unix::fs::symlink(&mount, &mount).expect("cyclic symlink");
+
+        assert_eq!(
+            std::fs::metadata(&mount).unwrap_err().raw_os_error(),
+            Some(libc::ELOOP)
+        );
+        assert_eq!(
+            unmounted_volume(&mount.join("gone"), &volumes),
+            None,
+            "a symlink loop does not prove a mount is absent"
+        );
     }
 
     /// A workspace, pane, or tab on a volume that is not mounted at launch
