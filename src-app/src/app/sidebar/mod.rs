@@ -4102,9 +4102,9 @@ mod tests {
         // Issue #79: GPUI only walks a key event down the dispatch path to the
         // FOCUSED node. A sidebar row that tracks no focus handle is never on
         // that path, so every branch of its `on_key_down` is dead code. This
-        // reads the module's own source because `PaneFlowApp` cannot be built
-        // in a unit test (bootstrap opens a window and does real I/O), so the
-        // rendered element tree is not reachable from here.
+        // source guard pins focus tracking and handler wiring in both row
+        // builders. App-level behavioral tests can use
+        // `app::test_support::blank_paneflow_app` without production bootstrap.
         let src = include_str!("mod.rs");
         let production = src
             .split("#[cfg(test)]")
@@ -4156,9 +4156,8 @@ mod tests {
     /// a workspace already has three other entry points (`Cmd+Shift+N`, the
     /// Window menu, and this sidebar's empty-state "Open folder" button,
     /// `empty-new-ws`), and the header glyph was the redundant extra. Read from
-    /// source because `PaneFlowApp` cannot be built in a unit test (bootstrap
-    /// opens a window and does real I/O), so the rendered element tree is
-    /// unreachable from here.
+    /// source to pin the header and empty-state affordances independently of
+    /// the workspace state used by app-level behavioral tests.
     #[test]
     fn the_workspaces_header_carries_no_new_workspace_button() {
         let production = include_str!("mod.rs")

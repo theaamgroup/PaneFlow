@@ -3774,8 +3774,8 @@ mod tests {
     /// eviction. Each body therefore gets exactly one such arm, and its toast
     /// is the one that is NOT paired with a push.
     ///
-    /// `PaneFlowApp` is not constructible in a test, so this pins the shape
-    /// rather than the behaviour.
+    /// This source guard checks every refusal arm. App-level behavioral tests
+    /// can use `app::test_support::blank_paneflow_app` for individual paths.
     #[test]
     fn every_transient_refusal_pushes_the_record_back_and_the_orphan_drops() {
         let src = include_str!("mod.rs");
@@ -3836,8 +3836,8 @@ mod tests {
     /// Issue #83: closing a workspace has to take the undo records and the
     /// pending confirmation that die with it.
     ///
-    /// Both are behavioural on a `PaneFlowApp` that cannot be constructed in a
-    /// test, so the ORDER is what is pinned here: the id has to be read - and
+    /// This source guard pins the ordering alongside app-level behavioral
+    /// tests: the id has to be read - and
     /// the pending close resolved against the live workspace - before
     /// `workspaces.remove` drops it.
     #[test]
@@ -4421,8 +4421,8 @@ mod tests {
     /// Before this, every UI create path returned without a word once
     /// `MAX_WORKSPACES` was reached, so Cmd+Shift+N, Window ▸ New Workspace,
     /// and the sidebar's Open folder all looked like dead gestures exactly
-    /// when the user needed to be told why. `PaneFlowApp` is not
-    /// constructible in a test, so this pins the shape and the shared copy.
+    /// when the user needed to be told why. This source guard checks that
+    /// every create entry point uses the same refusal and message.
     #[test]
     fn workspace_create_paths_report_the_cap() {
         let message = workspace_limit_reached();
@@ -4566,7 +4566,7 @@ mod tests {
         workspaces: Vec<Workspace>,
     ) -> gpui::Entity<PaneFlowApp> {
         cx.new(|cx| {
-            let mut app = crate::app::sidebar::customize_menu::tests::blank_paneflow_app(cx);
+            let mut app = crate::app::test_support::blank_paneflow_app(cx);
             hold_session_saves(&mut app);
             app.workspaces = workspaces;
             app.active_idx = 0;
