@@ -8,9 +8,9 @@
 //!   then Pane Overview, then Escape) takes only its own entry, so the outer
 //!   overlay's origin survives for its own close.
 //!
-//! `PaneFlowApp` cannot be built in a unit test, so the stack itself and the
-//! focus step are free of it and tested here; the wiring is pinned by source
-//! assertions (`every_overlay_remembers_and_restores_its_own_origin`).
+//! The stack and focus step are tested directly here. Source assertions pin
+//! the wiring in each overlay (`every_overlay_remembers_and_restores_its_own_origin`);
+//! app-level behavioral tests can use `app::test_support::blank_paneflow_app`.
 
 use gpui::{App, Entity, Focusable as _, WeakEntity, Window};
 
@@ -432,8 +432,8 @@ mod tests {
 
     /// The wiring: every overlay records its origin under its own kind
     /// before taking the focus, and its Escape path restores through that
-    /// kind. Source-text assertions, because `PaneFlowApp` cannot be built in
-    /// a unit test.
+    /// kind. These source assertions pin each overlay entry point alongside
+    /// the stack and focus behavior tested above.
     #[test]
     fn every_overlay_remembers_and_restores_its_own_origin() {
         // Split at the trailing test module, not the first `#[cfg(test)]`:

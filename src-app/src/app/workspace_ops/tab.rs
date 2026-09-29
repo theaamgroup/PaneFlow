@@ -1059,7 +1059,8 @@ mod tests {
     /// subscribes it again (the US-028 class). The duplicate was harmless while
     /// the view fired its own OSC 9 / 777 desktop notification; once the app
     /// handler delivers it, every program notification fired twice. Pinned on
-    /// the source body because a `PaneFlowApp` cannot be constructed in a test.
+    /// the source body to check both the shared pane constructor and the
+    /// absence of a second manual subscription.
     #[test]
     fn open_tab_with_surface_subscribes_terminal_events_exactly_once() {
         let src = include_str!("tab.rs");
@@ -1081,8 +1082,8 @@ mod tests {
 
     #[test]
     fn workspace_notification_actions_persist_without_dismissing_session_badges() {
-        // App bootstrap opens real windows and PTYs; inspect these UI command
-        // bodies to pin persistence and separation from session badge state.
+        // Inspect these UI command bodies to pin persistence and separation
+        // from session badge state alongside app-level behavioral tests.
         let src = include_str!("tab.rs");
         let toggle = src
             .split("pub(crate) fn toggle_workspace_muted(")

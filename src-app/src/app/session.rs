@@ -1053,6 +1053,48 @@ fn persisted_dir_is_live(path: &Path) -> bool {
     path.is_dir()
 }
 
+/// Where macOS mounts external and network volumes.
+const VOLUMES_ROOT: &str = "/Volumes";
+
+/// Classify one persisted path. Runs on the probe helper thread.
+///
+/// A path under `/Volumes/<name>` whose volume is not mounted is
+/// [`PersistedDirStatus::Unknown`], not Missing: the drive may be
+/// asleep or not yet attached at launch. Treating it as Missing saved
+/// the launch fallback over every workspace on an external SSD.
+fn stat_persisted_dir(path: &Path) -> PersistedDirStatus {
+    if persisted_dir_is_live(path) {
+        return PersistedDirStatus::Live;
+    }
+    if let Some(volume) = unmounted_volume(path, Path::new(VOLUMES_ROOT)) {
+        log::warn!(
+            "session restore: volume {} is not mounted; keeping {}",
+            volume.display(),
+            path.display()
+        );
+        return PersistedDirStatus::Unknown;
+    }
+    PersistedDirStatus::Missing
+}
+
+/// The `<volumes_root>/<name>` mount point `path` lives under, when that
+/// mount point is absent or is known not to be a directory. Other stat
+/// errors do not prove that it is unmounted. `None` for those errors,
+/// a path outside `volumes_root`, or a mounted volume.
+fn unmounted_volume(path: &Path, volumes_root: &Path) -> Option<PathBuf> {
+    let rest = path.strip_prefix(volumes_root).ok()?;
+    let name = match rest.components().next()? {
+        std::path::Component::Normal(name) => name,
+        _ => return None,
+    };
+    let volume = volumes_root.join(name);
+    match std::fs::metadata(&volume) {
+        Ok(metadata) if !metadata.is_dir() => Some(volume),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(volume),
+        _ => None,
+    }
+}
+
 /// Longest a persisted cwd probe may hold the restore frame step. A local
 /// directory answers in microseconds; only a dead network or cloud mount
 /// runs this out. The `stat` itself runs on a helper thread. A launch may
@@ -1073,7 +1115,7 @@ const RESTORE_CWD_PROBE_SLACK: std::time::Duration = std::time::Duration::from_m
 
 /// What a restore probe knows about one persisted path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PersistedDirStatus {
+pub(super) enum PersistedDirStatus {
     /// `stat` completed and the path is a directory.
     Live,
     /// `stat` completed and the path is not a directory.
@@ -1081,14 +1123,6 @@ enum PersistedDirStatus {
     /// Timed out, the batch budget was spent, or the probe thread failed
     /// to spawn. Not evidence the directory is gone.
     Unknown,
-}
-
-fn status_from_stat(is_dir: bool) -> PersistedDirStatus {
-    if is_dir {
-        PersistedDirStatus::Live
-    } else {
-        PersistedDirStatus::Missing
-    }
 }
 
 /// Probe outcomes for the startup restore on this thread. Absent outside
@@ -1286,13 +1320,15 @@ fn warm_restore_cwd_probes(ws: &paneflow_config::schema::WorkspaceSession) {
     join_restore_cwd_probes(inflight);
 }
 
-fn join_restore_cwd_probes(inflight: Vec<(PathBuf, std::sync::mpsc::Receiver<bool>)>) {
+fn join_restore_cwd_probes(
+    inflight: Vec<(PathBuf, std::sync::mpsc::Receiver<PersistedDirStatus>)>,
+) {
     let mut inflight = inflight.into_iter();
     while let Some((path, rx)) = inflight.next() {
         let wait = restore_cwd_probe_budget(RESTORED_CWD_PROBE_TIMEOUT)
             .unwrap_or(std::time::Duration::ZERO);
         match rx.recv_timeout(wait) {
-            Ok(is_dir) => remember_restore_cwd_probe(&path, status_from_stat(is_dir)),
+            Ok(status) => remember_restore_cwd_probe(&path, status),
             Err(_) => {
                 // The threads were started together, so this wait is the
                 // whole batch budget. Anything still blocked has missed it.
@@ -1305,7 +1341,7 @@ fn join_restore_cwd_probes(inflight: Vec<(PathBuf, std::sync::mpsc::Receiver<boo
                 expire_restore_cwd_probe_deadline();
                 for (path, rx) in inflight {
                     match rx.try_recv() {
-                        Ok(is_dir) => remember_restore_cwd_probe(&path, status_from_stat(is_dir)),
+                        Ok(status) => remember_restore_cwd_probe(&path, status),
                         Err(_) if waited => {
                             remember_restore_cwd_probe(&path, PersistedDirStatus::Unknown);
                             log_cwd_probe_timeout(&path, RESTORED_CWD_PROBE_TIMEOUT);
@@ -1353,13 +1389,12 @@ fn persisted_dir_status(path: &Path, timeout: std::time::Duration) -> PersistedD
         // with time left must still be able to tell Live from Missing.
         return PersistedDirStatus::Unknown;
     };
-    match probe_persisted_dir_within(path, budget) {
-        Some(is_dir) => {
-            let status = status_from_stat(is_dir);
+    match start_persisted_dir_probe(path, budget) {
+        ProbeOutcome::Answered(status) => {
             remember_restore_cwd_probe(path, status);
             status
         }
-        None => {
+        ProbeOutcome::TimedOut => {
             remember_restore_cwd_probe(path, PersistedDirStatus::Unknown);
             expire_restore_cwd_probe_deadline();
             PersistedDirStatus::Unknown
@@ -1367,24 +1402,10 @@ fn persisted_dir_status(path: &Path, timeout: std::time::Duration) -> PersistedD
     }
 }
 
-/// The same bounded probe with the timeout kept apart from a definite
-/// answer: `Some(is_dir)` when `stat` replied in time, `None` when it did
-/// not. Restore treats `None` as unknown and keeps the persisted path.
-/// The worker, if any, is left to unwind on its own.
-pub(crate) fn probe_persisted_dir_within(
-    path: &Path,
-    timeout: std::time::Duration,
-) -> Option<bool> {
-    match start_persisted_dir_probe(path, timeout) {
-        ProbeOutcome::Answered(is_dir) => Some(is_dir),
-        ProbeOutcome::TimedOut => None,
-    }
-}
-
 /// What [`start_persisted_dir_probe`] came back with.
 pub(super) enum ProbeOutcome {
     /// `stat` replied within the bound.
-    Answered(bool),
+    Answered(PersistedDirStatus),
     /// No reply in time (or the worker could not be spawned). A worker
     /// still blocked in `stat` is left to unwind on its own.
     TimedOut,
@@ -1394,13 +1415,13 @@ pub(super) enum ProbeOutcome {
 /// the caller treats the path as [`PersistedDirStatus::Unknown`]. The join
 /// handle is dropped so a `stat` that outlives the deadline can unwind on
 /// its own.
-fn spawn_cwd_probe(path: &Path) -> Option<std::sync::mpsc::Receiver<bool>> {
+fn spawn_cwd_probe(path: &Path) -> Option<std::sync::mpsc::Receiver<PersistedDirStatus>> {
     let (tx, rx) = std::sync::mpsc::channel();
     let probed = path.to_path_buf();
     match std::thread::Builder::new()
         .name("session-cwd-probe".to_string())
         .spawn(move || {
-            let _ = tx.send(persisted_dir_is_live(&probed));
+            let _ = tx.send(stat_persisted_dir(&probed));
         }) {
         Ok(_) => {
             #[cfg(test)]
@@ -1423,7 +1444,7 @@ pub(super) fn start_persisted_dir_probe(path: &Path, timeout: std::time::Duratio
         return ProbeOutcome::TimedOut;
     };
     match rx.recv_timeout(timeout) {
-        Ok(is_dir) => ProbeOutcome::Answered(is_dir),
+        Ok(status) => ProbeOutcome::Answered(status),
         Err(_) => {
             log_cwd_probe_timeout(path, timeout);
             ProbeOutcome::TimedOut
@@ -3010,6 +3031,102 @@ mod tests {
         assert_eq!(restored.spawn, None);
     }
 
+    /// Only a path under a missing `<volumes_root>/<name>` counts as an
+    /// unmounted volume. A gone folder on a mounted volume is still gone.
+    #[test]
+    fn unmounted_volume_only_matches_an_absent_mount_point() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let volumes = tmp.path().join("Volumes");
+        let mounted = volumes.join("Mounted");
+        std::fs::create_dir_all(&mounted).expect("mounted volume");
+
+        assert_eq!(
+            unmounted_volume(&volumes.join("Asleep").join("GitHub/repo"), &volumes),
+            Some(volumes.join("Asleep"))
+        );
+        assert_eq!(
+            unmounted_volume(&volumes.join("Asleep"), &volumes),
+            Some(volumes.join("Asleep"))
+        );
+        let non_directory = volumes.join("NotDirectory");
+        std::fs::write(&non_directory, "not a mount").expect("non-directory mount point");
+        assert_eq!(
+            unmounted_volume(&non_directory.join("gone"), &volumes),
+            Some(non_directory)
+        );
+        assert_eq!(unmounted_volume(&mounted.join("gone"), &volumes), None);
+        assert_eq!(unmounted_volume(&volumes, &volumes), None);
+        assert_eq!(unmounted_volume(&tmp.path().join("gone"), &volumes), None);
+    }
+
+    #[test]
+    fn unmounted_volume_does_not_treat_permission_errors_as_absent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let volumes = tmp.path().join("Volumes");
+        let mount = volumes.join("Mounted");
+        std::fs::create_dir_all(&mount).expect("mounted volume");
+        let original = std::fs::metadata(&volumes).unwrap().permissions();
+        std::fs::set_permissions(&volumes, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let metadata = std::fs::metadata(&mount);
+        let result = unmounted_volume(&mount.join("gone"), &volumes);
+        std::fs::set_permissions(&volumes, original).unwrap();
+
+        assert_eq!(
+            metadata.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(result, None, "access errors do not prove a mount is absent");
+    }
+
+    #[test]
+    fn unmounted_volume_does_not_treat_other_stat_errors_as_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let volumes = tmp.path().join("Volumes");
+        std::fs::create_dir(&volumes).expect("volumes root");
+        let mount = volumes.join("Loop");
+        std::os::unix::fs::symlink(&mount, &mount).expect("cyclic symlink");
+
+        assert_eq!(
+            std::fs::metadata(&mount).unwrap_err().raw_os_error(),
+            Some(libc::ELOOP)
+        );
+        assert_eq!(
+            unmounted_volume(&mount.join("gone"), &volumes),
+            None,
+            "a symlink loop does not prove a mount is absent"
+        );
+    }
+
+    /// A workspace, pane, or tab on a volume that is not mounted at launch
+    /// keeps its saved path and spawns at the fallback. Before this, a
+    /// detached external SSD made every workspace on it save `~` for good.
+    #[test]
+    fn restored_paths_on_an_unmounted_volume_keep_the_persisted_path() {
+        let volume =
+            Path::new(VOLUMES_ROOT).join(format!("paneflow-test-unmounted-{}", std::process::id()));
+        assert!(!volume.exists(), "test volume name must not be mounted");
+        let saved = volume.join("GitHub").join("repo");
+        let saved_str = saved.to_string_lossy().into_owned();
+
+        assert_eq!(stat_persisted_dir(&saved), PersistedDirStatus::Unknown);
+
+        let workspace = restored_workspace_cwd(&saved_str);
+        assert_eq!(workspace.persisted, saved);
+        assert_ne!(workspace.spawn, saved);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let surface = resolved_surface_cwd(Some(&saved_str), tmp.path());
+        assert_eq!(surface.persisted, saved);
+        assert_eq!(surface.spawn, tmp.path());
+
+        let tab = restored_tab_worktree("ws", Some(&saved_str));
+        assert_eq!(tab.persisted.as_deref(), Some(saved.as_path()));
+        assert_eq!(tab.spawn, None);
+    }
+
     /// Issue #878: N surfaces on one dead mount must stat it once per restore.
     /// A second batch deadline reuses that timeout, and a different dead path
     /// in the same batch does not start another probe. Removing the cache
@@ -3166,14 +3283,18 @@ mod tests {
     fn persisted_dir_probe_separates_a_timeout_from_a_definite_answer() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let bound = STALLED_STAT_DELAY / 2;
-        assert_eq!(
-            probe_persisted_dir_within(tmp.path(), bound),
-            Some(true),
+        assert!(
+            matches!(
+                start_persisted_dir_probe(tmp.path(), bound),
+                ProbeOutcome::Answered(PersistedDirStatus::Live)
+            ),
             "a live local directory answers at once"
         );
-        assert_eq!(
-            probe_persisted_dir_within(&tmp.path().join("missing"), bound),
-            Some(false),
+        assert!(
+            matches!(
+                start_persisted_dir_probe(&tmp.path().join("missing"), bound),
+                ProbeOutcome::Answered(PersistedDirStatus::Missing)
+            ),
             "a missing directory is a definite no"
         );
         let stalled = tmp.path().join("unmounted-volume");
@@ -3182,13 +3303,16 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner)
             .push(stalled.clone());
         let started = std::time::Instant::now();
-        let answer = probe_persisted_dir_within(&stalled, bound / 4);
+        let answer = start_persisted_dir_probe(&stalled, bound / 4);
         let elapsed = started.elapsed();
         STALLED_STAT_PATHS
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|path| path != &stalled);
-        assert_eq!(answer, None, "a stalled stat is not an answer");
+        assert!(
+            matches!(answer, ProbeOutcome::TimedOut),
+            "a stalled stat is not an answer"
+        );
         assert!(
             elapsed < bound,
             "the probe blocked the caller for {elapsed:?} (bound {bound:?})"
@@ -3218,7 +3342,7 @@ mod tests {
         );
         assert!(elapsed < STALLED_STAT_DELAY / 2);
         match start_persisted_dir_probe(tmp.path(), STALLED_STAT_DELAY) {
-            ProbeOutcome::Answered(true) => {}
+            ProbeOutcome::Answered(PersistedDirStatus::Live) => {}
             _ => panic!("a live local directory answers in time"),
         }
     }
