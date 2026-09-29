@@ -26,6 +26,8 @@ pub mod sidebar;
 pub mod sidebar_actions_menu;
 pub mod system_info_dialog;
 pub mod tab_worktree;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod workspace_ops;
 
 pub(crate) mod work_review;
