@@ -14,7 +14,9 @@ pub(super) enum TopLevelHooks {
     /// An empty file, comments only, or a column-0 block mapping without
     /// `hooks`: appending the managed block is safe.
     Absent,
-    /// The root mapping already has a `hooks` key.
+    /// One empty root value that can be replaced and restored verbatim.
+    Empty(std::ops::Range<usize>),
+    /// The root mapping already has a populated or unsupported `hooks` key.
     Present,
     /// The scan cannot tell, or appending a column-0 `hooks:` block would
     /// not extend the root mapping: a flow, sequence, scalar, or indented
@@ -24,18 +26,25 @@ pub(super) enum TopLevelHooks {
 }
 
 pub(super) fn top_level_hooks(content: &str) -> TopLevelHooks {
-    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let mut offset = usize::from(content.starts_with('\u{feff}')) * '\u{feff}'.len_utf8();
+    let content = &content[offset..];
     if has_other_line_breaks(content) {
         return TopLevelHooks::Unsure;
     }
     let mut root_seen = false;
     let mut unsure = false;
-    for line in content.lines() {
+    let mut empty = None;
+    let mut in_hooks = false;
+    for raw in content.split_inclusive('\n') {
+        let span = offset..offset + raw.len();
+        offset = span.end;
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
         let line = line.strip_suffix('\r').unwrap_or(line);
         let body = line.trim_start_matches(' ');
         let indent = line.len() - body.len();
         if indent == 0 {
             if body.starts_with('%') {
+                unsure |= root_seen;
                 continue;
             }
             if let Some((marker, rest)) = document_marker(body) {
@@ -56,26 +65,65 @@ pub(super) fn top_level_hooks(content: &str) -> TopLevelHooks {
         let kind = classify(node);
         if !root_seen {
             root_seen = true;
-            if indent != 0 || !matches!(kind, Line::Key(_)) {
+            if indent != 0 || body.starts_with('\t') || !matches!(kind, Line::Key(_)) {
                 // A flow, sequence, scalar, or indented root.
                 unsure = true;
             }
-        } else if indent > 0 {
-            // A nested node: a child mapping, a block scalar, or the
-            // continuation of a value.
+        } else if indent > 0 || body.starts_with('\t') {
+            // A non-comment child makes even a bare hooks value populated.
+            if in_hooks {
+                return TopLevelHooks::Present;
+            }
             continue;
         }
         match kind {
-            Line::Key(TopLevelHooks::Present) => return TopLevelHooks::Present,
-            Line::Key(TopLevelHooks::Unsure) | Line::Other => unsure = true,
-            Line::Key(TopLevelHooks::Absent) | Line::Entry => {}
+            Line::Key(TopLevelHooks::Present) => {
+                // Do not remove key properties (anchors/tags) or explicit keys.
+                if empty.is_some() || indent != 0 || node != body || !empty_hooks_value(node) {
+                    return TopLevelHooks::Present;
+                }
+                empty = Some(span);
+                in_hooks = true;
+            }
+            Line::Key(TopLevelHooks::Unsure | TopLevelHooks::Empty(_)) | Line::Other => {
+                unsure = true;
+                in_hooks = false;
+            }
+            Line::Key(TopLevelHooks::Absent) => in_hooks = false,
+            Line::Entry if in_hooks => return TopLevelHooks::Present,
+            Line::Entry => {}
         }
     }
     if unsure {
         TopLevelHooks::Unsure
     } else {
-        TopLevelHooks::Absent
+        empty.map_or(TopLevelHooks::Absent, TopLevelHooks::Empty)
     }
+}
+
+/// Only single-line implicit keys and the YAML null/empty-mapping spellings.
+/// Children and duplicate keys are checked by the surrounding document scan.
+fn empty_hooks_value(node: &str) -> bool {
+    let rest = if node.starts_with(['\"', '\'']) {
+        let Some((_, rest)) = quoted(node) else {
+            return false;
+        };
+        rest.trim_start()
+    } else {
+        let Some(index) = node.find(':') else {
+            return false;
+        };
+        &node[index..]
+    };
+    let Some(value) = rest.strip_prefix(':') else {
+        return false;
+    };
+    let value = value[..comment_start(value).unwrap_or(value.len())].trim();
+    matches!(value, "" | "null" | "Null" | "NULL" | "~")
+        || value
+            .strip_prefix('{')
+            .and_then(|rest| rest.strip_suffix('}'))
+            .is_some_and(|inside| inside.trim_matches([' ', '\t']).is_empty())
 }
 
 /// PyYAML also breaks lines at a lone `\r`, U+0085, U+2028, and U+2029,

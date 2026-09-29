@@ -133,11 +133,19 @@ the next launch after a SIGKILL, and refusal paths that protect user files -
 a symlinked config dir, any present-but-unparseable JSON config (the
 project-local `settings.local.json` / `hooks.json` files included, left
 byte-identical - the agent still launches, hookless), an unparseable PRIMARY
-config (`opencode.json`, `~/.hermes/config.yaml` with an existing `hooks:`
-key), or a `.jsonc`-only OpenCode setup all skip the install instead of
+config (`opencode.json`, `~/.hermes/config.yaml` with populated or unsupported
+`hooks:`), or a `.jsonc`-only OpenCode setup all skip the install instead of
 clobbering. The TS bridges are
 env-gated on `PANEFLOW_SOCKET_PATH`, so they are inert when the CLI runs
 outside a PaneFlow terminal.
+
+Hermes accepts a single empty root `hooks:` value: `{}` (including whitespace
+inside the braces), YAML null (`null`, `Null`, `NULL`, or `~`), or a bare key,
+with optional trailing comments. The managed block replaces that line in place
+and stores its exact bytes in a JSON-encoded comment. The last session's cleanup,
+or an orphan sweep after a crash, restores the original line and preserves
+unrelated edits. Populated values, duplicate keys, anchors/tags on the hook key
+or value, explicit hook keys, and ambiguous document shapes still refuse.
 
 Deliberately not integrated (no safe surface): **Copilot CLI** (no hooks, no
 JSON stream), **Factory Droid** (dashboard-managed hooks), **Kiro** (hooks

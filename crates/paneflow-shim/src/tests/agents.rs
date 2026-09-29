@@ -465,6 +465,102 @@ fn hermes_guard_appends_block_and_strips_on_drop() {
 }
 
 #[test]
+fn hermes_guard_fills_empty_hooks_and_restores_original_bytes() {
+    let fixtures = [
+        "hooks: {}\n",
+        "hooks: {} # mine\n",
+        "hooks: {} # <<< paneflow managed hooks <<<\n",
+        "hooks: { }\n",
+        "hooks: null\n",
+        "hooks: Null # mine\n",
+        "hooks: NULL\n",
+        "hooks: ~\n",
+        "hooks:\n",
+        "hooks: # mine\n  # still empty\n\nmodel: x\n",
+        "\"\\u0068ooks\": {}\n",
+        "'it''s': 1\n'hooks' : {}\n",
+        "--- # first document\nmodel: x\nhooks: {}\n",
+        "model: x\r\nhooks : null # mine\r\nverbose: true\r\n",
+        "\u{feff}hooks: {}\n",
+        "model: x\nhooks:",
+    ];
+    for original in fixtures {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("config.yaml");
+        std::fs::write(&path, original).unwrap();
+        let first = HermesHookConfigGuard::install_at(td.path())
+            .unwrap_or_else(|err| panic!("must install over {original:?}: {err}"));
+        let second = HermesHookConfigGuard::install_at(td.path()).unwrap();
+        let installed = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            installed.lines().filter(|line| *line == "hooks:").count(),
+            1
+        );
+        assert!(installed.contains("pre_tool_call:") && installed.contains(" PermissionRequest"));
+        assert_eq!(strip_hermes_managed_block(&installed).unwrap(), original);
+        drop(second);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), installed);
+        drop(first);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+}
+
+#[test]
+fn hermes_guard_refuses_nonempty_or_unsupported_hook_values() {
+    for original in [
+        "hooks:\n  # comment\n  pre_tool_call: []\n",
+        "hooks:\n- command: mine\n",
+        "hooks: {}\nhooks: {pre_tool_call: []}\n",
+        "hooks: {}\nhooks: null\n",
+        "hooks: []\n",
+        "hooks: 'null'\n",
+        "hooks: \"\"\n",
+        "hooks: false\n",
+        "hooks:\n\tpre_tool_call: []\n",
+        "hooks: &empty {}\n",
+        "hooks: !!null null\n",
+        "? hooks\n: {}\n",
+    ] {
+        assert_hermes_install_refused(original, "user Hermes config already has hooks");
+    }
+    for original in [
+        "hooks: {}\n---\nmodel: x\n",
+        "hooks: null\n...\n",
+        "hooks: {}\n<<: *base\n",
+        "hooks: {}\n%YAML 1.1\n",
+    ] {
+        assert_hermes_install_refused(
+            original,
+            "user Hermes config is not a single top-level block mapping",
+        );
+    }
+}
+
+#[test]
+fn hermes_empty_hooks_rollback_and_unrelated_edits_preserve_original() {
+    let td = tempfile::TempDir::new().unwrap();
+    let path = td.path().join("config.yaml");
+    let original = "model: x\nhooks: null # keep this\nverbose: false\n";
+    std::fs::write(&path, original).unwrap();
+    let allowlist = td.path().join("shell-hooks-allowlist.json");
+    std::fs::write(&allowlist, "not JSON").unwrap();
+    assert!(HermesHookConfigGuard::install_at(td.path()).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    assert_eq!(std::fs::read_to_string(&allowlist).unwrap(), "not JSON");
+    std::fs::remove_file(allowlist).unwrap();
+    let guard = HermesHookConfigGuard::install_at(td.path()).unwrap();
+    let installed = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("model: x", "model: y");
+    std::fs::write(&path, installed).unwrap();
+    drop(guard);
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        original.replace("model: x", "model: y")
+    );
+}
+
+#[test]
 fn hermes_guard_refuses_when_user_has_hooks_key() {
     // A duplicate top-level `hooks:` key would silently override the
     // user's own hooks under PyYAML-family last-wins semantics. Issue #1056:
@@ -475,17 +571,9 @@ fn hermes_guard_refuses_when_user_has_hooks_key() {
         "'hooks':\n  pre_tool_call:\n    - command: \"~/mine.sh\"\n",
         "hooks :\n  pre_tool_call:\n    - command: \"~/mine.sh\"\n",
         "model: x\n\"hooks\" : {pre_tool_call: []}\n",
-        // Pinned on purpose: an empty `hooks: {}` still refuses. Whether
-        // PaneFlow may fill an empty user mapping is a separate policy
-        // follow-up, not part of #1056.
-        "hooks: {}\n",
-        "hooks: {} # mine\n",
         "hooks: # mine\n  pre_tool_call: []\n",
-        "\"\\u0068ooks\": {}\n",
-        "'it''s': 1\n'hooks' : {}\n",
         "? hooks\n: {pre_tool_call: []}\n",
         "---\nhooks:\n  pre_tool_call: []\n",
-        "--- # first document\nmodel: x\nhooks: {}\n",
         "&mine hooks: {}\n",
         "!!str hooks: {}\n",
         "model: x\r\nhooks :\r\n  pre_tool_call: []\r\n",
@@ -665,6 +753,18 @@ fn strip_hermes_block_handles_absent_and_partial_markers() {
     // Begin without end (truncated write) → refuse to strip.
     let partial = format!("a: 1\n{HERMES_BLOCK_BEGIN}\nhooks:\n");
     assert!(strip_hermes_managed_block(&partial).is_none());
+    for backup in [
+        "not JSON",
+        "\"hooks: {pre_tool_call: []}\\n\"",
+        "\"hooks: {}\\nmodel: x\\n\"",
+    ] {
+        let damaged = hermes_managed_block().replacen(
+            "hooks:\n",
+            &format!("# paneflow original hooks: {backup}\nhooks:\n"),
+            1,
+        );
+        assert!(strip_hermes_managed_block(&damaged).is_none());
+    }
 }
 
 // ---------- US-006: CodexHookConfigGuard (Unix) ----------

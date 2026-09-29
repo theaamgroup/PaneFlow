@@ -16,6 +16,7 @@ use top_level_keys::{top_level_hooks, TopLevelHooks};
 
 pub(crate) const HERMES_BLOCK_BEGIN: &str =
     "# >>> paneflow managed hooks (auto-installed; removed on session end) >>>";
+const HERMES_ORIGINAL_HOOKS: &str = "# paneflow original hooks: ";
 const HERMES_BLOCK_END: &str = "# <<< paneflow managed hooks <<<";
 
 fn yaml_quote(value: &str) -> String {
@@ -61,12 +62,42 @@ pub(crate) fn hermes_managed_block() -> String {
 
 pub(crate) fn strip_hermes_managed_block(content: &str) -> Option<String> {
     let begin = content.find(HERMES_BLOCK_BEGIN)?;
-    let end_relative = content[begin..].find(HERMES_BLOCK_END)?;
+    let block = &content[begin..];
+    let mut end_relative = 0;
+    for line in block.split_inclusive('\n') {
+        if line.trim_end_matches(['\r', '\n']) == HERMES_BLOCK_END {
+            break;
+        }
+        end_relative += line.len();
+    }
+    if end_relative == block.len() {
+        return None;
+    }
+    let mut original = String::new();
+    for line in block[..end_relative].lines() {
+        if let Some(encoded) = line.strip_prefix(HERMES_ORIGINAL_HOOKS) {
+            // A damaged backup must never turn into a destructive cleanup.
+            if !original.is_empty() {
+                return None;
+            }
+            original = serde_json::from_str(encoded).ok()?;
+            if !matches!(top_level_hooks(&original), TopLevelHooks::Empty(span)
+                if span == (0..original.len()))
+            {
+                return None;
+            }
+        }
+    }
     let mut end = begin + end_relative + HERMES_BLOCK_END.len();
     if content[end..].starts_with('\n') {
         end += 1;
     }
-    Some(format!("{}{}", &content[..begin], &content[end..]))
+    Some(format!(
+        "{}{}{}",
+        &content[..begin],
+        original,
+        &content[end..]
+    ))
 }
 
 /// Profile directory Hermes reads: `HERMES_HOME` when set and non-empty,
@@ -237,7 +268,21 @@ impl HermesHookConfigGuard {
             let content = existing.unwrap_or_default();
             let mut base = strip_hermes_managed_block(&content).unwrap_or(content);
             match top_level_hooks(&base) {
-                TopLevelHooks::Absent => {}
+                TopLevelHooks::Absent => {
+                    if !base.is_empty() && !base.ends_with('\n') {
+                        base.push('\n');
+                    }
+                    base.push_str(&hermes_managed_block());
+                }
+                TopLevelHooks::Empty(span) => {
+                    let encoded = serde_json::to_string(&base[span.clone()])?;
+                    let mut block = hermes_managed_block();
+                    block.insert_str(
+                        HERMES_BLOCK_BEGIN.len() + 1,
+                        &format!("{HERMES_ORIGINAL_HOOKS}{encoded}\n"),
+                    );
+                    base.replace_range(span, &block);
+                }
                 TopLevelHooks::Present => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -252,10 +297,6 @@ impl HermesHookConfigGuard {
                     ));
                 }
             }
-            if !base.is_empty() && !base.ends_with('\n') {
-                base.push('\n');
-            }
-            base.push_str(&hermes_managed_block());
             write_text_atomic(&path, &base)?;
             if created {
                 lease.mark_created()?;
@@ -548,6 +589,35 @@ mod tests {
 
     fn approvals(allowlist: &Path) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(allowlist).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn empty_hooks_survive_crash_sweep_and_reinstall() {
+        for reinstall in [false, true] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let directory = temp.path().join("profile");
+            std::fs::create_dir_all(&directory).unwrap();
+            let path = directory.join("config.yaml");
+            let original = "model: x\r\nhooks: null # original\r\nverbose: false\r\n";
+            std::fs::write(&path, original).unwrap();
+            let guard = HermesHookConfigGuard::install_at(&directory).unwrap();
+            crash(guard, &temp.path().join("unrelated"));
+            if reinstall {
+                let next = HermesHookConfigGuard::install_at(&directory).unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(&path)
+                        .unwrap()
+                        .matches(HERMES_BLOCK_BEGIN)
+                        .count(),
+                    1,
+                );
+                drop(next);
+            } else {
+                HermesHookConfigGuard::sweep_orphan(&directory);
+            }
+            assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+            assert!(!allowlist_path(&directory).exists());
+        }
     }
 
     #[test]
