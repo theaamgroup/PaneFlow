@@ -12,25 +12,19 @@ pub enum SessionAgent {
     Claude,
     Codex,
     OpenCode,
-    Pi,
-    Hermes,
     Grok,
     Cursor,
     Gemini,
-    Kiro,
 }
 
 impl SessionAgent {
-    pub const ALL: [SessionAgent; 9] = [
+    pub const ALL: [SessionAgent; 6] = [
         SessionAgent::Claude,
         SessionAgent::Codex,
         SessionAgent::OpenCode,
-        SessionAgent::Pi,
-        SessionAgent::Hermes,
         SessionAgent::Grok,
         SessionAgent::Cursor,
         SessionAgent::Gemini,
-        SessionAgent::Kiro,
     ];
 
     pub(crate) fn index(self) -> usize {
@@ -38,12 +32,9 @@ impl SessionAgent {
             SessionAgent::Claude => 0,
             SessionAgent::Codex => 1,
             SessionAgent::OpenCode => 2,
-            SessionAgent::Pi => 3,
-            SessionAgent::Hermes => 4,
-            SessionAgent::Grok => 5,
-            SessionAgent::Cursor => 6,
-            SessionAgent::Gemini => 7,
-            SessionAgent::Kiro => 8,
+            SessionAgent::Grok => 3,
+            SessionAgent::Cursor => 4,
+            SessionAgent::Gemini => 5,
         }
     }
 
@@ -53,12 +44,9 @@ impl SessionAgent {
             SessionAgent::Claude => TerminalAgent::ClaudeCode,
             SessionAgent::Codex => TerminalAgent::Codex,
             SessionAgent::OpenCode => TerminalAgent::OpenCode,
-            SessionAgent::Pi => TerminalAgent::Pi,
-            SessionAgent::Hermes => TerminalAgent::Hermes,
             SessionAgent::Grok => TerminalAgent::Grok,
             SessionAgent::Cursor => TerminalAgent::Cursor,
             SessionAgent::Gemini => TerminalAgent::Gemini,
-            SessionAgent::Kiro => TerminalAgent::Kiro,
         }
     }
 
@@ -614,21 +602,14 @@ pub(crate) fn read_sessions_for_cwd_with_omitted_within(
         SessionAgent::Claude => crate::claude_sessions::read_sessions_for_cwd_with_omitted(cwd),
         SessionAgent::Codex => crate::codex_sessions::read_sessions_for_cwd_with_omitted(cwd),
         SessionAgent::OpenCode => crate::opencode_sessions::read_sessions_for_cwd_with_omitted(cwd),
-        SessionAgent::Pi => crate::pi_sessions::read_sessions_for_cwd_with_omitted(cwd),
         SessionAgent::Cursor => {
             crate::command_sessions::read_cursor_sessions_for_cwd(cwd, budget_until)
         }
         SessionAgent::Gemini => {
             crate::command_sessions::read_gemini_sessions_for_cwd(cwd, budget_until)
         }
-        SessionAgent::Kiro => {
-            crate::command_sessions::read_kiro_sessions_for_cwd(cwd, budget_until)
-        }
         SessionAgent::Grok => {
             crate::command_sessions::read_grok_sessions_for_cwd(cwd, budget_until)
-        }
-        SessionAgent::Hermes => {
-            crate::command_sessions::read_hermes_sessions_for_cwd(cwd, budget_until)
         }
     }
 }
@@ -922,16 +903,11 @@ pub(crate) fn attribution_for_column_within(
     for &agent in agents {
         match agent {
             // File-backed readers: title-only, mtime-cached, no clock.
-            SessionAgent::Claude
-            | SessionAgent::Codex
-            | SessionAgent::OpenCode
-            | SessionAgent::Pi => all.extend(read_sessions_for_cwd(agent, cwd)),
+            SessionAgent::Claude | SessionAgent::Codex | SessionAgent::OpenCode => {
+                all.extend(read_sessions_for_cwd(agent, cwd))
+            }
             // Command-backed readers spawn a CLI, so they share one budget.
-            SessionAgent::Hermes
-            | SessionAgent::Grok
-            | SessionAgent::Cursor
-            | SessionAgent::Gemini
-            | SessionAgent::Kiro => {
+            SessionAgent::Grok | SessionAgent::Cursor | SessionAgent::Gemini => {
                 all.extend(read_sessions_for_cwd_with_omitted_within(agent, cwd, budget_until).0)
             }
         }
@@ -1100,11 +1076,9 @@ mod tests {
 
         let cwd = dir.path().to_string_lossy().into_owned();
         let agents = [
-            SessionAgent::Hermes,
             SessionAgent::Grok,
             SessionAgent::Cursor,
             SessionAgent::Gemini,
-            SessionAgent::Kiro,
         ];
 
         // The stub has to be what the readers spawn. With the vendor CLIs
@@ -1141,13 +1115,10 @@ mod tests {
             claude_code_button_visible: Some(true),
             codex_button_visible: Some(false),
             opencode_button_visible: Some(true),
-            pi_button_visible: Some(false),
-            hermes_agent_button_visible: Some(false),
             grok_button_visible: Some(false),
             cursor_button_visible: Some(false),
             gemini_button_visible: Some(false),
-            kiro_button_visible: Some(false),
-            amp_button_visible: Some(true),
+            muse_button_visible: Some(true),
             ..Default::default()
         };
 

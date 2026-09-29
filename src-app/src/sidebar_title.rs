@@ -14,7 +14,7 @@ const MAX_SIDEBAR_TITLE_CHARS: usize = 240;
 const MAX_RAW_SIDEBAR_TITLE_CHARS: usize = 1024;
 
 /// Strip leading decoration glyphs and invisible characters that CLI
-/// agents (Claude Code, Codex, OpenCode, Pi, Amp) bake into their
+/// agents (Claude Code, Codex, OpenCode) bake into their
 /// session / OSC titles to indicate status. Without this:
 /// - During response: "● Project overview" sits in the sidebar with
 ///   a literal dot in front of the label.

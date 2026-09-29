@@ -1,8 +1,6 @@
 //! Terminal-agent launcher: the CLI coding agents Paneflow starts in a
-//! terminal pane (Claude Code, Codex, OpenCode, Pi, Hermes, plus the
-//! cmux-derived set: Grok, Amp, Cursor, Gemini, Kiro, Antigravity,
-//! Copilot, CodeBuddy, Factory, Qoder, Openclaw, DeepSeek Harness, plus Muse Code). Both the tab-bar
-//! launcher buttons
+//! terminal pane (Claude Code, Codex, OpenCode, Grok, Cursor, Gemini,
+//! Antigravity, Copilot, and Muse Code). Both the tab-bar launcher buttons
 //! (`pane.rs`) and the new-pane picker iterate this single
 //! source of truth so the per-agent visibility gate and the "respect
 //! bypass" contract can never drift between them.
@@ -25,45 +23,26 @@ pub enum TerminalAgent {
     ClaudeCode,
     Codex,
     OpenCode,
-    Pi,
-    Hermes,
     Grok,
-    Amp,
     Cursor,
     Gemini,
-    Kiro,
     Antigravity,
     Copilot,
-    CodeBuddy,
-    Factory,
-    Qoder,
-    Openclaw,
-    DeepSeekHarness,
     Muse,
 }
 
 impl TerminalAgent {
     /// Every variant, in display order (matches the tab-bar button row).
-    /// The original five lead; the cmux-derived launchers follow so the
-    /// button order is stable for users who upgraded from a 5-agent build.
-    pub const ALL: [TerminalAgent; 18] = [
+    /// The relative order of retained agents stays stable across upgrades.
+    pub const ALL: [TerminalAgent; 9] = [
         TerminalAgent::ClaudeCode,
         TerminalAgent::Codex,
         TerminalAgent::OpenCode,
-        TerminalAgent::Pi,
-        TerminalAgent::Hermes,
         TerminalAgent::Grok,
-        TerminalAgent::Amp,
         TerminalAgent::Cursor,
         TerminalAgent::Gemini,
-        TerminalAgent::Kiro,
         TerminalAgent::Antigravity,
         TerminalAgent::Copilot,
-        TerminalAgent::CodeBuddy,
-        TerminalAgent::Factory,
-        TerminalAgent::Qoder,
-        TerminalAgent::Openclaw,
-        TerminalAgent::DeepSeekHarness,
         TerminalAgent::Muse,
     ];
 
@@ -82,20 +61,11 @@ impl TerminalAgent {
             TerminalAgent::ClaudeCode => "Claude Code",
             TerminalAgent::Codex => "Codex",
             TerminalAgent::OpenCode => "OpenCode",
-            TerminalAgent::Pi => "Pi",
-            TerminalAgent::Hermes => "Hermes Agent",
             TerminalAgent::Grok => "Grok",
-            TerminalAgent::Amp => "Amp",
             TerminalAgent::Cursor => "Cursor",
             TerminalAgent::Gemini => "Gemini",
-            TerminalAgent::Kiro => "Kiro",
             TerminalAgent::Antigravity => "Antigravity",
             TerminalAgent::Copilot => "Copilot",
-            TerminalAgent::CodeBuddy => "CodeBuddy",
-            TerminalAgent::Factory => "Factory",
-            TerminalAgent::Qoder => "Qoder",
-            TerminalAgent::Openclaw => "Openclaw",
-            TerminalAgent::DeepSeekHarness => "DeepSeek Harness",
             TerminalAgent::Muse => "Muse Code",
         }
     }
@@ -105,36 +75,24 @@ impl TerminalAgent {
             TerminalAgent::ClaudeCode => "icons/claude-color.svg",
             TerminalAgent::Codex => "icons/codex.svg",
             TerminalAgent::OpenCode => "icons/opencode-color.svg",
-            TerminalAgent::Pi => "icons/pi-coding-agent.svg",
-            TerminalAgent::Hermes => "icons/hermesagent.svg",
             TerminalAgent::Grok => "agents/grok.svg",
-            TerminalAgent::Amp => "agents/amp-color.svg",
             TerminalAgent::Cursor => "agents/cursor.svg",
             TerminalAgent::Gemini => "agents/gemini-color.svg",
-            TerminalAgent::Kiro => "agents/kiro-color.svg",
             TerminalAgent::Antigravity => "agents/antigravity-color.svg",
             TerminalAgent::Copilot => "agents/githubcopilot.svg",
-            TerminalAgent::CodeBuddy => "agents/codebuddy-color.svg",
-            TerminalAgent::Factory => "agents/factory.svg",
-            TerminalAgent::Qoder => "agents/qoder-color.svg",
-            TerminalAgent::Openclaw => "agents/openclaw-color.svg",
-            TerminalAgent::DeepSeekHarness => "agents/deepseek-color.svg",
             TerminalAgent::Muse => "agents/muse-color.svg",
         }
     }
 
     /// Brand accent for the icon tint, as a packed `0xRRGGBB`. `None`
-    /// means "use the theme's primary text color" -- the OpenCode / Pi /
-    /// Hermes logos are monochrome `currentColor` SVGs (so is Codex, which
+    /// means "use the theme's primary text color" -- the OpenCode logo
+    /// is a monochrome `currentColor` SVG (so is Codex, which
     /// carries the OpenAI blossom mark).
     pub fn accent(self) -> Option<u32> {
         match self {
             TerminalAgent::ClaudeCode => Some(0xd97757),
             // Single-color brand logos: `svg()` renders a monochrome alpha
             // mask, so the silhouette is painted in this brand color.
-            TerminalAgent::Amp => Some(0xF34E3F),
-            TerminalAgent::Qoder => Some(0x2ADB5C),
-            TerminalAgent::DeepSeekHarness => Some(0x4D6BFE),
             TerminalAgent::Muse => Some(0x0081FB),
             // The rest are either monochrome `currentColor` logos (tinted
             // with the theme's primary text color so they stay readable on
@@ -143,17 +101,11 @@ impl TerminalAgent {
             // is unused.
             TerminalAgent::Codex
             | TerminalAgent::OpenCode
-            | TerminalAgent::Pi
-            | TerminalAgent::Hermes
             | TerminalAgent::Grok
             | TerminalAgent::Cursor
             | TerminalAgent::Gemini
-            | TerminalAgent::Kiro
             | TerminalAgent::Antigravity
-            | TerminalAgent::Copilot
-            | TerminalAgent::CodeBuddy
-            | TerminalAgent::Factory
-            | TerminalAgent::Openclaw => None,
+            | TerminalAgent::Copilot => None,
         }
     }
 
@@ -164,14 +116,7 @@ impl TerminalAgent {
     /// `img()` rasterizes the SVG (resvg) and preserves every fill. A
     /// single-color brand logo stays monochrome and uses `accent()`.
     pub fn icon_multicolor(self) -> bool {
-        matches!(
-            self,
-            TerminalAgent::Antigravity
-                | TerminalAgent::CodeBuddy
-                | TerminalAgent::Gemini
-                | TerminalAgent::Kiro
-                | TerminalAgent::Openclaw
-        )
+        matches!(self, TerminalAgent::Antigravity | TerminalAgent::Gemini)
     }
 
     /// Stable persistence tag for the session.json `terminal_agent`
@@ -182,20 +127,11 @@ impl TerminalAgent {
             TerminalAgent::ClaudeCode => "claude_code",
             TerminalAgent::Codex => "codex",
             TerminalAgent::OpenCode => "opencode",
-            TerminalAgent::Pi => "pi",
-            TerminalAgent::Hermes => "hermes",
             TerminalAgent::Grok => "grok",
-            TerminalAgent::Amp => "amp",
             TerminalAgent::Cursor => "cursor",
             TerminalAgent::Gemini => "gemini",
-            TerminalAgent::Kiro => "kiro",
             TerminalAgent::Antigravity => "antigravity",
             TerminalAgent::Copilot => "copilot",
-            TerminalAgent::CodeBuddy => "codebuddy",
-            TerminalAgent::Factory => "factory",
-            TerminalAgent::Qoder => "qoder",
-            TerminalAgent::Openclaw => "openclaw",
-            TerminalAgent::DeepSeekHarness => "deepseek_harness",
             TerminalAgent::Muse => "muse",
         }
     }
@@ -244,20 +180,11 @@ impl TerminalAgent {
             "claude_code" => Some(TerminalAgent::ClaudeCode),
             "codex" => Some(TerminalAgent::Codex),
             "opencode" => Some(TerminalAgent::OpenCode),
-            "pi" => Some(TerminalAgent::Pi),
-            "hermes" => Some(TerminalAgent::Hermes),
             "grok" => Some(TerminalAgent::Grok),
-            "amp" => Some(TerminalAgent::Amp),
             "cursor" => Some(TerminalAgent::Cursor),
             "gemini" => Some(TerminalAgent::Gemini),
-            "kiro" => Some(TerminalAgent::Kiro),
             "antigravity" => Some(TerminalAgent::Antigravity),
             "copilot" => Some(TerminalAgent::Copilot),
-            "codebuddy" => Some(TerminalAgent::CodeBuddy),
-            "factory" => Some(TerminalAgent::Factory),
-            "qoder" => Some(TerminalAgent::Qoder),
-            "openclaw" => Some(TerminalAgent::Openclaw),
-            "deepseek_harness" => Some(TerminalAgent::DeepSeekHarness),
             "muse" => Some(TerminalAgent::Muse),
             _ => None,
         }
@@ -287,20 +214,11 @@ impl TerminalAgent {
             TerminalAgent::ClaudeCode => config.claude_code_button_visible,
             TerminalAgent::Codex => config.codex_button_visible,
             TerminalAgent::OpenCode => config.opencode_button_visible,
-            TerminalAgent::Pi => config.pi_button_visible,
-            TerminalAgent::Hermes => config.hermes_agent_button_visible,
             TerminalAgent::Grok => config.grok_button_visible,
-            TerminalAgent::Amp => config.amp_button_visible,
             TerminalAgent::Cursor => config.cursor_button_visible,
             TerminalAgent::Gemini => config.gemini_button_visible,
-            TerminalAgent::Kiro => config.kiro_button_visible,
             TerminalAgent::Antigravity => config.antigravity_button_visible,
             TerminalAgent::Copilot => config.copilot_button_visible,
-            TerminalAgent::CodeBuddy => config.codebuddy_button_visible,
-            TerminalAgent::Factory => config.factory_button_visible,
-            TerminalAgent::Qoder => config.qoder_button_visible,
-            TerminalAgent::Openclaw => config.openclaw_button_visible,
-            TerminalAgent::DeepSeekHarness => config.deepseek_harness_button_visible,
             TerminalAgent::Muse => config.muse_button_visible,
         };
         explicit.unwrap_or_else(|| self.is_default_enabled() && is_installed(self))
@@ -321,20 +239,11 @@ impl TerminalAgent {
             TerminalAgent::ClaudeCode => "claude_code_button_visible",
             TerminalAgent::Codex => "codex_button_visible",
             TerminalAgent::OpenCode => "opencode_button_visible",
-            TerminalAgent::Pi => "pi_button_visible",
-            TerminalAgent::Hermes => "hermes_agent_button_visible",
             TerminalAgent::Grok => "grok_button_visible",
-            TerminalAgent::Amp => "amp_button_visible",
             TerminalAgent::Cursor => "cursor_button_visible",
             TerminalAgent::Gemini => "gemini_button_visible",
-            TerminalAgent::Kiro => "kiro_button_visible",
             TerminalAgent::Antigravity => "antigravity_button_visible",
             TerminalAgent::Copilot => "copilot_button_visible",
-            TerminalAgent::CodeBuddy => "codebuddy_button_visible",
-            TerminalAgent::Factory => "factory_button_visible",
-            TerminalAgent::Qoder => "qoder_button_visible",
-            TerminalAgent::Openclaw => "openclaw_button_visible",
-            TerminalAgent::DeepSeekHarness => "deepseek_harness_button_visible",
             TerminalAgent::Muse => "muse_button_visible",
         }
     }
@@ -346,20 +255,11 @@ impl TerminalAgent {
             TerminalAgent::ClaudeCode => "claude",
             TerminalAgent::Codex => "codex",
             TerminalAgent::OpenCode => "opencode",
-            TerminalAgent::Pi => "pi",
-            TerminalAgent::Hermes => "hermes",
             TerminalAgent::Grok => "grok",
-            TerminalAgent::Amp => "amp",
             TerminalAgent::Cursor => "cursor-agent",
             TerminalAgent::Gemini => "gemini",
-            TerminalAgent::Kiro => "kiro-cli",
             TerminalAgent::Antigravity => "agy",
             TerminalAgent::Copilot => "copilot",
-            TerminalAgent::CodeBuddy => "codebuddy",
-            TerminalAgent::Factory => "droid",
-            TerminalAgent::Qoder => "qodercli",
-            TerminalAgent::Openclaw => "openclaw",
-            TerminalAgent::DeepSeekHarness => "dsh",
             TerminalAgent::Muse => "muse",
         }
     }
@@ -383,9 +283,6 @@ impl TerminalAgent {
     /// whose CLI entry point is a subcommand rather than the bare executable.
     fn command_args(self) -> &'static [&'static str] {
         match self {
-            TerminalAgent::Kiro => &["chat"],
-            TerminalAgent::Openclaw => &["tui"],
-            TerminalAgent::DeepSeekHarness => &["--profile", "tui"],
             _ => &[],
         }
     }
@@ -417,12 +314,9 @@ impl TerminalAgent {
             TerminalAgent::ClaudeCode => Some(SessionAgent::Claude),
             TerminalAgent::Codex => Some(SessionAgent::Codex),
             TerminalAgent::OpenCode => Some(SessionAgent::OpenCode),
-            TerminalAgent::Pi => Some(SessionAgent::Pi),
-            TerminalAgent::Hermes => Some(SessionAgent::Hermes),
             TerminalAgent::Grok => Some(SessionAgent::Grok),
             TerminalAgent::Cursor => Some(SessionAgent::Cursor),
             TerminalAgent::Gemini => Some(SessionAgent::Gemini),
-            TerminalAgent::Kiro => Some(SessionAgent::Kiro),
             _ => None,
         }
     }
@@ -1024,6 +918,50 @@ fn is_env_assignment(token: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn retired_agents_have_no_native_identity() {
+        for (tag, binary) in [
+            ("pi", "pi"),
+            ("hermes", "hermes"),
+            ("amp", "amp"),
+            ("kiro", "kiro-cli"),
+            ("codebuddy", "codebuddy"),
+            ("factory", "droid"),
+            ("qoder", "qodercli"),
+            ("openclaw", "openclaw"),
+            ("deepseek_harness", "dsh"),
+        ] {
+            assert_eq!(TerminalAgent::from_tag(tag), None, "retired tag {tag}");
+            assert_eq!(
+                TerminalAgent::from_binary(binary),
+                None,
+                "retired binary {binary}"
+            );
+            assert_eq!(
+                TerminalAgent::from_launch_command(&format!("clear && {binary}")),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn retired_visibility_keys_load_without_restoring_launchers() {
+        let config: PaneFlowConfig = serde_json::from_value(serde_json::json!({
+            "pi_button_visible": true, "hermes_agent_button_visible": true,
+            "amp_button_visible": true, "kiro_button_visible": true,
+            "codebuddy_button_visible": true, "factory_button_visible": true,
+            "qoder_button_visible": true, "openclaw_button_visible": true,
+            "deepseek_harness_button_visible": true, "codex_button_visible": true,
+        }))
+        .unwrap();
+        let visible: Vec<_> = TerminalAgent::ALL
+            .into_iter()
+            .filter(|agent| agent.is_visible_with(&config, |_| false))
+            .map(TerminalAgent::tag)
+            .collect();
+        assert_eq!(visible, ["codex"]);
+    }
+
     /// Issue #518: `contains` is read from render frames, so a failed probe
     /// thread spawn must abandon the refresh, never run the PATH walk on
     /// the caller.
@@ -1180,10 +1118,10 @@ mod tests {
     #[test]
     fn explicit_visibility_does_not_consult_install_detection() {
         let shown = PaneFlowConfig {
-            amp_button_visible: Some(true),
+            gemini_button_visible: Some(true),
             ..Default::default()
         };
-        assert!(TerminalAgent::Amp.is_visible_with(&shown, |_| {
+        assert!(TerminalAgent::Gemini.is_visible_with(&shown, |_| {
             unreachable!("explicit true must short-circuit install detection")
         }));
 
@@ -1239,8 +1177,6 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(TerminalAgent::Codex.command(&config), "codex");
-        assert_eq!(TerminalAgent::Pi.command(&config), "pi");
-        assert_eq!(TerminalAgent::Hermes.command(&config), "hermes");
     }
 
     #[test]
@@ -1298,11 +1234,6 @@ mod tests {
             TerminalAgent::OpenCode.session_agent(),
             Some(SessionAgent::OpenCode)
         );
-        assert_eq!(TerminalAgent::Pi.session_agent(), Some(SessionAgent::Pi));
-        assert_eq!(
-            TerminalAgent::Hermes.session_agent(),
-            Some(SessionAgent::Hermes)
-        );
         assert_eq!(
             TerminalAgent::Grok.session_agent(),
             Some(SessionAgent::Grok)
@@ -1315,30 +1246,14 @@ mod tests {
             TerminalAgent::Gemini.session_agent(),
             Some(SessionAgent::Gemini)
         );
-        assert_eq!(
-            TerminalAgent::Kiro.session_agent(),
-            Some(SessionAgent::Kiro)
-        );
-        assert_eq!(TerminalAgent::Amp.session_agent(), None);
         assert_eq!(TerminalAgent::Antigravity.session_agent(), None);
         assert_eq!(TerminalAgent::Copilot.session_agent(), None);
-        assert_eq!(TerminalAgent::CodeBuddy.session_agent(), None);
-        assert_eq!(TerminalAgent::Factory.session_agent(), None);
-        assert_eq!(TerminalAgent::Qoder.session_agent(), None);
-        assert_eq!(TerminalAgent::Openclaw.session_agent(), None);
-        assert_eq!(TerminalAgent::DeepSeekHarness.session_agent(), None);
         assert_eq!(TerminalAgent::Muse.session_agent(), None);
     }
 
     #[test]
-    fn bare_commands_preserve_multi_token_agent_commands() {
+    fn muse_command_is_bare() {
         let cfg = PaneFlowConfig::default();
-        assert_eq!(TerminalAgent::Kiro.command(&cfg), "kiro-cli chat");
-        assert_eq!(TerminalAgent::Openclaw.command(&cfg), "openclaw tui");
-        assert_eq!(
-            TerminalAgent::DeepSeekHarness.command(&cfg),
-            "dsh --profile tui"
-        );
         assert_eq!(TerminalAgent::Muse.command(&cfg), "muse");
     }
 

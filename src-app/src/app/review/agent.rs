@@ -96,7 +96,6 @@ impl PaneFlowApp {
                 ReviewCli::ClaudeCode => crate::agent_launcher::TerminalAgent::ClaudeCode,
                 ReviewCli::Codex => crate::agent_launcher::TerminalAgent::Codex,
                 ReviewCli::OpenCode => crate::agent_launcher::TerminalAgent::OpenCode,
-                ReviewCli::Pi => crate::agent_launcher::TerminalAgent::Pi,
             };
             self.open_agent_tab_at_cwd(
                 ws_idx,
@@ -211,8 +210,12 @@ mod tests {
 
     #[test]
     fn review_dispatch_preserves_choice_order_and_second_opinion_prompts() {
-        let prompts =
-            review_prompts("feature", "HEAD~1", &[ReviewCli::Codex, ReviewCli::Pi]).unwrap();
+        let prompts = review_prompts(
+            "feature",
+            "HEAD~1",
+            &[ReviewCli::Codex, ReviewCli::OpenCode],
+        )
+        .unwrap();
         let opened = dispatch_reviews(prompts, Some);
         assert_eq!(
             opened[0],
@@ -224,7 +227,7 @@ mod tests {
         assert_eq!(
             opened[1],
             (
-                ReviewCli::Pi,
+                ReviewCli::OpenCode,
                 build_cli_review_prompt("feature", "HEAD~1", true)
             )
         );
@@ -248,7 +251,7 @@ mod tests {
         assert_eq!(opened[0].0, ReviewCli::ClaudeCode);
         assert!(
             dispatch_reviews(
-                review_prompts("feature", "main", &[ReviewCli::Pi]).unwrap(),
+                review_prompts("feature", "main", &[ReviewCli::OpenCode]).unwrap(),
                 |_| None::<()>
             )
             .is_empty()

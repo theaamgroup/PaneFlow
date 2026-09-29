@@ -46,7 +46,7 @@ const TITLE_SCAN_BYTES: u64 = 1024 * 1024;
 
 // US-013: per-line JSONL read cap, centralized (see `crate::limits`).
 use crate::limits::MAX_LINE_BYTES;
-use crate::pi_sessions::{CappedLine, read_capped_line};
+use crate::session_lines::{CappedLine, read_capped_line};
 
 /// Cap rendered first-user-message labels at this character count to keep
 /// the popover row from overflowing horizontally.

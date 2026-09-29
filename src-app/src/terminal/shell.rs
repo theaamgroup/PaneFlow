@@ -765,8 +765,8 @@ mod tests {
     fn clear_then_uses_powershell_51_compatible_syntax() {
         assert_eq!(clear_then_for_shell("claude", "pwsh"), "Clear-Host; claude");
         assert_eq!(
-            clear_then_for_shell("kiro-cli chat", "pwsh"),
-            "Clear-Host; kiro-cli chat"
+            clear_then_for_shell("codex resume", "pwsh"),
+            "Clear-Host; codex resume"
         );
     }
 
@@ -777,8 +777,8 @@ mod tests {
             "clear && opencode"
         );
         assert_eq!(
-            clear_then_for_shell("kiro-cli chat", "/bin/zsh"),
-            "clear && kiro-cli chat"
+            clear_then_for_shell("codex resume", "/bin/zsh"),
+            "clear && codex resume"
         );
     }
 

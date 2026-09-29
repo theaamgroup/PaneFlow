@@ -72,7 +72,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// callback. `(basename, source)` where `source` is the name inside the
 /// embed folder.
 ///
-/// Wrapping is UNCONDITIONAL for all 18 agents (not gated on the real CLI
+/// Wrapping is UNCONDITIONAL for all nine supported agents (not gated on the real CLI
 /// being installed): probing Paneflow's own `$PATH` would silently disable
 /// hooks whenever the app is launched from a desktop entry with a minimal
 /// PATH while the PTY's login shell resolves the agent fine. The cost is
@@ -299,11 +299,39 @@ fn ensure_binaries_extracted_into(cache_root: &Path, exe: &Path) -> Result<PathB
         // Lease first so a concurrent prune of `bin/<version>/` sees a live
         // holder before the wrappers exist (#442).
         write_version_lock(&target_dir);
+        remove_retired_wrappers(&target_dir)?;
         extract_into(&entries, &target_dir)?;
         link_cli_into(&target_dir, exe)?;
         prune_stale_version_dirs(&target_dir);
         Ok(target_dir)
     }
+}
+
+/// Remove retired shim names from an existing same-version cache before it
+/// returns to the PTY PATH. Remove the entry itself, never a symlink target.
+fn remove_retired_wrappers(target_dir: &Path) -> Result<()> {
+    for binary in [
+        "pi",
+        "hermes",
+        "amp",
+        "kiro-cli",
+        "codebuddy",
+        "droid",
+        "qodercli",
+        "openclaw",
+        "dsh",
+    ] {
+        let path = target_dir.join(binary);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("remove retired wrapper {}", path.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Per-process lease prefix inside `bin/<version>/`. Hidden so it is never
@@ -1193,6 +1221,38 @@ mod tests {
             cli.display()
         );
         assert!(cli.is_file(), "#440: the CLI link must resolve");
+        assert!(wrappers_present_for(&dir, &exe));
+    }
+
+    #[test]
+    fn extraction_removes_retired_wrappers_from_the_current_version_cache() {
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let exe = cache_root.path().join("app-exe");
+        std::fs::write(&exe, b"app").unwrap();
+        let dir = versioned_bin_dir(cache_root.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let retired = [
+            "pi",
+            "hermes",
+            "amp",
+            "kiro-cli",
+            "codebuddy",
+            "droid",
+            "qodercli",
+            "openclaw",
+            "dsh",
+        ];
+        for binary in retired {
+            std::fs::write(dir.join(binary), b"old shim").unwrap();
+        }
+        std::fs::write(dir.join("user-tool"), b"keep").unwrap();
+        std::fs::remove_file(dir.join("qodercli")).unwrap();
+        std::os::unix::fs::symlink(dir.join("user-tool"), dir.join("qodercli")).unwrap();
+        ensure_binaries_extracted_into(cache_root.path(), &exe).unwrap();
+        for binary in retired {
+            assert!(!dir.join(binary).exists(), "stale {binary} shadows PATH");
+        }
+        assert_eq!(std::fs::read(dir.join("user-tool")).unwrap(), b"keep");
         assert!(wrappers_present_for(&dir, &exe));
     }
 

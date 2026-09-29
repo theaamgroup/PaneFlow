@@ -226,9 +226,9 @@ mod tests {
     fn review_menu_picks_are_checkboxes(cx: &mut gpui::TestAppContext) {
         let pane = cx.update(diff_pane);
         pane.update(cx, |pane, cx| {
-            pane.review_picks = [true, false, false, false];
+            pane.review_picks = [true, false, false];
             let rows = pane.review_pick_rows(cx);
-            assert_eq!(rows.len(), 4, "the menu renders one row per review agent");
+            assert_eq!(rows.len(), 3, "the menu renders one row per review agent");
             for (index, row) in rows.iter().enumerate() {
                 let mut node = Node::new(Role::Unknown);
                 Element::write_a11y_info(row, &mut node);

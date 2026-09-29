@@ -1525,13 +1525,6 @@ fn resume_command_spec(
             spec.push_arg(session_id);
             spec
         }
-        SessionAgent::Pi => {
-            let mut spec = AgentCommandSpec::new("pi");
-            spec.push_arg("--session");
-            spec.push_arg(session_id);
-            spec
-        }
-        SessionAgent::Hermes => resume_flag_spec("hermes", session_id),
         SessionAgent::Grok => resume_flag_spec("grok", session_id),
         SessionAgent::Cursor => {
             let mut spec = AgentCommandSpec::new("cursor-agent");
@@ -1539,13 +1532,6 @@ fn resume_command_spec(
             spec
         }
         SessionAgent::Gemini => resume_flag_spec("gemini", session_id),
-        SessionAgent::Kiro => {
-            let mut spec = AgentCommandSpec::new("kiro-cli");
-            spec.push_arg("chat");
-            spec.push_arg("--resume-id");
-            spec.push_arg(session_id);
-            spec
-        }
     };
     debug_assert!(crate::agent_launcher::is_plain_shell_token(session_id));
     Some(spec)
@@ -1605,15 +1591,9 @@ mod tests {
             (SessionAgent::Claude, format!("claude --resume {id}")),
             (SessionAgent::Codex, format!("codex resume {id}")),
             (SessionAgent::OpenCode, format!("opencode --session {id}")),
-            (SessionAgent::Pi, format!("pi --session {id}")),
-            (SessionAgent::Hermes, format!("hermes --resume {id}")),
             (SessionAgent::Grok, format!("grok --resume {id}")),
             (SessionAgent::Cursor, format!("cursor-agent --resume={id}")),
             (SessionAgent::Gemini, format!("gemini --resume {id}")),
-            (
-                SessionAgent::Kiro,
-                format!("kiro-cli chat --resume-id {id}"),
-            ),
         ];
 
         for (agent, expected) in cases {

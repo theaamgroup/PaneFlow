@@ -129,19 +129,10 @@ default off even when installed.
 | `codex_button_visible` | Codex | On if installed |
 | `grok_button_visible` | Grok | On if installed |
 | `opencode_button_visible` | Opencode | Off |
-| `pi_button_visible` | Pi | Off |
-| `hermes_agent_button_visible` | Hermes Agent | Off |
-| `amp_button_visible` | Amp | Off |
 | `cursor_button_visible` | Cursor | Off |
 | `gemini_button_visible` | Gemini | Off |
-| `kiro_button_visible` | Kiro | Off |
 | `antigravity_button_visible` | Antigravity | Off |
 | `copilot_button_visible` | Copilot | Off |
-| `codebuddy_button_visible` | CodeBuddy | Off |
-| `factory_button_visible` | Factory | Off |
-| `qoder_button_visible` | Qoder | Off |
-| `openclaw_button_visible` | Openclaw | Off |
-| `deepseek_harness_button_visible` | DeepSeek Harness | Off |
 | `muse_button_visible` | Muse Code | Off |
 
 ## Terminal block
@@ -249,20 +240,11 @@ flag the key. Repeatable layouts come from session restore.
   "claude_code_button_visible": null,
   "codex_button_visible": null,
   "opencode_button_visible": null,
-  "pi_button_visible": null,
-  "hermes_agent_button_visible": null,
   "grok_button_visible": null,
-  "amp_button_visible": null,
   "cursor_button_visible": null,
   "gemini_button_visible": null,
-  "kiro_button_visible": null,
   "antigravity_button_visible": null,
   "copilot_button_visible": null,
-  "codebuddy_button_visible": null,
-  "factory_button_visible": null,
-  "qoder_button_visible": null,
-  "openclaw_button_visible": null,
-  "deepseek_harness_button_visible": null,
   "muse_button_visible": null
 }
 ```
