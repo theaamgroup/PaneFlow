@@ -279,12 +279,9 @@ impl TerminalAgent {
         installed_binaries_contains(self.binary())
     }
 
-    /// Static arguments appended after [`Self::binary`] for interactive agents
-    /// whose CLI entry point is a subcommand rather than the bare executable.
+    /// Supported interactive agents start with their bare executable.
     fn command_args(self) -> &'static [&'static str] {
-        match self {
-            _ => &[],
-        }
+        &[]
     }
 
     fn launch_spec(self, config: &PaneFlowConfig) -> AgentCommandSpec {
