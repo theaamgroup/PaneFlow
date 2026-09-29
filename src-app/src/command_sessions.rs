@@ -3,8 +3,7 @@
 //! These readers intentionally stay conservative: they never parse private
 //! storage, they run the vendor CLI in the scanned cwd when the command is
 //! project-scoped, and they drop output that cannot be reduced to a safe
-//! session id. Global commands (Hermes) additionally require the row to mention
-//! the scanned cwd before PaneFlow renders it.
+//! session id. Commands are scoped to the scanned cwd.
 
 use std::io;
 use std::path::Path;
@@ -22,22 +21,11 @@ pub(crate) const COMMAND_DEADLINE: Duration = Duration::from_secs(15);
 const COMMAND_STDOUT_CAP: u64 = 4 * 1024 * 1024;
 const STDERR_LOG_CAP: usize = 200;
 
-#[derive(Clone, Copy)]
-enum CommandScope {
-    /// The command is run with `current_dir(cwd)` and its output is expected to
-    /// be scoped to that directory.
-    CurrentDirectory,
-    /// The command can return global rows, so keep only rows that include the
-    /// cwd path text.
-    LineMustMentionCwd,
-}
-
 struct CommandSessionConfig {
     agent: SessionAgent,
     program: &'static str,
     args: &'static [&'static str],
     allow_numeric_ids: bool,
-    scope: CommandScope,
 }
 
 pub(crate) fn read_gemini_sessions_for_cwd(
@@ -50,7 +38,6 @@ pub(crate) fn read_gemini_sessions_for_cwd(
             program: list_program("gemini"),
             args: &["--list-sessions"],
             allow_numeric_ids: true,
-            scope: CommandScope::CurrentDirectory,
         },
         cwd,
         budget_until,
@@ -67,24 +54,6 @@ pub(crate) fn read_cursor_sessions_for_cwd(
             program: list_program("cursor-agent"),
             args: &["ls"],
             allow_numeric_ids: false,
-            scope: CommandScope::CurrentDirectory,
-        },
-        cwd,
-        budget_until,
-    )
-}
-
-pub(crate) fn read_kiro_sessions_for_cwd(
-    cwd: &str,
-    budget_until: Instant,
-) -> (Vec<SessionMeta>, usize) {
-    read_command_sessions(
-        CommandSessionConfig {
-            agent: SessionAgent::Kiro,
-            program: list_program("kiro-cli"),
-            args: &["chat", "--list-sessions"],
-            allow_numeric_ids: false,
-            scope: CommandScope::CurrentDirectory,
         },
         cwd,
         budget_until,
@@ -101,24 +70,6 @@ pub(crate) fn read_grok_sessions_for_cwd(
             program: list_program("grok"),
             args: &["sessions", "list", "--limit", "100"],
             allow_numeric_ids: false,
-            scope: CommandScope::CurrentDirectory,
-        },
-        cwd,
-        budget_until,
-    )
-}
-
-pub(crate) fn read_hermes_sessions_for_cwd(
-    cwd: &str,
-    budget_until: Instant,
-) -> (Vec<SessionMeta>, usize) {
-    read_command_sessions(
-        CommandSessionConfig {
-            agent: SessionAgent::Hermes,
-            program: list_program("hermes"),
-            args: &["sessions", "list", "--source", "cli", "--limit", "100"],
-            allow_numeric_ids: false,
-            scope: CommandScope::LineMustMentionCwd,
         },
         cwd,
         budget_until,
@@ -141,13 +92,7 @@ fn read_command_sessions(
     let Some(stdout) = run_list_command(&config, cwd, budget_until) else {
         return (Vec::new(), 0);
     };
-    parse_command_sessions(
-        &stdout,
-        config.agent,
-        cwd,
-        config.allow_numeric_ids,
-        config.scope,
-    )
+    parse_command_sessions(&stdout, config.agent, cwd, config.allow_numeric_ids)
 }
 
 fn run_list_command(
@@ -168,9 +113,7 @@ fn run_list_command(
     }
     let mut cmd = Command::new(config.program);
     cmd.args(config.args);
-    if matches!(config.scope, CommandScope::CurrentDirectory) {
-        cmd.current_dir(cwd);
-    }
+    cmd.current_dir(cwd);
 
     let output = match paneflow_process::run_with_timeout(cmd, deadline, COMMAND_STDOUT_CAP) {
         Ok(out) => out,
@@ -219,12 +162,11 @@ fn parse_command_sessions(
     agent: SessionAgent,
     cwd: &str,
     allow_numeric_ids: bool,
-    scope: CommandScope,
 ) -> (Vec<SessionMeta>, usize) {
     let text = String::from_utf8_lossy(stdout);
     let sessions = text
         .lines()
-        .filter_map(|line| parse_session_line(line, agent, cwd, allow_numeric_ids, scope));
+        .filter_map(|line| parse_session_line(line, agent, cwd, allow_numeric_ids));
     crate::agent_sessions::collect_recent_sessions(
         sessions,
         crate::agent_sessions::SIDEBAR_SESSION_RETAINED_PER_SOURCE,
@@ -236,13 +178,9 @@ fn parse_session_line(
     agent: SessionAgent,
     cwd: &str,
     allow_numeric_ids: bool,
-    scope: CommandScope,
 ) -> Option<SessionMeta> {
     let line = line.trim();
     if line.is_empty() || is_header_or_separator(line) {
-        return None;
-    }
-    if matches!(scope, CommandScope::LineMustMentionCwd) && !line_mentions_cwd(line, cwd) {
         return None;
     }
 
@@ -510,30 +448,6 @@ fn trim_leading_table_metadata(mut summary: &str) -> &str {
     }
 }
 
-/// Whether `line` names `cwd` itself or a path beneath it. A bare substring
-/// test also accepts sibling directories that share the prefix
-/// (`/Users/x/repo-old` for `/Users/x/repo`), so an occurrence only counts
-/// when a path boundary follows it. Every occurrence is tried, since a row
-/// can mention a sibling before the real cwd.
-fn line_mentions_cwd(line: &str, cwd: &str) -> bool {
-    // A cwd that already ends in a separator carries its own boundary.
-    if cwd.is_empty() || cwd.ends_with('/') {
-        return line.contains(cwd);
-    }
-    let mut from = 0;
-    while let Some(offset) = line[from..].find(cwd) {
-        let start = from + offset;
-        let after = line[start + cwd.len()..].chars().next();
-        if after.is_none_or(is_path_boundary) {
-            return true;
-        }
-        // Step one character, not past the match, so overlapping
-        // occurrences are still considered.
-        from = start + line[start..].chars().next().map_or(1, char::len_utf8);
-    }
-    false
-}
-
 // Test seam so a budget test can point every command-backed reader at one
 // hanging program. Absent on the production path, which keeps the vendor name.
 #[cfg(test)]
@@ -555,10 +469,6 @@ fn list_program(program: &'static str) -> &'static str {
         }
     }
     program
-}
-
-fn is_path_boundary(c: char) -> bool {
-    c == '/' || c.is_whitespace() || matches!(c, ')' | ']' | '"' | '\'' | ',')
 }
 
 fn sanitized_stderr(stderr: &[u8]) -> String {
@@ -593,7 +503,6 @@ mod tests {
             program,
             args: &[],
             allow_numeric_ids: false,
-            scope: CommandScope::CurrentDirectory,
         };
 
         let budget = Duration::from_millis(500);
@@ -625,13 +534,7 @@ mod tests {
     #[test]
     fn parse_command_sessions_extracts_uuid_from_cursorish_line() {
         let out = b"550e8400-e29b-41d4-a716-446655440000 2026-06-29T09:10:11Z Refactor auth flow\n";
-        let (sessions, omitted) = parse_command_sessions(
-            out,
-            SessionAgent::Cursor,
-            "/repo",
-            false,
-            CommandScope::CurrentDirectory,
-        );
+        let (sessions, omitted) = parse_command_sessions(out, SessionAgent::Cursor, "/repo", false);
         assert_eq!(omitted, 0);
         assert_eq!(sessions.len(), 1);
         assert_eq!(
@@ -651,13 +554,7 @@ Available sessions for this project (3):\n\
 1. Fix bug in auth (2 days ago) [a1b2c3d4]\n\
 2. Refactor database schema (5 hours ago) [e5f67890]\n\
 3. Update documentation (Just now) [abcd1234]\n";
-        let (sessions, omitted) = parse_command_sessions(
-            out,
-            SessionAgent::Gemini,
-            "/repo",
-            true,
-            CommandScope::CurrentDirectory,
-        );
+        let (sessions, omitted) = parse_command_sessions(out, SessionAgent::Gemini, "/repo", true);
         assert_eq!(omitted, 0);
         assert_eq!(sessions.len(), 3);
         // Highest list index is newest, so the sidebar order is the reverse
@@ -687,13 +584,8 @@ Available sessions for this project (3):\n\
         for i in 1..=cap + 1 {
             out.push_str(&format!("{i}. Session {i} (1 day ago) [id{i:04}]\n"));
         }
-        let (sessions, omitted) = parse_command_sessions(
-            out.as_bytes(),
-            SessionAgent::Gemini,
-            "/repo",
-            true,
-            CommandScope::CurrentDirectory,
-        );
+        let (sessions, omitted) =
+            parse_command_sessions(out.as_bytes(), SessionAgent::Gemini, "/repo", true);
         let expected: Vec<String> = (2..=cap + 1).rev().map(|i| format!("id{i:04}")).collect();
         assert_eq!(omitted, 1);
         assert_eq!(sessions.len(), cap);
@@ -725,13 +617,7 @@ Available sessions for this project (3):\n\
     fn parse_gemini_uuid_line_ignores_digits_in_title() {
         let out =
             b"  1. List 3 functions defined (Just now, current) [875c2ac1-4eec-42dd-a7b0-cccc97bcbd53]\n";
-        let (sessions, omitted) = parse_command_sessions(
-            out,
-            SessionAgent::Gemini,
-            "/repo",
-            true,
-            CommandScope::CurrentDirectory,
-        );
+        let (sessions, omitted) = parse_command_sessions(out, SessionAgent::Gemini, "/repo", true);
         assert_eq!(omitted, 0);
         assert_eq!(sessions.len(), 1);
         assert_eq!(
@@ -748,13 +634,7 @@ Available sessions for this project (3):\n\
     #[test]
     fn parse_gemini_falls_back_to_list_index_when_bracket_id_invalid() {
         let out = b"4. Something (Just now) [not a valid id!]\n";
-        let (sessions, omitted) = parse_command_sessions(
-            out,
-            SessionAgent::Gemini,
-            "/repo",
-            true,
-            CommandScope::CurrentDirectory,
-        );
+        let (sessions, omitted) = parse_command_sessions(out, SessionAgent::Gemini, "/repo", true);
         assert_eq!(omitted, 0);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "4");
@@ -764,13 +644,7 @@ Available sessions for this project (3):\n\
     #[test]
     fn parse_cursor_does_not_use_gemini_list_parser() {
         let out = b"1. Fix bug in auth (2 days ago) [a1b2c3d4]\n";
-        let (sessions, _) = parse_command_sessions(
-            out,
-            SessionAgent::Cursor,
-            "/repo",
-            false,
-            CommandScope::CurrentDirectory,
-        );
+        let (sessions, _) = parse_command_sessions(out, SessionAgent::Cursor, "/repo", false);
         assert_eq!(
             sessions.len(),
             0,
@@ -783,13 +657,7 @@ Available sessions for this project (3):\n\
     #[test]
     fn parse_command_sessions_accepts_short_explicit_session_id() {
         let out = b"Session ID: abc123\n";
-        let (sessions, _) = parse_command_sessions(
-            out,
-            SessionAgent::Kiro,
-            "/repo",
-            false,
-            CommandScope::CurrentDirectory,
-        );
+        let (sessions, _) = parse_command_sessions(out, SessionAgent::Cursor, "/repo", false);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "abc123");
         assert_eq!(sessions[0].summary, None);
@@ -799,13 +667,7 @@ Available sessions for this project (3):\n\
     fn parse_command_sessions_does_not_pick_long_summary_word_as_id() {
         let out =
             b"550e8400-e29b-41d4-a716-446655440000 2026-06-29T09:10:11Z Refactor authentication\n";
-        let (sessions, omitted) = parse_command_sessions(
-            out,
-            SessionAgent::Cursor,
-            "/repo",
-            false,
-            CommandScope::CurrentDirectory,
-        );
+        let (sessions, omitted) = parse_command_sessions(out, SessionAgent::Cursor, "/repo", false);
         assert_eq!(omitted, 0);
         assert_eq!(sessions.len(), 1);
         assert_eq!(
@@ -821,13 +683,7 @@ Available sessions for this project (3):\n\
     #[test]
     fn parse_command_sessions_accepts_labeled_token_id() {
         let out = b"id=abc123 label from command\n";
-        let (sessions, _) = parse_command_sessions(
-            out,
-            SessionAgent::Kiro,
-            "/repo",
-            false,
-            CommandScope::CurrentDirectory,
-        );
+        let (sessions, _) = parse_command_sessions(out, SessionAgent::Cursor, "/repo", false);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "abc123");
         assert_eq!(sessions[0].summary.as_deref(), Some("label from command"));
@@ -843,66 +699,6 @@ Available sessions for this project (3):\n\
     }
 
     #[test]
-    fn line_must_mention_cwd_filters_unrelated_global_rows() {
-        let out = b"550e8400-e29b-41d4-a716-446655440000 /elsewhere old\nses_current_123456 /repo current\n";
-        let (sessions, _) = parse_command_sessions(
-            out,
-            SessionAgent::Grok,
-            "/repo",
-            false,
-            CommandScope::LineMustMentionCwd,
-        );
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session_id, "ses_current_123456");
-    }
-
-    /// Issue #733: a sibling directory that shares the cwd as a prefix is a
-    /// different project, so its rows must not be attributed to this one.
-    #[test]
-    fn line_must_mention_cwd_rejects_sibling_prefix_directories() {
-        let cwd = "/Users/x/repo";
-        for line in [
-            "ses_1 /Users/x/repo-old summary",
-            "ses_1 /Users/x/repo2 summary",
-            "ses_1 /Users/x/repo.bak",
-            "ses_1 \"/Users/x/repository\"",
-        ] {
-            assert!(!line_mentions_cwd(line, cwd), "{line:?} must not match");
-        }
-        for line in [
-            "ses_1 /Users/x/repo",
-            "ses_1 /Users/x/repo summary",
-            "ses_1 /Users/x/repo/sub summary",
-            "ses_1 \"/Users/x/repo\" summary",
-            "ses_1 '/Users/x/repo' summary",
-            "ses_1 (/Users/x/repo) summary",
-            "ses_1 [/Users/x/repo, other]",
-            // A sibling mentioned first must not hide the real cwd after it.
-            "ses_1 /Users/x/repo-old -> /Users/x/repo",
-        ] {
-            assert!(line_mentions_cwd(line, cwd), "{line:?} must match");
-        }
-        // A cwd written with a trailing separator already ends on a boundary.
-        assert!(line_mentions_cwd(
-            "ses_1 /Users/x/repo/sub",
-            "/Users/x/repo/"
-        ));
-
-        // Hermes is the production `LineMustMentionCwd` reader.
-        let out =
-            b"ses_sibling_123456 /Users/x/repo-old old\nses_current_123456 /Users/x/repo current\n";
-        let (sessions, _) = parse_command_sessions(
-            out,
-            SessionAgent::Hermes,
-            cwd,
-            false,
-            CommandScope::LineMustMentionCwd,
-        );
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session_id, "ses_current_123456");
-    }
-
-    #[test]
     fn parse_grok_sessions_table_output() {
         let out = br#"
 (no label)
@@ -910,13 +706,7 @@ SESSION ID                            CREATED     UPDATED     STATUS      SUMMAR
 019f1501-50e7-76d0-bb9e-4a72ede6b35d  2026-06-29  2026-06-29  local  List Sessions Command in Software Codebase
 019f1501-69f1-7800-bc1e-cb269e1d985b  2026-06-29  2026-06-29  local  (no summary)
 "#;
-        let (sessions, omitted) = parse_command_sessions(
-            out,
-            SessionAgent::Grok,
-            "/repo",
-            false,
-            CommandScope::CurrentDirectory,
-        );
+        let (sessions, omitted) = parse_command_sessions(out, SessionAgent::Grok, "/repo", false);
         assert_eq!(omitted, 0);
         assert_eq!(sessions.len(), 2);
         assert_eq!(

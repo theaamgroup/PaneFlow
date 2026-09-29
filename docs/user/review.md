@@ -45,7 +45,7 @@ side-by-side choices are not saved with the grid.
 ## Ask an agent to review
 
 Choose **Review with agent** in a diff pane's header and select the installed
-agents you want to use: Claude Code, Codex, OpenCode, or Pi. PaneFlow opens
+agents you want to use: Claude Code, Codex, or OpenCode. PaneFlow opens
 an ordinary workspace tab for each agent in that checkout's directory and
 switches to Agents. Additional agents get a second-opinion prompt. The diff
 remains available when you return to Review.

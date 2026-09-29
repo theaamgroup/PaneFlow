@@ -31,10 +31,6 @@ use std::io::Write;
 // is redundant - but the PRD AC bullet 5 lists it explicitly to make the
 // env-pass-through contract discoverable in the source. The `.env(...)`
 // calls afterward shadow per-key (Command::env is last-write-wins).
-// `HERMES_ACCEPT_HOOKS` is removed after that copy. It is Hermes's
-// process-wide hook-consent bypass, and a session must not export it to
-// the agent or anything the agent starts.
-//
 // PANEFLOW_AI_TOOL - set so `paneflow-ai-hook` (US-003) can tag every
 // outbound IPC frame with the right tool identity (`claude` vs `codex`).
 // Without this, `paneflow-ai-hook::detect_tool_from(None)` defaults to
@@ -47,11 +43,9 @@ use std::io::Write;
 // (spawn failure) or its status is unknown (wait failure) - no frame is
 // emitted and the server keeps today's `ai.stop`-driven behavior.
 
-/// Environment `run_real` gives the agent. The parent env is passed through,
-/// then `HERMES_ACCEPT_HOOKS` is removed so it cannot be inherited.
+/// Environment `run_real` gives the agent: inherited variables plus PaneFlow identity.
 fn configure_agent_command(cmd: &mut std::process::Command, tool: &str) {
     cmd.envs(env::vars_os())
-        .env_remove("HERMES_ACCEPT_HOOKS")
         .env("PANEFLOW_AI_TOOL", tool)
         // PANEFLOW_AI_PID - stable session identity propagated to every
         // `paneflow-ai-hook` invocation fired by claude/codex during this
@@ -399,31 +393,3 @@ pub(crate) fn spawn_parent_death_guard(
 #[cfg(all(test, unix))]
 #[path = "tests/interrupt.rs"]
 mod interrupt_tests;
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::configure_agent_command;
-
-    #[test]
-    fn hermes_session_does_not_export_accept_hooks_into_the_agent_process() {
-        let mut cmd = std::process::Command::new("/bin/sh");
-        cmd.arg("-c").arg(
-            "if [ -n \"${HERMES_ACCEPT_HOOKS+x}\" ]; then printf 'accept=set\\n'; else printf 'accept=unset\\n'; fi; printf 'tool=%s\\n' \"$PANEFLOW_AI_TOOL\"",
-        );
-        // Present on the command the way the old install left it in the shim
-        // process. `run_real` applies `configure_agent_command` before spawn.
-        cmd.env("HERMES_ACCEPT_HOOKS", "1");
-        configure_agent_command(&mut cmd, "hermes");
-
-        let output = cmd.output().expect("spawn agent stand-in");
-        assert!(
-            output.status.success(),
-            "stand-in failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            String::from_utf8(output.stdout).unwrap(),
-            "accept=unset\ntool=hermes\n"
-        );
-    }
-}

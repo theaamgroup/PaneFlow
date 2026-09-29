@@ -81,7 +81,7 @@ Only **Claude Code** exposes a verified, file-based user-scope notification-hook
 surface, so it is the only agent that receives a persistent install
 (`paneflow hooks setup`). Every other integration is EPHEMERAL: injected by
 the shim when the agent launches inside a PaneFlow terminal, removed when it
-exits. The shim wraps all 18 `TerminalAgent` binaries; whatever has no hook
+exits. The shim wraps all nine `TerminalAgent` binaries; whatever has no hook
 surface below still gets the universal lifecycle (`ai.exit` on crash,
 `ai.session_end` on quit) plus the sidebar's "running" row from the process
 scan.
@@ -90,15 +90,10 @@ scan.
 |-------|-----------|----------------------|---------------|
 | Claude Code | Claude hooks (matcher groups) | `./.claude/settings.local.json` | UserPromptSubmit, Notification, Stop, Pre/PostToolUse, SubagentStart/Stop |
 | Codex | hooks.json + TOML feature flag | `./.codex/hooks.json` | SessionStart, UserPromptSubmit, Stop, Pre/PostToolUse, PermissionRequest, SubagentStart/Stop |
-| CodeBuddy | Claude-compatible clone | `./.codebuddy/settings.local.json` | same seven as Claude Code |
-| Qoder | Claude-compatible clone | `./.qoder/settings.local.json` | four (no Notification) |
 | Gemini CLI | matcher-group hooks in settings | `~/.gemini/settings.json` | BeforeAgent→UserPromptSubmit, AfterAgent→Stop, Before/AfterTool→Pre/PostToolUse |
 | Cursor | flat hooks.json (`version: 1`) | `~/.cursor/hooks.json` | beforeSubmitPrompt, stop, pre/postToolUse, subagentStart/Stop |
 | OpenCode | TS plugin + `plugin` entry | `~/.config/opencode/plugins/paneflow-status.ts` + `opencode.json` | chat.message, tool.execute.before/after, session.created/status/idle (child sessions as subagents), permission.asked |
-| Pi | TS extension (auto-loaded) | `~/.pi/agent/extensions/paneflow-status.ts` | agent_start/end, tool_execution_start/end |
-| Hermes | marked YAML block + exact-command approvals | `~/.hermes/{config.yaml,shell-hooks-allowlist.json}` (`$HERMES_HOME` when set) | pre/post_llm_call, pre/post_tool_call, pre_approval_request |
 | Grok | dedicated merged hook file (wholly PaneFlow-owned) | `~/.grok/hooks/paneflow.json` | UserPromptSubmit, Stop, Pre/PostToolUse, PermissionRequest, SubagentStart/Stop |
-| DeepSeek Harness | `--patch` overlay + Claude-compatible bridge | `~/.dsh/paneflow/{hooks.json,paneflow-overlay.yml}` | UserPromptSubmit, Pre/PostToolUse, Stop |
 | Muse Code | managed hook file (`managed_hooks_path` + `managed_hooks_env_vars` merged into `settings.json`; hooks run with a cleared environment) | `~/.config/muse/{paneflow-hooks.json,settings.json}` | UserPromptSubmit, Pre/PostToolUse, PermissionRequest, PostLLMCall (as Stop), Stop |
 
 Subagent events become `ai.subagent_start` / `ai.subagent_stop`, never
@@ -133,18 +128,14 @@ the next launch after a SIGKILL, and refusal paths that protect user files -
 a symlinked config dir, any present-but-unparseable JSON config (the
 project-local `settings.local.json` / `hooks.json` files included, left
 byte-identical - the agent still launches, hookless), an unparseable PRIMARY
-config (`opencode.json`, `~/.hermes/config.yaml` with an existing `hooks:`
-key), or a `.jsonc`-only OpenCode setup all skip the install instead of
+config (`opencode.json`), or a `.jsonc`-only OpenCode setup all skip the install instead of
 clobbering. The TS bridges are
 env-gated on `PANEFLOW_SOCKET_PATH`, so they are inert when the CLI runs
 outside a PaneFlow terminal.
 
-Deliberately not integrated (no safe surface): **Copilot CLI** (no hooks, no
-JSON stream), **Factory Droid** (dashboard-managed hooks), **Kiro** (hooks
-live inside per-agent definition files - no per-session surface),
-**Antigravity / Openclaw** and the remaining launchers (no stable public
-hook surface). They still get the universal exit/session-end lifecycle and
-the "running" row.
+Tools without a supported hook surface: **Copilot CLI** (no hooks or JSON
+stream) and **Antigravity** (no stable public hook surface). They still get
+the universal exit/session-end lifecycle and the "running" row.
 
 ## Parent-death and interrupt guards
 

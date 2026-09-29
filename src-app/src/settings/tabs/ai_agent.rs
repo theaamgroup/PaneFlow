@@ -58,24 +58,6 @@ const SETTINGS_AGENT_ORDER: &[AgentToggleRow] = &[
         agent: TerminalAgent::OpenCode,
     },
     AgentToggleRow {
-        id: "row-pi-visible",
-        title: "Pi",
-        description: "Show the Pi launcher button in every tab bar.",
-        agent: TerminalAgent::Pi,
-    },
-    AgentToggleRow {
-        id: "row-hermes-agent-visible",
-        title: "Hermes Agent",
-        description: "Show the Hermes Agent launcher button in every tab bar.",
-        agent: TerminalAgent::Hermes,
-    },
-    AgentToggleRow {
-        id: "row-amp-visible",
-        title: "Amp",
-        description: "Show the Amp launcher button in every tab bar.",
-        agent: TerminalAgent::Amp,
-    },
-    AgentToggleRow {
         id: "row-cursor-visible",
         title: "Cursor",
         description: "Show the Cursor launcher button in every tab bar.",
@@ -88,12 +70,6 @@ const SETTINGS_AGENT_ORDER: &[AgentToggleRow] = &[
         agent: TerminalAgent::Gemini,
     },
     AgentToggleRow {
-        id: "row-kiro-visible",
-        title: "Kiro",
-        description: "Show the Kiro launcher button in every tab bar.",
-        agent: TerminalAgent::Kiro,
-    },
-    AgentToggleRow {
         id: "row-antigravity-visible",
         title: "Antigravity",
         description: "Show the Antigravity launcher button in every tab bar.",
@@ -104,36 +80,6 @@ const SETTINGS_AGENT_ORDER: &[AgentToggleRow] = &[
         title: "Copilot",
         description: "Show the Copilot launcher button in every tab bar.",
         agent: TerminalAgent::Copilot,
-    },
-    AgentToggleRow {
-        id: "row-codebuddy-visible",
-        title: "CodeBuddy",
-        description: "Show the CodeBuddy launcher button in every tab bar.",
-        agent: TerminalAgent::CodeBuddy,
-    },
-    AgentToggleRow {
-        id: "row-factory-visible",
-        title: "Factory",
-        description: "Show the Factory launcher button in every tab bar.",
-        agent: TerminalAgent::Factory,
-    },
-    AgentToggleRow {
-        id: "row-qoder-visible",
-        title: "Qoder",
-        description: "Show the Qoder launcher button in every tab bar.",
-        agent: TerminalAgent::Qoder,
-    },
-    AgentToggleRow {
-        id: "row-openclaw-visible",
-        title: "Openclaw",
-        description: "Show the Openclaw launcher button in every tab bar.",
-        agent: TerminalAgent::Openclaw,
-    },
-    AgentToggleRow {
-        id: "row-deepseek-harness-visible",
-        title: "DeepSeek Harness",
-        description: "Show the DeepSeek Harness launcher button in every tab bar.",
-        agent: TerminalAgent::DeepSeekHarness,
     },
     AgentToggleRow {
         id: "row-muse-visible",

@@ -3,31 +3,23 @@
 mod agents;
 mod claude;
 mod codex;
-pub(crate) mod dsh;
-mod hermes;
 pub(crate) mod muse;
 mod opencode;
 mod owned_files;
 
 pub(crate) use agents::{
-    merge_cursor_hooks, merge_gemini_hooks, merge_qoder_hooks, remove_cursor_hooks,
-    remove_gemini_hooks, remove_qoder_hooks, ManagedHookConfigGuard, ManagedHookSpec,
+    merge_cursor_hooks, merge_gemini_hooks, remove_cursor_hooks, remove_gemini_hooks,
+    ManagedHookConfigGuard, ManagedHookSpec,
 };
 pub(crate) use claude::HookConfigGuard;
 pub(crate) use codex::CodexHookConfigGuard;
 #[cfg(test)]
 pub(crate) use codex::{enable_codex_feature_flag, CODEX_HOOK_EVENTS, CODEX_TOML_MARKER};
-pub(crate) use dsh::DshOverlayGuard;
-pub(crate) use hermes::HermesHookConfigGuard;
-#[cfg(test)]
-pub(crate) use hermes::{hermes_managed_block, strip_hermes_managed_block, HERMES_BLOCK_BEGIN};
 pub(crate) use muse::MuseHookConfigGuard;
 pub(crate) use opencode::OpenCodePluginGuard;
+pub(crate) use owned_files::GrokHookFileGuard;
 #[cfg(test)]
-pub(crate) use owned_files::{
-    render_as_sibling_instance, sibling_hook_program, PANEFLOW_TS_BASENAME,
-};
-pub(crate) use owned_files::{GrokHookFileGuard, PiExtensionGuard};
+pub(crate) use owned_files::PANEFLOW_TS_BASENAME;
 
 use crate::locate_sibling_hook_binary;
 #[cfg(test)]
@@ -110,7 +102,6 @@ pub(crate) mod test_lease {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HookInstallSkip {
     IpcUnavailable,
-    BridgeUnavailable,
     PersistentClaudeHook,
     UnsupportedTool,
 }
@@ -204,7 +195,7 @@ fn refuse_symlink(path: &Path, label: &str) -> std::io::Result<()> {
 }
 
 /// Project-local hook files live in the checkout's own `.claude/` (or
-/// `.codex/`, `.codebuddy/`, ...) directory, so a FILE symlink there is under
+/// `.codex/`, ...) directory, so a FILE symlink there is under
 /// the repository's control, not the user's. `write_json_atomic` deliberately
 /// follows a symlinked HOME config (stow, chezmoi, yadm); followed from a
 /// cloned repo it would rewrite whatever user-owned file the link points at.
@@ -548,10 +539,6 @@ pub(crate) fn merge_paneflow_hooks(root: &mut serde_json::Value) -> std::io::Res
     .map_err(hook_config_error)
 }
 
-pub(crate) fn merge_codebuddy_hooks(root: &mut serde_json::Value) -> std::io::Result<()> {
-    merge_strict_matcher_hooks_for_events(root, CLAUDE_HOOK_EVENTS)
-}
-
 pub(crate) fn remove_paneflow_hooks(root: &mut serde_json::Value) {
     paneflow_agent_config::claude_hooks::remove_hooks_lenient(root);
 }
@@ -575,10 +562,6 @@ fn merge_strict_matcher_hooks_for_events(
     )
     .map(|_| ())
     .map_err(hook_config_error)
-}
-
-fn remove_matcher_hooks_for_events(root: &mut serde_json::Value, events: &[&str]) {
-    remove_matcher_hooks_lenient(root, events);
 }
 
 fn hook_config_error(error: HookConfigError) -> std::io::Error {

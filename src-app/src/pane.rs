@@ -378,7 +378,7 @@ pub struct Pane {
     /// One-shot. The menu claims focus on the frame it opens. Later frames
     /// do not pull focus back if the user has moved it (issue #883).
     review_menu_needs_focus: Rc<Cell<bool>>,
-    review_picks: [bool; 4],
+    review_picks: [bool; 3],
     rename_focus: FocusHandle,
     /// Ghostty-style unfocused dim: `true` when this pane is NOT the focused
     /// one in a multi-pane workspace. Pushed idempotently by
@@ -443,7 +443,7 @@ impl Pane {
             rename: None,
             review_menu_open: false,
             review_menu_needs_focus: Rc::new(Cell::new(false)),
-            review_picks: [true, false, false, false],
+            review_picks: [true, false, false],
             rename_focus: cx.focus_handle(),
             dimmed: false,
             dim_from: 0.0,

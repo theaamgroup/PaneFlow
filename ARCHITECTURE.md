@@ -109,7 +109,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 ├── text_sanitize.rs                   ← strip bidi and zero-width characters from untrusted labels
 ├── agents/                            ← agent process supervision, notifications
 ├── ai_hooks/                          ← ai.* hook payload extraction; claude_hooks.rs runs `paneflow hooks`
-├── {claude,codex,opencode,pi,command}_sessions.rs ← per-agent session-file readers
+├── {claude,codex,opencode,command}_sessions.rs ← per-agent session readers; session_lines.rs shares bounded JSONL reads
 ├── agent_launcher.rs / agent_sessions.rs ← spawn agents through the PATH shim
 ├── widgets/                           ← text_input, scrollbar, callout
 ├── fonts.rs                           ← load_mono_fonts (Core Text on macOS)
@@ -142,7 +142,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 | `paneflow-config` | `crates/paneflow-config/` | Library | Config schema, JSON loader, file watcher |
 | `paneflow-ipc-client` | `crates/paneflow-ipc-client/` | Library | Blocking JSON-RPC client for the local socket |
 | `paneflow-mcp-install` | `crates/paneflow-mcp-install/` | Library | **Uninstall-only and temporary.** `cleanup.rs::remove_legacy_bridge` removes the `paneflow` MCP entries the retired bridge installed, and a later launch that finds none deletes its extracted binary (see below). #868 deletes the crate once the cleanup has shipped in two releases |
-| `paneflow-shim` | `crates/paneflow-shim/` | Binary | PATH shim wrapping 18 agent CLIs |
+| `paneflow-shim` | `crates/paneflow-shim/` | Binary | PATH shim wrapping nine agent CLIs |
 | `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | Binary | Hook binary agents invoke to report lifecycle events |
 | `paneflow-process` | `crates/paneflow-process/` | Library | Bounded subprocess execution (deadline + stdout cap) |
 | `paneflow-agent-config` | `crates/paneflow-agent-config/` | Library | Shared agent config, hooks, locking, Claude hook shapes |
@@ -288,7 +288,7 @@ agent CLI (claude, codex, opencode, …)
 
 - **Shim**: launching an agent from Paneflow puts a shim directory first in
   `PATH`. The shim records the real PID and process start time (PID-reuse
-  safe), then execs the real binary. Eighteen agent CLIs are recognized by
+  safe), then execs the real binary. Nine agent CLIs are recognized by
   name; unknown tools are reported as themselves.
 - **Hooks**: agents that support lifecycle hooks (Claude Code, Codex, …)
   report `session_start`, `prompt_submit`, `tool_use`, `notification`, `stop`,
@@ -427,7 +427,7 @@ app-owned state goes through them. The IPC socket does not follow it:
 both.
 
 Every pane's `PANEFLOW_BIN_DIR` (`~/Library/Caches/paneflow/bin/<version>/`)
-holds the 18 agent shims, `paneflow-ai-hook`, and a `paneflow` symlink to the
+holds the nine agent shims, `paneflow-ai-hook`, and a `paneflow` symlink to the
 running executable (`ai_hooks/extract.rs::link_cli_into`, #440), so `paneflow
 send` / `paneflow hooks` work inside a pane without the user linking the
 bundle binary onto their login PATH. The link is re-pointed at launch when

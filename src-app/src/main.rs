@@ -49,10 +49,10 @@ mod login_shell_env;
 mod opencode_sessions;
 mod pane;
 mod pane_drag;
-mod pi_sessions;
 mod release_notes;
 mod runtime_paths;
 mod search;
+mod session_lines;
 mod settings;
 mod sidebar_title;
 #[cfg(test)]
@@ -554,7 +554,7 @@ fn global_help_text() -> String {
          \x20 -v, --version    Print version\n\
          \n\
          Agent workflow:\n\
-         \x20 Launch Claude Code, Codex, opencode, Pi, or any CLI agent in panes\n\
+         \x20 Launch Claude Code, Codex, opencode, or any CLI agent in panes\n\
          \n\
          Keybindings:\n\
          \x20 Cmd+Shift+D/E    Split horizontal/vertical\n\

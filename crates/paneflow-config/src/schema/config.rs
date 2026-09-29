@@ -224,22 +224,10 @@ pub struct PaneFlowConfig {
     /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub opencode_button_visible: Option<bool>,
-    /// Show the built-in "Pi" command button in the tab bar.
-    /// Explicit booleans override; `None` defaults hidden even when installed.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub pi_button_visible: Option<bool>,
-    /// Show the built-in "Hermes Agent" command button in the tab bar.
-    /// Explicit booleans override; `None` defaults hidden even when installed.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub hermes_agent_button_visible: Option<bool>,
     /// Show the built-in "Grok" command button in the tab bar.
     /// Same allowlisted defaults as `claude_code_button_visible`.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub grok_button_visible: Option<bool>,
-    /// Show the built-in "Amp" command button in the tab bar.
-    /// Explicit booleans override; `None` defaults hidden even when installed.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub amp_button_visible: Option<bool>,
     /// Show the built-in "Cursor" command button in the tab bar.
     /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
@@ -248,10 +236,6 @@ pub struct PaneFlowConfig {
     /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub gemini_button_visible: Option<bool>,
-    /// Show the built-in "Kiro" command button in the tab bar.
-    /// Explicit booleans override; `None` defaults hidden even when installed.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub kiro_button_visible: Option<bool>,
     /// Show the built-in "Antigravity" command button in the tab bar.
     /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
@@ -260,26 +244,6 @@ pub struct PaneFlowConfig {
     /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub copilot_button_visible: Option<bool>,
-    /// Show the built-in "CodeBuddy" command button in the tab bar.
-    /// Explicit booleans override; `None` defaults hidden even when installed.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub codebuddy_button_visible: Option<bool>,
-    /// Show the built-in "Factory" command button in the tab bar.
-    /// Explicit booleans override; `None` defaults hidden even when installed.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub factory_button_visible: Option<bool>,
-    /// Show the built-in "Qoder" command button in the tab bar.
-    /// Explicit booleans override; `None` defaults hidden even when installed.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub qoder_button_visible: Option<bool>,
-    /// Show the built-in "Openclaw" command button in the tab bar.
-    /// Explicit booleans override; `None` defaults hidden even when installed.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub openclaw_button_visible: Option<bool>,
-    /// Show the built-in "DeepSeek Harness" command button in the tab bar.
-    /// Explicit booleans override; `None` defaults hidden even when installed.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub deepseek_harness_button_visible: Option<bool>,
     /// Show the built-in "Muse Code" command button in the tab bar.
     /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
@@ -362,7 +326,7 @@ impl PaneFlowConfig {
 
     /// EP-003 US-011: default review-prefill delay. 2000 ms is a slightly safer
     /// floor than the historical 1800 ms - enough headroom for `claude` /
-    /// `codex` / `opencode` / `pi` to boot their readline on a warm start, while
+    /// `codex` / `opencode` to boot their readline on a warm start, while
     /// the clipboard fallback covers any cold-start miss.
     pub const DEFAULT_REVIEW_PREFILL_DELAY_MS: u64 = 2000;
     /// Lower bound: below this the prefill almost certainly races the CLI's own

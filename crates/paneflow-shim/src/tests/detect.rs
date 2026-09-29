@@ -9,7 +9,7 @@ fn detect_tool_from_stem_maps_known_stems() {
     }
     assert_eq!(detect_tool_from_stem("claude"), Some("claude"));
     assert_eq!(detect_tool_from_stem("cursor-agent"), Some("cursor-agent"));
-    assert_eq!(detect_tool_from_stem("qodercli"), Some("qodercli"));
+    assert_eq!(detect_tool_from_stem("muse"), Some("muse"));
 }
 
 #[test]
@@ -296,4 +296,25 @@ fn find_real_binary_in_completes_under_50ms_budget() {
         elapsed < std::time::Duration::from_millis(50),
         "PATH walk must complete under 50 ms; got {elapsed:?}"
     );
+}
+
+#[test]
+fn retired_agent_binaries_are_not_wrapped() {
+    for binary in [
+        "pi",
+        "hermes",
+        "amp",
+        "kiro-cli",
+        "codebuddy",
+        "droid",
+        "qodercli",
+        "openclaw",
+        "dsh",
+    ] {
+        assert_eq!(
+            crate::detect::detect_tool_from_stem(binary),
+            None,
+            "{binary}"
+        );
+    }
 }

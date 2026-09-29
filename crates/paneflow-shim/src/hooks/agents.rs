@@ -1,17 +1,13 @@
 use super::{
     cleanup_hook_config_file, home_unavailable, hook_config_error, install_hook_config_file,
-    is_paneflow_hook_command, merge_strict_matcher_hooks_for_events, paneflow_ipc_reachable,
-    reconcile_matcher_hooks_replacing_invalid_container, refuse_symlinked_project_hook_file,
-    remove_matcher_hooks_for_events, remove_matcher_hooks_lenient, resolve_plain_hook_command,
-    sweep_orphan_hook_config, HookInstall, HookInstallResult, HookInstallSkip, HookLease,
-    InvalidJsonPolicy,
+    is_paneflow_hook_command, paneflow_ipc_reachable,
+    reconcile_matcher_hooks_replacing_invalid_container, remove_matcher_hooks_lenient,
+    resolve_plain_hook_command, sweep_orphan_hook_config, HookInstall, HookInstallResult,
+    HookInstallSkip, HookLease, InvalidJsonPolicy,
 };
 use paneflow_agent_config::jsonc;
 use paneflow_agent_config::{home_dir, read_optional_text, write_text_atomic};
-use std::env;
 use std::path::{Path, PathBuf};
-
-const QODER_HOOK_EVENTS: &[&str] = &["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"];
 
 const GEMINI_HOOK_EVENTS: &[(&str, &str)] = &[
     ("BeforeAgent", "UserPromptSubmit"),
@@ -28,14 +24,6 @@ const CURSOR_HOOK_EVENTS: &[(&str, &str)] = &[
     ("subagentStart", "SubagentStart"),
     ("subagentStop", "SubagentStop"),
 ];
-
-pub(crate) fn merge_qoder_hooks(root: &mut serde_json::Value) -> std::io::Result<()> {
-    merge_strict_matcher_hooks_for_events(root, QODER_HOOK_EVENTS)
-}
-
-pub(crate) fn remove_qoder_hooks(root: &mut serde_json::Value) {
-    remove_matcher_hooks_for_events(root, QODER_HOOK_EVENTS);
-}
 
 fn gemini_managed_group(foreign: &str) -> serde_json::Value {
     let canonical = GEMINI_HOOK_EVENTS
@@ -218,7 +206,6 @@ pub(crate) struct ManagedHookConfigGuard {
     jsonc: bool,
     /// Project-local files must not be cleaned through a symlink swapped in
     /// after install (#892). Home-scope guards leave this false.
-    project_local: bool,
     lease: HookLease,
 }
 
@@ -250,29 +237,6 @@ impl ManagedHookSpec {
 }
 
 impl ManagedHookConfigGuard {
-    pub(crate) fn install_in_cwd(spec: ManagedHookSpec) -> HookInstallResult<Self> {
-        let config_dir = env::current_dir()?.join(spec.directory_name);
-        refuse_symlinked_project_hook_file(
-            &config_dir.join(spec.config_filename),
-            spec.tool_label,
-        )?;
-        Ok(
-            match Self::install_anchored(
-                &config_dir,
-                spec,
-                // #202: project-local configs get the same protection as the
-                // home-scope ones - refuse a parse failure, never clobber.
-                InvalidJsonPolicy::Refuse,
-            )? {
-                HookInstall::Installed(mut guard) => {
-                    guard.project_local = true;
-                    HookInstall::Installed(guard)
-                }
-                skipped => skipped,
-            },
-        )
-    }
-
     pub(crate) fn install_in_home(spec: ManagedHookSpec) -> HookInstallResult<Self> {
         let home = home_dir().ok_or_else(home_unavailable)?;
         Self::install_anchored(
@@ -329,7 +293,6 @@ impl ManagedHookConfigGuard {
             created_dir: installed.created_directory,
             remove_fn: spec.remove,
             jsonc: installed.jsonc,
-            project_local: false,
             lease: installed.lease,
         })
     }
@@ -351,7 +314,7 @@ impl Drop for ManagedHookConfigGuard {
                 &self.config_dir,
                 self.created_file,
                 self.created_dir,
-                self.project_local,
+                false,
                 self.remove_fn,
                 &mut self.lease,
             );

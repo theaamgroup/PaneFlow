@@ -48,11 +48,9 @@ mod hooks;
 use detect::{detect_tool, find_real_binary};
 use exec::run_real;
 use hooks::{
-    merge_codebuddy_hooks, merge_cursor_hooks, merge_gemini_hooks, merge_qoder_hooks,
-    remove_cursor_hooks, remove_gemini_hooks, remove_paneflow_hooks, remove_qoder_hooks,
-    CodexHookConfigGuard, DshOverlayGuard, GrokHookFileGuard, HermesHookConfigGuard,
-    HookConfigGuard, HookInstall, HookInstallSkip, ManagedHookConfigGuard, ManagedHookSpec,
-    MuseHookConfigGuard, OpenCodePluginGuard, PiExtensionGuard,
+    merge_cursor_hooks, merge_gemini_hooks, remove_cursor_hooks, remove_gemini_hooks,
+    CodexHookConfigGuard, GrokHookFileGuard, HookConfigGuard, HookInstall, HookInstallSkip,
+    ManagedHookConfigGuard, ManagedHookSpec, MuseHookConfigGuard, OpenCodePluginGuard,
 };
 
 // ---------------------------------------------------------------------------
@@ -150,7 +148,7 @@ fn main() -> ExitCode {
     // read-only FS / missing permissions (PRD C4) - and for every wrapped
     // tool with no hook integration yet (the shim still provides the
     // universal `ai.exit`/`ai.session_end` lifecycle below).
-    let hook_guard = match install_hook_guard(tool) {
+    let _hook_guard = match install_hook_guard(tool) {
         Ok(HookInstall::Installed(guard)) => {
             diagnose(&format!("install_hook_guard({tool}) = installed"));
             Some(guard)
@@ -168,10 +166,6 @@ fn main() -> ExitCode {
     };
 
     let args: Vec<OsString> = env::args_os().skip(1).collect();
-    let args = match hook_guard.as_ref() {
-        Some(ToolHookGuard::Dsh(guard)) => with_dsh_patch_overlay(args, guard.overlay_path()),
-        _ => args,
-    };
 
     let (code, agent_exit) = run_real(tool, &real, &args);
 
@@ -213,11 +207,8 @@ enum ToolHookGuard {
     Claude(HookConfigGuard),
     Codex(CodexHookConfigGuard),
     Managed(ManagedHookConfigGuard),
-    Pi(PiExtensionGuard),
     OpenCode(OpenCodePluginGuard),
-    Hermes(HermesHookConfigGuard),
     Grok(GrokHookFileGuard),
-    Dsh(DshOverlayGuard),
     Muse(MuseHookConfigGuard),
 }
 
@@ -225,24 +216,6 @@ fn install_hook_guard(tool: &str) -> std::io::Result<HookInstall<ToolHookGuard>>
     match tool {
         "claude" => HookConfigGuard::install().map(|outcome| outcome.map(ToolHookGuard::Claude)),
         "codex" => CodexHookConfigGuard::install().map(|outcome| outcome.map(ToolHookGuard::Codex)),
-        // Claude-Code-compatible clones: same settings.local.json format,
-        // project-local dir, different event coverage.
-        "codebuddy" => ManagedHookConfigGuard::install_in_cwd(ManagedHookSpec::new(
-            ".codebuddy",
-            "settings.local.json",
-            "CodeBuddy",
-            merge_codebuddy_hooks,
-            remove_paneflow_hooks,
-        ))
-        .map(|outcome| outcome.map(ToolHookGuard::Managed)),
-        "qodercli" => ManagedHookConfigGuard::install_in_cwd(ManagedHookSpec::new(
-            ".qoder",
-            "settings.local.json",
-            "Qoder",
-            merge_qoder_hooks,
-            remove_qoder_hooks,
-        ))
-        .map(|outcome| outcome.map(ToolHookGuard::Managed)),
         // User-scope JSON agents (their project files are primary configs,
         // often git-tracked - mutating those would churn the user's diff for
         // the whole session). Gemini is matcher-grouped; Cursor is flat.
@@ -264,28 +237,17 @@ fn install_hook_guard(tool: &str) -> std::io::Result<HookInstall<ToolHookGuard>>
         .map(|outcome| outcome.map(ToolHookGuard::Managed)),
         // TypeScript-plugin agents: an embedded bridge file is materialized
         // (and, for OpenCode, declared in opencode.json) for the session.
-        "pi" => PiExtensionGuard::install().map(|outcome| outcome.map(ToolHookGuard::Pi)),
         "opencode" => {
             OpenCodePluginGuard::install().map(|outcome| outcome.map(ToolHookGuard::OpenCode))
         }
-        // YAML config, string-level marked block (comment-preserving).
-        "hermes" => {
-            HermesHookConfigGuard::install().map(|outcome| outcome.map(ToolHookGuard::Hermes))
-        }
         // Dedicated merged hook file - wholly Paneflow-owned, zero RMW.
         "grok" => GrokHookFileGuard::install().map(|outcome| outcome.map(ToolHookGuard::Grok)),
-        "dsh" => DshOverlayGuard::install().map(|outcome| outcome.map(ToolHookGuard::Dsh)),
         // Claude hook format, but hooks run with a cleared environment: a
         // Paneflow-owned managed hook file plus `managed_hooks_env_vars`.
         "muse" => MuseHookConfigGuard::install().map(|outcome| outcome.map(ToolHookGuard::Muse)),
         // Deliberately ABSENT (documented, not forgotten):
         // - "copilot": no hook/JSON-stream surface exists at all.
-        // - "kiro-cli": hooks live inside PER-AGENT definition files
-        //   (`~/.kiro/agents/<name>.json`) - injecting would mean rewriting
-        //   every agent the user defined, and the default agent has no
-        //   file to extend. No per-session surface exists.
-        // - "droid": hooks are dashboard-managed (closed-source).
-        // - "agy" / "openclaw" / the rest: no stable public hook surface.
+        // - "agy": no stable public hook surface.
         // They all still get the universal `ai.exit`/`ai.session_end`
         // lifecycle plus the sidebar's process-scan "running" row.
         _ => Ok(HookInstall::Skipped(HookInstallSkip::UnsupportedTool)),
@@ -391,87 +353,6 @@ pub(crate) fn locate_sibling_hook_binary() -> Option<PathBuf> {
     let name = "paneflow-ai-hook";
     let candidate = dir.join(name);
     candidate.is_file().then_some(candidate)
-}
-
-const DSH_LAUNCHER_OPT_OUT: &[&str] = &[
-    "--help",
-    "-h",
-    "--version",
-    "-V",
-    "--dump-config",
-    "--dump-default-config",
-];
-
-/// Launcher flags that consume the following argv token, so the token after
-/// them is a value and never the subcommand. `--profile=tui` stays a single
-/// token and is skipped as a dash option instead. The list mirrors dsh's root
-/// options as understood on 2026-09-16: `--profile` has the short spelling
-/// `-p`; `--from-default-profile` and `--patch` have no short form.
-const DSH_VALUE_OPTIONS: &[&str] = &["--profile", "-p", "--from-default-profile", "--patch"];
-
-pub(crate) fn with_dsh_patch_overlay(
-    args: Vec<OsString>,
-    overlay: &std::path::Path,
-) -> Vec<OsString> {
-    if !dsh_accepts_patch_overlay(&args) {
-        return args;
-    }
-    let mut patched = Vec::with_capacity(args.len() + 2);
-    patched.push(OsString::from("--patch"));
-    patched.push(overlay.as_os_str().to_owned());
-    patched.extend(args);
-    patched
-}
-
-fn dsh_accepts_patch_overlay(args: &[OsString]) -> bool {
-    if dsh_first_subcommand(args).is_some_and(|arg| arg == "plugin") {
-        return false;
-    }
-    // A user-supplied overlay wins: dsh's `--patch` arity is not something
-    // this shim can assume, so never stack a second one in front of it.
-    if dsh_user_supplies_patch(args) {
-        return false;
-    }
-    // The opt-out flags are dsh's own root options: after `--` every token
-    // is a positional for the subcommand (`dsh chat -- --version`), so the
-    // scan stops there, like the `--patch` scan below.
-    !args
-        .iter()
-        .take_while(|arg| *arg != "--")
-        .any(|arg| DSH_LAUNCHER_OPT_OUT.iter().any(|opt| arg == opt))
-}
-
-fn dsh_user_supplies_patch(args: &[OsString]) -> bool {
-    for arg in args {
-        let text = arg.to_string_lossy();
-        if text == "--" {
-            return false;
-        }
-        if text == "--patch" || text.starts_with("--patch=") {
-            return true;
-        }
-    }
-    false
-}
-
-fn dsh_first_subcommand(args: &[OsString]) -> Option<&OsString> {
-    let mut index = 0;
-    while index < args.len() {
-        let text = args[index].to_string_lossy();
-        if text == "--" {
-            return args.get(index + 1);
-        }
-        if text.starts_with('-') {
-            if DSH_VALUE_OPTIONS.iter().any(|opt| text == *opt) {
-                index += 2;
-                continue;
-            }
-            index += 1;
-            continue;
-        }
-        return Some(&args[index]);
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------

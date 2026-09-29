@@ -192,15 +192,12 @@ fn main() {
     // A directory `rerun-if-changed` only catches add/remove/rename (the dir
     // mtime), NOT a content edit of a nested file on Windows - so without these
     // an edited `*-paneflow-status.ts` would silently not be re-embedded.
-    for asset in [
-        "crates/paneflow-shim/assets/opencode-paneflow-status.ts",
-        "crates/paneflow-shim/assets/pi-paneflow-status.ts",
-    ] {
-        println!(
-            "cargo:rerun-if-changed={}",
-            workspace_root.join(asset).display()
-        );
-    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root
+            .join("crates/paneflow-shim/assets/opencode-paneflow-status.ts")
+            .display()
+    );
 
     let skip_nested_build = matches!(
         std::env::var("PANEFLOW_SKIP_EMBED_BUILD").ok().as_deref(),

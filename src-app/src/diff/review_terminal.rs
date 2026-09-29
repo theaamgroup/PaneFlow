@@ -9,19 +9,18 @@
 //! dispatches reviews into ordinary workspace agent tabs (`app::review::agent`).
 
 /// A CLI coding agent Paneflow can launch in a terminal for a review. This
-/// focused picker exposes the four review integrations supported by this view.
+/// focused picker exposes the three review integrations supported by this view.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ReviewCli {
     ClaudeCode,
     Codex,
     OpenCode,
-    Pi,
 }
 
 impl ReviewCli {
     /// All targets, in menu order.
-    pub(crate) fn all() -> [ReviewCli; 4] {
-        [Self::ClaudeCode, Self::Codex, Self::OpenCode, Self::Pi]
+    pub(crate) fn all() -> [ReviewCli; 3] {
+        [Self::ClaudeCode, Self::Codex, Self::OpenCode]
     }
 
     pub(crate) fn label(self) -> &'static str {
@@ -29,7 +28,6 @@ impl ReviewCli {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
             Self::OpenCode => "OpenCode",
-            Self::Pi => "Pi",
         }
     }
 
@@ -38,7 +36,6 @@ impl ReviewCli {
             Self::ClaudeCode => "claude",
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
-            Self::Pi => "pi",
         }
     }
 
@@ -118,11 +115,10 @@ mod tests {
     #[test]
     fn launch_commands_are_distinct_and_bare() {
         let cmds: Vec<&str> = ReviewCli::all().iter().map(|cli| cli.command()).collect();
-        assert_eq!(cmds.len(), 4);
+        assert_eq!(cmds.len(), 3);
         assert!(cmds.contains(&"claude"));
         assert!(cmds.contains(&"codex"));
         assert!(cmds.contains(&"opencode"));
-        assert!(cmds.contains(&"pi"));
     }
 
     #[test]
