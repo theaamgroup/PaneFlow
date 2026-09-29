@@ -6955,7 +6955,7 @@ mod tests {
             crate::layout::LayoutTree::Leaf(pane),
         );
         let app = cx.new(|cx| {
-            let mut app = crate::app::sidebar::customize_menu::tests::blank_paneflow_app(cx);
+            let mut app = crate::app::test_support::blank_paneflow_app(cx);
             app.workspaces = vec![workspace];
             app.active_idx = 0;
             app
