@@ -86,7 +86,12 @@ impl DisplayTerminal {
     /// Call this only after a complete frame has been rendered. A partial
     /// consumer should clear the rows it drew instead, which is what
     /// [`Self::snapshot`] does on its incremental path.
+    ///
+    /// The snapshot cache refreshes only the rows the native state reports
+    /// dirty, so consuming those flags here leaves it unable to see what
+    /// changed; it is invalidated and the next snapshot rebuilds in full.
     pub fn mark_frame_clean(&mut self) -> Result<()> {
+        self.snapshot_cache.invalidate();
         // SAFETY: the render state is owned by `self`.
         let result = unsafe { sys::ghostty_render_state_clean(self.render_state.raw()) };
         check("render_state_clean", result)
@@ -182,6 +187,34 @@ mod tests {
             DirtyState::Clean
         );
         assert!(terminal.dirty_rows().expect("dirty rows").is_empty());
+    }
+
+    /// A direct-rendered frame consumes the native dirty flags that
+    /// `snapshot` relies on to refresh its cache, so the next snapshot must
+    /// not hand back the frame cached before the direct render.
+    #[test]
+    fn mark_frame_clean_invalidates_snapshot_cache() {
+        let mut terminal = terminal(20, 3);
+        terminal.feed(b"AAAA").expect("output must parse");
+        let before = terminal.snapshot().expect("first frame primes the cache");
+        assert_eq!(before.cells[0].character, 'A');
+
+        terminal.feed(b"\x1b[1;1HBBBB").expect("output must parse");
+        terminal.refresh_render_state().expect("refresh");
+        assert!(!terminal.dirty_rows().expect("dirty rows").is_empty());
+        assert_eq!(
+            terminal.render_cell(0, 0).expect("point read").character,
+            'B'
+        );
+        terminal.mark_frame_clean().expect("clean");
+
+        let after = terminal.snapshot().expect("frame after a direct render");
+        for (column, cell) in after.cells[..4].iter().enumerate() {
+            assert_eq!(
+                cell.character, 'B',
+                "column {column}: snapshot reused the cells cached before the direct render"
+            );
+        }
     }
 
     #[test]
