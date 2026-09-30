@@ -414,8 +414,10 @@ fn glob_model_matches_paths_filter_semantics() {
     assert!(!glob_matches("src-app/**", "src-application/x.rs"));
 }
 
-/// The render smoke lane catches glyph-rasterization regressions that compile
-/// and pass `cargo test` (issue #1093). A GPUI dependency or feature change
+/// The render smoke lane captures screenshot evidence of glyph rasterization
+/// that compiles and passes `cargo test` (issue #1093); its hard gate is font
+/// resolution, so an empty-glyph regression shows in the uploaded screenshot
+/// rather than failing the lane. A GPUI dependency or feature change
 /// such as dropping `gpui_platform`'s `font-kit` feature (see the comment in
 /// src-app/Cargo.toml) rides in on the manifest or lockfile alone, and the
 /// toolchain pin and the root manifest's `[patch.crates-io]` and release

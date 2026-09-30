@@ -675,13 +675,13 @@ jobs:
     name: macOS aarch64 render smoke (visual)
     needs: [orchestrate, macos_release_build]
     # Gate on the `rendering` sub-filter (not the broad `rust` filter):
-    # the c3e2331-class regression this job exists to catch can only
-    # ride in on edits to the rendering paths declared by the
+    # the c3e2331-class regression this job captures evidence of can
+    # only ride in on edits to the rendering paths declared by the
     # orchestrate job, which include the GPUI manifest, the lockfile,
     # and the toolchain pin (issue #1093). A pure config-file or
     # non-render Rust PR cannot regress macOS Core Text empty-text
-    # rendering, so spending
-    # 10-15 min on a macos-15 runner on every such PR is wasted spend.
+    # rendering, so spending 10-15 min on a macos-15 runner on every
+    # such PR is wasted spend.
     if: >-
       needs.orchestrate.outputs.rendering == 'true' ||
       needs.orchestrate.outputs.ci == 'true' ||
