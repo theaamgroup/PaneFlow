@@ -2095,8 +2095,10 @@ mod spawn_exclusion_tests {
             // `paneflow_process::spawn_piped` for pipes instead.
             PIPED,
         ];
-        // The PTY guard's control pipe moves to `spawn_piped` with #1123;
-        // drop this entry when that lands.
+        // The PTY guard spawns on the render thread, where `spawn_piped`'s
+        // wait for in-flight spawns could stall the UI; its control pipe
+        // moves to `spawn_piped` once the spawn leaves that thread (#1129).
+        // Drop this entry then.
         let piped_allowed = [root.join("agents/parent_guard.rs")];
         assert!(
             piped_allowed.iter().all(|path| path.is_file()),
