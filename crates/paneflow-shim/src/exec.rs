@@ -23,9 +23,9 @@ use std::io::Write;
 // US-004 originally used `CommandExt::exec()` on Unix for zero-fork process
 // replacement. US-005 introduced the `HookConfigGuard` drop-cleanup contract,
 // which is incompatible with `exec()` - process replacement skips every Rust
-// destructor, so the guard would never fire. Both platforms now use
-// `Command::status()`; the shim pays one fork (~1-3 ms, well under the 15 ms
-// budget) in exchange for reliable cleanup.
+// destructor, so the guard would never fire. The agent now spawns through
+// `paneflow_process::spawn` and is then waited on; the shim pays one fork
+// (~1-3 ms, well under the 15 ms budget) in exchange for reliable cleanup.
 //
 // `Command` inherits the parent env by default, so `.envs(env::vars_os())`
 // is redundant - but the PRD AC bullet 5 lists it explicitly to make the
@@ -103,7 +103,7 @@ pub(crate) fn run_real(tool: &str, path: &Path, args: &[OsString]) -> (ExitCode,
 
     // Install signal isolation BEFORE spawn so the child inherits the
     // mask/dispositions at fork (then `pre_exec` flips them back for the
-    // child only). Doing this BEFORE `cmd.spawn()` closes the race window
+    // child only). Doing this BEFORE the spawn closes the race window
     // where a Ctrl+C could land between spawn and signal-install.
     #[cfg(unix)]
     ignore_terminal_signals();
@@ -121,7 +121,11 @@ pub(crate) fn run_real(tool: &str, path: &Path, args: &[OsString]) -> (ExitCode,
     #[cfg(target_os = "macos")]
     let child_reaped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    let mut child = match cmd.spawn() {
+    // Issue #1127: through `paneflow_process` like every other shim child, so
+    // the agent never copies a hook pipe another thread is still marking
+    // close-on-exec. `pre_exec` keeps this on std's fork path, whose own
+    // exec-status pipe is tracked separately (#1126).
+    let mut child = match paneflow_process::spawn(&mut cmd) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("paneflow-shim: spawn '{}' failed: {e}", path.display());
@@ -296,6 +300,12 @@ static INFLIGHT_REAPERS: std::sync::atomic::AtomicUsize = std::sync::atomic::Ato
 /// the `{}`-on-stdin contract (so the hook reads a valid empty payload) and do
 /// NOT kill the hook on a deadline: a slow-but-progressing socket write is a
 /// legitimate stop we don't want to interrupt.
+///
+/// Issue #1127: this runs on the sigwait thread while the main thread may be
+/// running the `Exit` hook through `paneflow_process::run_with_timeout`.
+/// `spawn_piped` creates the stdin pipe inside the spawn exclusion and spawns
+/// under its shared side, so neither hook copies the other's pipe ends. It
+/// waits for any spawn already in flight first, which only delays this stop.
 #[cfg(unix)]
 pub(crate) fn send_interrupt_stop(hook_path: &Path, tool: &str) {
     use std::sync::atomic::Ordering;
@@ -307,18 +317,23 @@ pub(crate) fn send_interrupt_stop(hook_path: &Path, tool: &str) {
         return;
     }
 
-    let spawned = std::process::Command::new(hook_path)
-        .arg("Stop")
+    let mut cmd = std::process::Command::new(hook_path);
+    cmd.arg("Stop")
         .env("PANEFLOW_AI_TOOL", tool)
         .env("PANEFLOW_AI_PID", std::process::id().to_string())
         .env(
             PANEFLOW_AI_EVENT_SOURCE_ENV,
             PANEFLOW_AI_EVENT_SOURCE_INTERRUPT,
         )
-        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+        .stderr(std::process::Stdio::null());
+    let spawned = paneflow_process::spawn_piped(
+        &mut cmd,
+        paneflow_process::Pipes {
+            stdin: true,
+            ..paneflow_process::Pipes::default()
+        },
+    );
     let Ok(mut child) = spawned else {
         // Spawn failed: release the reserved slot.
         INFLIGHT_REAPERS.fetch_sub(1, Ordering::AcqRel);
