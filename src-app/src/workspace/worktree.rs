@@ -178,7 +178,8 @@ pub fn is_paneflow_worktree_dir(repo_root: &Path, branch: &str, path: &Path) -> 
 ///
 /// Also the list [`crate::agents::parent_guard::scrub_inherited_git_env_before_threads`]
 /// removes from the whole process at startup (issue #1110), so pane shells,
-/// session-list CLIs, the editor, and launchers start without it too.
+/// session-list CLIs, the editor, and launchers start without it too. That
+/// scrub keeps `GIT_SSH_COMMAND`, which only this per-spawn removal drops.
 pub(crate) const INHERITED_GIT_ENV: &[&str] = &[
     // Which repository: git dir, work tree, the shared common dir, and the
     // subdirectory prefix git exports to aliases.
