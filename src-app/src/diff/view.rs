@@ -163,7 +163,6 @@ enum Built {
         row_caches: Vec<FileRowCache>,
         theme_generation: u64,
         fingerprint: Box<super::git::ColumnFingerprint>,
-        attribution: Vec<SessionMeta>,
     },
 }
 
@@ -192,6 +191,15 @@ struct Column {
     loading_mode: Option<ViewMode>,
     loading_theme_generation: Option<u64>,
     attribution: Vec<SessionMeta>,
+    /// Generation whose run produced `attribution`, or `None` before the
+    /// first run lands. Results only move forward from here (issue #1094).
+    attribution_generation: Option<u64>,
+    /// An attribution run is on the blocking pool (issue #1094). One at a
+    /// time per column, so reloads while a session-list CLI hangs cannot
+    /// stack more runs behind it.
+    attribution_in_flight: bool,
+    /// Rows landed while a run was in flight; rerun once it finishes.
+    attribution_queued: bool,
     h_offsets: Rc<Vec<f32>>,
 }
 
@@ -222,6 +230,9 @@ impl Column {
             loading_mode: None,
             loading_theme_generation: None,
             attribution: Vec::new(),
+            attribution_generation: None,
+            attribution_in_flight: false,
+            attribution_queued: false,
             h_offsets: Rc::new(Vec::new()),
         }
     }
@@ -257,6 +268,7 @@ impl Column {
         self.expanded_folds.clear();
         self.fingerprint = None;
         self.attribution.clear();
+        self.attribution_generation = None;
         self.clear_display_mode(ViewMode::Unified);
         self.clear_display_mode(ViewMode::Split);
         self.h_offsets = Rc::new(Vec::new());
