@@ -40,6 +40,25 @@ impl Assets {
     /// Skips non-`.ttf` files so the `OFL.txt` / `LICENSE` companions sit
     /// alongside the font binaries without needing a separate include set.
     pub fn load_fonts(&self, cx: &App) -> Result<()> {
+        let embedded_fonts = self.embedded_font_data()?;
+        if embedded_fonts.is_empty() {
+            log::warn!(
+                "Assets::load_fonts: no .ttf/.otf found under fonts/ - \
+                 the rust-embed include set may have drifted"
+            );
+            return Ok(());
+        }
+        let count = embedded_fonts.len();
+        cx.text_system().add_fonts(embedded_fonts)?;
+        log::info!("Assets::load_fonts: registered {count} embedded font file(s) with GPUI");
+        Ok(())
+    }
+
+    /// The bytes of every embedded `.ttf`/`.otf` under `assets/fonts/`.
+    /// Shared by [`Self::load_fonts`] and `paneflow self-test glyphs`
+    /// (issue #1116), so the self-test registers exactly the faces the app
+    /// registers at startup.
+    pub fn embedded_font_data(&self) -> Result<Vec<Cow<'static, [u8]>>> {
         let font_paths = self.list("fonts/")?;
         let mut embedded_fonts = Vec::with_capacity(font_paths.len());
         for path in &font_paths {
@@ -55,17 +74,7 @@ impl Assets {
                 .ok_or_else(|| anyhow::anyhow!("embedded font {path} listed but not loadable"))?;
             embedded_fonts.push(data);
         }
-        if embedded_fonts.is_empty() {
-            log::warn!(
-                "Assets::load_fonts: no .ttf/.otf found under fonts/ - \
-                 the rust-embed include set may have drifted"
-            );
-            return Ok(());
-        }
-        let count = embedded_fonts.len();
-        cx.text_system().add_fonts(embedded_fonts)?;
-        log::info!("Assets::load_fonts: registered {count} embedded font file(s) with GPUI");
-        Ok(())
+        Ok(embedded_fonts)
     }
 }
 

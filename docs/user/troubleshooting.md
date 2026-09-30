@@ -7,7 +7,7 @@ Start with the symptom, confirm it, then apply the matching fix.
 | Symptom | Confirm | First fix |
 | --- | --- | --- |
 | Build fails on a Metal shader | `xcrun metal -c` on a scratch file errors | Install full Xcode, then run `xcodebuild -downloadComponent MetalToolchain`. See below. |
-| Text renders as empty boxes | Build succeeded, glyphs are all rectangles | `gpui_platform` was built without the `font-kit` feature. See below. |
+| Text renders as empty boxes | `paneflow self-test glyphs` exits 1 | `gpui_platform` was built without the `font-kit` feature. See below. |
 | Config change ignored | Validate `paneflow.json`, and check which build you are running | Fix the path or JSON syntax. Debug builds read `paneflow-dev`, not `paneflow`. |
 | Shortcut does nothing | Compare against the keybindings reference | Use a known action name and a parseable key chord. |
 | Theme change ignored | Save `paneflow.json` and wait one second | Use a bundled theme name and verify file watching. |
@@ -49,8 +49,18 @@ Full prerequisites are in [INSTALL.md](../../INSTALL.md).
 The build succeeded but every glyph is an empty rectangle. On macOS the
 `gpui_platform` dependency must carry the `font-kit` feature; without it
 the build still succeeds and text renders as boxes. The requirement is
-noted at `src-app/Cargo.toml:53`. Check that the feature is present
-rather than hunting for a font problem.
+noted next to the `gpui_platform` line in `src-app/Cargo.toml`. Check that
+the feature is present rather than hunting for a font problem.
+
+Confirm with the glyph self-test, which rasterizes sample text in the
+bundled fonts without opening a window. A healthy build prints
+`paneflow self-test glyphs: ok (...)` and exits 0; a build that draws
+empty glyphs lists each empty glyph and exits 1. CI's render smoke lane
+runs the same command on the bundled release binary.
+
+```bash
+dist/PaneFlow.app/Contents/MacOS/paneflow self-test glyphs
+```
 
 ## Launch and rendering
 
