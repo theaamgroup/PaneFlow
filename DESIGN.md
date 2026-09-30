@@ -138,8 +138,8 @@ fonts come from the user's system, with a bundled Nerd Font as the default.
 │ ▤                                                                   [ ● ● ● macOS ] │
 ├──────────────┬───────────────────────────────────────────────────┬──────────────────┤
 │ primary      │ main panel: inset card, 4px inset, 10px radius,   │ right rail       │
-│ sidebar      │ corner masks painted in the shell color           │ sessions or      │
-│ 300px        │ ┌ pane card, 20px squircle ─┐ ┌ pane card ─────┐  │ files, 300px     │
+│ sidebar      │ corner masks painted in the shell color           │ agent sessions,  │
+│ 300px        │ ┌ pane card, 20px squircle ─┐ ┌ pane card ─────┐  │ 300px            │
 │ (520 in      │ │ header 34px: title, tools │ │                │  │                  │
 │  Review)     │ │ terminal, inset 3 / 0     │ │                │  │                  │
 │              │ └───────────────────────────┘ └────────────────┘  │                  │
@@ -158,11 +158,14 @@ fonts come from the user's system, with a bundled Nerd Font as the default.
 | Primary sidebar | Workspaces rail in Agents mode; the Workspaces and Changes rails side by side in Review; navigation in Settings | Width 300, **520 in Review** (220 + 300); slides in 280 ms | `app/constants.rs:15`, `app/review/mod.rs:22-23`, `app/review/mode.rs:90-92`, `main.rs:352`, `settings/chrome.rs:35` |
 | Main panel | The inset card that holds the pane grid (Agents or Review) or a Settings page | Inset 4 on right and bottom, and on the left only when the sidebar is hidden; radius 10; four corner masks painted in the shell color. There is no top inset — a spacer the height of the title bar reserves the strip | `app/constants.rs:25-27`, `main.rs:872,1983,2425,2435-2438,2471-2506` |
 | Pane grid | **N-ary** `LayoutTree { Leaf, Container }` of pane cards; one grid per workspace tab in Agents, one global grid of diff panes in Review | Gutter 8, divider hit area 7, minimum pane 80; `MAX_PANES` 32, `MAX_WORKSPACES` 32, `MAX_TABS_PER_WORKSPACE` 32, Review caps at `MAX_REVIEW_PANES` 6 | `layout/tree.rs:62-67`, `layout/mod.rs:34,39`, `workspace/mod.rs:53,59`, `app/review/mod.rs:21` |
-| Right rail | Sessions rail | Width 300 | `app/sessions_sidebar.rs:37` |
+| Right rail | Sessions rail; not mounted while Settings is open, which keeps it open for when Settings closes (issue #1097) | Width 300 | `app/sessions_sidebar.rs:37`, `main.rs` (`sessions_sidebar_mounted`) |
 | Footer | IPC offline banner, then the Agents / Review mode strip | Persistent primary navigation. **No Settings gear** (issue #105) and **no update banner** | `app/sidebar_actions_menu.rs` (`render_sidebar_ipc_banner`, `render_sidebar_settings_footer`) |
 
 The window is 800 by 500 at minimum, and a surface MUST hold there with the
-primary sidebar hidden and a right rail open at the same time.
+primary sidebar hidden and a right rail open at the same time. Settings is the
+exception that cannot hide its left rail, so it takes the right rail's width
+instead: the sessions rail is hidden, not closed, while Settings is open
+(`settings_preserves_content_width_with_sessions_open`).
 
 Branch metadata polling runs only while the primary sidebar is visible and
 `sidebar_show.branch` is enabled. Hiding either pauses pane-CWD collection and
@@ -179,7 +182,10 @@ PaneFlow has two modes and one takeover surface.
 | Settings | Back to the app, a search field, three nav groups | One page at a time, centered column, 26 px heading | macOS menu bar, **PaneFlow ▸ Settings…** |
 
 Settings is not a window. It replaces the main panel and reuses the sidebar
-width for its navigation, so the shell never changes shape. Leaving it hands
+width for its navigation. Settings changes the shell in two places: it
+forces the left rail open for its navigation, and it hides the sessions
+rail, keeping it open, until Settings closes (issue #1097), because two
+300 px rails leave the page under 200 px at the minimum window. Leaving it hands
 the keyboard back to the pane it was opened from (5.5).
 
 `review_enabled` defaults to `true`, but it is only half the gate.
@@ -752,8 +758,9 @@ happens only while Settings still holds the focus, in its page or anywhere
 in its rail (the nav search included), or the placeholder does (Settings
 opened from an empty workspace, or a click on the title-bar strip; the
 sidebar toggle swallows its click and moves no focus): a surface that took it over
-Settings, such as Pane Overview, About, or the sessions rail, keeps it when
-the sidebar toggle closes Settings underneath. `close_settings` has no
+Settings, such as Pane Overview or About, keeps it when the sidebar toggle
+closes Settings underneath. The sessions rail cannot take it, because it is
+not mounted while Settings is open (3.2). `close_settings` has no
 `Window`, so it sets `pending_settings_return` and the window-bearing drain
 settles it before the next frame paints. Settings is the
 `OverlayKind::Settings` origin described in 7.4.

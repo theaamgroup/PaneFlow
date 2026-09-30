@@ -257,6 +257,8 @@ impl PaneFlowApp {
             .child(mockup);
 
         div()
+            // Issue #1097: the Settings width regression measures each tile.
+            .debug_selector(move || id.into())
             .flex_1()
             .min_w(px(120.))
             .flex()
