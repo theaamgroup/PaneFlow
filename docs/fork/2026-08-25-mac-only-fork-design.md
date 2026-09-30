@@ -295,21 +295,40 @@ Found during the inventory. Each one would have cost a debugging session.
     an unpinned `kill(-pgid, TERM)` → 100 ms → `KILL` on the shell's group.
     This fork's contract is `TerminalState::Drop` in
     `src-app/src/terminal/pty_session.rs`: pin every live process group in
-    the PTY session through the app-owned `dup()` of the master
+    the PTY session through the app-owned duplicate of the master
     (`SpawnedGhostty::master_fd`), SIGTERM them, drop the external guards,
-    *then* `GhosttySession::shutdown()`, close the dup, SIGKILL at 100 ms
-    with start-time pins re-checked. The runtime thread reaps and never
-    signals (`reap_child_bounded`); `terminate_child` survives only for the
-    engine-failure paths. Two things bit while landing it: the guard dups
-    the fd it is handed (`spawn_pty_guard` clears `FD_CLOEXEC` on its own
-    copy), so one app-owned dup is enough; and a synthetic `Cmd+Shift+W`
-    posted with `CGEventPostToPid` did not act on the pane (an AX
-    `frontmost` raise is a no-op on macOS 26, so the window was never key),
-    so the live check of this ladder is the
-    in-suite test `dropping_the_state_kills_background_and_stopped_jobs_in_the_pty_session`
+    *then* `GhosttySession::shutdown()`, close the duplicate, SIGKILL at
+    100 ms with start-time pins re-checked. The runtime thread reaps and
+    never signals (`reap_child_bounded`); `terminate_child` survives only
+    for the engine-failure paths. Two things bit while landing it: the
+    guard needs its own copy of the master, but one app-owned duplicate is
+    enough because `spawn_pty_guard` makes the guard's copy from it; and a
+    synthetic `Cmd+Shift+W` posted with `CGEventPostToPid` did not act on
+    the pane (an AX `frontmost` raise is a no-op on macOS 26, so the window
+    was never key), so the live check of this ladder is the in-suite test
+    `dropping_the_state_kills_background_and_stopped_jobs_in_the_pty_session`
     (real `/bin/sh`, background + stopped `sleep`), not a keystroke smoke.
     The parent-death half (`kill -9` the GUI, guard reaps) does smoke
     live over IPC.
+
+    **Amended 2026-09-30 (#1123): a pane's master reaches no other child.**
+    Both copies were plain `dup()`, which clears `FD_CLOEXEC`, so every
+    guard, git probe, and editor started while a pane was open held that
+    pane's master and kept its PTY allocated after the pane closed. Now:
+    - `SpawnedGhostty::master_fd` is taken with `F_DUPFD_CLOEXEC`.
+    - `parent_guard::pass_pty_master_to_child` makes the guard's copy with
+      `F_DUPFD_CLOEXEC` too, and only the forked guard clears the flag, in
+      a `pre_exec` closure. That closure moves the guard spawn from
+      `posix_spawn` to `fork` + `exec` (std cannot run `pre_exec` under
+      `posix_spawn`). It runs between `fork` and `exec` in a copy of a
+      multi-threaded process, so it must stay async-signal-safe: one
+      `fcntl`, no allocation, no locks, no logging.
+    - `ghostty_session::open_pty_pair` opens the PTY under the #1115 spawn
+      exclusion, because portable-pty marks both ends close-on-exec only
+      after `openpty()` returns. The wait is bounded
+      (`OPEN_PTY_EXCLUSION_WAIT`, 250 ms): past it the PTY opens without
+      the exclusion, so a slow spawn in flight (a first-exec Gatekeeper
+      scan) cannot push pane startup past `STARTUP_REPORT_TIMEOUT`.
 
 ## Verification: Ghostty is unreachable on macOS (historical - reversed by #184 Phase 2, 2026-08-31)
 

@@ -209,7 +209,7 @@ Detailed styling conventions are in ARCHITECTURE.md.
 
 ### Close-guard contract
 
-The contract lives in `TerminalState::Drop` (`terminal/pty_session.rs`): pin every live process group in the PTY session through an **app-owned `dup()` of the master** (`SpawnedGhostty::master_fd`, taken at spawn), SIGTERM them synchronously, drop the external guards, then `GhosttySession::shutdown()`, close the dup, and SIGKILL 100 ms later with start-time pins re-checked. **The runtime thread never signals**: on an app-initiated shutdown or a natural exit it only reaps (`reap_child_bounded`); `terminate_child` survives solely for the engine-failure paths (runtime failed, `waitid` failed, the startup and panic guards). `dropping_the_state_kills_background_and_stopped_jobs_in_the_pty_session` pins the outcome with a live shell.
+The contract lives in `TerminalState::Drop` (`terminal/pty_session.rs`): pin every live process group in the PTY session through an **app-owned close-on-exec duplicate (`F_DUPFD_CLOEXEC`) of the master** (`SpawnedGhostty::master_fd`, taken at spawn), SIGTERM them synchronously, drop the external guards, then `GhosttySession::shutdown()`, close the dup, and SIGKILL 100 ms later with start-time pins re-checked. **The runtime thread never signals**: on an app-initiated shutdown or a natural exit it only reaps (`reap_child_bounded`); `terminate_child` survives solely for the engine-failure paths (runtime failed, `waitid` failed, the startup and panic guards). `dropping_the_state_kills_background_and_stopped_jobs_in_the_pty_session` pins the outcome with a live shell.
 
 ## Crash reporting
 
