@@ -54,14 +54,64 @@ pub const INHERITED_AGENT_SESSION_ENV: &[&str] = &[
 /// Must run before any other thread, async runtime, or foreign library can
 /// concurrently read environment variables. Prefer
 /// `Command::env_remove` for per-child scrubbing after startup.
+///
+/// This is the one pre-thread scrub `main` calls, so it also runs
+/// [`scrub_inherited_git_env_before_threads`] (issue #1110).
 pub(crate) unsafe fn scrub_claudecode_env_before_threads() {
     // SAFETY: delegated to the caller by this function's contract.
     unsafe {
         for key in INHERITED_AGENT_SESSION_ENV {
             std::env::remove_var(*key);
         }
+        scrub_inherited_git_env_before_threads();
     }
 }
+
+/// Remove the repository-redirecting git environment PaneFlow was launched
+/// with ([`INHERITED_GIT_ENV`](crate::workspace::worktree::INHERITED_GIT_ENV))
+/// from the whole process (issue #1110).
+///
+/// These names normally reach PaneFlow only when it was started from inside a
+/// git process (a hook, `rebase --exec`, `bisect run`). A Dock or Finder
+/// launch can carry them too, through `launchctl setenv`, but a
+/// repository-wide redirect set that way is still one no workspace should
+/// follow. Every child inherits the process env: pane shells
+/// (`CommandBuilder` seeds from it), the agent session-list CLIs, the external
+/// editor, and the workspace launchers. Left in place, each of them would read
+/// the launcher's repository, index, or object store instead of its own `cwd`.
+/// Names a user's shell rc exports are unaffected: the shell sets them after
+/// it starts. The login-shell capture imports only `PATH`, so no git name can
+/// come back through it.
+///
+/// [`GIT_ENV_KEPT_BY_STARTUP_SCRUB`] names the exceptions.
+///
+/// Runs for the GUI and the CLI verbs alike, since both pass through the one
+/// scrub in `main`. The CLI verbs spawn no git, so the scrub is harmless there
+/// and keeps a single call site.
+///
+/// # Safety
+///
+/// Same contract as [`scrub_claudecode_env_before_threads`]: no other thread,
+/// async runtime, or foreign library may be reading the environment.
+pub(crate) unsafe fn scrub_inherited_git_env_before_threads() {
+    // SAFETY: delegated to the caller by this function's contract.
+    unsafe {
+        for key in crate::workspace::worktree::INHERITED_GIT_ENV {
+            if !GIT_ENV_KEPT_BY_STARTUP_SCRUB.contains(key) {
+                std::env::remove_var(*key);
+            }
+        }
+    }
+}
+
+/// `INHERITED_GIT_ENV` names the startup scrub leaves in the process, so pane
+/// shells and every other child still inherit them. `git_command` still drops
+/// them from PaneFlow's own git spawns.
+///
+/// `GIT_SSH_COMMAND` picks the SSH command, not which repository git
+/// inspects. A user may set it with `launchctl setenv`, which Dock launches
+/// inherit; removing it would make `git push` in every pane use the wrong key.
+const GIT_ENV_KEPT_BY_STARTUP_SCRUB: &[&str] = &["GIT_SSH_COMMAND"];
 
 /// Remove inherited agent-session markers from one child command without
 /// mutating global process environment.
@@ -1973,5 +2023,164 @@ mod tests {
                 "child command should explicitly remove {key}"
             );
         }
+    }
+
+    /// Turns an issue #1110 test into its re-exec'd child.
+    const GIT_ENV_PROBE: &str = "PANEFLOW_GIT_ENV_SCRUB_PROBE";
+    /// Kept by the scrub on purpose (it only decides whether discovery
+    /// succeeds), so it proves the scrub is targeted.
+    const KEPT_GIT_NAME: &str = "GIT_CEILING_DIRECTORIES";
+    /// A plain inherited name every child must still see.
+    const KEPT_PLAIN_NAME: &str = "PANEFLOW_GIT_ENV_SCRUB_KEEP";
+    /// In `INHERITED_GIT_ENV` for `git_command`, but kept by the startup scrub
+    /// so panes still push with the user's SSH command. Spelled out rather
+    /// than read from `GIT_ENV_KEPT_BY_STARTUP_SCRUB`, so dropping the
+    /// exception fails these tests.
+    const KEPT_SSH_NAME: &str = "GIT_SSH_COMMAND";
+
+    /// Re-exec `test` (a test in this module) in a fresh process launched the
+    /// way a git hook launches PaneFlow: every `INHERITED_GIT_ENV` name set.
+    /// The scrub mutates the process env, which is only sound before other
+    /// threads read it, so it runs in that child, never in this runner.
+    /// Returns true in the parent once the child passed; false in the child,
+    /// which then runs the test body and prints `done` last.
+    fn ran_in_git_launched_child(test: &str, done: &str) -> bool {
+        if std::env::var_os(GIT_ENV_PROBE).is_some() {
+            return false;
+        }
+        // `--exact` matches the full path without the crate name, so a bare
+        // function name filters out every test and exits 0 (#1109).
+        let module = module_path!();
+        let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+        let filter = format!("{module}::{test}");
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"));
+        child
+            .args([
+                filter.as_str(),
+                "--exact",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(GIT_ENV_PROBE, "1")
+            .env(KEPT_GIT_NAME, "/nonexistent/paneflow-1110")
+            .env(KEPT_PLAIN_NAME, "1");
+        for name in crate::workspace::worktree::INHERITED_GIT_ENV {
+            child.env(name, "/nonexistent/paneflow-1110");
+        }
+        let output = child.output().expect("re-exec the git env scrub probe");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(done) && stdout.contains("1 passed"),
+            "git env scrub probe `{filter}` failed or did not run:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
+    /// Issue #1110: the pre-thread scrub `main` runs removes every inherited
+    /// repository-redirecting git name from the process, and keeps
+    /// `GIT_SSH_COMMAND`.
+    #[test]
+    fn startup_scrub_removes_every_inherited_git_env_name() {
+        const DONE: &str = "PANEFLOW_1110_SCRUB_NAMES_DONE";
+        if ran_in_git_launched_child("startup_scrub_removes_every_inherited_git_env_name", DONE) {
+            return;
+        }
+        let names = crate::workspace::worktree::INHERITED_GIT_ENV;
+        for pinned in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", KEPT_SSH_NAME] {
+            assert!(names.contains(&pinned), "INHERITED_GIT_ENV lost {pinned}");
+        }
+        for name in names {
+            assert!(
+                std::env::var_os(name).is_some(),
+                "control: the probe must be launched with {name}"
+            );
+        }
+        // SAFETY: a re-exec'd child running this one test under
+        // `--test-threads=1`; libtest's other thread only waits for it, and
+        // nothing else in this process reads the environment meanwhile.
+        unsafe { scrub_claudecode_env_before_threads() };
+        for name in names.iter().filter(|name| **name != KEPT_SSH_NAME) {
+            assert!(
+                std::env::var_os(name).is_none(),
+                "the startup scrub must remove {name}"
+            );
+        }
+        assert!(
+            std::env::var_os(KEPT_GIT_NAME).is_some(),
+            "{KEPT_GIT_NAME} is not a redirect and must survive"
+        );
+        assert!(std::env::var_os(KEPT_PLAIN_NAME).is_some());
+        assert!(
+            std::env::var_os(KEPT_SSH_NAME).is_some(),
+            "{KEPT_SSH_NAME} picks the SSH command, not a repository, and must survive"
+        );
+        println!("{DONE}");
+    }
+
+    /// Issue #1110: after the startup scrub, a child PaneFlow spawns (a plain
+    /// `Command`, as the session lists, editor and launchers use, and a pane
+    /// shell's `CommandBuilder`, which seeds from the process env) no longer
+    /// sees `GIT_INDEX_FILE` or any other inherited redirect, but still sees
+    /// `GIT_SSH_COMMAND`.
+    #[test]
+    fn child_spawned_after_startup_scrub_does_not_see_git_index_file() {
+        const DONE: &str = "PANEFLOW_1110_SCRUB_CHILD_DONE";
+        if ran_in_git_launched_child(
+            "child_spawned_after_startup_scrub_does_not_see_git_index_file",
+            DONE,
+        ) {
+            return;
+        }
+        // SAFETY: as in `startup_scrub_removes_every_inherited_git_env_name`.
+        unsafe { scrub_claudecode_env_before_threads() };
+
+        let output = std::process::Command::new("/usr/bin/env")
+            .output()
+            .expect("run /usr/bin/env");
+        assert!(output.status.success(), "/usr/bin/env failed");
+        let listed = String::from_utf8_lossy(&output.stdout);
+        let seen: Vec<&str> = listed
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+            .collect();
+        assert!(
+            seen.contains(&KEPT_PLAIN_NAME) && seen.contains(&KEPT_GIT_NAME),
+            "control: the child must still inherit the rest of the env:\n{listed}"
+        );
+        assert!(
+            seen.contains(&KEPT_SSH_NAME),
+            "a spawned child must still see {KEPT_SSH_NAME}:\n{listed}"
+        );
+        assert!(
+            !seen.contains(&"GIT_INDEX_FILE"),
+            "a spawned child still sees GIT_INDEX_FILE:\n{listed}"
+        );
+        for name in crate::workspace::worktree::INHERITED_GIT_ENV
+            .iter()
+            .filter(|name| **name != KEPT_SSH_NAME)
+        {
+            assert!(!seen.contains(name), "a spawned child still sees {name}");
+        }
+
+        let pane = portable_pty::CommandBuilder::new("/bin/sh");
+        assert!(
+            pane.get_env(KEPT_PLAIN_NAME).is_some(),
+            "control: a pane shell seeds from the process env"
+        );
+        assert!(
+            pane.get_env(KEPT_SSH_NAME).is_some(),
+            "a pane shell must still inherit {KEPT_SSH_NAME}"
+        );
+        for name in crate::workspace::worktree::INHERITED_GIT_ENV
+            .iter()
+            .filter(|name| **name != KEPT_SSH_NAME)
+        {
+            assert!(
+                pane.get_env(name).is_none(),
+                "a pane shell still inherits {name}"
+            );
+        }
+        println!("{DONE}");
     }
 }

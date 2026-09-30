@@ -39,7 +39,8 @@ pub use font::{
     resolve_frame_metrics, sanitize_font_override,
 };
 pub(crate) use font::{
-    DEFAULT_CELL_WIDTH, DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT, normalize_font_weight_key,
+    DEFAULT_CELL_WIDTH, DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT, EMBEDDED_MONO_FAMILY,
+    EMBEDDED_SANS_FAMILY, normalize_font_weight_key,
 };
 use geometry::CellGeometry;
 pub use hyperlink::{

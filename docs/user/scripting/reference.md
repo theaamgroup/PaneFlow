@@ -15,6 +15,7 @@ launching the app.
 | ------------------------------------------ | ---------------------------------- | -------------------------- | -------------------------------------- |
 | `send <target> <text>`                     | `surface.send_text`                | Gated                      | Stage or submit text                   |
 | `key <target> <keystroke>`                 | `surface.send_keystroke`           | Gated                      | Send one non-submitting keystroke      |
+| `self-test glyphs`                         | offline (no socket, no window)     | No                         | Confirm this build rasterizes text     |
 
 The CLI has no read verbs. Scripts, agents, and custom clients call the
 `surface.list`, `surface.read`, `surface.search`, `surface.status`,
