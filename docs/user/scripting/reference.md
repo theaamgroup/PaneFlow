@@ -163,6 +163,15 @@ printf '%s\n' '{"jsonrpc":"2.0","method":"system.capabilities","params":{},"id":
 | `ai.subagent_start`        | `pid`, hook payload with `subagent_id`                                                          | Subagent started; raises the sidebar running count      |
 | `ai.subagent_stop`         | `pid`, hook payload with `subagent_id`                                                          | Subagent finished; never ends the parent's turn         |
 
+Every request must be a JSON object carrying `"jsonrpc": "2.0"` and a string
+`method`. An `id`, when present, must be a string, number or `null`, and
+`params`, when present, must be an object or array; omitted `params` is
+treated as `{}`. Anything else gets `-32600` Invalid Request before any
+method runs, and a line that is not JSON gets `-32700` parse error. An
+invalid request is answered even without an `id`; the reply echoes the `id`
+when it is a string, number or `null` and is `null` otherwise. A valid
+request without an `id` is a notification and gets no reply.
+
 Structured failures use JSON-RPC `error` envelopes: `-32602` invalid
 params, `-32601` gated or unknown method, `-32001` permission,
 `-32002` dispatch timeout, `-32000` backpressure or shutdown, and `-32603`
