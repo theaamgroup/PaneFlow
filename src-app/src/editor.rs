@@ -274,7 +274,7 @@ pub fn open_at_location(
     configured: Option<&str>,
 ) -> bool {
     if configured.map(str::trim) == Some("system") {
-        return open::that(path).is_ok();
+        return crate::external_open::open_with_system_handler(path).is_ok();
     }
     let visual = std::env::var("VISUAL").ok();
     let editor = std::env::var("EDITOR").ok();
@@ -310,7 +310,7 @@ pub fn open_at_location(
         "editor: no $VISUAL/$EDITOR and none of {:?} on PATH - falling back to OS handler",
         FALLBACK_PROBES
     );
-    open::that(path).is_ok()
+    crate::external_open::open_with_system_handler(path).is_ok()
 }
 
 fn try_spawn(bin: &str, args: &[String]) -> bool {

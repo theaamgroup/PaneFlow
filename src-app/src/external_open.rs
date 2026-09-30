@@ -278,7 +278,36 @@ fn launch_services_open(url: &str) -> std::io::Result<()> {
             return hook(url);
         }
     }
-    open::that(url)
+    open_with_system_handler(url)
+}
+
+/// `open::that` through the spawn exclusion (issue #1115).
+///
+/// Runs the platform launcher (`/usr/bin/open`) with null stdio, waits for it,
+/// and fails on a non-zero exit, as `open::that` does. `open::that` itself
+/// spawns with a plain `Command`, which could copy an IPC socket that is not
+/// close-on-exec yet. Blocks until the launcher exits; keep it off the GPUI
+/// thread.
+pub(crate) fn open_with_system_handler(target: impl AsRef<std::ffi::OsStr>) -> std::io::Result<()> {
+    let mut last_err = None;
+    for mut launcher in open::commands(target) {
+        launcher
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        match paneflow_process::spawn(&mut launcher).and_then(|mut child| child.wait()) {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => {
+                return Err(std::io::Error::other(format!(
+                    "Launcher {launcher:?} failed with {status:?}"
+                )));
+            }
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "no system open launcher")
+    }))
 }
 
 #[cfg(test)]
@@ -294,6 +323,20 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
             .expect("chmod stub");
         path
+    }
+
+    /// The guarded replacement for `open::that` keeps its error contract: a
+    /// launcher that exits non-zero is an error, not a silent success.
+    /// `/usr/bin/open` on a missing file exits 1 without opening anything.
+    #[test]
+    fn system_handler_reports_a_failed_launcher() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist.txt");
+        let err = open_with_system_handler(&missing).expect_err("missing file must fail");
+        assert!(
+            err.to_string().contains("failed with"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

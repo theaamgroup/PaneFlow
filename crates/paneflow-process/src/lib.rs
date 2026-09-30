@@ -46,6 +46,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// only ever tried, never queued for: a queued writer would make every later
 /// spawner, including the render thread, wait behind whichever spawn call is
 /// slowest.
+///
+/// The cost runs the other way: while a spawn call is slow (a first-exec
+/// Gatekeeper scan of a new binary, for example), the IPC server does not
+/// accept, and new connections wait in the listen backlog until it returns.
+/// That delay is the accepted trade-off for never leaking a socket.
 static SPAWN_EXCLUSION: RwLock<()> = RwLock::new(());
 
 /// How often [`with_spawns_excluded`] retries while a spawn is in flight.
@@ -1016,10 +1021,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn zombie_child_count() -> usize {
         let me = std::process::id().to_string();
-        let out = Command::new("ps")
-            .args(["-A", "-o", "ppid=,stat="])
-            .output()
-            .expect("ps must be spawnable to count zombie children");
+        // Through the spawn exclusion like every other child: a plain
+        // `output()` could copy the socket another test holds inheritable.
+        let mut ps = Command::new("ps");
+        ps.args(["-A", "-o", "ppid=,stat="]);
+        let out = run_with_timeout(ps, Duration::from_secs(10), 4 << 20)
+            .expect("ps must run to count zombie children");
         assert!(
             out.status.success(),
             "ps -A -o ppid=,stat= failed with status {:?}",

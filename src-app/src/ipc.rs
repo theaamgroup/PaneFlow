@@ -1886,8 +1886,12 @@ mod spawn_exclusion_tests {
                 index += 1;
                 continue;
             }
+            // Further attributes and doc comments belong to the same item.
             let mut item = index + 1;
-            while item < lines.len() && lines[item].starts_with("#[") {
+            while item < lines.len() && {
+                let line = lines[item].trim_start();
+                line.starts_with("#[") || line.starts_with("//")
+            } {
                 item += 1;
             }
             let Some(first) = lines.get(item) else {
@@ -1896,17 +1900,91 @@ mod spawn_exclusion_tests {
             if let Some(name) = out_of_line_module(first) {
                 test_modules.push(name.to_string());
             }
-            index = if first.ends_with(';') {
-                item + 1
-            } else {
-                let close = lines[item..]
-                    .iter()
-                    .position(|line| *line == "}" || *line == "};")
-                    .unwrap_or_else(|| panic!("test-only item at line {} never closes", item + 1));
-                item + close + 1
-            };
+            index = test_item_end(&lines, item) + 1;
         }
         (kept, test_modules)
+    }
+
+    /// The index of the last line of the top-level item that starts at
+    /// `first`, as rustfmt lays it out. A block item (`fn`, `mod`, `impl`,
+    /// with its head on one or several lines) opens with a column-0 line
+    /// ending in `{` and closes at the next column-0 `}`. Any other item ends
+    /// at its first line ending in `;`, or on its own line when that line
+    /// opens and closes a block (`fn f() {}`). When unsure this ends early,
+    /// so the rest is scanned as production: a guard that scans too much
+    /// fails loudly, one that scans too little passes silently.
+    fn test_item_end(lines: &[&str], first: usize) -> usize {
+        for (at, line) in lines.iter().enumerate().skip(first) {
+            let column_zero = !line.starts_with(char::is_whitespace);
+            if line.ends_with(';') || (column_zero && line.ends_with('}')) {
+                return at;
+            }
+            if column_zero && line.ends_with('{') {
+                let close = lines[at + 1..]
+                    .iter()
+                    .position(|line| line.starts_with('}'))
+                    .unwrap_or_else(|| panic!("test-only item at line {} never closes", at + 1));
+                return at + 1 + close;
+            }
+        }
+        first
+    }
+
+    /// Each test-only item shape rustfmt produces is skipped exactly, and
+    /// the production line after it is still scanned.
+    #[test]
+    fn production_lines_skip_only_test_only_items() {
+        let src = [
+            "#[cfg(test)]",
+            "static GATE: Mutex<Vec<PathBuf>> =",
+            "    Mutex::new(Vec::new());",
+            "fn after_static() {}",
+            "#[cfg(test)]",
+            "type Map =",
+            "    HashMap<(A, String), Arc<B>>;",
+            "fn after_type() {}",
+            "#[cfg(test)]",
+            "fn one_line() {}",
+            "fn after_one_line() {}",
+            "#[cfg(test)]",
+            "/// doc",
+            "#[allow(dead_code)]",
+            "const X: u8 = 1;",
+            "fn after_const() {}",
+            "#[cfg(test)]",
+            "fn multi_line_head(",
+            "    a: u8,",
+            ") -> u8 {",
+            "    a",
+            "}",
+            "fn after_fn() {}",
+            "#[cfg(not(test))]",
+            "fn not_test() {}",
+            "#[cfg(all(test, unix))]",
+            "mod tests {",
+            "    fn inner() {}",
+            "}",
+            "#[cfg(test)]",
+            "pub(crate) mod helpers;",
+            "fn after_mod() {}",
+        ]
+        .join("\n");
+        let (kept, modules) = production_lines(&src);
+        let kept: Vec<&str> = kept.into_iter().map(|(_, line)| line).collect();
+        assert_eq!(
+            kept,
+            [
+                "fn after_static() {}",
+                "fn after_type() {}",
+                "fn after_one_line() {}",
+                "fn after_const() {}",
+                "fn after_fn() {}",
+                "#[cfg(not(test))]",
+                "fn not_test() {}",
+                "fn after_mod() {}",
+            ]
+        );
+        assert_eq!(modules, ["helpers"]);
     }
 
     fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -1984,6 +2062,16 @@ mod spawn_exclusion_tests {
             main.iter().any(|(_, line)| line == "impl PaneFlowApp {"),
             "main.rs production code after its first test module was not scanned"
         );
+        let git = &production
+            .iter()
+            .find(|(path, _)| *path == root.join("workspace/git.rs"))
+            .expect("workspace/git.rs was walked")
+            .1;
+        assert!(
+            git.iter()
+                .any(|(_, line)| line.starts_with("fn git_entry_exists(")),
+            "workspace/git.rs production code after a multi-line test-only static was not scanned"
+        );
 
         let direct = [
             ".spawn()",
@@ -1992,6 +2080,13 @@ mod spawn_exclusion_tests {
             "Command::spawn(",
             "Command::output(",
             "Command::status(",
+            // The `open` crate runs `/usr/bin/open` through a plain `Command`.
+            "open::that(",
+            "open::that_detached(",
+            "open::that_in_background(",
+            "open::with(",
+            "open::with_detached(",
+            "open::with_in_background(",
         ];
         let mut offenders = Vec::new();
         for (path, lines) in &production {
