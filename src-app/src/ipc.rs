@@ -2021,7 +2021,9 @@ mod spawn_exclusion_tests {
     /// Every child PaneFlow spawns outside the PTY goes through
     /// `paneflow_process`, whose `spawn` holds the exclusion the IPC server
     /// creates its sockets under. A direct `Command::spawn`, `output`, or
-    /// `status` could copy a socket that is not close-on-exec yet.
+    /// `status` could copy a socket that is not close-on-exec yet, and a
+    /// `Stdio::piped()` pipe is inheritable for a moment while std creates it
+    /// (issue #1124).
     #[test]
     fn production_child_spawns_go_through_paneflow_process() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -2073,6 +2075,7 @@ mod spawn_exclusion_tests {
             "workspace/git.rs production code after a multi-line test-only static was not scanned"
         );
 
+        const PIPED: &str = "Stdio::piped()";
         let direct = [
             ".spawn()",
             ".output()",
@@ -2087,7 +2090,18 @@ mod spawn_exclusion_tests {
             "open::with(",
             "open::with_detached(",
             "open::with_in_background(",
+            // Issue #1124: on macOS std's `Stdio::piped()` pipe ends stay
+            // inheritable for a moment inside `Command::spawn`; ask
+            // `paneflow_process::spawn_piped` for pipes instead.
+            PIPED,
         ];
+        // The PTY guard's control pipe moves to `spawn_piped` with #1123;
+        // drop this entry when that lands.
+        let piped_allowed = [root.join("agents/parent_guard.rs")];
+        assert!(
+            piped_allowed.iter().all(|path| path.is_file()),
+            "a Stdio::piped() allowlist entry no longer exists: {piped_allowed:?}"
+        );
         let mut offenders = Vec::new();
         for (path, lines) in &production {
             // Component-wise: covers a test-only `name.rs` and all of `name/`.
@@ -2097,7 +2111,9 @@ mod spawn_exclusion_tests {
             let name = path.strip_prefix(&root).expect("under src").display();
             for (number, line) in lines {
                 if !line.trim_start().starts_with("//")
-                    && direct.iter().any(|call| line.contains(call))
+                    && direct.iter().any(|call| {
+                        line.contains(call) && !(*call == PIPED && piped_allowed.contains(path))
+                    })
                 {
                     offenders.push(format!("{name}:{number}: {}", line.trim()));
                 }
@@ -2105,8 +2121,9 @@ mod spawn_exclusion_tests {
         }
         assert!(
             offenders.is_empty(),
-            "spawn children through paneflow_process::spawn (or its run_with_timeout / \
-             spawn_detached helpers), not directly (issue #1115):\n{}",
+            "spawn children through paneflow_process::spawn (or its spawn_piped / \
+             run_with_timeout / spawn_detached helpers), not directly, and get pipes from \
+             spawn_piped, not Stdio::piped() (issues #1115, #1124):\n{}",
             offenders.join("\n")
         );
     }

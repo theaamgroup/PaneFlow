@@ -137,9 +137,7 @@ pub fn load_login_shell_env() {
         // hooks like direnv/asdf/mise are irrelevant here.)
         cmd.current_dir(home);
     }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    cmd.stdin(Stdio::null()).stderr(Stdio::null());
     // SAFETY: `setsid` is async-signal-safe and the only thing we do between
     // fork and exec. Putting the capture shell in its own session means a stray
     // rc script that opens `/dev/tty` can't grab our controlling terminal.
@@ -150,7 +148,11 @@ pub fn load_login_shell_env() {
         });
     }
 
-    let mut child = match paneflow_process::spawn(&mut cmd) {
+    let stdout_only = paneflow_process::Pipes {
+        stdout: true,
+        ..paneflow_process::Pipes::default()
+    };
+    let mut child = match paneflow_process::spawn_piped(&mut cmd, stdout_only) {
         Ok(child) => child,
         Err(e) => {
             log::debug!("login-shell env: could not spawn {capture_shell:?}: {e}");
