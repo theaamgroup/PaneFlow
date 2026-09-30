@@ -343,10 +343,17 @@ fn read_stdout_prefix(
     let cap = usize::try_from(cap).ok()?;
     let mut cmd = git_listing_command(cwd, args);
     cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
-    let mut child = paneflow_process::spawn(&mut cmd).ok()?;
+    let stdout_only = paneflow_process::Pipes {
+        stdout: true,
+        ..paneflow_process::Pipes::default()
+    };
+    // `spawn_piped` first waits for any spawn already in flight on another
+    // thread (#1124). That wait is not charged to `remaining`, which is
+    // measured from `started` below, after the child exists, so a slow
+    // concurrent spawn can push this read past `deadline_at`.
+    let mut child = paneflow_process::spawn_piped(&mut cmd, stdout_only).ok()?;
     let stdout = child.stdout.take()?;
     let (tx, rx) = std::sync::mpsc::channel();
     if std::thread::Builder::new()

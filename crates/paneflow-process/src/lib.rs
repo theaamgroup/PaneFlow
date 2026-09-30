@@ -10,14 +10,16 @@
 //!
 //! [`spawn`] is the one place PaneFlow starts a non-PTY child. It keeps spawns
 //! out of the windows where the IPC server's sockets are not close-on-exec yet
-//! (issue #1115).
+//! (issue #1115). [`spawn_piped`] does the same for a child's stdio pipes
+//! (issue #1124).
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::error::Error;
 use std::fmt;
-use std::io::{self, Read, Write};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::io::{self, PipeReader, PipeWriter, Read, Write};
+use std::os::fd::OwnedFd;
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::{OnceLock, PoisonError, RwLock, TryLockError};
 use std::thread;
@@ -35,8 +37,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// Issue #1115: exclusion between spawning a child and creating a descriptor
 /// that is not close-on-exec yet.
 ///
-/// macOS has no `SOCK_CLOEXEC` and no `accept4`, so `socket()` and `accept()`
-/// return a descriptor that is only marked `FD_CLOEXEC` by a second `fcntl`.
+/// macOS has no `SOCK_CLOEXEC`, no `accept4` and no `pipe2`, so `socket()`,
+/// `accept()` and `pipe()` return descriptors that are only marked
+/// `FD_CLOEXEC` by a second `fcntl`.
 /// A `posix_spawn` or `fork` on another thread between the two calls copies
 /// the descriptor into the child, where it survives exec for the child's
 /// whole life. [`spawn`] holds the shared side for the length of the
@@ -67,6 +70,102 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
         .read()
         .unwrap_or_else(PoisonError::into_inner);
     command.spawn()
+}
+
+/// Which of a child's standard streams [`spawn_piped`] connects to the parent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pipes {
+    pub stdin: bool,
+    pub stdout: bool,
+    pub stderr: bool,
+}
+
+/// [`spawn`] with a pipe to the parent for each stream `pipes` selects. Use it
+/// instead of passing `Stdio::piped()` to [`spawn`] (issue #1124).
+///
+/// On macOS, std makes each `Stdio::piped()` pair inside `Command::spawn`
+/// with `pipe()` and then marks each end close-on-exec in a separate
+/// `fcntl`. [`spawn`] holds only the shared side, so a concurrent spawn in
+/// that window copies the pipe ends into its own child. A reader then waits
+/// for that unrelated child to exit before it sees EOF.
+///
+/// This creates the pipes itself inside a [`with_spawns_excluded`] window
+/// and spawns under the shared side as usual. The window lasts a few
+/// syscalls, so other spawners, the render thread included, wait for
+/// microseconds at most. Opening it, though, waits for every spawn already
+/// in flight to return: while another thread's spawn call is slow (a 12-20 s
+/// first-exec Gatekeeper scan, for example), this call waits as long before
+/// its own child starts. Keep it off the render thread. Holding the exclusive
+/// side across the whole spawn instead would make every other spawner wait
+/// on this one as well.
+///
+/// The selected streams on `command` are reset to `Stdio::null()` before this
+/// returns, which closes the parent's copy of the child's ends. The pipes'
+/// parent ends are returned in `Child::stdin`, `stdout` and `stderr`.
+pub fn spawn_piped(command: &mut Command, pipes: Pipes) -> io::Result<Child> {
+    let StdioPipes {
+        stdin,
+        stdout,
+        stderr,
+    } = with_spawns_excluded(|| StdioPipes::create(pipes))?;
+
+    let mut parent_stdin = None;
+    let mut parent_stdout = None;
+    let mut parent_stderr = None;
+    if let Some((child_end, parent_end)) = stdin {
+        command.stdin(child_end);
+        parent_stdin = Some(ChildStdin::from(OwnedFd::from(parent_end)));
+    }
+    if let Some((parent_end, child_end)) = stdout {
+        command.stdout(child_end);
+        parent_stdout = Some(ChildStdout::from(OwnedFd::from(parent_end)));
+    }
+    if let Some((parent_end, child_end)) = stderr {
+        command.stderr(child_end);
+        parent_stderr = Some(ChildStderr::from(OwnedFd::from(parent_end)));
+    }
+
+    let spawned = spawn(command);
+    // `Command` owns the child's ends until its stdio is replaced. Close
+    // them now: a reader sees EOF only once every write end is closed.
+    if pipes.stdin {
+        command.stdin(Stdio::null());
+    }
+    if pipes.stdout {
+        command.stdout(Stdio::null());
+    }
+    if pipes.stderr {
+        command.stderr(Stdio::null());
+    }
+
+    let mut child = spawned?;
+    child.stdin = parent_stdin;
+    child.stdout = parent_stdout;
+    child.stderr = parent_stderr;
+    Ok(child)
+}
+
+/// The pipes [`spawn_piped`] creates, each as `(read end, write end)`.
+struct StdioPipes {
+    stdin: Option<(PipeReader, PipeWriter)>,
+    stdout: Option<(PipeReader, PipeWriter)>,
+    stderr: Option<(PipeReader, PipeWriter)>,
+}
+
+impl StdioPipes {
+    /// Only call inside a [`with_spawns_excluded`] window: on macOS each end
+    /// is inheritable until `io::pipe` marks it close-on-exec.
+    fn create(pipes: Pipes) -> io::Result<Self> {
+        let pipe_if = |wanted: bool| wanted.then(io::pipe).transpose();
+        let created = Self {
+            stdin: pipe_if(pipes.stdin)?,
+            stdout: pipe_if(pipes.stdout)?,
+            stderr: pipe_if(pipes.stderr)?,
+        };
+        #[cfg(test)]
+        tests::run_pipe_window_hook(&created);
+        Ok(created)
+    }
 }
 
 /// Run `create` while no [`spawn`] call is in flight, or return `None`
@@ -199,7 +298,9 @@ impl Error for ProcError {
 ///
 /// The deadline starts after the child is successfully spawned. Process creation
 /// itself is owned by the OS and may still block on platform-level executable
-/// lookup or antivirus hooks.
+/// lookup or antivirus hooks. Before that, creating the capture pipes waits
+/// for every other spawn already in flight (see [`spawn_piped`]); that wait
+/// is not counted against the deadline either.
 ///
 /// - stdin is `/dev/null` so the child can never block waiting on a prompt.
 /// - stdout/stderr are read on dedicated threads; exceeding either cap closes
@@ -245,20 +346,21 @@ fn run_bounded(
     let stdout_cap = validate_capture_cap(stdout_cap)?;
     let stderr_cap = validate_capture_cap(stderr_cap)?;
 
-    cmd.stdin(if stdin.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    })
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    if stdin.is_none() {
+        cmd.stdin(Stdio::null());
+    }
+    let pipes = Pipes {
+        stdin: stdin.is_some(),
+        stdout: true,
+        stderr: true,
+    };
 
     configure_process_tree(&mut cmd);
     // Prepare the reaper before spawning the child. Once a process exists,
     // every error path can hand it to this already-running thread without
     // risking a late thread-spawn failure or blocking the caller's deadline.
     let cleanup = spawn_cleanup_worker()?;
-    let child = spawn(&mut cmd).map_err(ProcError::Spawn)?;
+    let child = spawn_piped(&mut cmd, pipes).map_err(ProcError::Spawn)?;
     let start = Instant::now();
     let mut process = RunningProcess::new(child, cleanup);
 
@@ -749,6 +851,168 @@ mod tests {
         sh("sleep 30")
     }
 
+    #[cfg(unix)]
+    fn set_cloexec(fd: i32, on: bool) {
+        const F_SETFD: i32 = 2;
+        const FD_CLOEXEC: i32 = 1;
+        unsafe extern "C" {
+            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        }
+        let flag = if on { FD_CLOEXEC } else { 0 };
+        assert_eq!(unsafe { fcntl(fd, F_SETFD, flag) }, 0, "fcntl(F_SETFD)");
+    }
+
+    type PipeWindowHook = Box<dyn FnOnce(&[i32])>;
+
+    thread_local! {
+        /// Runs once, on this thread, inside the next [`StdioPipes::create`]
+        /// window, with every descriptor that window created.
+        static PIPE_WINDOW_HOOK: std::cell::RefCell<Option<PipeWindowHook>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    fn set_pipe_window_hook(hook: impl FnOnce(&[i32]) + 'static) {
+        PIPE_WINDOW_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn run_pipe_window_hook(pipes: &StdioPipes) {
+        use std::os::fd::AsRawFd;
+
+        let Some(hook) = PIPE_WINDOW_HOOK.with(|slot| slot.borrow_mut().take()) else {
+            return;
+        };
+        let fds: Vec<i32> = [&pipes.stdin, &pipes.stdout, &pipes.stderr]
+            .into_iter()
+            .flatten()
+            .flat_map(|(reader, writer)| [reader.as_raw_fd(), writer.as_raw_fd()])
+            .collect();
+        hook(&fds);
+    }
+
+    /// Issue #1124: the pipes [`spawn_piped`] creates are never copied into
+    /// a concurrent spawn's child.
+    ///
+    /// The hook holds the pipe-creation window open for 300 ms with every
+    /// new end inheritable, the state std's macOS `Stdio::piped()` leaves a
+    /// pipe in until its follow-up `fcntl` calls. If the concurrent spawn ran
+    /// inside it, the 30 s `/bin/sleep` would hold the probe's stdout write
+    /// end, the probe would see no EOF after `printf` exits, and the run
+    /// would end in `Timeout` instead of returning `hello`.
+    #[cfg(unix)]
+    #[test]
+    fn piped_spawn_never_leaks_its_pipes_into_a_concurrent_spawn() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let (window_open_tx, window_open_rx) = mpsc::channel();
+        let window_closed = Arc::new(AtomicBool::new(false));
+        let prober = {
+            let window_closed = Arc::clone(&window_closed);
+            thread::spawn(move || {
+                set_pipe_window_hook(move |fds| {
+                    for &fd in fds {
+                        set_cloexec(fd, false);
+                    }
+                    let _ = window_open_tx.send(());
+                    thread::sleep(Duration::from_millis(300));
+                    for &fd in fds {
+                        set_cloexec(fd, true);
+                    }
+                    window_closed.store(true, Ordering::SeqCst);
+                });
+                let started = Instant::now();
+                let result = run_with_timeout(sh("printf hello"), Duration::from_secs(3), 1 << 20);
+                (result, started.elapsed())
+            })
+        };
+
+        window_open_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("run_with_timeout must create its pipes through spawn_piped");
+        // Piped as well, like a PTY guard's control channel.
+        let mut holder = spawn_piped(
+            Command::new("/bin/sleep")
+                .arg("30")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+            Pipes {
+                stdin: true,
+                ..Pipes::default()
+            },
+        )
+        .expect("spawn /bin/sleep");
+        let spawned_after_window = window_closed.load(Ordering::SeqCst);
+        let (result, elapsed) = prober.join().expect("prober thread");
+        let _ = holder.kill();
+        let _ = holder.wait();
+
+        let out = result.expect(
+            "printf exited, so its stdout must reach EOF: the concurrent child must not \
+             hold a copy of the write end",
+        );
+        assert_eq!(out.stdout, b"hello");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "EOF must follow printf's exit promptly, took {elapsed:?}"
+        );
+        assert!(
+            spawned_after_window,
+            "a concurrent spawn must wait until the pipe window closes"
+        );
+    }
+
+    /// The parent's copy of each child end is closed, so a spawned child's
+    /// stdout reaches EOF when it exits, and the command's stdio is reset.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_piped_hands_back_parent_ends_and_closes_child_ends() {
+        let mut command = sh("cat; printf done >&2");
+        let mut child = spawn_piped(
+            &mut command,
+            Pipes {
+                stdin: true,
+                stdout: true,
+                stderr: true,
+            },
+        )
+        .expect("spawn cat");
+        child
+            .stdin
+            .take()
+            .expect("stdin pipe")
+            .write_all(b"echoed")
+            .expect("write stdin");
+
+        // Read on threads: if a child end stayed open in the parent, the
+        // read would never see EOF, and the test must fail, not hang.
+        fn read_all_within(mut pipe: impl Read + Send + 'static, child: &mut Child) -> Vec<u8> {
+            let (tx, rx) = mpsc::channel();
+            thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = tx.send(pipe.read_to_end(&mut bytes).map(|_| bytes));
+            });
+            let read = rx.recv_timeout(Duration::from_secs(10));
+            if read.is_err() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            read.expect("the pipe never reached EOF: a child end stayed open in the parent")
+                .expect("read the pipe")
+        }
+        let stdout_pipe = child.stdout.take().expect("stdout pipe");
+        let stdout = read_all_within(stdout_pipe, &mut child);
+        let stderr_pipe = child.stderr.take().expect("stderr pipe");
+        let stderr = read_all_within(stderr_pipe, &mut child);
+        assert!(child.wait().expect("wait").success());
+        assert_eq!(stdout, b"echoed");
+        assert_eq!(stderr, b"done");
+
+        // The reset stdio means a second spawn gets no pipes.
+        let again = spawn(&mut command).and_then(|child| child.wait_with_output());
+        let again = again.expect("respawn");
+        assert!(again.stdout.is_empty() && again.stderr.is_empty());
+    }
+
     /// Issue #1115: a descriptor created inside a [`with_spawns_excluded`]
     /// window and marked close-on-exec before the window closes is never
     /// inherited by a concurrent [`spawn`].
@@ -764,16 +1028,6 @@ mod tests {
         use std::os::unix::net::UnixStream;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Barrier};
-
-        const F_SETFD: i32 = 2;
-        const FD_CLOEXEC: i32 = 1;
-        unsafe extern "C" {
-            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
-        }
-        fn set_cloexec(fd: i32, on: bool) {
-            let flag = if on { FD_CLOEXEC } else { 0 };
-            assert_eq!(unsafe { fcntl(fd, F_SETFD, flag) }, 0, "fcntl(F_SETFD)");
-        }
 
         let window_open = Arc::new(Barrier::new(2));
         let window_closed = Arc::new(AtomicBool::new(false));
