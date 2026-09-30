@@ -670,18 +670,28 @@ jobs:
   # Pipeline: download the binary built by `macos_release_build` → wrap it in
   # the same `.app` skeleton `release.yml` ships → launch the binary
   # inside the bundle (so Core Text sees the bundle context, exactly
-  # like an end-user install) → screencapture → soft OCR sanity check.
-  # The screenshot is always uploaded so reviewers can eyeball the
-  # PR's macOS rendering even when the OCR gate is happy.
+  # like an end-user install) → screencapture → soft OCR sanity check →
+  # glyph self-test. The screenshot is always uploaded so reviewers can
+  # eyeball the PR's macOS rendering.
   #
   # Gates:
-  #   * HARD - `font: resolved family=...` line MUST appear in the app
-  #     log (proves the renderer reached `cached_font_config()`, i.e.
-  #     the app didn't crash before first frame). This is the font-kit
-  #     empty-box check.
-  #   * SOFT - OCR finds ≥10 alphanumeric chars (the macOS menubar
-  #     alone passes this trivially when rendering works; failure
-  #     means we're staring at a black screen or empty cells).
+  #   * HARD - `paneflow self-test glyphs`, run from inside the bundle,
+  #     rasterizes sample text in the bundled terminal and UI fonts
+  #     through the binary's own text system and exits 1 when any glyph
+  #     bitmap is empty (issue #1116). This is the empty-glyph check: a
+  #     build without gpui_platform's `font-kit` feature gets GPUI's
+  #     NoopTextSystem and fails it.
+  #   * HARD - a `font: resolved family=...` line MUST appear in the app
+  #     log. It proves only that the app launched and reached
+  #     `cached_font_config()`. The line is logged before any glyph is
+  #     rasterized, so an empty-glyph build still prints it.
+  #   * SOFT - OCR of the full-display screenshot finds ≥10 alphanumeric
+  #     chars. Evidence only: the AppKit menu bar alone satisfies it, so
+  #     it cannot tell a blank PaneFlow window from a healthy one.
+  #
+  # Not covered: a terminal paint-path regression that leaves cells blank
+  # while the text system still rasterizes. The screenshot is the only
+  # signal for that class.
   #
   # Runner: macos-15 hosts a real macOS GUI session, so apps launch
   # and render normally — the same pattern used by Electron /
@@ -742,7 +752,7 @@ jobs:
           # Launch the binary INSIDE the bundle directly (rather than
           # `open -a`) so stdout/stderr can be redirected - `open` does
           # not tee child output and the `font: resolved family=` log
-          # line is our hard gate. The bundle path is preserved, so
+          # line is the launch gate. The bundle path is preserved, so
           # Info.plist + Resources/ load correctly and Core Text sees
           # the same bundle context as a real install.
           PANEFLOW_DISABLE_SPARKLE=1 RUST_LOG=info "$APP/Contents/MacOS/paneflow" \
@@ -766,11 +776,13 @@ jobs:
           kill -9 "$APP_PID" 2>/dev/null || true
           wait "$APP_PID" 2>/dev/null || true
 
-          # HARD GATE: the resolved-font log line must be present.
-          # Absence means the app crashed before reaching
+          # HARD GATE (launch): the resolved-font log line must be
+          # present. Absence means the app crashed before reaching
           # cached_font_config() - i.e. before the renderer ever asked
-          # for a font, which is upstream of every rendering-correctness
-          # property this job exists to verify.
+          # for a font. Presence proves nothing about painted glyphs: the
+          # line is logged before any glyph is rasterized, so an
+          # empty-glyph build prints it too. The glyph self-test below is
+          # the empty-glyph gate.
           echo "── Resolved font ──"
           if grep "font: resolved family=" paneflow.log; then
             if grep -q "font: resolved family='JetBrains Mono'" paneflow.log; then
@@ -782,10 +794,12 @@ jobs:
           fi
 
       - name: OCR sanity check (text rendered?)
-        # Soft gate: tesseract output is fuzzy and we don't want flaky
-        # OCR to block PRs. The signal still surfaces in the CI log
-        # (alphanumeric char count) and the screenshot artifact is
-        # available for human review on every run.
+        # Soft, evidence only: tesseract output is fuzzy and we don't want
+        # flaky OCR to block PRs. It reads the full-display capture, whose
+        # AppKit-drawn menu bar has text even when every PaneFlow glyph is
+        # empty, so it cannot detect the empty-glyph failure; the glyph
+        # self-test step does. The char count surfaces in the CI log and the
+        # screenshot artifact is available for human review on every run.
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -797,11 +811,33 @@ jobs:
           echo "OCR alphanumeric chars: $char_count"
           # Threshold rationale: the macOS menubar (Apple logo,
           # "Finder", clock, date) alone OCRs to ~30+ chars on a healthy
-          # session. <10 chars almost always means rendering is broken
-          # - either the screen is black or every glyph rendered as a
-          # blank cell, which is the c3e2331 failure mode.
+          # session, so <10 chars means the capture itself is broken
+          # (black screen, no session). It does NOT mean PaneFlow's
+          # glyphs rendered: the menu bar passes this on its own.
           if [ "$char_count" -lt 10 ]; then
             echo "::warning::OCR found <10 alphanumeric chars. Visual rendering may be broken - inspect screenshot.png artifact."
+          fi
+
+      - name: Glyph self-test (text rasterizes?)
+        # HARD GATE (issue #1116): rasterize sample text in the bundled
+        # terminal and UI fonts through the bundled binary's own text
+        # system and fail when any glyph bitmap is empty. This fails on
+        # the "boxes drawn, no glyphs" build (v0.2.12, c3e2331) that the
+        # two checks above pass: dropping gpui_platform's `font-kit`
+        # feature swaps Core Text for GPUI's NoopTextSystem, and that
+        # build still logs `font: resolved family=` and still OCRs the
+        # menu bar. Offline and windowless; run from inside the bundle so
+        # Core Text sees the same bundle context as the launch above.
+        # Placed after the launch so the screenshot is captured either way.
+        run: |
+          set -uo pipefail
+          status=0
+          dist/PaneFlow.app/Contents/MacOS/paneflow self-test glyphs \
+            >glyph-self-test.txt 2>&1 || status=$?
+          cat glyph-self-test.txt
+          if [ "$status" -ne 0 ]; then
+            echo "::error::paneflow self-test glyphs exited $status: this build rasterizes text as empty bitmaps. See glyph-self-test.txt."
+            exit 1
           fi
 
       - name: Upload visual smoke artifacts
@@ -812,6 +848,7 @@ jobs:
           path: |
             screenshot.png
             paneflow.log
+            glyph-self-test.txt
           if-no-files-found: warn
           retention-days: 7
 
