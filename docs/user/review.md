@@ -39,8 +39,15 @@ checkouts already in the grid, while Changes always follows the active pane.
 
 PaneFlow saves the grid's checkouts, split directions and sizes, and collapsed
 repository groups with your session. On restart it restores checkouts that
-still exist and belong to an open repository. Base selections and unified or
-side-by-side choices are not saved with the grid.
+still exist and belong to an open repository. If a checkout's drive does not
+answer in time or is not mounted, for example a sleeping external or network
+volume, PaneFlow keeps the whole saved grid, sizes included, without opening
+it. Review then names that checkout instead of offering a branch. It tries
+again when you switch to Review, choose a branch, or relaunch. If choosing a
+branch finds the drive answering, the saved grid opens as it was. If the
+drive still does not answer, the branch you chose replaces the saved grid
+and a notice names the checkout. Base selections and unified or side-by-side
+choices are not saved with the grid.
 
 ## Ask an agent to review
 

@@ -313,6 +313,17 @@ pub(crate) fn pull_request(checkout: &Checkout) -> Result<Option<PullRequest>, S
         return Ok(None);
     };
     let gh = which::which("gh").map_err(|_| "Install GitHub CLI to see PR checks".to_string())?;
+    let cmd = gh_pr_list_command(&gh, checkout);
+    let out = paneflow_process::run_with_timeout(cmd, Duration::from_secs(12), 512 * 1024)
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err("GitHub unavailable · check gh auth status, then refresh".into());
+    }
+    parse_pr(&out.stdout, head)
+}
+
+/// `gh pr list` for the checkout's branch, run in the checkout.
+fn gh_pr_list_command(gh: &Path, checkout: &Checkout) -> std::process::Command {
     let mut cmd = std::process::Command::new(gh);
     cmd.current_dir(&checkout.root)
         .args([
@@ -330,12 +341,9 @@ pub(crate) fn pull_request(checkout: &Checkout) -> Result<Option<PullRequest>, S
         .env("GH_PROMPT_DISABLED", "1")
         .env("GH_PAGER", "")
         .env("NO_COLOR", "1");
-    let out = paneflow_process::run_with_timeout(cmd, Duration::from_secs(12), 512 * 1024)
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err("GitHub unavailable · check gh auth status, then refresh".into());
-    }
-    parse_pr(&out.stdout, head)
+    // `gh` finds the repository and its remote by running git in this cwd.
+    crate::workspace::worktree::remove_inherited_git_env(&mut cmd);
+    cmd
 }
 
 fn parse_pr(bytes: &[u8], head: &str) -> Result<Option<PullRequest>, String> {
@@ -540,6 +548,26 @@ mod tests {
         let ambiguous = json!([row(1, "local-head"), row(2, "local-head")]);
         assert!(parse_pr(ambiguous.to_string().as_bytes(), "local-head").is_err());
         assert!(parse_pr(b"[]", "local-head").unwrap().is_none());
+    }
+
+    /// Issue #1100: `gh` runs git in the checkout to find the repository, so
+    /// it must not inherit git's repository-location variables either.
+    #[test]
+    fn gh_pr_list_does_not_inherit_git_repository_env() {
+        let cmd = gh_pr_list_command(Path::new("/usr/local/bin/gh"), &checkout());
+        for name in [
+            "GIT_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+        ] {
+            assert!(
+                cmd.get_envs()
+                    .any(|(key, value)| key == name && value.is_none()),
+                "gh pr list must not inherit {name}"
+            );
+        }
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/repo/a")));
     }
 
     #[test]

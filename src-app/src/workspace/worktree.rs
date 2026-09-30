@@ -159,11 +159,72 @@ pub fn is_paneflow_worktree_dir(repo_root: &Path, branch: &str, path: &Path) -> 
     path == worktree_dir(repo_root, branch) || path == worktree_dir_hashed(repo_root, branch)
 }
 
+/// Git environment that PaneFlow's own git spawns never inherit (issue #1100).
+///
+/// Opening a worktree is like git entering a submodule, so the core is git's
+/// own repository-local set (`git rev-parse --local-env-vars`): the variables
+/// git drops before it touches a different repository. Inherited from the
+/// launcher, each one makes the sidebar and Review read another repository's
+/// data instead of the opened worktree's.
+///
+/// Kept on purpose: `GIT_CEILING_DIRECTORIES` and
+/// `GIT_DISCOVERY_ACROSS_FILESYSTEM` only decide whether discovery succeeds,
+/// never which repository it finds, and are the user's guard against probing
+/// slow mounts. `GIT_INDEX_VERSION` sets the format of a newly written index,
+/// not which index is read. `GIT_NAMESPACE` scopes refs for transport only,
+/// and PaneFlow runs no transport. `GIT_CONFIG_GLOBAL` is the user's own
+/// config, and `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` are inert without
+/// `GIT_CONFIG_COUNT`.
+const INHERITED_GIT_ENV: &[&str] = &[
+    // Which repository: git dir, work tree, the shared common dir, and the
+    // subdirectory prefix git exports to aliases.
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+    // Which index. An empty alternate index turns a clean tree into tracked
+    // deletions plus untracked additions, and staged changes come from it.
+    "GIT_INDEX_FILE",
+    // Which objects and history. A foreign object store, extra alternates,
+    // replace refs (or turning the repo's own off), grafts, and a shallow file
+    // change what HEAD, `merge-base`, and each diff resolve to.
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_GRAFT_FILE",
+    "GIT_SHALLOW_FILE",
+    // The launcher's `-c` and counted config, and the legacy `git config`
+    // file. Injected `core.excludesFile` hides untracked files from the totals.
+    // PaneFlow's own `-c` arguments are unaffected: git parses them itself.
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG",
+    // Outside git's local set, but still another repository's state. An
+    // attribute tree-ish the opened repo lacks kills `git diff`; a valid one
+    // silently swaps the attributes (binary, `-diff`, eol) and so the totals.
+    // A receive-pack quarantine forbids the ref updates `worktree add` makes.
+    "GIT_ATTR_SOURCE",
+    "GIT_QUARANTINE_PATH",
+    // Not a location: an inherited SSH command must not run on our behalf.
+    "GIT_SSH_COMMAND",
+];
+
+/// Drop [`INHERITED_GIT_ENV`] from a spawn that runs git, directly or through
+/// another tool, against a repository PaneFlow opened.
+pub(crate) fn remove_inherited_git_env(cmd: &mut Command) {
+    for name in INHERITED_GIT_ENV {
+        cmd.env_remove(name);
+    }
+}
+
 /// Isolated `git` spawn: ignore the opened repo's `core.hooksPath` /
-/// `core.fsmonitor` / `diff.external`, drop inherited git location/SSH env,
-/// and never prompt. `git diff` also passes `--no-textconv`. Clean filters
-/// are blanked per invocation by [`git_diff_clean_filter_overrides`]
-/// (issue #1019); their names are not known until config is read.
+/// `core.fsmonitor` / `diff.external`, drop inherited git location, index,
+/// object, config, and SSH env ([`INHERITED_GIT_ENV`]), and never prompt.
+/// `git diff` also passes `--no-textconv`. Clean filters are blanked per
+/// invocation by [`git_diff_clean_filter_overrides`] (issue #1019); their
+/// names are not known until config is read.
 pub(crate) fn git_command() -> Command {
     let mut cmd = Command::new("git");
     cmd.args([
@@ -176,9 +237,7 @@ pub(crate) fn git_command() -> Command {
     ]);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.env("GIT_CONFIG_NOSYSTEM", "1");
-    cmd.env_remove("GIT_DIR");
-    cmd.env_remove("GIT_WORK_TREE");
-    cmd.env_remove("GIT_SSH_COMMAND");
+    remove_inherited_git_env(&mut cmd);
     cmd
 }
 
@@ -276,12 +335,12 @@ fn run_git(repo: &Path, args: &[&str], deadline: Duration) -> Result<String, Str
 
 /// `git config --name-only --get-regexp ^filter\.` for one diff probe.
 ///
-/// Drops `GIT_CONFIG`. `git config` reads it as `--file`; `git diff` does
-/// not, so an inherited file can hide the repository's filters.
+/// [`git_command`] drops `GIT_CONFIG`. `git config` reads it as `--file`;
+/// `git diff` does not, so an inherited file could hide the repository's
+/// filters.
 fn git_filter_listing_command(dir: &Path) -> Command {
     let mut cmd = git_command();
     cmd.current_dir(dir);
-    cmd.env_remove("GIT_CONFIG");
     cmd.args([
         "-c",
         "alias.config=",
@@ -298,7 +357,7 @@ fn git_filter_listing_command(dir: &Path) -> Command {
 ///
 /// The listing is a direct [`git_command`] spawn, not a diff runner: those
 /// call back here, and `git config` must not recurse into filter
-/// neutralization. [`git_filter_listing_command`] drops `GIT_CONFIG` so the
+/// neutralization. [`git_command`] drops `GIT_CONFIG`, so the listed
 /// names match the config `git diff` will use. Exit code 1 means the pattern
 /// matched nothing. A name that is not `[A-Za-z0-9_-]+` refuses the diff: it
 /// cannot be passed as `-c` and must not be left runnable. Smudge is left
@@ -1225,9 +1284,7 @@ mod tests {
         "core.hooksPath=/dev/null",
         "diff.external=",
         "GIT_CONFIG_NOSYSTEM",
-        "env_remove(\"GIT_DIR\")",
-        "env_remove(\"GIT_WORK_TREE\")",
-        "env_remove(\"GIT_SSH_COMMAND\")",
+        "remove_inherited_git_env(&mut cmd)",
     ];
 
     fn git_fn_source<'a>(source: &'a str, marker: &str) -> &'a str {
@@ -1260,7 +1317,7 @@ mod tests {
         assert!(
             source_has_git_isolation_prelude(git_command_body),
             "git_command() helper must pass -c core.fsmonitor= -c core.hooksPath=/dev/null \
-             -c diff.external=, GIT_CONFIG_NOSYSTEM, and env_remove GIT_DIR/GIT_WORK_TREE/GIT_SSH_COMMAND"
+             -c diff.external=, GIT_CONFIG_NOSYSTEM, and remove_inherited_git_env"
         );
     }
 
@@ -1661,6 +1718,239 @@ not-a-filter
             (1, 1, 0),
             "sidebar diff did not report the dirty file: {stats:?}"
         );
+    }
+
+    /// Issue #1100: a PaneFlow launched with git pointed at other repository
+    /// data (an alternate index, git dir, object store, common dir, attribute
+    /// source, or the launcher's `-c` config) must still inspect the opened worktree.
+    ///
+    /// The variable has to be inherited: set on the child `Command`, it would
+    /// override `git_command`'s removal. Setting it on this process would leak
+    /// into parallel tests. So the test re-executes itself with the variable
+    /// in the child test process's environment, and that child runs the real
+    /// sidebar probe and a `git_command` status.
+    #[test]
+    fn git_command_ignores_inherited_alternate_index() {
+        const CLEAN: &str = "PANEFLOW_TEST_GIT_ENV_PROBE_CLEAN";
+        const DIRTY: &str = "PANEFLOW_TEST_GIT_ENV_PROBE_DIRTY";
+        const HEAD: &str = "PANEFLOW_TEST_GIT_ENV_PROBE_HEAD";
+        const DONE: &str = "git-env-probe: inspected the opened worktree";
+
+        if let Some(clean) = std::env::var_os(CLEAN) {
+            let clean = PathBuf::from(clean);
+            let dirty = PathBuf::from(std::env::var_os(DIRTY).expect("dirty repo"));
+            let head = std::env::var(HEAD).expect("expected HEAD");
+            assert_eq!(
+                run_git(
+                    &clean,
+                    &["status", "--porcelain=v1", "--untracked-files=all"],
+                    GIT_DEADLINE
+                ),
+                Ok(String::new()),
+                "the clean worktree reports no changes"
+            );
+            assert_eq!(
+                run_git(&clean, &["rev-parse", "HEAD"], GIT_DEADLINE),
+                Ok(head),
+                "HEAD resolves in the opened repository"
+            );
+            let totals = |dir: &Path| {
+                let stats = crate::workspace::GitDiffStats::from_cwd(
+                    dir.to_str().expect("utf-8 temp path"),
+                );
+                (stats.files_changed, stats.insertions, stats.deletions)
+            };
+            assert_eq!(totals(&clean), (0, 0, 0), "clean sidebar totals");
+            // A nonzero expectation separates "no changes" from "git failed",
+            // which also renders as empty totals.
+            assert_eq!(
+                totals(&dirty),
+                (2, 2, 0),
+                "one edited and one untracked line"
+            );
+            println!("{DONE}");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let make_repo = |name: &str| -> PathBuf {
+            let root = tmp.path().join(name);
+            std::fs::create_dir_all(&root).expect("repo root");
+            run_git(&root, &["init"], GIT_DEADLINE).expect("git init");
+            for (key, value) in [
+                ("user.email", "paneflow-tests@example.invalid"),
+                ("user.name", "PaneFlow Tests"),
+                ("core.autocrlf", "false"),
+            ] {
+                run_git(&root, &["config", key, value], GIT_DEADLINE).expect("git config");
+            }
+            std::fs::write(root.join("tracked.txt"), "one\n").expect("tracked file");
+            run_git(&root, &["add", "."], GIT_DEADLINE).expect("git add");
+            run_git(
+                &root,
+                &["-c", "commit.gpgsign=false", "commit", "-m", "fixture"],
+                GIT_DEADLINE,
+            )
+            .expect("git commit");
+            root
+        };
+        let clean = make_repo("clean");
+        let dirty = make_repo("dirty");
+        std::fs::write(dirty.join("tracked.txt"), "one\ntwo\n").expect("edit tracked file");
+        std::fs::write(dirty.join("new.txt"), "added\n").expect("untracked file");
+        let head = run_git(&clean, &["rev-parse", "HEAD"], GIT_DEADLINE).expect("HEAD");
+
+        // An empty alternate index, written by git itself.
+        let alternate_index = tmp.path().join("alternate.index");
+        let mut empty_index = git_command();
+        empty_index
+            .current_dir(&clean)
+            .env("GIT_INDEX_FILE", &alternate_index)
+            .args(["read-tree", "--empty"]);
+        let out = empty_index.output().expect("git read-tree");
+        assert!(
+            out.status.success(),
+            "git read-tree --empty: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let empty_dir = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty_dir).expect("empty dir");
+        let exclude_all = tmp.path().join("exclude-all");
+        std::fs::write(&exclude_all, "*\n").expect("exclude file");
+        let exclude_all = exclude_all.to_str().expect("utf-8 temp path");
+        let empty_dir = empty_dir.to_str().expect("utf-8 temp path");
+        let alternate_index = alternate_index.to_str().expect("utf-8 temp path");
+        let excludes_parameter = format!("'core.excludesfile'='{exclude_all}'");
+
+        let cases: &[(&str, &[(&str, &str)])] = &[
+            ("alternate index", &[("GIT_INDEX_FILE", alternate_index)]),
+            ("git dir", &[("GIT_DIR", empty_dir)]),
+            ("object store", &[("GIT_OBJECT_DIRECTORY", empty_dir)]),
+            ("common dir", &[("GIT_COMMON_DIR", empty_dir)]),
+            (
+                "attribute source",
+                &[("GIT_ATTR_SOURCE", "paneflow-no-such-attr-source")],
+            ),
+            (
+                "-c config",
+                &[("GIT_CONFIG_PARAMETERS", excludes_parameter.as_str())],
+            ),
+            (
+                "counted config",
+                &[
+                    ("GIT_CONFIG_COUNT", "1"),
+                    ("GIT_CONFIG_KEY_0", "core.excludesfile"),
+                    ("GIT_CONFIG_VALUE_0", exclude_all),
+                ],
+            ),
+        ];
+        // What git reports for the dirty repo, status and HEAD diff, with
+        // `vars` really applied to the spawned git.
+        let report = |vars: &[(&str, &str)]| -> String {
+            let mut report = String::new();
+            for args in [
+                &["status", "--porcelain=v1", "--untracked-files=all"][..],
+                &["diff", "--numstat", "HEAD", "--"][..],
+            ] {
+                let mut cmd = git_command();
+                cmd.current_dir(&dirty)
+                    .envs(vars.iter().copied())
+                    .args(args);
+                let out = cmd.output().expect("control git");
+                report.push_str(&format!(
+                    "{:?} {}|",
+                    out.status.code(),
+                    String::from_utf8_lossy(&out.stdout)
+                ));
+            }
+            report
+        };
+        let baseline = report(&[]);
+        assert_eq!(
+            baseline,
+            "Some(0)  M tracked.txt\n?? new.txt\n|Some(0) 1\t0\ttracked.txt\n|"
+        );
+        // GIT_ATTR_SOURCE arrived in git 2.40; an older git ignores it, so
+        // that case's control could not show any effect.
+        let version = git_command()
+            .arg("--version")
+            .output()
+            .expect("git --version");
+        let version = String::from_utf8_lossy(&version.stdout).into_owned();
+        let mut numbers = version
+            .trim()
+            .trim_start_matches("git version ")
+            .split(['.', ' '])
+            .map(|part| part.parse::<u32>().unwrap_or(0));
+        let major_minor = (numbers.next().unwrap_or(0), numbers.next().unwrap_or(0));
+        let attr_source_supported = major_minor >= (2, 40);
+        for (label, vars) in cases {
+            if !attr_source_supported && vars.iter().any(|(key, _)| *key == "GIT_ATTR_SOURCE") {
+                eprintln!(
+                    "skipping {label}: {} predates GIT_ATTR_SOURCE",
+                    version.trim()
+                );
+                continue;
+            }
+            // Control: git given the variable directly answers differently, so
+            // each case can catch a regression.
+            assert_ne!(
+                report(vars),
+                baseline,
+                "{label}: the fixture does not change what git reports"
+            );
+
+            let out = Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "workspace::worktree::tests::git_command_ignores_inherited_alternate_index",
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CLEAN, &clean)
+                .env(DIRTY, &dirty)
+                .env(HEAD, &head)
+                .envs(vars.iter().copied())
+                .output()
+                .expect("re-exec the git env probe");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains(DONE),
+                "{label}: inherited {vars:?} redirected repository inspection\n{stdout}\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        // Every variable git would otherwise inherit is removed, including
+        // the ones the live cases above cannot provoke on a fresh repository.
+        let spawned = git_command();
+        for name in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_IMPLICIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_PREFIX",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_REPLACE_REF_BASE",
+            "GIT_NO_REPLACE_OBJECTS",
+            "GIT_GRAFT_FILE",
+            "GIT_SHALLOW_FILE",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG",
+            "GIT_ATTR_SOURCE",
+            "GIT_QUARANTINE_PATH",
+            "GIT_SSH_COMMAND",
+        ] {
+            assert!(
+                spawned
+                    .get_envs()
+                    .any(|(key, value)| key == name && value.is_none()),
+                "git_command must not inherit {name}"
+            );
+        }
     }
 
     #[test]

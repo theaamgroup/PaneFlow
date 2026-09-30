@@ -312,6 +312,9 @@ impl PaneFlowApp {
     /// render thread. Called when a picker opens: both are plumbing reads, but
     /// they are still subprocesses (issue #161: never on the UI thread).
     pub(crate) fn spawn_worktree_listing(&mut self, ws_idx: usize, cx: &mut Context<Self>) {
+        if checkout_probes_suppressed() {
+            return;
+        }
         let Some(repo_root) = self
             .workspaces
             .get(ws_idx)
@@ -840,11 +843,11 @@ fn checkout_probes_suppressed() -> bool {
 }
 
 #[cfg(test)]
-struct SuppressCheckoutProbes;
+pub(crate) struct SuppressCheckoutProbes;
 
 #[cfg(test)]
 impl SuppressCheckoutProbes {
-    fn arm() -> Self {
+    pub(crate) fn arm() -> Self {
         SUPPRESS_CHECKOUT_PROBES.with(|flag| flag.set(true));
         Self
     }
