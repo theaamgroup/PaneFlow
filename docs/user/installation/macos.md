@@ -43,6 +43,15 @@ Or, from an assembled bundle:
 dist/PaneFlow.app/Contents/MacOS/paneflow --version
 ```
 
+To confirm the build actually draws text, run the glyph self-test. It
+rasterizes sample text in the bundled terminal and UI fonts, prints
+`paneflow self-test glyphs: ok (...)`, and exits 1 when any glyph comes
+back empty. It runs offline: no window, no running instance.
+
+```bash
+dist/PaneFlow.app/Contents/MacOS/paneflow self-test glyphs
+```
+
 ## Put the CLI on your PATH
 
 Inside a PaneFlow pane, `paneflow` is already on `PATH`: every pane's

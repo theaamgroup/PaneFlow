@@ -1,7 +1,9 @@
 //! `paneflow <verb>` scriptable CLI (EP-001, prd-cli-agent-orchestration).
 //!
 //! Talks to a RUNNING Paneflow instance over the existing IPC JSON-RPC socket
-//! (`paneflow-ipc-client`) and exits before any GPUI init. `main.rs` dispatches
+//! (`paneflow-ipc-client`) and exits before any GPUI init. The one exception
+//! is `self-test`, which runs offline against this binary's own headless text
+//! system and never connects (issue #1116). `main.rs` dispatches
 //! here only when `argv[1]` names a known verb ([`is_cli_verb`]) - mirroring the
 //! `paneflow hooks …` intercept - so every other invocation (no args, unknown
 //! args, `--help`/`--version`) is left untouched and the GUI
@@ -14,6 +16,7 @@ use paneflow_ipc_client::IpcClient;
 use serde_json::Value;
 
 mod selector;
+mod self_test;
 mod send_cmd;
 
 /// Process exit codes. Kept distinct so scripts can branch on the failure
@@ -28,12 +31,13 @@ pub const EXIT_TARGET: i32 = 3;
 ///
 /// Pane reads are not CLI verbs (issue #811): scripts call the `surface.*` /
 /// `fleet.list` / `agent.whoami` JSON-RPC methods on the socket directly.
-pub(crate) const VERBS: &[&str] = &["send", "key"];
+pub(crate) const VERBS: &[&str] = &["send", "key", "self-test"];
 
 /// Verbs shown in `paneflow --help`, one row per [`VERBS`] entry.
 pub(crate) const HELP_VERBS: &[(&str, &str)] = &[
     ("send", "Inject text into a pane"),
     ("key", "Send a named keystroke to a pane"),
+    ("self-test", "Check this build renders text (offline)"),
 ];
 
 /// Offline intercepts handled in `main.rs` before clap (`hooks`).
@@ -138,6 +142,18 @@ enum Commands {
         /// Dash-separated keystroke description ("escape", "ctrl-c", "alt-f").
         keystroke: String,
     },
+    // Issue #1116: the render smoke lane's empty-glyph gate.
+    /// Check this build offline, without a running instance.
+    ///
+    /// `paneflow self-test glyphs` rasterizes sample text in the bundled
+    /// fonts and exits 1 when any glyph comes back empty, the "boxes drawn,
+    /// no glyphs" failure. CI's render smoke lane runs it on the bundled
+    /// release binary.
+    #[command(name = "self-test")]
+    SelfTest {
+        #[command(subcommand)]
+        check: self_test::SelfTestCheck,
+    },
 }
 
 /// A CLI failure carrying the process exit code to surface for it.
@@ -183,6 +199,11 @@ pub fn run() -> i32 {
     let Some(command) = cli.command else {
         return EXIT_OK;
     };
+
+    // Offline: runs against this binary, not a running instance.
+    if let Commands::SelfTest { check } = command {
+        return self_test::run(check);
+    }
 
     let client = match connect() {
         Ok(client) => client,
@@ -234,6 +255,7 @@ fn dispatch(command: Commands, client: &IpcClient) -> Result<i32, CliError> {
             report_file.as_deref(),
         ),
         Commands::Key { target, keystroke } => send_cmd::key(client, &target, &keystroke),
+        Commands::SelfTest { check } => Ok(self_test::run(check)),
     }
 }
 
@@ -401,6 +423,7 @@ mod tests {
     fn is_cli_verb_matches_known_verbs() {
         assert!(is_cli_verb(Some("send")));
         assert!(is_cli_verb(Some("key")));
+        assert!(is_cli_verb(Some("self-test")));
         assert!(!is_cli_verb(Some("mcp")));
         assert!(!is_cli_verb(Some("hooks")));
         assert!(!is_cli_verb(Some("--version")));

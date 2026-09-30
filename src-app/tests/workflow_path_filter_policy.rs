@@ -414,12 +414,12 @@ fn glob_model_matches_paths_filter_semantics() {
     assert!(!glob_matches("src-app/**", "src-application/x.rs"));
 }
 
-/// The render smoke lane captures screenshot evidence of glyph rasterization
-/// that compiles and passes `cargo test` (issue #1093); its hard gate is font
-/// resolution, so an empty-glyph regression shows in the uploaded screenshot
-/// rather than failing the lane. `tests_pass` accepts a skipped lane, so each
-/// of `paths` must make the lane's gate true, and every job it `needs` must be
-/// selected too: a lane whose dependency was skipped is skipped.
+/// The render smoke lane fails a build whose glyphs rasterize empty (its
+/// `paneflow self-test glyphs` gate, issue #1116) and captures screenshot
+/// evidence of the rest of the paint path (issue #1093). `tests_pass` accepts
+/// a skipped lane, so each of `paths` must make the lane's gate true, and
+/// every job it `needs` must be selected too: a lane whose dependency was
+/// skipped is skipped.
 fn assert_paths_select_render_smoke(paths: &[&str]) {
     const RENDER_JOB: &str = "macos_render_smoke";
     const AGGREGATOR: &str = "tests_pass";
@@ -512,4 +512,64 @@ fn engine_crate_changes_select_render_smoke() {
         "native/libghostty/prebuilt/aarch64-apple-darwin/lib/libghostty-vt.a",
         "native/libghostty/prebuilt/aarch64-apple-darwin/include/ghostty/vt.h",
     ]);
+}
+
+/// Issue #1116: the render smoke lane's empty-glyph gate is the bundled
+/// binary's `paneflow self-test glyphs`, and it must be able to fail the job.
+/// The lane's other checks cannot: the `font: resolved family=` log line is
+/// written before any glyph is rasterized, and the OCR step is
+/// `continue-on-error` and reads a capture whose AppKit menu bar has text
+/// even when every PaneFlow glyph is empty.
+#[test]
+fn render_smoke_hard_gates_on_the_glyph_self_test() {
+    const RENDER_JOB: &str = "macos_render_smoke";
+    const GATE: &str = "dist/PaneFlow.app/Contents/MacOS/paneflow self-test glyphs";
+    let workflow = read(&repo_root().join(WORKFLOW));
+    let mut steps: Vec<Vec<&str>> = Vec::new();
+    for line in job_lines(&workflow, RENDER_JOB) {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        if line.starts_with("      - ") {
+            steps.push(vec![line]);
+        } else if let Some(step) = steps.last_mut() {
+            step.push(line);
+        }
+    }
+    let gates: Vec<&Vec<&str>> = steps
+        .iter()
+        .filter(|step| step.iter().any(|line| line.contains(GATE)))
+        .collect();
+    assert_eq!(
+        gates.len(),
+        1,
+        "`{RENDER_JOB}` must run `{GATE}` in exactly one step (the bundled binary, \
+         not a rebuilt one); found {}",
+        gates.len()
+    );
+    let gate = gates[0];
+    for key in ["continue-on-error:", "if:"] {
+        assert!(
+            !gate.iter().any(|line| line.trim_start().starts_with(key)),
+            "the `{GATE}` step in `{RENDER_JOB}` carries `{key}`, so it can no longer \
+             fail the lane on an empty-glyph build"
+        );
+    }
+    assert!(
+        gate.iter().any(|line| line.trim() == "exit 1"),
+        "the `{GATE}` step in `{RENDER_JOB}` must `exit 1` when the self-test fails"
+    );
+    let upload = steps
+        .iter()
+        .find(|step| {
+            step.iter()
+                .any(|line| line.contains("actions/upload-artifact"))
+        })
+        .unwrap_or_else(|| panic!("`{RENDER_JOB}` no longer uploads its evidence"));
+    for evidence in ["screenshot.png", "glyph-self-test.txt"] {
+        assert!(
+            upload.iter().any(|line| line.trim() == evidence),
+            "`{RENDER_JOB}` must upload {evidence} as evidence"
+        );
+    }
 }
