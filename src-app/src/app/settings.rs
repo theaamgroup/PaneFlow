@@ -17,8 +17,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use gpui::{Context, KeyDownEvent, Keystroke, ScrollHandle, Window};
+use gpui::{Context, Focusable as _, KeyDownEvent, Keystroke, ScrollHandle, Window};
 
+use crate::app::overlay_origin::OverlayKind;
 use crate::settings::tabs::terminal::{FontKeyEffect, apply_font_typeahead_key};
 use crate::widgets::scrollbar;
 use crate::{PaneFlowApp, SettingsSection, config_writer, keybindings};
@@ -142,6 +143,14 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) {
         self.workspace_menu_open = None;
+        // Issue #1096: record the pane Settings opens from while it still
+        // owns the focus, so every close hands the focus back to it. A
+        // re-open while Settings is up keeps the first origin: whatever holds
+        // the focus then (Settings, or a pane a workspace chord focused under
+        // it) is not where the user came from.
+        if self.settings_section.is_none() {
+            self.remember_overlay_origin(OverlayKind::Settings, window, cx);
+        }
         self.settings_section = Some(section);
         self.reset_settings_scroll();
         self.terminal_dropdown = None;
@@ -207,7 +216,18 @@ impl PaneFlowApp {
         self.rebuild_shortcut_rows(cx);
     }
 
+    /// The single way out of Settings: Escape, the Back control, the search
+    /// fields' Escape and the sidebar toggle all land here.
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
+        // Issue #1096: Settings may hold the focus, and its node unmounts on
+        // the next frame. This path has no `Window`, so it only owes the
+        // drain a return (`return_focus_from_settings`), which lands before
+        // that frame paints. A call while Settings is already closed owes
+        // nothing: queuing then would pull the focus out of whatever holds it.
+        if self.settings_section.is_some() {
+            self.pending_settings_return = true;
+            cx.notify();
+        }
         self.settings_section = None;
         // Shortcuts-page ephemeral state. The armed "Reset" confirmation is the
         // one that matters: left standing across a close, it would turn a
@@ -231,6 +251,43 @@ impl PaneFlowApp {
             self.recording_shortcut_idx = None;
             let config = paneflow_config::loader::load_config();
             keybindings::apply_keybindings(cx, &config.shortcuts);
+        }
+    }
+
+    /// Drain half of [`Self::close_settings`] (issue #1096), run by
+    /// `drain_pending_window_actions` before the frame that unmounts Settings.
+    ///
+    /// The focus goes back to the pane Settings was opened from, then to the
+    /// pane the focus would return to anyway (the active Review pane in
+    /// Review, else the active tab's first pane), then to the empty-workspace
+    /// placeholder. Only while Settings still holds the focus (read from the
+    /// last frame, which still contains it), the placeholder holds it, or
+    /// nothing does: a surface that took the focus over Settings (Pane
+    /// Overview, About, the sessions rail) keeps it. The origin is taken either way so it never outlives the
+    /// close.
+    pub(crate) fn return_focus_from_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings_section.is_some() {
+            // Re-opened before the drain ran: Settings keeps the focus and
+            // its origin.
+            return;
+        }
+        let target = self.take_overlay_return_pane(OverlayKind::Settings);
+        // The app root tracks the placeholder handle, so a click on the
+        // Settings rail (the Back control, the title-bar toggle) lands the
+        // focus there before the close runs: that is Settings' own focus too.
+        let settings_holds_focus = self.settings_focus.contains_focused(window, cx)
+            || self.empty_workspace_focus.is_focused(window)
+            || window.focused(cx).is_none();
+        if !settings_holds_focus {
+            return;
+        }
+        match target {
+            Some(pane) => pane.read(cx).focus_handle(cx).focus(window, cx),
+            None => window.focus(&self.empty_workspace_focus, cx),
         }
     }
 
@@ -875,5 +932,434 @@ mod tests {
             settings.section.is_none(),
             "escape with no menu open closes settings"
         );
+    }
+
+    /// Issue #1096: the return-focus restore hangs off `close_settings`, so
+    /// it covers every way out only while `close_settings` is the one place
+    /// that clears `settings_section`. A second writer would close Settings
+    /// with the focus stranded inside it. Every source file under `src/` is
+    /// scanned whole (several have early test modules followed by production
+    /// code), and the needles are built with `concat!` so this test does not
+    /// match its own text.
+    #[test]
+    fn close_settings_is_the_only_settings_exit() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("readable source dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert!(root.is_dir(), "no source root at {}", root.display());
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        assert!(
+            files.len() > 100
+                && files.iter().any(|f| f.ends_with("app/settings.rs"))
+                && files.iter().any(|f| f.ends_with("main.rs")),
+            "the walk must read the app sources under {} (read {})",
+            root.display(),
+            files.len()
+        );
+
+        let clear = concat!("settings_section", " = None");
+        let needles = [
+            clear,
+            concat!("settings_section", " = Default::default()"),
+            concat!("settings_section", ".take()"),
+            concat!("settings_section", ".replace("),
+            // `std::mem::take`, `mem::replace` and `Option::take` all borrow it.
+            concat!("&mut self.", "settings_section"),
+            concat!("&mut app.", "settings_section"),
+        ];
+        let mut writers = Vec::new();
+        for file in &files {
+            let src = std::fs::read_to_string(file).expect("readable source");
+            for needle in needles {
+                let count = src.matches(needle).count();
+                if count > 0 {
+                    let rel = file.strip_prefix(&root).unwrap_or(file).to_owned();
+                    writers.push((rel, needle, count));
+                }
+            }
+        }
+        assert_eq!(
+            writers,
+            vec![(std::path::PathBuf::from("app/settings.rs"), clear, 1)],
+            "Settings must close only through close_settings"
+        );
+
+        let settings = include_str!("settings.rs");
+        let close = body(
+            settings,
+            "fn close_settings(",
+            "/// Drain half of [`Self::close_settings`]",
+        );
+        assert!(close.contains(clear));
+        assert!(
+            close.contains("if self.settings_section.is_some() {")
+                && close.contains("self.pending_settings_return = true;"),
+            "close_settings must owe the drain a return only when Settings was open: {close}"
+        );
+        let open = body(
+            settings,
+            "fn open_settings_at(",
+            "/// Arm or disarm the Shortcuts page",
+        );
+        assert!(
+            open.contains("self.remember_overlay_origin(OverlayKind::Settings, window, cx);"),
+            "open_settings_at must record the pane Settings opens from: {open}"
+        );
+        let main = include_str!("../main.rs");
+        let drain = body(
+            main,
+            "fn drain_pending_window_actions(",
+            "self.prune_stale_split_palette(cx);",
+        );
+        let panes = drain
+            .find("self.pending_pane_focus.take()")
+            .expect("the drain focuses a queued pane");
+        let settings_return = drain
+            .find("self.return_focus_from_settings(window, cx);")
+            .expect("the drain runs the Settings return");
+        assert!(
+            panes < settings_return,
+            "a queued pane must take the focus before the Settings return checks it"
+        );
+    }
+
+    type PaneEntity = gpui::Entity<crate::pane::Pane>;
+    type App = gpui::Entity<crate::PaneFlowApp>;
+
+    fn make_pane(cx: &mut gpui::VisualTestContext) -> PaneEntity {
+        use gpui::AppContext as _;
+        let terminal = cx.new(|cx| crate::terminal::TerminalView::display_only_for_test(1, cx));
+        cx.new(|cx| crate::pane::Pane::new(terminal, 1, cx))
+    }
+
+    /// Paint one frame. The focus-lost fallback only runs at the end of a
+    /// draw, so every Settings transition has to be drawn to be real.
+    fn draw(cx: &mut gpui::VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    }
+
+    fn is_focused(pane: &PaneEntity, cx: &mut gpui::VisualTestContext) -> bool {
+        use gpui::Focusable as _;
+        let pane = pane.clone();
+        cx.update(|window, cx| pane.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    fn handle_focused(
+        app: &App,
+        cx: &mut gpui::VisualTestContext,
+        handle: impl Fn(&crate::PaneFlowApp) -> &gpui::FocusHandle,
+    ) -> bool {
+        let handle = app.read_with(cx, |app, _| handle(app).clone());
+        cx.update(|window, _| handle.is_focused(window))
+    }
+
+    /// A staged restore makes `save_session` return before it resolves the
+    /// session path, so the sidebar toggle below cannot write the developer's
+    /// `session-dev.json` (or leave a debounced write running off-thread).
+    fn hold_session_saves(app: &mut crate::PaneFlowApp) {
+        app.session_restore = crate::app::session::PendingSessionRestore::from_session(
+            paneflow_config::schema::SessionState {
+                version: paneflow_config::schema::SESSION_SCHEMA_VERSION,
+                active_workspace: 0,
+                workspaces: vec![paneflow_config::schema::WorkspaceSession {
+                    title: "hold".into(),
+                    cwd: "/tmp/paneflow-session-hold".into(),
+                    tabs: vec![paneflow_config::schema::TabSession::empty()],
+                    active_tab: 0,
+                    legacy_layout: None,
+                    legacy_empty: false,
+                    pinned: false,
+                    sidebar_collapsed: false,
+                    muted: false,
+                }],
+                mode: paneflow_config::schema::AppMode::Cli,
+                review_layout: None,
+                review_collapsed: Vec::new(),
+                primary_sidebar_collapsed: false,
+            },
+        );
+        assert!(
+            app.session_restore.is_some(),
+            "session saves must stay skipped"
+        );
+    }
+
+    /// The whole app in a window, with the same focus-lost fallback and
+    /// pending-focus drain `mount_paneflow_app` registers, over one
+    /// workspace split into panes A and B. B holds the focus.
+    fn split_app(
+        cx: &mut gpui::TestAppContext,
+    ) -> (App, PaneEntity, PaneEntity, &mut gpui::VisualTestContext) {
+        use gpui::Focusable as _;
+        let (app, cx) = cx.add_window_view(|_window, cx| {
+            let mut app = crate::app::test_support::blank_paneflow_app(cx);
+            hold_session_saves(&mut app);
+            app
+        });
+        let a = make_pane(cx);
+        let b = make_pane(cx);
+        let root = crate::layout::LayoutTree::from_panes_equal(
+            crate::layout::SplitDirection::Vertical,
+            vec![a.clone(), b.clone()],
+        )
+        .expect("two panes make a split");
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                crate::register_focus_lost_fallback(window, cx, |app| &app.empty_workspace_focus);
+                let entity = cx.entity();
+                cx.observe_in(&entity, window, |this, _app, window, cx| {
+                    this.drain_pending_window_actions(window, cx);
+                })
+                .detach();
+                app.workspaces = vec![crate::workspace::Workspace::with_layout_and_id(
+                    1,
+                    "split",
+                    std::path::PathBuf::new(),
+                    root,
+                )];
+                app.active_idx = 0;
+            });
+            b.read(cx).focus_handle(cx).focus(window, cx);
+        });
+        draw(cx);
+        assert!(is_focused(&b, cx), "the second pane starts focused");
+        (app, a, b, cx)
+    }
+
+    fn open_settings(app: &App, cx: &mut gpui::VisualTestContext) {
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| app.open_settings_window(window, cx));
+        });
+        draw(cx);
+        assert!(
+            handle_focused(app, cx, |app| &app.settings_focus),
+            "Settings takes the focus while it is open"
+        );
+    }
+
+    fn assert_closed_onto(
+        app: &App,
+        pane: &PaneEntity,
+        how: &str,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        assert!(
+            app.read_with(cx, |app, _| app.settings_section.is_none()),
+            "{how} closes Settings"
+        );
+        assert!(
+            !handle_focused(app, cx, |app| &app.empty_workspace_focus),
+            "{how}: the focus must not be parked on the empty-workspace placeholder"
+        );
+        assert!(
+            is_focused(pane, cx),
+            "{how}: the terminal pane regains focus"
+        );
+    }
+
+    /// Issue #1096: opening Settings from the second pane of a split moves
+    /// the focus onto `settings_focus`; every way out (Escape, the Back
+    /// control, after a menu re-open) must hand it back to that pane, or to a
+    /// live pane of the active workspace once that pane is gone. Before the
+    /// fix the Settings node unmounted with the focus inside it and the
+    /// focus-lost fallback parked the window on `empty_workspace_focus`,
+    /// which takes no terminal input.
+    #[gpui::test]
+    fn closing_settings_restores_originating_pane_focus(cx: &mut gpui::TestAppContext) {
+        use gpui::Focusable as _;
+        let (app, a, b, cx) = split_app(cx);
+
+        // Escape, through the Settings root's key handler.
+        open_settings(&app, cx);
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert_closed_onto(&app, &b, "Escape", cx);
+
+        // A real click on the Back control at the top of the Settings rail.
+        open_settings(&app, cx);
+        let back = cx
+            .debug_bounds("settings-back")
+            .expect("the Settings rail paints its Back control");
+        cx.simulate_click(back.center(), gpui::Modifiers::none());
+        draw(cx);
+        assert_closed_onto(&app, &b, "Back", cx);
+
+        // PaneFlow ▸ Settings… again while Settings is open keeps the pane it
+        // was first opened from, even when a pane handle holds the focus at
+        // the re-open (a workspace chord focuses one under Settings).
+        open_settings(&app, cx);
+        cx.update(|window, cx| {
+            a.read(cx).focus_handle(cx).focus(window, cx);
+            app.update(cx, |app, cx| app.open_settings_window(window, cx));
+        });
+        draw(cx);
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert_closed_onto(&app, &b, "Escape after a menu re-open", cx);
+
+        // Closing Settings while it is already closed owes no return, so it
+        // cannot pull the focus out of whatever holds it.
+        cx.update(|_window, cx| {
+            app.update(cx, |app, cx| {
+                app.close_settings(cx);
+                assert!(
+                    !app.pending_settings_return,
+                    "a close of a closed Settings must not queue a return"
+                );
+            });
+        });
+        draw(cx);
+        assert!(is_focused(&b, cx));
+
+        // The originating pane closes while Settings is open: the focus goes
+        // to a live pane of the active workspace instead.
+        open_settings(&app, cx);
+        cx.update(|_window, cx| {
+            app.update(cx, |app, cx| {
+                app.workspaces[0].active_tab_mut().root =
+                    Some(crate::layout::LayoutTree::Leaf(a.clone()));
+                cx.notify();
+            });
+        });
+        drop(b);
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert_closed_onto(&app, &a, "Escape after the origin closed", cx);
+    }
+
+    /// Issue #1096 follow-up: a surface that took the focus over Settings
+    /// keeps it when Settings closes underneath it (the sidebar toggle,
+    /// Cmd+Alt+B, closes Settings from anywhere), and Pane Overview closing
+    /// over a still-open Settings hands the focus to Settings, not to the
+    /// pane Settings hides.
+    #[gpui::test]
+    fn settings_return_leaves_surfaces_opened_over_settings(cx: &mut gpui::TestAppContext) {
+        let (app, _a, b, cx) = split_app(cx);
+        let open_overview = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    app.handle_open_pane_overview(&crate::OpenPaneOverview, window, cx);
+                });
+            });
+            draw(cx);
+            assert!(
+                handle_focused(&app, cx, |app| &app.pane_overview_focus),
+                "Pane Overview takes the focus over Settings"
+            );
+        };
+
+        // Pane Overview closes over an open Settings: back to Settings, which
+        // still answers Escape and still returns to B.
+        open_settings(&app, cx);
+        open_overview(cx);
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.close_pane_overview_and_restore_focus(window, cx)
+            });
+        });
+        draw(cx);
+        assert!(
+            app.read_with(cx, |app, _| app.settings_section.is_some()),
+            "Settings stays open under the overview"
+        );
+        assert!(
+            handle_focused(&app, cx, |app| &app.settings_focus),
+            "an overlay closing over Settings returns the focus to Settings"
+        );
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert_closed_onto(
+            &app,
+            &b,
+            "Escape after Pane Overview closed over Settings",
+            cx,
+        );
+
+        // The sidebar toggle closes Settings under Pane Overview: the
+        // overview keeps the focus, and its own close then lands on B.
+        open_settings(&app, cx);
+        open_overview(cx);
+        cx.update(|_window, cx| {
+            app.update(cx, |app, cx| app.toggle_primary_sidebar_with_chrome(cx));
+        });
+        draw(cx);
+        assert!(app.read_with(cx, |app, _| app.settings_section.is_none()));
+        assert!(
+            handle_focused(&app, cx, |app| &app.pane_overview_focus),
+            "closing Settings must not pull the focus out of Pane Overview"
+        );
+        assert!(!is_focused(&b, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.close_pane_overview_and_restore_focus(window, cx)
+            });
+        });
+        draw(cx);
+        assert!(is_focused(&b, cx), "the overview's own close lands on B");
+
+        // The same for a modal: About opened from the menu over Settings.
+        open_settings(&app, cx);
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| app.open_about_dialog(window, cx));
+        });
+        draw(cx);
+        cx.update(|_window, cx| {
+            app.update(cx, |app, cx| app.toggle_primary_sidebar_with_chrome(cx));
+        });
+        draw(cx);
+        assert!(
+            handle_focused(&app, cx, |app| &app.about_dialog_focus),
+            "closing Settings must not pull the focus out of About"
+        );
+        assert!(!is_focused(&b, cx));
+    }
+
+    /// Issue #1096 follow-up: in Review, with no origin pane, Settings falls
+    /// back to the active Review pane, not the grid's first leaf, which
+    /// `review_track_focus` would turn into a pane switch that drops the
+    /// selected file.
+    #[gpui::test]
+    fn settings_falls_back_to_the_active_review_pane(cx: &mut gpui::TestAppContext) {
+        use gpui::Focusable as _;
+        let (app, cx) = cx.add_window_view(|_window, cx| {
+            let mut app = crate::app::test_support::blank_paneflow_app(cx);
+            hold_session_saves(&mut app);
+            app
+        });
+        let a = make_pane(cx);
+        let b = make_pane(cx);
+        let root = crate::layout::LayoutTree::from_panes_equal(
+            crate::layout::SplitDirection::Vertical,
+            vec![a.clone(), b.clone()],
+        )
+        .expect("two panes make a split");
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.mode = paneflow_config::schema::AppMode::Diff;
+                app.review.layout = Some(root);
+                app.review.active_pane = Some(b.downgrade());
+                // Opened with no pane holding the focus: no origin recorded.
+                window.focus(&app.empty_workspace_focus, cx);
+                app.open_settings_window(window, cx);
+                app.close_settings(cx);
+                app.drain_pending_window_actions(window, cx);
+            });
+            assert!(
+                b.read(cx).focus_handle(cx).is_focused(window),
+                "the active Review pane regains the focus"
+            );
+            assert!(!a.read(cx).focus_handle(cx).is_focused(window));
+        });
     }
 }

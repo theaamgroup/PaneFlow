@@ -72,6 +72,7 @@ pub(crate) fn blank_paneflow_app(cx: &mut gpui::Context<crate::PaneFlowApp>) -> 
         tab_menu_open: None,
         pane_menu_open: None,
         pending_pane_focus: None,
+        pending_settings_return: false,
         agent_sessions: crate::AgentSessionsState {
             sessions_sidebar_open: false,
             sessions_sidebar_animation: None,
