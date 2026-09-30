@@ -95,8 +95,11 @@ impl DiffView {
                     mode.label(),
                     t1.elapsed()
                 );
-                let cwd = path.to_string_lossy();
-                let attribution = crate::agent_sessions::attribution_for_column(&cwd, &bc);
+                // Issue #1094: session attribution is not part of the build.
+                // It runs vendor CLIs with a 30 s budget, so it starts after
+                // these rows land (`request_attribution`), never before. Until
+                // that run lands, the header may briefly show the previous
+                // generation's attribution for this same column and branch.
                 Built::Loaded {
                     rows,
                     file_count: files.len(),
@@ -105,7 +108,6 @@ impl DiffView {
                     row_caches,
                     theme_generation,
                     fingerprint: Box::new(fingerprint),
-                    attribution,
                 }
             })
             .await;
@@ -139,11 +141,9 @@ impl DiffView {
                             row_caches,
                             theme_generation,
                             fingerprint,
-                            attribution,
                         } => {
                             log::debug!("diff: ({branch}) LOADED ({file_count} files)");
                             col.fingerprint = Some(*fingerprint);
-                            col.attribution = attribution;
                             col.loading_mode = None;
                             col.loading_theme_generation = None;
                             match rows {
@@ -172,11 +172,15 @@ impl DiffView {
                             }
                         }
                     };
+                    let loaded = matches!(new_state, ColumnState::Loaded { .. });
                     col.state = new_state;
                     col.recompute_display_for(mode);
                     col.clear_display_mode(mode.other());
                     view.body_menu = None;
                     view.schedule_mode_build(mode.other(), cx);
+                    if loaded {
+                        view.request_attribution(cx);
+                    }
                     cx.notify();
                 });
             });
@@ -481,5 +485,151 @@ mod tests {
         assert_eq!(col.lazy_build_verdict(&build), LazyBuildVerdict::Release);
         assert!(!col.finish_mode_build(&build, rows_for(&build)));
         assert!(col.loading_mode.is_none());
+    }
+
+    fn git(cwd: &std::path::Path, args: &[&str]) {
+        let out = crate::workspace::worktree::git_command()
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn session(agent: crate::agent_sessions::SessionAgent) -> SessionMeta {
+        SessionMeta {
+            agent,
+            session_id: "s".into(),
+            timestamp: "2026-06-01T10:00:00Z".into(),
+            cwd: "/repo".into(),
+            git_branch: "main".into(),
+            summary: None,
+        }
+    }
+
+    /// Run the diff load started last until its rows land and its lazy
+    /// other-mode build finishes. Git runs on the blocking pool, so poll.
+    fn settle_load(view: &gpui::Entity<DiffView>, cx: &mut gpui::TestAppContext) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            cx.run_until_parked();
+            let settled = view.read_with(cx, |view, _| {
+                let col = &view.column;
+                matches!(col.state, ColumnState::Loaded { .. })
+                    && col.loading_theme_generation.is_none()
+                    && col.loading_mode.is_none()
+            });
+            if settled {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "diff rows never landed while session attribution was pending"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Issue #1094: rows land while attribution is still pending, a reload
+    /// does not stack a second run, and a superseded run still applies before
+    /// the newest generation's rerun replaces it.
+    #[gpui::test]
+    fn start_loading_publishes_rows_before_session_attribution_completes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::agent_sessions::SessionAgent;
+        use gpui::AppContext as _;
+
+        super::super::attribution::hold_attribution();
+        let held = super::super::attribution::take_held_attribution;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().to_path_buf();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(
+            &repo,
+            &["config", "user.email", "paneflow-tests@example.invalid"],
+        );
+        git(&repo, &["config", "user.name", "PaneFlow Tests"]);
+        std::fs::write(repo.join("lib.rs"), "alpha\nold\nomega\n").expect("tracked file");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "fixture"]);
+        std::fs::write(repo.join("lib.rs"), "alpha\nnew\nomega\n").expect("edit");
+
+        let subject = ReviewSubject {
+            repo_root: repo.clone(),
+            worktree: DiffWorktree {
+                path: repo,
+                branch: "main".into(),
+                workspace_id: None,
+            },
+        };
+        let view = cx.new(|cx| {
+            let mut view = DiffView::for_test(subject, cx);
+            view.base_ref = "HEAD".into();
+            view
+        });
+        // The git load finishes on the blocking pool and wakes the
+        // foreground task from that thread.
+        cx.executor().allow_parking();
+
+        view.update(cx, |view, cx| view.start_loading(cx));
+        settle_load(&view, cx);
+        let first = held();
+        assert_eq!(first.len(), 1, "landing rows starts one attribution run");
+        view.read_with(cx, |view, _| {
+            let col = &view.column;
+            assert!(col.has_rows_for_mode(ViewMode::Unified));
+            let paths: Vec<&str> = col
+                .disp_anchors_unified
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect();
+            assert_eq!(paths, ["lib.rs"], "rows are on screen before attribution");
+            assert!(col.attribution.is_empty(), "attribution is still pending");
+        });
+
+        // A refresh supersedes that generation while its run is pending. The
+        // rows land again, and no second run starts beside the hung one.
+        view.update(cx, |view, cx| view.start_loading(cx));
+        settle_load(&view, cx);
+        assert!(
+            held().is_empty(),
+            "a reload must not stack attribution runs"
+        );
+
+        // The superseded run finishes: nothing newer is shown, so it applies
+        // (same column and branch), and the newer generation gets a rerun.
+        for tx in first {
+            tx.send(vec![session(SessionAgent::Codex)])
+                .expect("run awaiting");
+        }
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let agents: Vec<SessionAgent> =
+                view.column.attribution.iter().map(|s| s.agent).collect();
+            assert_eq!(
+                agents,
+                [SessionAgent::Codex],
+                "a superseded run must still apply, or reloads starve the header"
+            );
+        });
+        let second = held();
+        assert_eq!(second.len(), 1, "the current generation reruns attribution");
+
+        for tx in second {
+            tx.send(vec![session(SessionAgent::Claude)])
+                .expect("run awaiting");
+        }
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let agents: Vec<SessionAgent> =
+                view.column.attribution.iter().map(|s| s.agent).collect();
+            assert_eq!(agents, [SessionAgent::Claude]);
+        });
     }
 }
