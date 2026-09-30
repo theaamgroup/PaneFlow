@@ -1,7 +1,7 @@
 //! Per-overlay focus origin (issue #584).
 //!
-//! Every overlay that takes the focus (Pane Overview, the pane palette)
-//! records the pane it was opened from, keyed by the overlay, so that:
+//! Every overlay that takes the focus (Pane Overview, the pane palette,
+//! Settings) records the pane it was opened from, keyed by the overlay, so that:
 //!
 //! - its own close hands focus back to that pane, not to the first leaf;
 //! - an inner overlay closed over an outer one (pane palette from pane B,
@@ -9,8 +9,11 @@
 //!   overlay's origin survives for its own close.
 //!
 //! The stack and focus step are tested directly here. Source assertions pin
-//! the wiring in each overlay (`every_overlay_remembers_and_restores_its_own_origin`);
-//! app-level behavioral tests can use `app::test_support::blank_paneflow_app`.
+//! the Pane Overview and pane palette wiring
+//! (`every_overlay_remembers_and_restores_its_own_origin`). Settings is pinned
+//! in `app/settings.rs` instead: `close_settings_is_the_only_settings_exit`
+//! for the wiring, and rendered-app tests (built on
+//! `app::test_support::blank_paneflow_app`) for the behavior.
 
 use gpui::{App, Entity, Focusable as _, WeakEntity, Window};
 
@@ -23,6 +26,11 @@ use crate::pane::Pane;
 pub(crate) enum OverlayKind {
     PaneOverview,
     PanePalette,
+    /// The embedded Settings surface (issue #1096). It closes without a
+    /// `Window`, so its close only sets `pending_settings_return`; the
+    /// window-bearing drain settles it (`return_focus_from_settings`) through
+    /// [`PaneFlowApp::take_overlay_return_pane`].
+    Settings,
 }
 
 /// Insertion-ordered origins, outermost first. One entry per overlay kind:
@@ -119,16 +127,21 @@ impl PaneFlowApp {
         match kind {
             OverlayKind::PaneOverview => self.pane_overview.is_some(),
             OverlayKind::PanePalette => self.pane_palette.is_some(),
+            OverlayKind::Settings => self.settings_section.is_some(),
         }
     }
 
     /// The origins whose overlays are still open. `PaneFlowApp` stays
     /// borrowed immutably here; the callers apply the result to the stack.
     fn open_overlay_kinds(&self) -> Vec<OverlayKind> {
-        [OverlayKind::PaneOverview, OverlayKind::PanePalette]
-            .into_iter()
-            .filter(|kind| self.overlay_is_open(*kind))
-            .collect()
+        [
+            OverlayKind::PaneOverview,
+            OverlayKind::PanePalette,
+            OverlayKind::Settings,
+        ]
+        .into_iter()
+        .filter(|kind| self.overlay_is_open(*kind))
+        .collect()
     }
 
     /// Record the pane `kind` is being opened from. Called BEFORE the overlay
@@ -189,7 +202,8 @@ impl PaneFlowApp {
     /// was opened from, or to the first pane when that pane is gone, or to
     /// the empty-workspace placeholder when the workspace has none (issue
     /// #108: an overlay that closes with nothing focused leaves every global
-    /// chord without a handler). The caller has already cleared the
+    /// chord without a handler). While Settings is open the focus goes back
+    /// to Settings instead (issue #1096). The caller has already cleared the
     /// overlay's own state.
     pub(crate) fn restore_overlay_origin_focus(
         &mut self,
@@ -197,11 +211,38 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut App,
     ) {
+        if self.settings_section.is_some() {
+            // Issue #1096: an overlay closing over Settings (Pane Overview
+            // opened from it) returns to Settings, not to a pane Settings
+            // hides; the unrendered pane would lose the focus to the
+            // placeholder and Settings would stop answering Escape. Its own
+            // origin is still taken, so Settings' entry stays for its close.
+            let _ = self.overlay_origins.take(kind);
+            window.focus(&self.settings_focus, cx);
+            return;
+        }
         let origin = self.take_live_overlay_origin(kind);
         let root = self.focus_return_root();
         if !focus_origin_leaf(origin, root, window, cx) {
             self.focus_first_leaf_or_placeholder(window, cx);
         }
+    }
+
+    /// The pane a closing Settings returns the focus to (issue #1096): take
+    /// `kind`'s origin while it is still a live leaf, else the active Review
+    /// pane in Review, else the first leaf of the active tab. `None` means
+    /// the placeholder.
+    pub(crate) fn take_overlay_return_pane(&mut self, kind: OverlayKind) -> Option<Entity<Pane>> {
+        self.take_live_overlay_origin(kind).or_else(|| {
+            if self.mode == paneflow_config::schema::AppMode::Diff {
+                // The Review grid's own notion of the current pane. Its first
+                // leaf would make `review_track_focus` switch the active
+                // pane, drop the selected file and fold the popovers.
+                self.review_active_pane()
+            } else {
+                self.focus_return_root()?.first_leaf()
+            }
+        })
     }
 
     /// The tree a closing overlay returns the focus to.

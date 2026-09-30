@@ -1473,6 +1473,10 @@ struct PaneFlowApp {
     shortcut_drag: Option<crate::widgets::scrollbar::ScrollDragState>,
     /// Focus handle for the settings page (receives key events during recording/font search).
     settings_focus: FocusHandle,
+    /// Issue #1096: tracked by the Settings rail (Back, the nav search, the
+    /// section rows), a sibling of the panel that tracks `settings_focus`.
+    /// Focus anywhere in it still belongs to Settings when Settings closes.
+    settings_nav_focus: FocusHandle,
     /// Cached list of monospace font family names from the system.
     mono_font_names: Vec<String>,
     /// Whether the font family dropdown is open.
@@ -1510,6 +1514,11 @@ struct PaneFlowApp {
     /// `Window` - and consumed by `drain_pending_window_actions`, the
     /// window-bearing notify observer (issue #211). One-shot.
     pending_pane_focus: Option<Entity<Pane>>,
+    /// Issue #1096: Settings closed (`close_settings`, which has no `Window`)
+    /// and the drain still owes the focus a way back out of it. Consumed by
+    /// `drain_pending_window_actions`, which hands the focus back only while
+    /// the last frame's Settings still holds it. One-shot.
+    pending_settings_return: bool,
     /// US-053: agent-sessions sidebar state (see `AgentSessionsState`).
     agent_sessions: AgentSessionsState,
     /// Ephemeral bottom-right toast.
@@ -1827,6 +1836,11 @@ impl PaneFlowApp {
     fn drain_pending_window_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = self.pending_pane_focus.take() {
             pane.read(cx).focus_handle(cx).focus(window, cx);
+        }
+        // After the pane drain: a pane something else queued has already
+        // taken the focus out of Settings, so the Settings return stands down.
+        if std::mem::take(&mut self.pending_settings_return) {
+            self.return_focus_from_settings(window, cx);
         }
         if std::mem::take(&mut self.pending_palette_focus) {
             window.focus(&self.pane_palette_focus, cx);
@@ -2267,6 +2281,7 @@ impl Render for PaneFlowApp {
                         if self.settings_section.is_some() {
                             return row.child(
                                 div()
+                                    .track_focus(&self.settings_nav_focus)
                                     .flex()
                                     .flex_col()
                                     .h_full()
@@ -2816,6 +2831,7 @@ mod render_side_effect_policy_tests {
         // read, write, or call in render has to go through `self.`.
         for forbidden in [
             "self.pending_pane_focus",
+            "self.pending_settings_return",
             "self.pending_palette_focus",
             "self.pending_palette_launch",
             "self.prune_stale_split_palette",
