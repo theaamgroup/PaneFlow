@@ -346,7 +346,7 @@ fn read_stdout_prefix(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
-    let mut child = cmd.spawn().ok()?;
+    let mut child = paneflow_process::spawn(&mut cmd).ok()?;
     let stdout = child.stdout.take()?;
     let (tx, rx) = std::sync::mpsc::channel();
     if std::thread::Builder::new()

@@ -150,7 +150,7 @@ pub fn load_login_shell_env() {
         });
     }
 
-    let mut child = match cmd.spawn() {
+    let mut child = match paneflow_process::spawn(&mut cmd) {
         Ok(child) => child,
         Err(e) => {
             log::debug!("login-shell env: could not spawn {capture_shell:?}: {e}");

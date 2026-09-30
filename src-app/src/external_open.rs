@@ -65,7 +65,7 @@ pub(crate) async fn run_workspace_command(mut command: Command) -> std::io::Resu
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let result = smol::unblock(move || command.spawn()).await;
+    let result = smol::unblock(move || paneflow_process::spawn(&mut command)).await;
     let mut child = match result {
         Ok(child) => child,
         Err(error) => {
