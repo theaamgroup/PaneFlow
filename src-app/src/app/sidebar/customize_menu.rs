@@ -452,23 +452,40 @@ pub(crate) mod tests {
         use gpui::AppContext;
 
         const SEED: &str = "{\"theme\":\"Keep\"}\n";
+        const PROBE_RAN: &str = "SIDEBAR_FS_PROBE_RAN";
 
         // `PANEFLOW_HOME` is read once per process. Re-exec this test so the
         // child is the first reader and the write cannot land in the real
         // settings file after another test has already resolved the path.
         if std::env::var_os("PANEFLOW_SIDEBAR_FS_PROBE").is_none() {
+            // `--exact` matches the full path without the crate name, so a
+            // bare function name filters out every test and exits 0 (#1109).
+            let module = module_path!();
+            let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+            let filter = format!("{module}::sidebar_show_toggle_does_not_fsync_on_the_caller");
             let home = tempfile::TempDir::new().expect("temp home");
-            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+            let output = std::process::Command::new(std::env::current_exe().expect("test exe"))
                 .args([
-                    "sidebar_show_toggle_does_not_fsync_on_the_caller",
+                    filter.as_str(),
                     "--exact",
                     "--test-threads=1",
+                    "--nocapture",
                 ])
                 .env("PANEFLOW_SIDEBAR_FS_PROBE", "1")
                 .env(paneflow_config::loader::HOME_ENV, home.path())
-                .status()
+                .env("HOME", home.path())
+                .output()
                 .expect("re-exec sidebar probe");
-            assert!(status.success(), "sidebar probe child failed");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "sidebar probe child failed:\n{stdout}\n{stderr}"
+            );
+            assert!(
+                stdout.contains(PROBE_RAN) && stdout.contains("1 passed"),
+                "sidebar probe child did not run `{filter}`:\n{stdout}\n{stderr}"
+            );
             return;
         }
 
@@ -612,5 +629,7 @@ pub(crate) mod tests {
             config_path.is_dir(),
             "the failed write must not replace the config with a file"
         );
+        // The parent asserts this line: a child that ran zero tests exits 0.
+        println!("{PROBE_RAN}");
     }
 }
