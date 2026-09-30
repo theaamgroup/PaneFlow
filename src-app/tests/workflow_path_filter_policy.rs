@@ -113,33 +113,44 @@ fn path_filters(workflow: &str) -> BTreeMap<String, Vec<String>> {
     filters
 }
 
-/// The `orchestrate` outputs named in `macos_check`'s `if:` condition.
-fn gating_outputs(workflow: &str) -> Vec<String> {
+/// The body lines of `job` under `jobs:`, up to the next job.
+fn job_lines<'a>(workflow: &'a str, job: &str) -> Vec<&'a str> {
     let lines: Vec<&str> = workflow.lines().collect();
-    let header = format!("  {GATED_JOB}:");
+    let header = format!("  {job}:");
     let job_start = lines
         .iter()
         .position(|line| line.trim_end() == header)
-        .unwrap_or_else(|| panic!("{WORKFLOW} has no `{GATED_JOB}` job; update this test"));
-    let job: Vec<&str> = lines[job_start + 1..]
+        .unwrap_or_else(|| panic!("{WORKFLOW} has no `{job}` job; update this test"));
+    lines[job_start + 1..]
         .iter()
         .copied()
         .take_while(|line| line.trim().is_empty() || indent(line) > 2)
-        .collect();
-    let if_line = job
+        .collect()
+}
+
+/// The `orchestrate` outputs named in `job`'s `if:` condition. The gate must
+/// be a disjunction of `needs.orchestrate.outputs.<filter> == 'true'` terms,
+/// so the job is selected exactly when one of the returned filters matches.
+fn gating_outputs(workflow: &str, job: &str) -> Vec<String> {
+    let lines = job_lines(workflow, job);
+    let if_line = lines
         .iter()
-        .position(|line| line.trim_start().starts_with("if:"))
-        .unwrap_or_else(|| panic!("`{GATED_JOB}` has no `if:` gate; update this test"));
-    let if_indent = indent(job[if_line]);
-    let condition: String = std::iter::once(job[if_line])
+        .position(|line| line.starts_with("    if:"))
+        .unwrap_or_else(|| panic!("`{job}` has no `if:` gate; update this test"));
+    let if_indent = indent(lines[if_line]);
+    let condition: String = std::iter::once(lines[if_line])
         .chain(
-            job[if_line + 1..]
+            lines[if_line + 1..]
                 .iter()
                 .copied()
                 .take_while(|line| indent(line) > if_indent),
         )
         .collect::<Vec<_>>()
         .join(" ");
+    assert!(
+        !condition.contains("&&") && !condition.contains('!'),
+        "`{job}` gate is not a plain `||` of filter outputs; this test cannot read it: {condition}"
+    );
 
     const PREFIX: &str = "needs.orchestrate.outputs.";
     let mut outputs = Vec::new();
@@ -151,11 +162,62 @@ fn gating_outputs(workflow: &str) -> Vec<String> {
             .collect();
         assert!(
             rest[name.len()..].trim_start().starts_with("== 'true'"),
-            "`{GATED_JOB}` gate uses `{PREFIX}{name}` in a form this test cannot read: {condition}"
+            "`{job}` gate uses `{PREFIX}{name}` in a form this test cannot read: {condition}"
         );
         outputs.push(name);
     }
+    assert!(
+        !outputs.is_empty(),
+        "`{job}` gate names no filter: {condition}"
+    );
     outputs
+}
+
+/// The jobs named in `job`'s `needs:` (inline `[a, b]`, scalar, or block list).
+fn job_needs(workflow: &str, job: &str) -> Vec<String> {
+    let lines = job_lines(workflow, job);
+    let at = lines
+        .iter()
+        .position(|line| line.starts_with("    needs:"))
+        .unwrap_or_else(|| panic!("`{job}` has no `needs:`; update this test"));
+    let value = lines[at].trim_start().trim_start_matches("needs:").trim();
+    let names: Vec<String> = if value.is_empty() {
+        lines[at + 1..]
+            .iter()
+            .map(|line| line.trim())
+            .take_while(|line| line.starts_with("- "))
+            .map(|line| line.trim_start_matches("- ").trim().to_owned())
+            .collect()
+    } else {
+        value
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .collect()
+    };
+    assert!(
+        !names.is_empty(),
+        "`{job}` has an empty `needs:`; update this test"
+    );
+    names
+}
+
+/// Whether a PR that changes only `path` makes `job`'s `if:` gate true.
+fn job_selected(
+    filters: &BTreeMap<String, Vec<String>>,
+    workflow: &str,
+    job: &str,
+    path: &str,
+) -> bool {
+    gating_outputs(workflow, job).iter().any(|gate| {
+        filters
+            .get(gate)
+            .unwrap_or_else(|| panic!("`{job}` is gated on `{gate}`, which is not a path filter"))
+            .iter()
+            .any(|glob| glob_matches(glob, path))
+    })
 }
 
 /// dorny/paths-filter glob semantics for the forms run_tests.yml uses: `**`
@@ -290,7 +352,7 @@ fn every_test_input_selects_the_cargo_test_lane() {
     let root = repo_root();
     let workflow = read(&root.join(WORKFLOW));
     let filters = path_filters(&workflow);
-    let gates = gating_outputs(&workflow);
+    let gates = gating_outputs(&workflow, GATED_JOB);
     assert!(
         gates.iter().any(|gate| gate == "rust"),
         "`{GATED_JOB}` must be gated on the `rust` filter, got {gates:?}"
@@ -350,4 +412,104 @@ fn glob_model_matches_paths_filter_semantics() {
     assert!(!glob_matches("docs/*.md", "docs/sub/a.md"));
     assert!(!glob_matches("CLAUDE.md", "ARCHITECTURE.md"));
     assert!(!glob_matches("src-app/**", "src-application/x.rs"));
+}
+
+/// The render smoke lane captures screenshot evidence of glyph rasterization
+/// that compiles and passes `cargo test` (issue #1093); its hard gate is font
+/// resolution, so an empty-glyph regression shows in the uploaded screenshot
+/// rather than failing the lane. `tests_pass` accepts a skipped lane, so each
+/// of `paths` must make the lane's gate true, and every job it `needs` must be
+/// selected too: a lane whose dependency was skipped is skipped.
+fn assert_paths_select_render_smoke(paths: &[&str]) {
+    const RENDER_JOB: &str = "macos_render_smoke";
+    const AGGREGATOR: &str = "tests_pass";
+    let root = repo_root();
+    let workflow = read(&root.join(WORKFLOW));
+    let filters = path_filters(&workflow);
+
+    let aggregated = job_needs(&workflow, AGGREGATOR);
+    assert!(
+        aggregated.iter().any(|job| job == RENDER_JOB),
+        "`{AGGREGATOR}` no longer needs `{RENDER_JOB}`, so its result is never checked"
+    );
+    let needs = job_needs(&workflow, RENDER_JOB);
+
+    for &path in paths {
+        assert!(
+            root.join(path).is_file(),
+            "{path} no longer exists; update this test"
+        );
+        assert!(
+            job_selected(&filters, &workflow, RENDER_JOB, path),
+            "a PR changing only {path} skips `{RENDER_JOB}` (gated on {:?}) and \
+             `{AGGREGATOR}` accepts the skip; add {path} to the `rendering` filter in {WORKFLOW}",
+            gating_outputs(&workflow, RENDER_JOB)
+        );
+        for need in needs.iter().filter(|need| *need != "orchestrate") {
+            assert!(
+                job_selected(&filters, &workflow, need, path),
+                "a PR changing only {path} skips `{need}`, which `{RENDER_JOB}` needs, so \
+                 `{RENDER_JOB}` is skipped too"
+            );
+            assert!(
+                aggregated.iter().any(|job| job == need),
+                "`{AGGREGATOR}` does not check `{need}`, so its failure would skip \
+                 `{RENDER_JOB}` without failing the aggregate"
+            );
+        }
+    }
+
+    // Negative controls: an unrelated doc, and a crate outside the paint
+    // path, must not select the lane, or the assertions above pass for a gate
+    // that matches everything or a filter widened to `crates/**`.
+    for path in [
+        "docs/user/keybindings.md",
+        "crates/paneflow-config/src/lib.rs",
+    ] {
+        assert!(
+            !job_selected(&filters, &workflow, RENDER_JOB, path),
+            "`{RENDER_JOB}` is selected by a change to {path}; its gate model is broken \
+             or the `rendering` filter is wider than the paint path"
+        );
+    }
+}
+
+/// A GPUI dependency or feature change such as dropping `gpui_platform`'s
+/// `font-kit` feature (see the comment in src-app/Cargo.toml) rides in on the
+/// manifest or lockfile alone, and the toolchain pin and the root manifest's
+/// `[patch.crates-io]` and release profile change the same binary (issue
+/// #1093).
+#[test]
+fn manifest_and_lockfile_changes_select_render_smoke() {
+    assert_paths_select_render_smoke(&[
+        "src-app/Cargo.toml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "rust-toolchain.toml",
+    ]);
+}
+
+/// Every painted cell comes out of the terminal engine (issue #1111):
+/// `ghostty_session.rs` calls the engine crate's `snapshot()` (built on the
+/// `snapshot_ffi`, `snapshot_cell` and `color` modules, which read render
+/// state through the libghostty-sys bindings to the vendored archive), then
+/// `CellMirror::publish` / `content_from_ghostty` translate it into the
+/// neutral `Content` the element paints. A regression anywhere on that chain
+/// can yield blank cells while every crate unit test passes.
+#[test]
+fn engine_crate_changes_select_render_smoke() {
+    assert_paths_select_render_smoke(&[
+        "crates/paneflow-terminal-ghostty/src/snapshot.rs",
+        "crates/paneflow-terminal-ghostty/src/snapshot_ffi.rs",
+        "crates/paneflow-terminal-ghostty/src/snapshot_cell.rs",
+        "crates/paneflow-terminal-ghostty/src/color.rs",
+        "crates/paneflow-terminal-ghostty/Cargo.toml",
+        "src-app/src/terminal/ghostty_session.rs",
+        "crates/paneflow-libghostty-sys/build.rs",
+        "crates/paneflow-libghostty-sys/src/lib.rs",
+        "native/libghostty/manifest.toml",
+        "native/libghostty/bindings.rs",
+        "native/libghostty/prebuilt/aarch64-apple-darwin/lib/libghostty-vt.a",
+        "native/libghostty/prebuilt/aarch64-apple-darwin/include/ghostty/vt.h",
+    ]);
 }
