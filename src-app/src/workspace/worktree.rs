@@ -175,7 +175,11 @@ pub fn is_paneflow_worktree_dir(repo_root: &Path, branch: &str, path: &Path) -> 
 /// and PaneFlow runs no transport. `GIT_CONFIG_GLOBAL` is the user's own
 /// config, and `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` are inert without
 /// `GIT_CONFIG_COUNT`.
-const INHERITED_GIT_ENV: &[&str] = &[
+///
+/// Also the list [`crate::agents::parent_guard::scrub_inherited_git_env_before_threads`]
+/// removes from the whole process at startup (issue #1110), so pane shells,
+/// session-list CLIs, the editor, and launchers start without it too.
+pub(crate) const INHERITED_GIT_ENV: &[&str] = &[
     // Which repository: git dir, work tree, the shared common dir, and the
     // subdirectory prefix git exports to aliases.
     "GIT_DIR",
@@ -213,6 +217,10 @@ const INHERITED_GIT_ENV: &[&str] = &[
 
 /// Drop [`INHERITED_GIT_ENV`] from a spawn that runs git, directly or through
 /// another tool, against a repository PaneFlow opened.
+///
+/// The startup scrub already removed these names from the process, so this is
+/// defence in depth: it keeps a git spawn clean even if a later change sets one
+/// of them in the process environment again.
 pub(crate) fn remove_inherited_git_env(cmd: &mut Command) {
     for name in INHERITED_GIT_ENV {
         cmd.env_remove(name);
