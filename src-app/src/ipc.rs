@@ -923,10 +923,15 @@ fn handle_connection(stream: Stream, request_tx: mpsc::SyncSender<IpcRequest>) {
         let mut suppress_reply = false;
         let response = match serde_json::from_str::<Value>(line) {
             Ok(req) => {
-                let id = req.get("id").cloned();
-                let response_id = id.clone().unwrap_or(Value::Null);
+                let id = req.get("id");
+                // Echo only an id of a valid JSON-RPC type; anything else
+                // cannot be determined, so the (error) reply carries `null`.
+                let response_id = id
+                    .filter(|id| is_valid_request_id(id))
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 suppress_reply = id.is_none();
-                match req.get("method").and_then(|m| m.as_str()) {
+                match request_method(&req) {
                     Some(method) => {
                         let method = method.to_string();
                         let params = req.get("params").cloned().unwrap_or(json!({}));
@@ -981,6 +986,35 @@ fn handle_connection(stream: Stream, request_tx: mpsc::SyncSender<IpcRequest>) {
             break;
         }
     }
+}
+
+/// The method of a valid JSON-RPC 2.0 request envelope: an object carrying
+/// `"jsonrpc": "2.0"`, a string `method`, an `id` (when present) that is a
+/// string, number or null, and `params` (when present) that is an object or
+/// array. `None` for anything else, which the caller answers with `-32600
+/// Invalid Request` before any dispatch (issue #1098). An invalid envelope is
+/// never a notification, so it is answered even without an `id`. The reply
+/// echoes an `id` of a valid type and is `null` otherwise, the JSON-RPC 2.0
+/// rule for an id that cannot be determined.
+fn request_method(req: &Value) -> Option<&str> {
+    if req.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return None;
+    }
+    if req.get("id").is_some_and(|id| !is_valid_request_id(id)) {
+        return None;
+    }
+    if req
+        .get("params")
+        .is_some_and(|params| !(params.is_object() || params.is_array()))
+    {
+        return None;
+    }
+    req.get("method").and_then(Value::as_str)
+}
+
+/// JSON-RPC 2.0: a request id is a string, a number or null.
+fn is_valid_request_id(id: &Value) -> bool {
+    matches!(id, Value::String(_) | Value::Number(_) | Value::Null)
 }
 
 /// Serialize a JSON-RPC value as a newline-terminated frame and send it
@@ -1449,6 +1483,130 @@ mod peer_closed_tests {
         drop(reader);
         drop(client);
         handler.join().expect("handler thread");
+    }
+
+    /// Issue #1098: a frame without `"jsonrpc":"2.0"`, with an `id` that is
+    /// not a string/number/null, or with `params` that is not an object/array
+    /// is not a JSON-RPC 2.0 request. It gets `-32600 Invalid Request` before
+    /// any dispatch, even with no `id` (an invalid envelope is not a
+    /// notification), and an invalid-type id is answered as `null`. Valid 2.0
+    /// pings on the same connection still succeed.
+    #[test]
+    fn invalid_jsonrpc_version_is_rejected_before_dispatch() {
+        use serde_json::Value;
+        use std::io::{BufRead, BufReader};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bad-version.sock");
+        let name = path
+            .as_path()
+            .to_fs_name::<GenericFilePath>()
+            .expect("socket name");
+        let listener = ListenerOptions::new()
+            .name(name)
+            .create_sync()
+            .expect("bind listener");
+
+        let client = UnixStream::connect(&path).expect("connect");
+        let server = listener.accept().expect("accept");
+        let (request_tx, request_rx) = mpsc::sync_channel::<IpcRequest>(8);
+        let handler = std::thread::spawn(move || handle_connection(server, request_tx));
+        // Stand-in for the GPUI thread: record and answer anything dispatched.
+        let gpui = std::thread::spawn(move || {
+            let mut methods = Vec::new();
+            for request in request_rx {
+                methods.push(request.method.clone());
+                let _ = request.response_tx.send(json!({"ok": true}));
+            }
+            methods
+        });
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
+        let mut writer = client.try_clone().expect("clone");
+        let mut reader = BufReader::new(client);
+        let mut round_trip = |frame: &str| -> Value {
+            writer
+                .write_all(format!("{frame}\n").as_bytes())
+                .expect("write request");
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read reply");
+            serde_json::from_str(&line).expect("reply parses")
+        };
+
+        let invalid = [
+            (r#"{"method":"surface.list","params":{},"id":1}"#, json!(1)),
+            (
+                r#"{"jsonrpc":2,"method":"surface.list","params":{},"id":2}"#,
+                json!(2),
+            ),
+            (
+                r#"{"jsonrpc":"1.0","method":"system.ping","id":3}"#,
+                json!(3),
+            ),
+            (
+                r#"{"jsonrpc":"1.0","method":"surface.list","params":{},"id":4}"#,
+                json!(4),
+            ),
+            (
+                r#"{"jsonrpc":"1.0","method":"ai.stop","params":{}}"#,
+                Value::Null,
+            ),
+            ("5", Value::Null),
+            // An id of an invalid type is not echoed back.
+            (
+                r#"{"jsonrpc":"1.0","method":"x","id":{"a":1}}"#,
+                Value::Null,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"surface.list","id":true}"#,
+                Value::Null,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"surface.list","params":{},"id":[7]}"#,
+                Value::Null,
+            ),
+            // `params`, when present, must be an object or an array.
+            (
+                r#"{"jsonrpc":"2.0","method":"surface.list","params":5,"id":8}"#,
+                json!(8),
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"surface.list","params":"x","id":9}"#,
+                json!(9),
+            ),
+            (
+                r#"{"jsonrpc":"2.0","method":"ai.stop","params":null}"#,
+                Value::Null,
+            ),
+        ];
+        for (frame, id) in invalid {
+            let reply = round_trip(frame);
+            assert_eq!(reply["jsonrpc"], "2.0", "{frame} -> {reply}");
+            assert_eq!(reply["error"]["code"], -32600, "{frame} -> {reply}");
+            assert_eq!(reply["id"], id, "{frame} -> {reply}");
+            assert!(reply.get("result").is_none(), "{frame} -> {reply}");
+        }
+
+        let pong = round_trip(r#"{"jsonrpc":"2.0","method":"system.ping","id":6}"#);
+        assert_eq!(pong["result"]["pong"], true, "{pong}");
+        assert_eq!(pong["id"], 6);
+        // A string or null id and array params are valid envelopes.
+        let pong = round_trip(r#"{"jsonrpc":"2.0","method":"system.ping","params":[],"id":"s"}"#);
+        assert_eq!(pong["result"]["pong"], true, "{pong}");
+        assert_eq!(pong["id"], "s");
+        let pong = round_trip(r#"{"jsonrpc":"2.0","method":"system.ping","id":null}"#);
+        assert_eq!(pong["result"]["pong"], true, "{pong}");
+        assert_eq!(pong["id"], Value::Null);
+
+        drop(writer);
+        drop(reader);
+        handler.join().expect("handler thread");
+        let dispatched = gpui.join().expect("gpui stand-in");
+        assert!(
+            dispatched.is_empty(),
+            "invalid envelopes reached GPUI dispatch: {dispatched:?}"
+        );
     }
 }
 
