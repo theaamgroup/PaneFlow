@@ -558,8 +558,17 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// Printed by `lease_namespace_child` after its last assertion. A child
+    /// whose filter matched nothing, or that skipped its body, exits 0 too.
+    const LEASE_NAMESPACE_CHILD_RAN: &str = "LEASE_NAMESPACE_CHILD_RAN";
+
     #[test]
     fn leases_share_resource_across_paneflow_homes() {
+        // `--exact` matches the path without the crate name; derive it so a
+        // module rename cannot leave the filter matching zero tests (#1117).
+        let module = module_path!();
+        let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+        let filter = format!("{module}::lease_namespace_child");
         let resource = unique_resource("shared-home");
         let mut holder = ConfigLease::acquire(&resource).unwrap();
         holder.mark_created_with("shared ownership").unwrap();
@@ -572,11 +581,7 @@ mod tests {
         ] {
             let mut child = std::process::Command::new(std::env::current_exe().unwrap());
             child
-                .args([
-                    "--exact",
-                    "lease::tests::lease_namespace_child",
-                    "--nocapture",
-                ])
+                .args(["--exact", filter.as_str(), "--nocapture"])
                 .env("PANEFLOW_TEST_LEASE_RESOURCE", &resource)
                 .env_remove("PANEFLOW_HOME");
             if let Some(home) = home {
@@ -587,11 +592,15 @@ mod tests {
         let mut last = holder.try_take_last().unwrap().unwrap();
         assert!(last.take_created().unwrap());
         for output in outputs {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(
                 output.status.success(),
-                "child lease check failed: {}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+                "child lease check failed:\n{stdout}\n{stderr}"
+            );
+            assert!(
+                stdout.contains(LEASE_NAMESPACE_CHILD_RAN) && stdout.contains("1 passed"),
+                "child did not run `{filter}` to completion:\n{stdout}\n{stderr}"
             );
         }
     }
@@ -617,6 +626,8 @@ mod tests {
             lease.try_take_last().unwrap().is_none(),
             "the parent still owns the resource"
         );
+        // The parent requires this line from every child.
+        println!("{LEASE_NAMESPACE_CHILD_RAN}");
     }
 
     #[test]
