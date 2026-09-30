@@ -50,7 +50,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 │   ├── tab_worktree.rs                ← per-tab worktree binding (#347): cached checkout git state, branch/worktree
 │   │                                     listings, bind_tab_to_branch (prepare_branch_checkout off-thread)
 │   └── workspace_ops/                 ← create/close/select/rename/reveal, focus, layout, tab
-├── cli/                               ← CLI commands over the IPC socket
+├── cli/                               ← CLI verbs: IPC socket clients, plus offline self-test
 ├── window_chrome/
 │   ├── shell.rs                       ← native macOS window content shell
 │   ├── macos_backdrop.rs              ← native material behind sidebar/title bar
