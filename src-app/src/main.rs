@@ -1473,6 +1473,10 @@ struct PaneFlowApp {
     shortcut_drag: Option<crate::widgets::scrollbar::ScrollDragState>,
     /// Focus handle for the settings page (receives key events during recording/font search).
     settings_focus: FocusHandle,
+    /// Issue #1096: tracked by the Settings rail (Back, the nav search, the
+    /// section rows), a sibling of the panel that tracks `settings_focus`.
+    /// Focus anywhere in it still belongs to Settings when Settings closes.
+    settings_nav_focus: FocusHandle,
     /// Cached list of monospace font family names from the system.
     mono_font_names: Vec<String>,
     /// Whether the font family dropdown is open.
@@ -2277,6 +2281,7 @@ impl Render for PaneFlowApp {
                         if self.settings_section.is_some() {
                             return row.child(
                                 div()
+                                    .track_focus(&self.settings_nav_focus)
                                     .flex()
                                     .flex_col()
                                     .h_full()

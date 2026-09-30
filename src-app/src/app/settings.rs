@@ -260,8 +260,9 @@ impl PaneFlowApp {
     /// The focus goes back to the pane Settings was opened from, then to the
     /// pane the focus would return to anyway (the active Review pane in
     /// Review, else the active tab's first pane), then to the empty-workspace
-    /// placeholder. Only while Settings still holds the focus (read from the
-    /// last frame, which still contains it), the placeholder holds it, or
+    /// placeholder. Only while Settings (its panel or its rail) still holds
+    /// the focus (read from the last frame, which still contains it), the
+    /// placeholder holds it, or
     /// nothing does: a surface that took the focus over Settings (Pane
     /// Overview, About, the sessions rail) keeps it. The origin is taken either way so it never outlives the
     /// close.
@@ -276,10 +277,15 @@ impl PaneFlowApp {
             return;
         }
         let target = self.take_overlay_return_pane(OverlayKind::Settings);
-        // The app root tracks the placeholder handle, so a click on the
-        // Settings rail (the Back control, the title-bar toggle) lands the
-        // focus there before the close runs: that is Settings' own focus too.
+        // Settings is two sibling trees: the panel (`settings_focus`) and the
+        // rail (`settings_nav_focus`: Back, the nav search, the section rows).
+        // The sidebar toggle swallows its mouse-down, so its close finds the
+        // focus still inside Settings. The app root tracks the placeholder
+        // handle, which holds the focus when Settings was opened from an empty
+        // workspace or after a click on the title-bar strip: that counts as
+        // Settings' own focus too.
         let settings_holds_focus = self.settings_focus.contains_focused(window, cx)
+            || self.settings_nav_focus.contains_focused(window, cx)
             || self.empty_workspace_focus.is_focused(window)
             || window.focused(cx).is_none();
         if !settings_holds_focus {
@@ -1207,6 +1213,49 @@ mod tests {
         cx.simulate_keystrokes("escape");
         draw(cx);
         assert_closed_onto(&app, &b, "Escape after a menu re-open", cx);
+
+        // Escape in the rail's nav search field: the first clears the query,
+        // the second closes Settings. The field is drawn in the Settings rail,
+        // outside the panel that tracks `settings_focus`.
+        open_settings(&app, cx);
+        let nav_search = app.read_with(cx, |app, cx| {
+            app.settings_search_input.read(cx).focus_handle.clone()
+        });
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.settings_search_input
+                    .update(cx, |input, cx| input.set_value("theme", cx));
+            });
+            window.focus(&nav_search, cx);
+        });
+        draw(cx);
+        assert!(cx.update(|window, _| nav_search.is_focused(window)));
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert!(
+            app.read_with(cx, |app, _| app.settings_section.is_some()),
+            "the first Escape only clears the nav query"
+        );
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert_closed_onto(&app, &b, "Escape in the nav search field", cx);
+
+        // Escape in the Shortcuts page's search field, inside the panel.
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_settings_at(SettingsSection::Shortcuts, window, cx);
+            });
+        });
+        draw(cx);
+        let shortcut_search = app.read_with(cx, |app, cx| {
+            app.shortcut_search_input.read(cx).focus_handle.clone()
+        });
+        cx.update(|window, cx| window.focus(&shortcut_search, cx));
+        draw(cx);
+        assert!(cx.update(|window, _| shortcut_search.is_focused(window)));
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert_closed_onto(&app, &b, "Escape in the Shortcuts search field", cx);
 
         // Closing Settings while it is already closed owes no return, so it
         // cannot pull the focus out of whatever holds it.

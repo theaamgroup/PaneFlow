@@ -748,8 +748,10 @@ returns to the pane Settings was opened from; when that pane is gone, to the
 active Review pane in Review or the active tab's first pane otherwise; with
 no pane, to the empty-workspace placeholder. Choosing **PaneFlow ▸
 Settings…** again while Settings is open keeps the original pane. The return
-happens only while Settings (or the placeholder, which a click on the
-Settings rail focuses) still holds the focus: a surface that took it over
+happens only while Settings still holds the focus, in its page or anywhere
+in its rail (the nav search included), or the placeholder does (Settings
+opened from an empty workspace, or a click on the title-bar strip; the
+sidebar toggle swallows its click and moves no focus): a surface that took it over
 Settings, such as Pane Overview, About, or the sessions rail, keeps it when
 the sidebar toggle closes Settings underneath. `close_settings` has no
 `Window`, so it sets `pending_settings_return` and the window-bearing drain

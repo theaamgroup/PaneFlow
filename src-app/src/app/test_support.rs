@@ -59,6 +59,7 @@ pub(crate) fn blank_paneflow_app(cx: &mut gpui::Context<crate::PaneFlowApp>) -> 
         shortcut_list: crate::settings::tabs::shortcuts::new_shortcut_list_state(),
         shortcut_drag: None,
         settings_focus: cx.focus_handle(),
+        settings_nav_focus: cx.focus_handle(),
         mono_font_names: Vec::new(),
         font_dropdown_open: false,
         font_search: String::new(),
