@@ -976,8 +976,9 @@ impl TerminalState {
         self.child_pid = spawned.child_pid;
         self.child_proc_start = crate::agents::parent_guard::pid_start_time(spawned.child_pid);
         self.current_cwd = Some(spawned.cwd.to_string_lossy().into_owned());
-        // The guard dups the fd again for its own child (FD_CLOEXEC cleared),
-        // so this app-owned copy stays ours for `Drop`'s session snapshot.
+        // The guard dups the fd again for its own child (FD_CLOEXEC cleared
+        // in that child only, #1123), so this app-owned copy stays ours for
+        // `Drop`'s session snapshot.
         #[cfg(all(unix, not(test)))]
         {
             self.pty_guard = crate::agents::parent_guard::spawn_pty_guard(
@@ -5035,6 +5036,79 @@ mod tests {
         assert!(!state.title.contains('\n'));
         assert!(!state.title.contains('\u{0007}'));
         assert!(state.title.ends_with('…'));
+    }
+
+    /// Issue #1123: a pane's PTY master reaches no child PaneFlow spawns
+    /// outside the PTY. The app's copy was a plain `dup`, which clears
+    /// close-on-exec, so every guard, git probe, and editor started while the
+    /// pane was open held its master and kept the PTY allocated after the pane
+    /// closed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pane_pty_master_is_not_inherited_by_spawned_children() {
+        use crate::agents::parent_guard::{KillOnDrop, vnode_devices_held_by};
+
+        let (mut state, pending) = TerminalState::new_pending(80, 24);
+        let params = SpawnParams {
+            shell: "/bin/sh".into(),
+            shell_quoting: ShellQuoting::Posix,
+            extra_args: Vec::new(),
+            env: std::collections::HashMap::from([
+                ("TERM".into(), "xterm-256color".into()),
+                ("PATH".into(), "/usr/bin:/bin".into()),
+            ]),
+            cwd: std::env::temp_dir(),
+            cols: 80,
+            rows: 24,
+            profile: TerminalSurfaceProfile::Normal,
+        };
+        let spawned = state
+            .ghostty_session()
+            .start(pending.ghostty, params, None, 1_000)
+            .expect("spawn a PTY shell");
+        state.promote_ghostty(spawned);
+        let master = state
+            .pty_master_fd
+            .as_ref()
+            .expect("promotion keeps the app-owned master dup")
+            .as_raw_fd();
+
+        // SAFETY: F_GETFD only reads the flags of a descriptor the state owns.
+        let flags = unsafe { libc::fcntl(master, libc::F_GETFD) };
+        let own = vnode_devices_held_by(std::process::id() as i32);
+        let device = own
+            .iter()
+            .find(|(fd, _)| *fd == master)
+            .map(|(_, rdev)| *rdev)
+            .expect("the app's master copy is listed");
+
+        let child = KillOnDrop(
+            paneflow_process::spawn(
+                std::process::Command::new("/bin/sleep")
+                    .arg("30")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null()),
+            )
+            .expect("spawn /bin/sleep"),
+        );
+        let held = vnode_devices_held_by(child.0.id() as i32);
+
+        let leaked: Vec<i32> = held
+            .iter()
+            .filter(|(_, rdev)| *rdev == device)
+            .map(|(fd, _)| *fd)
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "a plain child holds the pane's PTY master (device {device:#x}) at fds {leaked:?}"
+        );
+        assert!(flags >= 0, "F_GETFD on the app's master copy");
+        assert_ne!(
+            flags & libc::FD_CLOEXEC,
+            0,
+            "the app's copy of the PTY master must be close-on-exec"
+        );
     }
 
     /// The fork's teardown contract on the Ghostty host (#184 decision 3):

@@ -755,29 +755,26 @@ fn spawn_process_group_guard_with_mode(
         return None;
     };
 
-    let inherited_master = session_pty_master_fd.and_then(|fd| {
-        // SAFETY: dup creates a guard-dedicated descriptor and clears
-        // FD_CLOEXEC so Command's child inherits it across exec.
-        let duplicate = unsafe { libc::dup(fd) };
-        if duplicate < 0 {
-            log::warn!(
-                "parent_guard: cannot duplicate PTY master for pgid {}; foreground hard-death guard unavailable",
-                group.pgid
-            );
-            None
-        } else {
-            // SAFETY: this is the only owner of the fresh duplicate in the
-            // parent. It is dropped immediately after `spawn` returns.
-            Some(unsafe { OwnedFd::from_raw_fd(duplicate) })
-        }
-    });
+    let mut cmd = Command::new(exe);
+    // The guard's own copy of the master. The parent's copy is dropped when
+    // this function returns, right after `spawn`.
+    let inherited_master =
+        session_pty_master_fd.and_then(|fd| match pass_pty_master_to_child(&mut cmd, fd) {
+            Ok(duplicate) => Some(duplicate),
+            Err(err) => {
+                log::warn!(
+                    "parent_guard: cannot duplicate PTY master for pgid {}: {err}; foreground hard-death guard unavailable",
+                    group.pgid
+                );
+                None
+            }
+        });
     let mode_arg = match &inherited_master {
         Some(fd) => format!("session:{}", fd.as_raw_fd()),
         None if session_pty_master_fd.is_some() => "session:none".to_string(),
         None => "frozen".to_string(),
     };
 
-    let mut cmd = Command::new(exe);
     cmd.arg(PTY_GUARD_SUBCOMMAND)
         .arg(std::process::id().to_string())
         .arg(group.pgid.to_string())
@@ -813,6 +810,135 @@ fn spawn_process_group_guard_with_mode(
             None
         }
     }
+}
+
+/// Give the child `cmd` spawns its own copy of `pty_master_fd`, at the
+/// number of the returned descriptor, and give it to no other child
+/// (issue #1123).
+///
+/// The parent's copy is close-on-exec from the moment it exists
+/// (`F_DUPFD_CLOEXEC`), so a child another thread spawns first never
+/// inherits it. Only the forked child clears the flag, in `pre_exec`, just
+/// before its exec. Drop the returned descriptor once `spawn` returns.
+///
+/// A `pre_exec` closure makes std `fork` and `exec` this child instead of
+/// using `posix_spawn`. The closure runs in the fork of a multi-threaded
+/// process, so it must stay async-signal-safe: no allocation, locks, or
+/// logging.
+#[cfg(unix)]
+fn pass_pty_master_to_child(cmd: &mut Command, pty_master_fd: i32) -> std::io::Result<OwnedFd> {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: fcntl only reads `pty_master_fd`. F_DUPFD_CLOEXEC returns a
+    // fresh descriptor at 3 or above (never a stdio slot), or -1.
+    let duplicate = unsafe { libc::fcntl(pty_master_fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: this is the only owner of the fresh duplicate in the parent.
+    let duplicate = unsafe { OwnedFd::from_raw_fd(duplicate) };
+    let inherited = duplicate.as_raw_fd();
+    // SAFETY: fcntl is async-signal-safe, and the closure touches only the
+    // child's copy of the descriptor, which stays open until exec.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::fcntl(inherited, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(duplicate)
+}
+
+/// A test child that is killed and reaped however the test ends, so a failed
+/// assertion never leaves it running.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) struct KillOnDrop(pub(crate) std::process::Child);
+
+#[cfg(all(test, target_os = "macos"))]
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        // Already reaped: killing now could signal a reused pid.
+        if matches!(self.0.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Device numbers of the vnode descriptors `pid` holds, as `(fd, rdev)`.
+///
+/// A PTY master's `rdev` names its pair, so this shows which process still
+/// holds a pane's master (issue #1123), the way `lsof` does.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn vnode_devices_held_by(pid: i32) -> Vec<(i32, u32)> {
+    /// `struct proc_fileinfo` from `<sys/proc_info.h>`, for layout only.
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct ProcFileInfo {
+        fi_openflags: u32,
+        fi_status: u32,
+        fi_offset: libc::off_t,
+        fi_type: i32,
+        fi_guardflags: u32,
+    }
+    /// `struct vnode_fdinfo` from `<sys/proc_info.h>`.
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct VnodeFdInfo {
+        pfi: ProcFileInfo,
+        pvi: libc::vnode_info,
+    }
+    const PROC_PIDFDVNODEINFO: i32 = 1;
+
+    let entry = std::mem::size_of::<libc::proc_fdinfo>();
+    // SAFETY: a null buffer asks only for the size of the descriptor table.
+    let needed =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    assert!(needed > 0, "PROC_PIDLISTFDS size for pid {pid}");
+    // Headroom for descriptors opened between the two calls.
+    let mut fds: Vec<libc::proc_fdinfo> = Vec::with_capacity(needed as usize / entry + 64);
+    // SAFETY: the buffer holds `capacity` entries and the kernel writes at
+    // most the byte count it is given.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            fds.as_mut_ptr().cast(),
+            (fds.capacity() * entry) as i32,
+        )
+    };
+    assert!(written > 0, "PROC_PIDLISTFDS for pid {pid}");
+    // SAFETY: the kernel initialized `written` bytes of whole entries.
+    unsafe { fds.set_len(written as usize / entry) };
+
+    let mut devices = Vec::new();
+    for fd in fds {
+        if fd.proc_fdtype != libc::PROX_FDTYPE_VNODE as u32 {
+            continue;
+        }
+        let mut info = std::mem::MaybeUninit::<VnodeFdInfo>::zeroed();
+        let size = std::mem::size_of::<VnodeFdInfo>() as i32;
+        // SAFETY: `info` is a writable buffer of exactly `size` bytes.
+        let got = unsafe {
+            libc::proc_pidfdinfo(
+                pid,
+                fd.proc_fd,
+                PROC_PIDFDVNODEINFO,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if got == size {
+            // SAFETY: the kernel filled the whole struct.
+            let info = unsafe { info.assume_init() };
+            devices.push((fd.proc_fd, info.pvi.vi_stat.vst_rdev));
+        }
+    }
+    devices
 }
 
 #[cfg(unix)]
@@ -990,6 +1116,93 @@ mod tests {
     /// - dash's `wait` blocks signals, checks for a pending one, and only then
     ///   suspends, so it has neither problem: the trap runs at once.
     const FIXTURE_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Issue #1123: the guard's copy of the PTY master reaches the guard at
+    /// the number it is told, and no child spawned while that copy exists.
+    /// The copy was a plain `dup`, inheritable by any child another thread
+    /// spawned before the guard's `spawn` returned.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn guard_pty_master_copy_reaches_only_the_guard_child() {
+        let mut master_fd = -1;
+        let mut slave_fd = -1;
+        // SAFETY: openpty initializes both fd outputs using default terminal
+        // settings when termios/winsize are null.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master_fd,
+                    &mut slave_fd,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        // SAFETY: openpty returned two fresh descriptors this test owns.
+        let (master, _slave) = unsafe {
+            (
+                OwnedFd::from_raw_fd(master_fd),
+                OwnedFd::from_raw_fd(slave_fd),
+            )
+        };
+        // As portable-pty leaves the engine's copy.
+        // SAFETY: F_SETFD only changes this test's own descriptors' flags.
+        unsafe {
+            libc::fcntl(master_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(slave_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+        let device = vnode_devices_held_by(std::process::id() as i32)
+            .into_iter()
+            .find(|(fd, _)| *fd == master.as_raw_fd())
+            .map(|(_, rdev)| rdev)
+            .expect("the test's master is listed");
+
+        let sleeper = || {
+            let mut command = Command::new("/bin/sleep");
+            command
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            command
+        };
+        let mut guard_command = sleeper();
+        let guard_copy = pass_pty_master_to_child(&mut guard_command, master.as_raw_fd())
+            .expect("duplicate the master for the guard");
+        let guard_fd = guard_copy.as_raw_fd();
+        // A spawn on another thread lands between the duplicate and the
+        // guard's own spawn.
+        let bystander =
+            KillOnDrop(paneflow_process::spawn(&mut sleeper()).expect("spawn bystander"));
+        let guard =
+            KillOnDrop(paneflow_process::spawn(&mut guard_command).expect("spawn guard stand-in"));
+        drop(guard_copy);
+
+        let bystander_held = vnode_devices_held_by(bystander.0.id() as i32);
+        let guard_held = vnode_devices_held_by(guard.0.id() as i32);
+
+        let leaked: Vec<i32> = bystander_held
+            .iter()
+            .filter(|(_, rdev)| *rdev == device)
+            .map(|(fd, _)| *fd)
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "a child spawned while the guard's copy existed holds the master at fds {leaked:?}"
+        );
+        let guard_masters: Vec<i32> = guard_held
+            .iter()
+            .filter(|(_, rdev)| *rdev == device)
+            .map(|(fd, _)| *fd)
+            .collect();
+        assert_eq!(
+            guard_masters,
+            vec![guard_fd],
+            "the guard holds its master exactly at the number its argument names"
+        );
+    }
 
     #[test]
     fn failed_session_member_query_skips_only_exit_or_positive_session_change() {
