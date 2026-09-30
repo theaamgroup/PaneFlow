@@ -29,6 +29,8 @@ impl PaneFlowApp {
                 squircle_skin(
                     div()
                         .id("settings-back")
+                        // Issue #1096: the return-focus regression clicks it.
+                        .debug_selector(|| "settings-back".into())
                         .role(Role::Button)
                         .aria_label("Back to the app")
                         .mx(px(8.))
