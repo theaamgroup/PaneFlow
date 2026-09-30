@@ -179,7 +179,8 @@ PaneFlow has two modes and one takeover surface.
 | Settings | Back to the app, a search field, three nav groups | One page at a time, centered column, 26 px heading | macOS menu bar, **PaneFlow ▸ Settings…** |
 
 Settings is not a window. It replaces the main panel and reuses the sidebar
-width for its navigation, so the shell never changes shape.
+width for its navigation, so the shell never changes shape. Leaving it hands
+the keyboard back to the pane it was opened from (5.5).
 
 `review_enabled` defaults to `true`, but it is only half the gate.
 `review_is_viable()` is `review_view_enabled() && (a restored Review layout ||
@@ -740,6 +741,23 @@ Appearance, Keyboard Shortcuts), **Terminal** (Terminal, Workspaces), and
 **Integrations** (AI Agent). Group eyebrows are 11 px Semibold;
 in-page eyebrows are 11 px Normal `muted`.
 
+Settings takes the keyboard focus when it opens and gives it back when it
+closes (issue #1096). Every way out (Escape, `Back to the app`, Escape in
+either search field, the sidebar toggle) runs `close_settings`. The focus
+returns to the pane Settings was opened from; when that pane is gone, to the
+active Review pane in Review or the active tab's first pane otherwise; with
+no pane, to the empty-workspace placeholder. Choosing **PaneFlow ▸
+Settings…** again while Settings is open keeps the original pane. The return
+happens only while Settings still holds the focus, in its page or anywhere
+in its rail (the nav search included), or the placeholder does (Settings
+opened from an empty workspace, or a click on the title-bar strip; the
+sidebar toggle swallows its click and moves no focus): a surface that took it over
+Settings, such as Pane Overview, About, or the sessions rail, keeps it when
+the sidebar toggle closes Settings underneath. `close_settings` has no
+`Window`, so it sets `pending_settings_return` and the window-bearing drain
+settles it before the next frame paints. Settings is the
+`OverlayKind::Settings` origin described in 7.4.
+
 Pages are a centered column with a 26 px Semibold heading and cards that share
 `PANE_CARD_RADIUS` with the pane card, painted as a `squircle_fill` absolute
 child rather than a `bg()`, borderless, with `hairline` row separators. Rows
@@ -1080,16 +1098,19 @@ A new overlay MUST at minimum dismiss on Escape, and MUST confirm on Enter
 when it has a single default action. A new list surface SHOULD be
 arrow-navigable.
 
-This paragraph covers the two origin-tracked overlays, the `OverlayKind`
-variants in `app/overlay_origin.rs`: Pane Overview and the pane palette. The
+This paragraph covers the origin-tracked surfaces, the `OverlayKind`
+variants in `app/overlay_origin.rs`: the two overlays, Pane Overview and the
+pane palette, and Settings, whose own return rules are in 5.5. The
 modal dialogs (About, System Info, close confirm, Work
 Review), and the diff branch menu keep their own
 restore paths and are not part of it. Dismissing a tracked overlay (Escape,
 an outside click on its scrim, its toggle chord, or a committed choice)
 returns the focus to the pane it was opened from, then to the workspace's
 first pane when that pane is gone, then to the empty-workspace placeholder.
-Each tracked overlay keeps its own origin: one opened over another inherits the outer
-overlay's origin, and closing the inner one leaves the outer one's in place,
+An overlay dismissed while Settings is open (Pane Overview opened over it)
+returns the focus to Settings instead, because Settings hides the panes.
+Each tracked surface keeps its own origin: one opened over another inherits the outer
+surface's origin, and closing the inner one leaves the outer one's in place,
 so the focus lands on the same pane whichever closes last. An activation that
 teleports (a Pane Overview card)
 lands on its target instead. A new cockpit overlay of this kind (a focus-taking surface over the

@@ -132,6 +132,34 @@ impl PaneFlowApp {
 
     pub(crate) fn review_show_subject(&mut self, subject: ReviewSubject, cx: &mut Context<Self>) {
         self.review.dismiss_popovers();
+        // Issue #1095: a pick over a held grid first retries its probes.
+        // A grid that comes back is shown as saved, not retargeted. One that
+        // is still unconfirmed is replaced by this pick, with a toast, so an
+        // unmounted drive cannot trap Review on the empty state.
+        if self.review.layout.is_none()
+            && let Some(held) = self.review.retained_layout.clone()
+        {
+            self.restore_review_layout(&held, cx);
+            if self.review.layout.is_some() {
+                if let Some(pane) = self.review_pane_for_subject(&subject, cx) {
+                    self.review.active_pane = Some(pane.downgrade());
+                }
+                self.pending_pane_focus = self.review_active_pane();
+                self.save_session(cx);
+                cx.notify();
+                return;
+            }
+            if self.review.retained_layout.take().is_some() {
+                let message = match self.review.unconfirmed_checkout.take() {
+                    Some(path) => format!(
+                        "Saved Review grid replaced; {} did not answer",
+                        path.display()
+                    ),
+                    None => "Saved Review grid replaced".to_string(),
+                };
+                self.show_toast(message, cx);
+            }
+        }
         if let Some(pane) = self.review_pane_for_subject(&subject, cx) {
             self.review.reveal_pane(&pane, cx);
             self.review.active_pane = Some(pane.downgrade());
@@ -445,7 +473,7 @@ mod tests {
             .match_indices("self.review.active_pane = ")
             .map(|(at, _)| src[at..].lines().next().unwrap_or_default())
             .collect();
-        assert_eq!(writes.len(), 8, "write sites moved: {writes:?}");
+        assert_eq!(writes.len(), 9, "write sites moved: {writes:?}");
         for write in &writes {
             assert!(
                 write.contains(".downgrade())") || write.contains("map(Entity::downgrade)"),
