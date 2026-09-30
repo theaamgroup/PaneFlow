@@ -34,6 +34,10 @@ paneflow-process.workspace = true
 # Test oracle for the Codex `config.toml` scanner (#1053). Dev-only, so the
 # size-capped release helper does not link a TOML parser.
 toml = "1"
+# Issue #1127: the pipe-window hook, to hold `spawn_piped`'s window open
+# while the interrupt Stop hook spawns. Dev-only, so the shipped shim never
+# compiles it in.
+paneflow-process = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

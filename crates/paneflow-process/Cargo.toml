@@ -12,5 +12,13 @@ description = "Bounded external-process execution (wall-clock deadline + stdout 
 # embedded `paneflow-shim`, so anything pulled in here inflates the shim binary
 # that ships inside the main executable (EP-002, US-005).
 
+[features]
+# Exposes `test_support`, the hook that holds `spawn_piped`'s pipe window
+# open, to other crates' tests (issue #1127). Enable it only from a
+# `[dev-dependencies]` entry. Any build that pulls that entry in compiles it
+# (workspace test and clippy runs, where feature unification also puts it in
+# paneflow-app's dev build); release and release-min artifacts never do.
+test-support = []
+
 [lints]
 workspace = true

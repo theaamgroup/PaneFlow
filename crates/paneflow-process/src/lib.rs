@@ -162,9 +162,52 @@ impl StdioPipes {
             stdout: pipe_if(pipes.stdout)?,
             stderr: pipe_if(pipes.stderr)?,
         };
-        #[cfg(test)]
-        tests::run_pipe_window_hook(&created);
+        #[cfg(any(test, feature = "test-support"))]
+        test_support::run_pipe_window_hook(&created);
         Ok(created)
+    }
+}
+
+/// Test seam for code that races [`spawn_piped`] (issues #1124, #1127).
+///
+/// Compiled for this crate's tests and for any build that enables the
+/// `test-support` feature through a dev-dependency: workspace test and clippy
+/// runs, where feature unification also puts it in paneflow-app's dev build.
+/// Release and release-min artifacts never include it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use super::StdioPipes;
+    use std::cell::RefCell;
+
+    type PipeWindowHook = Box<dyn FnOnce(&[i32])>;
+
+    thread_local! {
+        /// Runs once, on this thread, inside the next `StdioPipes::create`
+        /// window, with every descriptor that window created.
+        static PIPE_WINDOW_HOOK: RefCell<Option<PipeWindowHook>> =
+            const { RefCell::new(None) };
+    }
+
+    /// Run `hook` inside the next pipe-creation window [`super::spawn_piped`]
+    /// opens on the calling thread, with the raw descriptors it created.
+    /// The window stays open, with every other spawner waiting, until the
+    /// hook returns.
+    pub fn set_pipe_window_hook(hook: impl FnOnce(&[i32]) + 'static) {
+        PIPE_WINDOW_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn run_pipe_window_hook(pipes: &StdioPipes) {
+        use std::os::fd::AsRawFd;
+
+        let Some(hook) = PIPE_WINDOW_HOOK.with(|slot| slot.borrow_mut().take()) else {
+            return;
+        };
+        let fds: Vec<i32> = [&pipes.stdin, &pipes.stdout, &pipes.stderr]
+            .into_iter()
+            .flatten()
+            .flat_map(|(reader, writer)| [reader.as_raw_fd(), writer.as_raw_fd()])
+            .collect();
+        hook(&fds);
     }
 }
 
@@ -862,32 +905,7 @@ mod tests {
         assert_eq!(unsafe { fcntl(fd, F_SETFD, flag) }, 0, "fcntl(F_SETFD)");
     }
 
-    type PipeWindowHook = Box<dyn FnOnce(&[i32])>;
-
-    thread_local! {
-        /// Runs once, on this thread, inside the next [`StdioPipes::create`]
-        /// window, with every descriptor that window created.
-        static PIPE_WINDOW_HOOK: std::cell::RefCell<Option<PipeWindowHook>> =
-            const { std::cell::RefCell::new(None) };
-    }
-
-    fn set_pipe_window_hook(hook: impl FnOnce(&[i32]) + 'static) {
-        PIPE_WINDOW_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
-    }
-
-    pub(super) fn run_pipe_window_hook(pipes: &StdioPipes) {
-        use std::os::fd::AsRawFd;
-
-        let Some(hook) = PIPE_WINDOW_HOOK.with(|slot| slot.borrow_mut().take()) else {
-            return;
-        };
-        let fds: Vec<i32> = [&pipes.stdin, &pipes.stdout, &pipes.stderr]
-            .into_iter()
-            .flatten()
-            .flat_map(|(reader, writer)| [reader.as_raw_fd(), writer.as_raw_fd()])
-            .collect();
-        hook(&fds);
-    }
+    use super::test_support::set_pipe_window_hook;
 
     /// Issue #1124: the pipes [`spawn_piped`] creates are never copied into
     /// a concurrent spawn's child.
