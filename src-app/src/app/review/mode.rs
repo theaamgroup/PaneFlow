@@ -31,19 +31,20 @@ impl PaneFlowApp {
         // rebuilding it. Opening Review in this process has to use that node.
         // `save_session` below would otherwise persist the default grid and
         // drop the one the user left.
+        // Issue #1095: the same node is held when a checkout's probe timed
+        // out. The rebuild probes again, and clears the node on any
+        // confirmed verdict.
         if self.review.layout.is_none()
             && let Some(node) = self.review.retained_layout.clone()
         {
             self.restore_review_layout(&node, cx);
-            if self.review.layout.is_some() {
-                self.review.retained_layout = None;
-            }
         }
+        // A node still held is still unconfirmed: keep it, open no default.
         if self.review.layout.is_none()
+            && self.review.retained_layout.is_none()
             && let Some(subject) = self.review_default_subject()
         {
             self.review_show_subject(subject, cx);
-            self.review.retained_layout = None;
         } else if let Some(pane) = self.review_active_pane() {
             self.pending_pane_focus = Some(pane);
         }
@@ -131,14 +132,30 @@ impl PaneFlowApp {
         let ui = crate::theme::ui_colors();
         self.review_track_focus(window, cx);
         let Some(root) = self.review.layout.as_ref() else {
+            // Issue #1095: a held grid names the checkout that kept it closed.
+            let (title, message): (gpui::SharedString, gpui::SharedString) =
+                match self.review.unconfirmed_checkout.as_ref() {
+                    Some(path) => (
+                        "Saved grid not opened".into(),
+                        format!(
+                            "{} did not answer or is not mounted. Choosing a branch tries again, and replaces the saved grid if it still does not answer.",
+                            path.display()
+                        )
+                        .into(),
+                    ),
+                    None => (
+                        "Choose a branch".into(),
+                        "Pick a branch or worktree in the Workspaces rail to read its diff, or drag one here.".into(),
+                    ),
+                };
             return div()
                 .flex()
                 .size_full()
                 .child(crate::ui_primitives::panel_empty_state(
                     ui,
                     Some("icons/git-branch.svg"),
-                    Some("Choose a branch".into()),
-                    "Pick a branch or worktree in the Workspaces rail to read its diff, or drag one here.",
+                    Some(title),
+                    message,
                     false,
                 ))
                 .into_any_element();

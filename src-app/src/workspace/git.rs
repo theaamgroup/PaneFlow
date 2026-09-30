@@ -45,7 +45,6 @@ const GIT_DIFF_STAT_STDOUT_CAP: u64 = 256 * 1024;
 /// instead of dropping every untracked path (issue #913).
 const GIT_LS_FILES_STDOUT_CAP: u64 = 8 * 1024 * 1024;
 
-const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const GIT_DIFF_STAT_UNTRACKED_FILE_CAP: usize = 200;
 const GIT_DIFF_STAT_FILE_BYTES_CAP: u64 = 512 * 1024;
 
@@ -78,12 +77,19 @@ impl GitDiffStats {
             return Self::default();
         }
         let cwd = toplevel.as_str();
-        let base = git_stdout(cwd, &["rev-parse", "--verify", "HEAD"], deadline_at)
-            .map(|out| String::from_utf8_lossy(&out).trim().to_string())
-            .filter(|base| !base.is_empty())
-            .unwrap_or_else(|| EMPTY_TREE_SHA.to_string());
+        // An unborn branch diffs against the empty tree. Its id depends on the
+        // repository's object format (SHA-1 vs SHA-256), so ask this repo for
+        // it (issue #1099). Only unborn repos pay for the extra call.
+        let stdout_line = |args: &[&str]| {
+            git_stdout(cwd, args, deadline_at)
+                .map(|out| String::from_utf8_lossy(&out).trim().to_string())
+                .filter(|line| !line.is_empty())
+        };
+        let base = stdout_line(&["rev-parse", "--verify", "HEAD"])
+            .or_else(|| stdout_line(&["hash-object", "-t", "tree", "/dev/null"]));
 
-        let mut stats = git_stdout(cwd, &["diff", "--shortstat", &base, "--"], deadline_at)
+        let mut stats = base
+            .and_then(|base| git_stdout(cwd, &["diff", "--shortstat", &base, "--"], deadline_at))
             .map(|out| {
                 let text = String::from_utf8_lossy(&out);
                 Self::parse_shortstat(&text)
@@ -1740,6 +1746,44 @@ mod tests {
         let stats = GitDiffStats::from_cwd(root.to_str().unwrap());
         assert_eq!(stats.files_changed, 2);
         assert_eq!(stats.insertions, 3);
+        assert_eq!(stats.deletions, 0);
+    }
+
+    /// Stats for an unborn repository in `object_format` holding one staged
+    /// two-line file. `None` when the installed git cannot create the fixture.
+    fn unborn_repository_stats(object_format: &str) -> Option<GitDiffStats> {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let format_arg = format!("--object-format={object_format}");
+        if !test_git(root, &["init", &format_arg]) {
+            eprintln!("installed git cannot init a {object_format} repository; skipping");
+            return None;
+        }
+        assert!(test_git(root, &["config", "core.autocrlf", "false"]));
+        std::fs::write(root.join("staged.txt"), "one\ntwo\n").unwrap();
+        assert!(test_git(root, &["add", "staged.txt"]));
+        Some(GitDiffStats::from_cwd(root.to_str().unwrap()))
+    }
+
+    /// Issue #1099: the unborn fallback was the SHA-1 empty tree, which does
+    /// not resolve in a SHA-256 repository, so staged files vanished.
+    #[test]
+    fn unborn_sha256_repository_counts_staged_changes() {
+        let Some(stats) = unborn_repository_stats("sha256") else {
+            return;
+        };
+        assert_eq!(stats.files_changed, 1, "staged file missing: {stats:?}");
+        assert_eq!(stats.insertions, 2);
+        assert_eq!(stats.deletions, 0);
+    }
+
+    #[test]
+    fn unborn_sha1_repository_counts_staged_changes() {
+        let Some(stats) = unborn_repository_stats("sha1") else {
+            return;
+        };
+        assert_eq!(stats.files_changed, 1, "staged file missing: {stats:?}");
+        assert_eq!(stats.insertions, 2);
         assert_eq!(stats.deletions, 0);
     }
 
