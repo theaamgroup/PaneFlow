@@ -188,6 +188,18 @@ jobs:
               - 'src-app/src/pane.rs'
               - 'src-app/src/layout/render.rs'
               - 'src-app/tests/flex_nchild.rs'
+              # GPUI dependency graph and toolchain (issue #1093). A
+              # manifest- or lockfile-only change can compile clean and
+              # still rasterize every glyph empty: dropping
+              # gpui_platform's `font-kit` feature does exactly that (see
+              # src-app/Cargo.toml). The root manifest carries the GPUI
+              # [patch.crates-io] forks and the release profile. The last
+              # three are the workspace-wide set detect_packages treats as
+              # a full rebuild. workflow_path_filter_policy.rs pins these.
+              - 'src-app/Cargo.toml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
 
       # Per-package detector. Adapted from Zed's orchestrate step. The
       # output isn't consumed yet (`cargo test --workspace` still runs
@@ -663,11 +675,13 @@ jobs:
     name: macOS aarch64 render smoke (visual)
     needs: [orchestrate, macos_release_build]
     # Gate on the `rendering` sub-filter (not the broad `rust` filter):
-    # the c3e2331-class regression this job exists to catch can only
-    # ride in on edits to the rendering paths declared by the
-    # orchestrate job. A pure config-file or non-render Rust PR cannot
-    # regress macOS Core Text empty-text rendering, so spending
-    # 10-15 min on a macos-15 runner on every such PR is wasted spend.
+    # the c3e2331-class regression this job captures evidence of can
+    # only ride in on edits to the rendering paths declared by the
+    # orchestrate job, which include the GPUI manifest, the lockfile,
+    # and the toolchain pin (issue #1093). A pure config-file or
+    # non-render Rust PR cannot regress macOS Core Text empty-text
+    # rendering, so spending 10-15 min on a macos-15 runner on every
+    # such PR is wasted spend.
     if: >-
       needs.orchestrate.outputs.rendering == 'true' ||
       needs.orchestrate.outputs.ci == 'true' ||
