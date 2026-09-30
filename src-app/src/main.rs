@@ -1882,8 +1882,14 @@ impl Render for PaneFlowApp {
             (1.75 * window.rem_size()).max(crate::app::constants::TITLE_BAR_MIN_HEIGHT);
         let settings_open = self.settings_section.is_some();
         let sessions_sidebar_width = self.rendered_sessions_sidebar_width(window);
-        let sessions_sidebar_mounted = self.agent_sessions.sessions_sidebar_open
-            || self.agent_sessions.sessions_sidebar_animation.is_some();
+        // Issue #1097: Settings mounts its own 300 px nav rail on the left, so
+        // a sessions rail beside it left an 800 px window under 200 px for the
+        // Settings page, and the Appearance tiles overflowed the clipped
+        // panel. Settings hides the rail without closing it: its open state,
+        // cwd and rows survive, and the rail is back when Settings closes.
+        let sessions_sidebar_mounted = !settings_open
+            && (self.agent_sessions.sessions_sidebar_open
+                || self.agent_sessions.sessions_sidebar_animation.is_some());
         let sessions_sidebar_opacity = (sessions_sidebar_width
             / crate::app::sessions_sidebar::SESSIONS_SIDEBAR_WIDTH.max(1.))
         .clamp(0., 1.);
@@ -2349,6 +2355,9 @@ impl Render for PaneFlowApp {
                                     .flex()
                                     .flex_col()
                                     .overflow_hidden()
+                                    // Issue #1097: the Settings width regression
+                                    // measures the page against this panel.
+                                    .debug_selector(|| "main-panel".into())
                                     .bg(panel_bg)
                                     .ml(px(main_panel_left_inset))
                                     .mr(px(crate::app::constants::PANEL_INSET))
@@ -2429,6 +2438,7 @@ impl Render for PaneFlowApp {
                     .when(sessions_sidebar_mounted, |row| {
                         row.child(
                             div()
+                                .debug_selector(|| "sessions-rail".into())
                                 .flex()
                                 .flex_col()
                                 .h_full()

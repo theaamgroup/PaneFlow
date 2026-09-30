@@ -264,8 +264,9 @@ impl PaneFlowApp {
     /// the focus (read from the last frame, which still contains it), the
     /// placeholder holds it, or
     /// nothing does: a surface that took the focus over Settings (Pane
-    /// Overview, About, the sessions rail) keeps it. The origin is taken either way so it never outlives the
-    /// close.
+    /// Overview, About) keeps it. The sessions rail is not one: Settings
+    /// unmounts it (issue #1097), so it cannot hold the focus meanwhile. The
+    /// origin is taken either way so it never outlives the close.
     pub(crate) fn return_focus_from_settings(
         &mut self,
         window: &mut Window,
@@ -1410,5 +1411,101 @@ mod tests {
             );
             assert!(!a.read(cx).focus_handle(cx).is_focused(window));
         });
+    }
+
+    /// Issue #1097: at the 800 by 500 minimum window (`window_state.rs`),
+    /// Settings' 300 px nav rail plus a 300 px sessions rail left the page
+    /// under 200 px, and the Appearance tiles (120 px minimum each) spilled
+    /// past the clipped main panel. Settings hides the sessions rail without
+    /// closing it, and the rail is back when Settings closes. A rail opened
+    /// while Settings is up (a new-tab picker under it) waits the same way.
+    #[gpui::test]
+    fn settings_preserves_content_width_with_sessions_open(cx: &mut gpui::TestAppContext) {
+        const TILES: [&str; 3] = ["theme-mode-system", "theme-mode-light", "theme-mode-dark"];
+        let (app, _a, b, cx) = split_app(cx);
+        cx.simulate_resize(gpui::size(gpui::px(800.), gpui::px(500.)));
+        draw(cx);
+
+        let open_rail = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_window, cx| {
+                app.update(cx, |app, cx| {
+                    // No cwd, so no scans touch the disk. The width snaps to
+                    // open instead of sliding over real time.
+                    app.open_sessions_sidebar_at(None, None, None, cx);
+                    app.agent_sessions.sessions_sidebar_animation = None;
+                });
+            });
+        };
+        let rail_open = |cx: &mut gpui::VisualTestContext| {
+            app.read_with(cx, |app, _| app.agent_sessions.sessions_sidebar_open)
+        };
+        let open_appearance = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    app.open_settings_at(SettingsSection::Appearance, window, cx);
+                });
+            });
+            draw(cx);
+        };
+        let assert_rail_painted = |how: &str, cx: &mut gpui::VisualTestContext| {
+            let rail = cx
+                .debug_bounds("sessions-rail")
+                .unwrap_or_else(|| panic!("{how}: the sessions rail is painted"));
+            assert_eq!(
+                rail.size.width,
+                gpui::px(crate::app::sessions_sidebar::SESSIONS_SIDEBAR_WIDTH),
+                "{how}: the sessions rail is at full width"
+            );
+        };
+
+        open_rail(cx);
+        draw(cx);
+        assert_rail_painted("before Settings", cx);
+
+        open_appearance(cx);
+        let panel = cx
+            .debug_bounds("main-panel")
+            .expect("the main panel is painted");
+        for tile in TILES {
+            let bounds = cx
+                .debug_bounds(tile)
+                .unwrap_or_else(|| panic!("the {tile} tile is painted"));
+            assert!(
+                bounds.left() >= panel.left() && bounds.right() <= panel.right(),
+                "the {tile} tile {bounds:?} must stay inside the Settings panel {panel:?}"
+            );
+        }
+        assert!(
+            cx.debug_bounds("sessions-rail").is_none(),
+            "Settings hides the sessions rail"
+        );
+        assert!(rail_open(cx), "hiding the rail must not close it");
+
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert_closed_onto(&app, &b, "Escape with the sessions rail hidden", cx);
+        assert_rail_painted("after Settings closes", cx);
+
+        // A rail opened while Settings is up stays hidden until it closes.
+        cx.update(|_window, cx| {
+            app.update(cx, |app, cx| {
+                app.close_sessions_sidebar(cx);
+                app.agent_sessions.sessions_sidebar_animation = None;
+            });
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("sessions-rail").is_none());
+        open_appearance(cx);
+        open_rail(cx);
+        draw(cx);
+        assert!(
+            cx.debug_bounds("sessions-rail").is_none(),
+            "a rail opened under Settings stays hidden"
+        );
+        assert!(rail_open(cx));
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        assert_closed_onto(&app, &b, "Escape after the rail opened under Settings", cx);
+        assert_rail_painted("after Settings closes over a rail opened under it", cx);
     }
 }
