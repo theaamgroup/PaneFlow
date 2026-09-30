@@ -1370,46 +1370,72 @@ mod timeout_policy_tests {
 
 #[cfg(test)]
 mod peer_closed_tests {
-    use super::{IpcRequest, handle_connection};
-    use interprocess::local_socket::{GenericFilePath, ListenerOptions, prelude::*};
+    use super::{IpcRequest, Stream, handle_connection};
+    use interprocess::local_socket::{GenericFilePath, Listener, ListenerOptions, prelude::*};
     use paneflow_ipc_client::ai_hook::METHOD_STOP;
     use serde_json::json;
     use std::io::Write;
+    use std::os::fd::OwnedFd;
     use std::os::unix::net::UnixStream;
+    use std::path::Path;
+    use std::process::{Command, Stdio};
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    /// Issue #824: a fire-and-forget client writes one frame and closes before
-    /// the handler sets its receive timeout. XNU then refuses `SO_RCVTIMEO`
-    /// with `EINVAL`; the buffered frame must still be dispatched.
-    #[test]
-    fn frame_from_a_peer_that_already_closed_is_still_dispatched() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("peer-closed.sock");
-        let name = path
-            .as_path()
-            .to_fs_name::<GenericFilePath>()
-            .expect("socket name");
-        let listener = ListenerOptions::new()
+    /// How long a stray copy of the client socket may keep the peer open. A
+    /// concurrently forked child releases it at exec or exit.
+    const PEER_CLOSE_DEADLINE: Duration = Duration::from_secs(10);
+
+    fn bind_listener(path: &Path) -> Listener {
+        let name = path.to_fs_name::<GenericFilePath>().expect("socket name");
+        ListenerOptions::new()
             .name(name)
             .create_sync()
-            .expect("bind listener");
+            .expect("bind listener")
+    }
 
-        let mut client = UnixStream::connect(&path).expect("connect");
+    /// Connect and write one fire-and-forget `ai.stop` frame. The caller
+    /// closes the client.
+    fn connect_and_write_stop_frame(path: &Path) -> UnixStream {
+        let mut client = UnixStream::connect(path).expect("connect");
         let frame = json!({"jsonrpc": "2.0", "method": METHOD_STOP, "params": {}});
         client
             .write_all(format!("{frame}\n").as_bytes())
             .expect("write frame");
-        drop(client);
+        client
+    }
 
-        let server = listener.accept().expect("accept");
-        // Precondition: this is the bug path, not a socket that still accepts
-        // a receive timeout.
-        let err = server
-            .set_recv_timeout(Some(Duration::from_secs(1)))
-            .expect_err("SO_RCVTIMEO on a peer-closed socket must fail on macOS");
-        assert_eq!(err.raw_os_error(), Some(libc::EINVAL), "got {err:?}");
+    /// Wait for XNU to treat the peer as closed, and return the error it then
+    /// gives for `SO_RCVTIMEO`.
+    ///
+    /// Issue #1112: `drop(client)` closes only this thread's descriptor, and
+    /// the peer is closed only once the last copy of the client socket goes.
+    /// Other tests in this binary spawn children concurrently (portable-pty
+    /// shells, re-execs, `/bin/sh` helpers). A child forked at the wrong
+    /// moment holds a copy until it execs or exits; macOS has no atomic
+    /// close-on-exec for `socket()`, so an unlucky fork keeps it for the
+    /// child's whole life. While a copy is open `SO_RCVTIMEO` succeeds, so
+    /// retry until it fails rather than asserting on the first attempt.
+    fn wait_until_peer_closed(server: &Stream) -> std::io::Error {
+        let deadline = Instant::now() + PEER_CLOSE_DEADLINE;
+        loop {
+            match server.set_recv_timeout(Some(Duration::from_secs(1))) {
+                Err(err) => return err,
+                Ok(()) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(()) => panic!(
+                    "SO_RCVTIMEO on a peer-closed socket must fail on macOS, but it \
+                     still succeeded after {PEER_CLOSE_DEADLINE:?}: another process \
+                     is holding a copy of the client socket"
+                ),
+            }
+        }
+    }
 
+    /// The buffered frame reaches the GPUI queue exactly once, then the
+    /// handler sees EOF and returns.
+    fn assert_single_frame_dispatched(server: Stream) {
         let (request_tx, request_rx) = mpsc::sync_channel::<IpcRequest>(4);
         let handler = std::thread::spawn(move || handle_connection(server, request_tx));
 
@@ -1424,6 +1450,67 @@ mod peer_closed_tests {
             request_rx.recv_timeout(Duration::from_millis(100)).is_err(),
             "exactly one frame is dispatched, then the handler sees EOF"
         );
+    }
+
+    /// Issue #824: a fire-and-forget client writes one frame and closes before
+    /// the handler sets its receive timeout. XNU then refuses `SO_RCVTIMEO`
+    /// with `EINVAL`; the buffered frame must still be dispatched.
+    #[test]
+    fn frame_from_a_peer_that_already_closed_is_still_dispatched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("peer-closed.sock");
+        let listener = bind_listener(&path);
+
+        drop(connect_and_write_stop_frame(&path));
+
+        let server = listener.accept().expect("accept");
+        // Precondition: this is the bug path, not a socket that still accepts
+        // a receive timeout.
+        let err = wait_until_peer_closed(&server);
+        assert_eq!(err.raw_os_error(), Some(libc::EINVAL), "got {err:?}");
+
+        assert_single_frame_dispatched(server);
+    }
+
+    /// Issue #1112: a deterministic stand-in for the concurrent fork that made
+    /// the test above flaky. A child holds a copy of the client socket after
+    /// `drop(client)`, so an immediate `SO_RCVTIMEO` still succeeds (the old
+    /// hard precondition panicked here). The precondition converges once the
+    /// child lets go, and the #824 path still dispatches the frame.
+    #[test]
+    fn peer_closed_precondition_waits_out_a_stray_holder_of_the_client_fd() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("stray-holder.sock");
+        let listener = bind_listener(&path);
+
+        let client = connect_and_write_stop_frame(&path);
+        // `/bin/cat` holds the client socket as its stdout and blocks reading
+        // its stdin until `release` closes, so the test decides when the last
+        // copy goes.
+        let (hold, release) = std::io::pipe().expect("pipe");
+        let mut holder = Command::new("/bin/cat")
+            .stdin(hold)
+            .stdout(OwnedFd::from(client.try_clone().expect("clone client")))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the fd holder");
+        drop(client);
+
+        let server = listener.accept().expect("accept");
+        server
+            .set_recv_timeout(Some(Duration::from_secs(1)))
+            .expect("a stray copy of the client keeps the peer open");
+
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(release);
+        });
+        let err = wait_until_peer_closed(&server);
+        assert_eq!(err.raw_os_error(), Some(libc::EINVAL), "got {err:?}");
+        releaser.join().expect("releaser thread");
+        assert!(holder.wait().expect("reap the fd holder").success());
+
+        assert_single_frame_dispatched(server);
     }
 
     /// Issue #1071: the server echoes any request id. A raw-socket request
