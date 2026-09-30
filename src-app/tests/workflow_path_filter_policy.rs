@@ -417,15 +417,10 @@ fn glob_model_matches_paths_filter_semantics() {
 /// The render smoke lane captures screenshot evidence of glyph rasterization
 /// that compiles and passes `cargo test` (issue #1093); its hard gate is font
 /// resolution, so an empty-glyph regression shows in the uploaded screenshot
-/// rather than failing the lane. A GPUI dependency or feature change
-/// such as dropping `gpui_platform`'s `font-kit` feature (see the comment in
-/// src-app/Cargo.toml) rides in on the manifest or lockfile alone, and the
-/// toolchain pin and the root manifest's `[patch.crates-io]` and release
-/// profile change the same binary. `tests_pass` accepts a skipped lane, so each
-/// of these inputs must make the lane's gate true, and every job it `needs`
-/// must be selected too: a lane whose dependency was skipped is skipped.
-#[test]
-fn manifest_and_lockfile_changes_select_render_smoke() {
+/// rather than failing the lane. `tests_pass` accepts a skipped lane, so each
+/// of `paths` must make the lane's gate true, and every job it `needs` must be
+/// selected too: a lane whose dependency was skipped is skipped.
+fn assert_paths_select_render_smoke(paths: &[&str]) {
     const RENDER_JOB: &str = "macos_render_smoke";
     const AGGREGATOR: &str = "tests_pass";
     let root = repo_root();
@@ -439,12 +434,7 @@ fn manifest_and_lockfile_changes_select_render_smoke() {
     );
     let needs = job_needs(&workflow, RENDER_JOB);
 
-    for path in [
-        "src-app/Cargo.toml",
-        "Cargo.lock",
-        "Cargo.toml",
-        "rust-toolchain.toml",
-    ] {
+    for &path in paths {
         assert!(
             root.join(path).is_file(),
             "{path} no longer exists; update this test"
@@ -469,10 +459,57 @@ fn manifest_and_lockfile_changes_select_render_smoke() {
         }
     }
 
-    // Negative control: an unrelated doc must not select the lane, or the
-    // assertions above pass for a gate that matches everything.
-    assert!(
-        !job_selected(&filters, &workflow, RENDER_JOB, "docs/user/keybindings.md"),
-        "`{RENDER_JOB}` is selected by a keybindings doc edit; its gate model is broken"
-    );
+    // Negative controls: an unrelated doc, and a crate outside the paint
+    // path, must not select the lane, or the assertions above pass for a gate
+    // that matches everything or a filter widened to `crates/**`.
+    for path in [
+        "docs/user/keybindings.md",
+        "crates/paneflow-config/src/lib.rs",
+    ] {
+        assert!(
+            !job_selected(&filters, &workflow, RENDER_JOB, path),
+            "`{RENDER_JOB}` is selected by a change to {path}; its gate model is broken \
+             or the `rendering` filter is wider than the paint path"
+        );
+    }
+}
+
+/// A GPUI dependency or feature change such as dropping `gpui_platform`'s
+/// `font-kit` feature (see the comment in src-app/Cargo.toml) rides in on the
+/// manifest or lockfile alone, and the toolchain pin and the root manifest's
+/// `[patch.crates-io]` and release profile change the same binary (issue
+/// #1093).
+#[test]
+fn manifest_and_lockfile_changes_select_render_smoke() {
+    assert_paths_select_render_smoke(&[
+        "src-app/Cargo.toml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "rust-toolchain.toml",
+    ]);
+}
+
+/// Every painted cell comes out of the terminal engine (issue #1111):
+/// `ghostty_session.rs` calls the engine crate's `snapshot()` (built on the
+/// `snapshot_ffi`, `snapshot_cell` and `color` modules, which read render
+/// state through the libghostty-sys bindings to the vendored archive), then
+/// `CellMirror::publish` / `content_from_ghostty` translate it into the
+/// neutral `Content` the element paints. A regression anywhere on that chain
+/// can yield blank cells while every crate unit test passes.
+#[test]
+fn engine_crate_changes_select_render_smoke() {
+    assert_paths_select_render_smoke(&[
+        "crates/paneflow-terminal-ghostty/src/snapshot.rs",
+        "crates/paneflow-terminal-ghostty/src/snapshot_ffi.rs",
+        "crates/paneflow-terminal-ghostty/src/snapshot_cell.rs",
+        "crates/paneflow-terminal-ghostty/src/color.rs",
+        "crates/paneflow-terminal-ghostty/Cargo.toml",
+        "src-app/src/terminal/ghostty_session.rs",
+        "crates/paneflow-libghostty-sys/build.rs",
+        "crates/paneflow-libghostty-sys/src/lib.rs",
+        "native/libghostty/manifest.toml",
+        "native/libghostty/bindings.rs",
+        "native/libghostty/prebuilt/aarch64-apple-darwin/lib/libghostty-vt.a",
+        "native/libghostty/prebuilt/aarch64-apple-darwin/include/ghostty/vt.h",
+    ]);
 }

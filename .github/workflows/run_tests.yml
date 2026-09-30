@@ -200,6 +200,22 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              # Terminal engine, the source of every painted cell (issue
+              # #1111). ghostty_session.rs calls the engine crate's
+              # snapshot() (snapshot*, color and cell modules, reading render
+              # state through the -sys bindings to the vendored archive) and
+              # translates it into the neutral Content the element paints
+              # (CellMirror::publish, content_from_ghostty). A regression on
+              # that chain can paint blank cells while every crate unit test
+              # passes. Whole-crate and whole-directory globs: which engine
+              # modules feed the frame moves with refactors (render.rs is not
+              # called from src-app today), and native/libghostty changes
+              # are rare and almost always an engine bump.
+              # workflow_path_filter_policy.rs pins these.
+              - 'crates/paneflow-terminal-ghostty/**'
+              - 'src-app/src/terminal/ghostty_session.rs'
+              - 'crates/paneflow-libghostty-sys/**'
+              - 'native/libghostty/**'
 
       # Per-package detector. Adapted from Zed's orchestrate step. The
       # output isn't consumed yet (`cargo test --workspace` still runs
@@ -678,7 +694,8 @@ jobs:
     # the c3e2331-class regression this job captures evidence of can
     # only ride in on edits to the rendering paths declared by the
     # orchestrate job, which include the GPUI manifest, the lockfile,
-    # and the toolchain pin (issue #1093). A pure config-file or
+    # and the toolchain pin (issue #1093), and the terminal engine that
+    # produces every painted cell (issue #1111). A pure config-file or
     # non-render Rust PR cannot regress macOS Core Text empty-text
     # rendering, so spending 10-15 min on a macos-15 runner on every
     # such PR is wasted spend.
