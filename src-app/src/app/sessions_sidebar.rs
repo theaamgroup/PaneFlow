@@ -185,7 +185,8 @@ impl PaneFlowApp {
     }
 
     /// Render the docked sessions sidebar (right edge of the root `flex_row`).
-    /// Only called while the sidebar is open or animating closed.
+    /// Only called while the sidebar is open or animating closed, and
+    /// Settings is closed (issue #1097).
     pub(crate) fn render_sessions_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let ui = crate::theme::ui_colors();
         // Issue #333: the type-to-filter field sits under the header. It is
