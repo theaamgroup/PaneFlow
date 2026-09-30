@@ -38,6 +38,9 @@ pub(crate) struct ReviewState {
     /// and is not this node. The next save writes it back when no live grid
     /// was rebuilt.
     pub(crate) retained_layout: Option<LayoutNode>,
+    /// Issue #1095: the checkout whose probe left `retained_layout` held
+    /// with Review enabled. `None` for the #932 hold and for no hold.
+    pub(crate) unconfirmed_checkout: Option<PathBuf>,
     /// Issue #475: weak, like every other transient pane reference in the
     /// app (`PendingClose`, the pane palette).
     /// The read chokepoint `review_active_pane` already treats this as a
@@ -65,6 +68,7 @@ impl ReviewState {
             layout: None,
             saved_layout: None,
             retained_layout: None,
+            unconfirmed_checkout: None,
             active_pane: None,
             collapsed: HashSet::new(),
             rail_menu: None,

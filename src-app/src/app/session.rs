@@ -609,6 +609,9 @@ impl PaneFlowApp {
         // one every pane can actually load.
         // Issue #932: that rebuild is also what opens the Review panes. With
         // the setting off, hold the raw node instead of dropping it.
+        // Issue #1095: the rebuild also holds the raw node, unopened, when a
+        // checkout's probe timed out.
+        self.review.unconfirmed_checkout = None;
         if self.cached_config.review_view_enabled() {
             self.review.retained_layout = None;
             if let Some(node) = review_layout.as_ref() {
@@ -635,7 +638,10 @@ impl PaneFlowApp {
             self.mode = paneflow_config::schema::AppMode::Cli;
             return;
         }
+        // Issue #1095: an unconfirmed checkout kept the raw node. A default
+        // grid would replace it in the next save.
         if self.review.layout.is_none()
+            && self.review.retained_layout.is_none()
             && let Some(subject) = self.review_default_subject()
         {
             self.review_show_subject(subject, cx);
@@ -1030,7 +1036,7 @@ fn session_corruption_info(
 /// Test-only stand-in for a dead network mount: `stat` on any path listed
 /// here stalls for [`STALLED_STAT_DELAY`] before answering "directory".
 #[cfg(test)]
-static STALLED_STAT_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+pub(super) static STALLED_STAT_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 const STALLED_STAT_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
@@ -1362,25 +1368,23 @@ fn log_cwd_probe_timeout(path: &Path, timeout: std::time::Duration) {
     );
 }
 
-/// `true` only when `stat` answered that `path` is a directory.
+/// Tri-state restore probe for one persisted directory.
 ///
-/// A timeout, a spent restore budget, or a probe that failed to spawn
-/// returns `false`. That means "not confirmed", not "missing": session
-/// persistence keeps the original path (issue #1024). Review restore uses
-/// this bool and therefore still refuses an unconfirmed path.
+/// A timeout, a spent restore budget, or a probe that failed to spawn is
+/// [`PersistedDirStatus::Unknown`]. That means "not confirmed", not
+/// "missing": session persistence keeps the original path (issue #1024),
+/// and Review restore keeps the original grid (issue #1095). Only
+/// [`PersistedDirStatus::Live`] is safe to use.
 ///
 /// While a restore is in progress the wait is capped by the batch deadline,
 /// and a path that already timed out is not stat'd again. Outside restore
 /// every call probes on its own (issue #878). The `stat` runs on a helper
 /// thread so it cannot pin the GPUI thread (issue #705). A stalled worker
 /// is left to unwind on its own once the filesystem finally answers.
-pub(crate) fn persisted_dir_is_live_within(path: &Path, timeout: std::time::Duration) -> bool {
-    persisted_dir_status(path, timeout) == PersistedDirStatus::Live
-}
-
-/// Tri-state restore probe. Persistence uses this; [`persisted_dir_is_live_within`]
-/// is the "safe to use" view and is true only for [`PersistedDirStatus::Live`].
-fn persisted_dir_status(path: &Path, timeout: std::time::Duration) -> PersistedDirStatus {
+pub(super) fn persisted_dir_status(
+    path: &Path,
+    timeout: std::time::Duration,
+) -> PersistedDirStatus {
     if let Some(status) = cached_restore_cwd_probe(path) {
         return status;
     }
@@ -3204,8 +3208,9 @@ mod tests {
         let workspace = restored_workspace_cwd(&stalled_str);
         assert_eq!(workspace.persisted, stalled);
         assert_ne!(workspace.spawn, stalled);
-        assert!(
-            !persisted_dir_is_live_within(&stalled, RESTORED_CWD_PROBE_TIMEOUT),
+        assert_ne!(
+            persisted_dir_status(&stalled, RESTORED_CWD_PROBE_TIMEOUT),
+            PersistedDirStatus::Live,
             "an unconfirmed path is not safe to use"
         );
         let elapsed = started.elapsed();
