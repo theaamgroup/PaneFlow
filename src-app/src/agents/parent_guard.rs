@@ -790,7 +790,7 @@ fn spawn_process_group_guard_with_mode(
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
 
-    match cmd.spawn() {
+    match paneflow_process::spawn(&mut cmd) {
         Ok(mut child) => {
             let Some(stdin) = child.stdin.take() else {
                 log::warn!(

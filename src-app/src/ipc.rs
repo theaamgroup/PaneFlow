@@ -377,10 +377,14 @@ pub fn start_server() -> (mpsc::Receiver<IpcRequest>, IpcStatus) {
 
             // Non-blocking accept lets the loop periodically re-verify the
             // socket inode (clobber detection) without starving connections.
+            // It is also required by `accept_uninheritable`: a blocking accept
+            // under the spawn exclusion would stall every spawn in the app.
             #[cfg(unix)]
-            listener
-                .set_nonblocking(ListenerNonblockingMode::Accept)
-                .ok();
+            if let Err(e) = listener.set_nonblocking(ListenerNonblockingMode::Accept) {
+                thread_status.disable();
+                log::error!("IPC: could not make the listener non-blocking ({e}); IPC disabled");
+                return;
+            }
 
             // US-022: bound the number of concurrently-served connections so a
             // peer opening sockets in a loop can't fan out unbounded threads.
@@ -401,7 +405,7 @@ pub fn start_server() -> (mpsc::Receiver<IpcRequest>, IpcStatus) {
             }
 
             loop {
-                match listener.accept() {
+                match accept_uninheritable(&listener) {
                     Ok(stream) => {
                         if active_connections.load(Ordering::Acquire) >= MAX_REQUEST_CONNECTIONS {
                             reject_overloaded(stream);
@@ -458,7 +462,14 @@ pub fn start_server() -> (mpsc::Receiver<IpcRequest>, IpcStatus) {
                         drop(listener);
                         match bind_socket(&socket_path) {
                             Some(l) => {
-                                l.set_nonblocking(ListenerNonblockingMode::Accept).ok();
+                                if let Err(e) = l.set_nonblocking(ListenerNonblockingMode::Accept) {
+                                    thread_status.disable();
+                                    log::error!(
+                                        "IPC: could not make the re-bound listener non-blocking \
+                                         ({e}); IPC disabled"
+                                    );
+                                    return;
+                                }
                                 listener = l;
                                 our_ino = socket_inode(&socket_path).unwrap_or(0);
                             }
@@ -517,7 +528,10 @@ fn bind_socket(socket_path: &std::path::Path) -> Option<Listener> {
         }
     };
 
-    let listener_result = ListenerOptions::new().name(name).create_sync();
+    // Issue #1115: macOS has no `SOCK_CLOEXEC`, so `interprocess` marks the
+    // new socket close-on-exec in a second call. Keep spawns out of that window.
+    let listener_result =
+        paneflow_process::with_spawns_excluded(|| ListenerOptions::new().name(name).create_sync());
 
     let listener = match listener_result {
         Ok(l) => l,
@@ -551,6 +565,22 @@ fn bind_socket(socket_path: &std::path::Path) -> Option<Listener> {
     }
     log::info!("IPC server listening on {}", socket_path.display());
     Some(listener)
+}
+
+/// Accept one pending connection, never while a spawn is in flight.
+///
+/// Issue #1115: macOS has no `accept4`, so the accepted descriptor is marked
+/// close-on-exec by a second call. A child spawned between the two keeps the
+/// connection open for its whole life, and the client sees no EOF when the
+/// handler drops its end. An in-flight spawn reads as `WouldBlock`, which the
+/// accept loop already retries on its next tick.
+///
+/// `listener` must be non-blocking (`ListenerNonblockingMode::Accept`): the
+/// accept runs under the spawn exclusion, so a blocking one would stall every
+/// spawn in the app until a client connects.
+fn accept_uninheritable(listener: &Listener) -> std::io::Result<Stream> {
+    paneflow_process::try_with_spawns_excluded(|| listener.accept())
+        .unwrap_or_else(|| Err(std::io::ErrorKind::WouldBlock.into()))
 }
 
 #[cfg(unix)]
@@ -1693,6 +1723,391 @@ mod peer_closed_tests {
         assert!(
             dispatched.is_empty(),
             "invalid envelopes reached GPUI dispatch: {dispatched:?}"
+        );
+    }
+}
+
+/// Issue #1115: the IPC server creates its sockets only while no guarded
+/// spawn is in flight, so a child spawned through `paneflow_process::spawn`
+/// can never copy a socket that is not close-on-exec yet.
+#[cfg(test)]
+mod spawn_exclusion_tests {
+    use super::{accept_uninheritable, bind_socket};
+    use interprocess::local_socket::{ListenerNonblockingMode, prelude::*};
+    use std::io::{PipeReader, PipeWriter, Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
+
+    /// Lets the held child continue to exec. Also sent on drop, so a failed
+    /// assertion never leaves the spawn thread blocked.
+    struct Release(PipeWriter);
+
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = self.0.write_all(b"r");
+        }
+    }
+
+    /// Start a guarded spawn on another thread and return once it is in
+    /// flight. The forked child blocks before exec until `Release` fires, so
+    /// `paneflow_process::spawn` does not return until then.
+    fn spawn_held_in_flight() -> (Release, JoinHandle<()>) {
+        let (mut ready_rx, ready_tx): (PipeReader, PipeWriter) = std::io::pipe().expect("pipe");
+        let (release_rx, release_tx) = std::io::pipe().expect("pipe");
+        let (ready_fd, release_rx_fd, release_tx_fd) = (
+            ready_tx.as_raw_fd(),
+            release_rx.as_raw_fd(),
+            release_tx.as_raw_fd(),
+        );
+        let spawner = std::thread::spawn(move || {
+            let mut command = Command::new("/usr/bin/true");
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            // SAFETY: `close`, `write`, and `read` are async-signal-safe,
+            // and the closure only touches descriptors it was handed.
+            // Closing the child's copy of the release writer lets the
+            // test's drop of `Release` reach it as EOF as well.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::close(release_tx_fd);
+                    libc::write(ready_fd, b"x".as_ptr().cast(), 1);
+                    let mut byte = 0_u8;
+                    libc::read(release_rx_fd, (&raw mut byte).cast(), 1);
+                    Ok(())
+                });
+            }
+            let mut child = paneflow_process::spawn(&mut command).expect("spawn held child");
+            let _ = child.wait();
+            drop((ready_tx, release_rx));
+        });
+        let mut byte = [0_u8; 1];
+        ready_rx
+            .read_exact(&mut byte)
+            .expect("the held child reports that it has forked");
+        (Release(release_tx), spawner)
+    }
+
+    #[test]
+    fn ipc_accept_waits_for_an_in_flight_spawn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("accept.sock");
+        let listener = bind_socket(&path).expect("bind");
+        listener
+            .set_nonblocking(ListenerNonblockingMode::Accept)
+            .expect("nonblocking accept");
+        let _client = UnixStream::connect(&path).expect("connect");
+
+        let (release, spawner) = spawn_held_in_flight();
+        let during = accept_uninheritable(&listener);
+        assert!(
+            matches!(&during, Err(err) if err.kind() == std::io::ErrorKind::WouldBlock),
+            "a pending connection must not be accepted while a spawn is in flight: {during:?}"
+        );
+
+        drop(release);
+        spawner.join().expect("spawner thread");
+        // Other tests in this binary spawn too; retry past their brief holds.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match accept_uninheritable(&listener) {
+                Ok(_stream) => break,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "accept never resumed");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(err) => panic!("accept failed: {err}"),
+            }
+        }
+    }
+
+    #[test]
+    fn ipc_bind_waits_for_an_in_flight_spawn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bind.sock");
+
+        let (release, spawner) = spawn_held_in_flight();
+        let bound = Arc::new(AtomicBool::new(false));
+        let binder = {
+            let bound = Arc::clone(&bound);
+            std::thread::spawn(move || {
+                let listener = bind_socket(&path);
+                bound.store(true, Ordering::SeqCst);
+                listener.is_some()
+            })
+        };
+        // An unguarded bind finishes in well under a millisecond.
+        std::thread::sleep(Duration::from_millis(300));
+        let bound_during_spawn = bound.load(Ordering::SeqCst);
+        drop(release);
+        spawner.join().expect("spawner thread");
+        let listened = binder.join().expect("binder thread");
+
+        assert!(
+            !bound_during_spawn,
+            "the IPC socket must not be created while a spawn is in flight"
+        );
+        assert!(listened, "bind must succeed once the spawn returns");
+    }
+
+    /// A column-0 attribute that compiles the next item only under test:
+    /// `#[cfg(test)]` or `#[cfg(all(test, ...))]`, never `#[cfg(not(test))]`.
+    fn is_test_cfg(line: &str) -> bool {
+        line == "#[cfg(test)]" || line.starts_with("#[cfg(all(test,")
+    }
+
+    /// The name in `mod NAME;` (any visibility), for an out-of-line module.
+    fn out_of_line_module(line: &str) -> Option<&str> {
+        let line = line
+            .trim_start_matches("pub(crate) ")
+            .trim_start_matches("pub ");
+        line.strip_prefix("mod ")?.strip_suffix(';')
+    }
+
+    /// The production lines of `src`, numbered from 1, with every top-level
+    /// test-only item left out, however late it sits in the file: a block
+    /// item runs to its column-0 `}`. Also returns the names of out-of-line
+    /// test-only modules (`#[cfg(test)] mod name;`).
+    fn production_lines(src: &str) -> (Vec<(usize, &str)>, Vec<String>) {
+        let lines: Vec<&str> = src.lines().collect();
+        let mut kept = Vec::new();
+        let mut test_modules = Vec::new();
+        let mut index = 0;
+        while index < lines.len() {
+            if !is_test_cfg(lines[index]) {
+                kept.push((index + 1, lines[index]));
+                index += 1;
+                continue;
+            }
+            // Further attributes and doc comments belong to the same item.
+            let mut item = index + 1;
+            while item < lines.len() && {
+                let line = lines[item].trim_start();
+                line.starts_with("#[") || line.starts_with("//")
+            } {
+                item += 1;
+            }
+            let Some(first) = lines.get(item) else {
+                break;
+            };
+            if let Some(name) = out_of_line_module(first) {
+                test_modules.push(name.to_string());
+            }
+            index = test_item_end(&lines, item) + 1;
+        }
+        (kept, test_modules)
+    }
+
+    /// The index of the last line of the top-level item that starts at
+    /// `first`, as rustfmt lays it out. A block item (`fn`, `mod`, `impl`,
+    /// with its head on one or several lines) opens with a column-0 line
+    /// ending in `{` and closes at the next column-0 `}`. Any other item ends
+    /// at its first line ending in `;`, or on its own line when that line
+    /// opens and closes a block (`fn f() {}`). When unsure this ends early,
+    /// so the rest is scanned as production: a guard that scans too much
+    /// fails loudly, one that scans too little passes silently.
+    fn test_item_end(lines: &[&str], first: usize) -> usize {
+        for (at, line) in lines.iter().enumerate().skip(first) {
+            let column_zero = !line.starts_with(char::is_whitespace);
+            if line.ends_with(';') || (column_zero && line.ends_with('}')) {
+                return at;
+            }
+            if column_zero && line.ends_with('{') {
+                let close = lines[at + 1..]
+                    .iter()
+                    .position(|line| line.starts_with('}'))
+                    .unwrap_or_else(|| panic!("test-only item at line {} never closes", at + 1));
+                return at + 1 + close;
+            }
+        }
+        first
+    }
+
+    /// Each test-only item shape rustfmt produces is skipped exactly, and
+    /// the production line after it is still scanned.
+    #[test]
+    fn production_lines_skip_only_test_only_items() {
+        let src = [
+            "#[cfg(test)]",
+            "static GATE: Mutex<Vec<PathBuf>> =",
+            "    Mutex::new(Vec::new());",
+            "fn after_static() {}",
+            "#[cfg(test)]",
+            "type Map =",
+            "    HashMap<(A, String), Arc<B>>;",
+            "fn after_type() {}",
+            "#[cfg(test)]",
+            "fn one_line() {}",
+            "fn after_one_line() {}",
+            "#[cfg(test)]",
+            "/// doc",
+            "#[allow(dead_code)]",
+            "const X: u8 = 1;",
+            "fn after_const() {}",
+            "#[cfg(test)]",
+            "fn multi_line_head(",
+            "    a: u8,",
+            ") -> u8 {",
+            "    a",
+            "}",
+            "fn after_fn() {}",
+            "#[cfg(not(test))]",
+            "fn not_test() {}",
+            "#[cfg(all(test, unix))]",
+            "mod tests {",
+            "    fn inner() {}",
+            "}",
+            "#[cfg(test)]",
+            "pub(crate) mod helpers;",
+            "fn after_mod() {}",
+        ]
+        .join("\n");
+        let (kept, modules) = production_lines(&src);
+        let kept: Vec<&str> = kept.into_iter().map(|(_, line)| line).collect();
+        assert_eq!(
+            kept,
+            [
+                "fn after_static() {}",
+                "fn after_type() {}",
+                "fn after_one_line() {}",
+                "fn after_const() {}",
+                "fn after_fn() {}",
+                "#[cfg(not(test))]",
+                "fn not_test() {}",
+                "fn after_mod() {}",
+            ]
+        );
+        assert_eq!(modules, ["helpers"]);
+    }
+
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let entries = std::fs::read_dir(dir).expect("read source dir");
+        for path in entries.flatten().map(|entry| entry.path()) {
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Where `mod name;` declared in `file` lives: `name.rs` or `name/`.
+    fn module_path(file: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let parent = file.parent().expect("source file has a parent");
+        let owns_dir = matches!(
+            file.file_name().and_then(|n| n.to_str()),
+            Some("main.rs" | "lib.rs" | "mod.rs")
+        );
+        let base = if owns_dir {
+            parent.to_path_buf()
+        } else {
+            parent.join(file.file_stem().expect("source file stem"))
+        };
+        let single = base.join(format!("{name}.rs"));
+        if single.is_file() {
+            single
+        } else {
+            base.join(name)
+        }
+    }
+
+    /// Every child PaneFlow spawns outside the PTY goes through
+    /// `paneflow_process`, whose `spawn` holds the exclusion the IPC server
+    /// creates its sockets under. A direct `Command::spawn`, `output`, or
+    /// `status` could copy a socket that is not close-on-exec yet.
+    #[test]
+    fn production_child_spawns_go_through_paneflow_process() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert!(root.is_dir(), "{} is not a directory", root.display());
+        let mut files = Vec::new();
+        rust_sources(&root, &mut files);
+        files.sort();
+        assert!(
+            files.len() > 100,
+            "the walk found only {} files",
+            files.len()
+        );
+
+        let mut production = Vec::new();
+        let mut test_only = Vec::new();
+        for path in files {
+            let src = std::fs::read_to_string(&path).expect("read source");
+            let (kept, test_modules) = production_lines(&src);
+            test_only.extend(test_modules.iter().map(|name| module_path(&path, name)));
+            let kept: Vec<(usize, String)> = kept
+                .into_iter()
+                .map(|(number, line)| (number, line.to_string()))
+                .collect();
+            production.push((path, kept));
+        }
+
+        // Self-checks: a guard that scans nothing passes every tree.
+        assert!(
+            test_only.contains(&root.join("startup_bench.rs")),
+            "`#[cfg(test)] mod startup_bench;` in main.rs was not recognised"
+        );
+        let main = &production
+            .iter()
+            .find(|(path, _)| *path == root.join("main.rs"))
+            .expect("main.rs was walked")
+            .1;
+        assert!(
+            main.iter().any(|(_, line)| line == "impl PaneFlowApp {"),
+            "main.rs production code after its first test module was not scanned"
+        );
+        let git = &production
+            .iter()
+            .find(|(path, _)| *path == root.join("workspace/git.rs"))
+            .expect("workspace/git.rs was walked")
+            .1;
+        assert!(
+            git.iter()
+                .any(|(_, line)| line.starts_with("fn git_entry_exists(")),
+            "workspace/git.rs production code after a multi-line test-only static was not scanned"
+        );
+
+        let direct = [
+            ".spawn()",
+            ".output()",
+            ".status()",
+            "Command::spawn(",
+            "Command::output(",
+            "Command::status(",
+            // The `open` crate runs `/usr/bin/open` through a plain `Command`.
+            "open::that(",
+            "open::that_detached(",
+            "open::that_in_background(",
+            "open::with(",
+            "open::with_detached(",
+            "open::with_in_background(",
+        ];
+        let mut offenders = Vec::new();
+        for (path, lines) in &production {
+            // Component-wise: covers a test-only `name.rs` and all of `name/`.
+            if test_only.iter().any(|skip| path.starts_with(skip)) {
+                continue;
+            }
+            let name = path.strip_prefix(&root).expect("under src").display();
+            for (number, line) in lines {
+                if !line.trim_start().starts_with("//")
+                    && direct.iter().any(|call| line.contains(call))
+                {
+                    offenders.push(format!("{name}:{number}: {}", line.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "spawn children through paneflow_process::spawn (or its run_with_timeout / \
+             spawn_detached helpers), not directly (issue #1115):\n{}",
+            offenders.join("\n")
         );
     }
 }

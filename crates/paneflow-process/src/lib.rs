@@ -7,6 +7,10 @@
 //! [`run_with_timeout`] gives non-interactive subprocesses a wall-clock deadline
 //! and strict stdout/stderr capture limits. It is synchronous and is meant to
 //! run on a background thread, never on the GPUI render thread.
+//!
+//! [`spawn`] is the one place PaneFlow starts a non-PTY child. It keeps spawns
+//! out of the windows where the IPC server's sockets are not close-on-exec yet
+//! (issue #1115).
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -15,7 +19,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, PoisonError, RwLock, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,6 +31,75 @@ const STDERR_CAP: u64 = 64 * 1024;
 /// fast command returns promptly, large enough that a multi-minute deadline
 /// does not spin the CPU.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Issue #1115: exclusion between spawning a child and creating a descriptor
+/// that is not close-on-exec yet.
+///
+/// macOS has no `SOCK_CLOEXEC` and no `accept4`, so `socket()` and `accept()`
+/// return a descriptor that is only marked `FD_CLOEXEC` by a second `fcntl`.
+/// A `posix_spawn` or `fork` on another thread between the two calls copies
+/// the descriptor into the child, where it survives exec for the child's
+/// whole life. [`spawn`] holds the shared side for the length of the
+/// `Command::spawn` call, so spawns never wait on each other.
+/// [`with_spawns_excluded`] and [`try_with_spawns_excluded`] hold the
+/// exclusive side across the create-then-mark window. The exclusive side is
+/// only ever tried, never queued for: a queued writer would make every later
+/// spawner, including the render thread, wait behind whichever spawn call is
+/// slowest.
+///
+/// The cost runs the other way: while a spawn call is slow (a first-exec
+/// Gatekeeper scan of a new binary, for example), the IPC server does not
+/// accept, and new connections wait in the listen backlog until it returns.
+/// That delay is the accepted trade-off for never leaking a socket.
+static SPAWN_EXCLUSION: RwLock<()> = RwLock::new(());
+
+/// How often [`with_spawns_excluded`] retries while a spawn is in flight.
+const SPAWN_EXCLUSION_RETRY: Duration = Duration::from_millis(1);
+
+/// Spawn `command`, never while a [`with_spawns_excluded`] or
+/// [`try_with_spawns_excluded`] window is open (issue #1115).
+///
+/// Use this instead of `Command::spawn` for every child PaneFlow starts
+/// outside the PTY: a descriptor another thread is still marking
+/// close-on-exec cannot leak into the child.
+pub fn spawn(command: &mut Command) -> io::Result<Child> {
+    let _shared = SPAWN_EXCLUSION
+        .read()
+        .unwrap_or_else(PoisonError::into_inner);
+    command.spawn()
+}
+
+/// Run `create` while no [`spawn`] call is in flight, or return `None`
+/// without running it when one is.
+///
+/// For poll loops, such as a non-blocking `accept`: the caller retries on its
+/// next tick instead of waiting.
+pub fn try_with_spawns_excluded<T>(create: impl FnOnce() -> T) -> Option<T> {
+    let _exclusive = match SPAWN_EXCLUSION.try_write() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return None,
+    };
+    Some(create())
+}
+
+/// Run `create` while no [`spawn`] call is in flight, waiting for in-flight
+/// spawns to return first. Keep `create` short: spawns wait while it runs.
+///
+/// `create` must also mark every descriptor it opens close-on-exec before it
+/// returns, as `interprocess` and `std` do.
+pub fn with_spawns_excluded<T>(create: impl FnOnce() -> T) -> T {
+    loop {
+        match SPAWN_EXCLUSION.try_write() {
+            Ok(_exclusive) => return create(),
+            Err(TryLockError::Poisoned(poisoned)) => {
+                let _exclusive = poisoned.into_inner();
+                return create();
+            }
+            Err(TryLockError::WouldBlock) => thread::sleep(SPAWN_EXCLUSION_RETRY),
+        }
+    }
+}
 
 /// Output from a bounded process run.
 ///
@@ -185,7 +258,7 @@ fn run_bounded(
     // every error path can hand it to this already-running thread without
     // risking a late thread-spawn failure or blocking the caller's deadline.
     let cleanup = spawn_cleanup_worker()?;
-    let child = cmd.spawn().map_err(ProcError::Spawn)?;
+    let child = spawn(&mut cmd).map_err(ProcError::Spawn)?;
     let start = Instant::now();
     let mut process = RunningProcess::new(child, cleanup);
 
@@ -565,7 +638,7 @@ static DETACHED_REAPER: OnceLock<Option<mpsc::Sender<Child>>> = OnceLock::new();
 /// succeeds or fails, so it is safe to call from the render thread. Only spawn
 /// errors are reported; the child's exit code is deliberately discarded.
 pub fn spawn_detached(command: &mut Command) -> io::Result<()> {
-    let child = command.spawn()?;
+    let child = spawn(command)?;
     // A missing or dead reaper is not worth failing the launch over: the child
     // is already running and the caller wanted it running. Dropping the handle
     // here is exactly the pre-existing behavior.
@@ -674,6 +747,85 @@ mod tests {
     #[cfg(unix)]
     fn sleep_command() -> Command {
         sh("sleep 30")
+    }
+
+    /// Issue #1115: a descriptor created inside a [`with_spawns_excluded`]
+    /// window and marked close-on-exec before the window closes is never
+    /// inherited by a concurrent [`spawn`].
+    ///
+    /// The window is held open for 300 ms with the descriptor inheritable, the
+    /// state macOS leaves a fresh `socket()` or `accept()` descriptor in until
+    /// its follow-up `fcntl`. If the spawn ran inside it, `/bin/sleep` would
+    /// hold the socket for 30 s and the peer would see no EOF.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_never_inherits_a_descriptor_created_in_an_excluded_window() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        const F_SETFD: i32 = 2;
+        const FD_CLOEXEC: i32 = 1;
+        unsafe extern "C" {
+            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        }
+        fn set_cloexec(fd: i32, on: bool) {
+            let flag = if on { FD_CLOEXEC } else { 0 };
+            assert_eq!(unsafe { fcntl(fd, F_SETFD, flag) }, 0, "fcntl(F_SETFD)");
+        }
+
+        let window_open = Arc::new(Barrier::new(2));
+        let window_closed = Arc::new(AtomicBool::new(false));
+        let creator = {
+            let window_open = Arc::clone(&window_open);
+            let window_closed = Arc::clone(&window_closed);
+            thread::spawn(move || {
+                // Create the pair inside the window too: `socketpair` is no
+                // more atomically close-on-exec than `socket`, and another
+                // test's spawn must not copy it either.
+                with_spawns_excluded(|| {
+                    let (held, peer) = UnixStream::pair().expect("socketpair");
+                    // Set before `held` can close: XNU refuses `SO_RCVTIMEO`
+                    // on a socket whose peer is already gone (issue #824).
+                    peer.set_read_timeout(Some(Duration::from_secs(5)))
+                        .expect("read timeout");
+                    set_cloexec(held.as_raw_fd(), false);
+                    window_open.wait();
+                    thread::sleep(Duration::from_millis(300));
+                    set_cloexec(held.as_raw_fd(), true);
+                    window_closed.store(true, Ordering::SeqCst);
+                    (held, peer)
+                })
+            })
+        };
+
+        window_open.wait();
+        let mut child = spawn(
+            Command::new("/bin/sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .expect("spawn /bin/sleep");
+        let spawned_after_window = window_closed.load(Ordering::SeqCst);
+        let (held, mut peer) = creator.join().expect("creator thread");
+        drop(held);
+
+        let mut byte = [0_u8; 1];
+        let read = peer.read(&mut byte);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            matches!(read, Ok(0)),
+            "the peer must see EOF once the creator drops its end, but the \
+             spawned child still holds a copy: {read:?}"
+        );
+        assert!(
+            spawned_after_window,
+            "spawn must wait until the excluded window closes"
+        );
     }
 
     #[test]
@@ -869,10 +1021,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn zombie_child_count() -> usize {
         let me = std::process::id().to_string();
-        let out = Command::new("ps")
-            .args(["-A", "-o", "ppid=,stat="])
-            .output()
-            .expect("ps must be spawnable to count zombie children");
+        // Through the spawn exclusion like every other child: a plain
+        // `output()` could copy the socket another test holds inheritable.
+        let mut ps = Command::new("ps");
+        ps.args(["-A", "-o", "ppid=,stat="]);
+        let out = run_with_timeout(ps, Duration::from_secs(10), 4 << 20)
+            .expect("ps must run to count zombie children");
         assert!(
             out.status.success(),
             "ps -A -o ppid=,stat= failed with status {:?}",
