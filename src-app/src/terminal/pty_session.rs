@@ -872,6 +872,29 @@ pub(super) struct SpawnParams {
     pub(super) profile: TerminalSurfaceProfile,
 }
 
+/// A promoted pane's identity and its own PTY master copy, moved to the
+/// background task that starts the pane-open guard (issue #1129).
+#[cfg(target_os = "macos")]
+pub(super) struct PaneGuardTarget {
+    child_pid: u32,
+    child_proc_start: Option<u64>,
+    master: OwnedFd,
+}
+
+#[cfg(target_os = "macos")]
+impl PaneGuardTarget {
+    /// Start the session-mode guard. Off the GPUI thread only: it walks the
+    /// process table and spawns through `spawn_piped`.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(super) fn spawn_guard(self) -> Option<crate::agents::parent_guard::PtyGuardHandle> {
+        crate::agents::parent_guard::spawn_pty_guard(
+            self.child_pid,
+            self.child_proc_start,
+            self.master.as_raw_fd(),
+        )
+    }
+}
+
 /// Foreground (main-thread) signal mask, captured so an off-thread PTY spawn
 /// doesn't hand the child the background executor's mask (which blocks
 /// SIGINT/SIGTSTP and would break Ctrl-C / Ctrl-Z).
@@ -974,24 +997,49 @@ impl TerminalState {
     pub(super) fn promote_ghostty(&mut self, spawned: SpawnedGhostty) {
         self.ghostty.promote();
         self.child_pid = spawned.child_pid;
-        self.child_proc_start = crate::agents::parent_guard::pid_start_time(spawned.child_pid);
+        // Read on the runtime thread at spawn, never here (issue #1129).
+        self.child_proc_start = spawned.child_proc_start;
         self.current_cwd = Some(spawned.cwd.to_string_lossy().into_owned());
-        // The guard dups the fd again for its own child (FD_CLOEXEC cleared
-        // in that child only, #1123), so this app-owned copy stays ours for
-        // `Drop`'s session snapshot.
-        #[cfg(all(unix, not(test)))]
-        {
-            self.pty_guard = crate::agents::parent_guard::spawn_pty_guard(
-                spawned.child_pid,
-                self.child_proc_start,
-                spawned.master_fd.as_raw_fd(),
-            );
-        }
+        // No guard spawn here: this runs on the GPUI thread. The view starts
+        // the pane-open guard on the background executor once the pane is
+        // live, from `pane_guard_target` (issue #1129).
         self.pty_master_fd = Some(spawned.master_fd);
         self.set_osc52_mode(self.spawn_osc52_mode);
         self.cursor_blinking = true;
         self.dirty = true;
         self.flush_ghostty_pending_input();
+    }
+
+    /// What the pane-open guard needs, to start it off the GPUI thread
+    /// (issue #1129): `None` before promotion or once the child has exited.
+    /// The master copy is the target's own, so the background spawn never
+    /// races `Drop` closing this state's copy.
+    #[cfg(target_os = "macos")]
+    pub(super) fn pane_guard_target(&self) -> Option<PaneGuardTarget> {
+        if self.child_pid == 0 || self.exited.is_some() {
+            return None;
+        }
+        let master = self.pty_master_fd.as_ref()?.try_clone().ok()?;
+        Some(PaneGuardTarget {
+            child_pid: self.child_pid,
+            child_proc_start: self.child_proc_start,
+            master,
+        })
+    }
+
+    /// Install the pane-open guard the background task started.
+    ///
+    /// A child that has already exited gets no guard: the handle drops here,
+    /// its control pipe closes, and the guard sweeps whatever is left of the
+    /// session, as `ChildExited` does for a guard installed in time.
+    #[cfg(all(unix, not(test)))]
+    pub(super) fn install_pty_guard(
+        &mut self,
+        guard: Option<crate::agents::parent_guard::PtyGuardHandle>,
+    ) {
+        if self.exited.is_none() {
+            self.pty_guard = guard;
+        }
     }
 
     /// Route the Drop-time SIGKILL escalation through GPUI's background
@@ -2708,13 +2756,28 @@ impl Drop for TerminalState {
 
         if !groups.is_empty() {
             // 2. External watchers for every captured group BEFORE any signal, so
-            //    orderly teardown survives immediate application exit.
+            //    orderly teardown survives immediate application exit. Each
+            //    group gets a frozen guard with a `/dev/null` stdin, which runs
+            //    the TERM-to-KILL ladder at once and needs no pipe on this
+            //    thread (issue #1129). They are skipped while the pane-open
+            //    guard is running with its own PTY master copy: on EOF it
+            //    signals the groups it finds in the session through that copy.
+            //    Trade-off: once the shell leader has exited, that lookup can
+            //    fail, and the guard falls back to the groups it last observed,
+            //    refreshed only every `SESSION_SNAPSHOT_REFRESH` (5 s). A group
+            //    created since that snapshot is then left to the local SIGKILL
+            //    timer below, which does not survive an immediate app exit.
             #[cfg(all(target_os = "macos", not(test)))]
-            let teardown_guards = groups
-                .iter()
-                .cloned()
-                .filter_map(crate::agents::parent_guard::spawn_process_group_guard)
-                .collect::<Vec<_>>();
+            if crate::agents::parent_guard::frozen_teardown_guards_needed(
+                self.pty_guard.as_ref().is_some_and(|guard| guard.is_live()),
+                self.pty_guard
+                    .as_ref()
+                    .is_some_and(|guard| guard.covers_session()),
+            ) {
+                for group in &groups {
+                    crate::agents::parent_guard::spawn_process_group_guard(group.clone());
+                }
+            }
 
             // 3. SIGTERM every pinned group synchronously while the tty is still
             //    alive, so agents and shells run their TERM handlers (state
@@ -2723,12 +2786,10 @@ impl Drop for TerminalState {
                 crate::agents::parent_guard::signal_pinned_process_group(group, libc::SIGTERM);
             }
 
-            // 4. Close each external guard's control pipe while Drop is still
+            // 4. Close the pane-open guard's control pipe while Drop is still
             //    running; the local timer below stays as the fallback.
             #[cfg(all(unix, not(test)))]
             drop(self.pty_guard.take());
-            #[cfg(all(target_os = "macos", not(test)))]
-            drop(teardown_guards);
 
             // 7. (scheduled) Re-check each target's PID/start/PGID/session
             //    identity at fire time; PGID reuse fails closed. The runtime

@@ -80,6 +80,40 @@ fn parent_death_guard_does_not_signal_once_child_is_reaped() {
     );
 }
 
+/// The agent keeps a descriptor its shell passed on, with or without another
+/// listed descriptor that is gone by the spawn (#1126).
+#[test]
+fn agent_keeps_inherited_descriptors_and_starts_without_a_closed_one() {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+
+    // Far above any descriptor this test process opens.
+    const CLOSED: i32 = 4000;
+    for listed_closed in [&[][..], &[CLOSED][..]] {
+        let (mut reader, writer) = std::io::pipe().expect("pipe");
+        let passed = writer.as_raw_fd();
+        let mut command = paneflow_process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(format!("printf passed >&{passed}"))
+            .stdin(paneflow_process::Stdio::Null)
+            .stdout(paneflow_process::Stdio::Null)
+            .stderr(paneflow_process::Stdio::Null);
+        let inherited: Vec<i32> = listed_closed.iter().copied().chain([passed]).collect();
+        let status = crate::exec::start_agent(&mut command, &inherited)
+            .and_then(|mut child| child.wait())
+            .expect("a closed inherited descriptor must not stop the agent");
+        drop(writer);
+        let mut text = String::new();
+        reader.read_to_string(&mut text).expect("read");
+        assert!(status.success(), "{inherited:?}: {status:?}");
+        assert_eq!(
+            text, "passed",
+            "the open descriptor must still reach the agent: {inherited:?}"
+        );
+    }
+}
+
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = std::fs::read_dir(dir).expect("read source dir");
     for path in entries.flatten().map(|entry| entry.path()) {
@@ -124,8 +158,10 @@ fn production_part(path: &Path, src: &str) -> String {
 /// `src-app/src/ipc.rs` requires of the app. A direct `Command::spawn`,
 /// `output` or `status` ignores the spawn exclusion, and a `Stdio::piped()`
 /// or hand-made pipe is inheritable for a moment while it is created (#1124).
-/// Test code, under `src/tests/` or a trailing `mod tests`, may still spawn
-/// directly.
+/// `paneflow_process::spawn` takes a std command, whose child inherits every
+/// descriptor not marked close-on-exec; production uses
+/// `paneflow_process::Command` (#1126). Test code, under `src/tests/` or a
+/// trailing `mod tests`, may still spawn directly.
 #[test]
 fn production_child_spawns_go_through_paneflow_process() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -213,6 +249,9 @@ fn production_child_spawns_go_through_paneflow_process() {
         // A hand-made pipe outside `spawn_piped`'s window.
         "io::pipe()",
         "libc::pipe(",
+        // Issue #1126: a std command, even under the exclusion, inherits
+        // every descriptor not marked close-on-exec.
+        "paneflow_process::spawn(",
     ];
     let mut offenders = Vec::new();
     for (path, src) in &production {
@@ -225,9 +264,9 @@ fn production_child_spawns_go_through_paneflow_process() {
     }
     assert!(
         offenders.is_empty(),
-        "spawn shim children through paneflow_process::spawn (or its spawn_piped / \
-         run_with_timeout helpers), not directly, and get pipes from spawn_piped, not \
-         {PIPED} (issues #1115, #1124, #1127):\n{}",
+        "spawn shim children through paneflow_process::Command (or its spawn_piped / \
+         run_with_timeout helpers), not directly or through paneflow_process::spawn, and \
+         get pipes from spawn_piped, not {PIPED} (issues #1115, #1124, #1126, #1127):\n{}",
         offenders.join("\n")
     );
 }

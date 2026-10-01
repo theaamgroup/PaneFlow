@@ -738,10 +738,12 @@ impl TerminalView {
                             .map_err(classify_ghostty_start_error)
                     })
                     .await;
-                let _ = this.update(cx, |view, cx| {
+                let promoted = this.update(cx, |view, cx| {
+                    let mut guard_target = None;
                     match outcome {
                         Ok(spawned) => {
                             view.terminal.promote_ghostty(spawned);
+                            guard_target = view.terminal.pane_guard_target();
                             if let Some(size) = view.recorded_window_size() {
                                 view.terminal.notify_window_size(size);
                             }
@@ -768,7 +770,24 @@ impl TerminalView {
                     }
                     log_backend_diagnostics(&view.terminal);
                     cx.notify();
+                    guard_target
                 });
+
+                // Issue #1129: the pane-open guard starts in its own background
+                // task once the pane is live, never on the GPUI thread. Until
+                // its handle arrives the pane has no hard-death guard; that
+                // short window is accepted. If the view and its terminal are
+                // gone by then, `update` fails and the handle drops here: the
+                // guard reads EOF on its control pipe and shuts the session
+                // down, which is what closing the pane asked for.
+                #[cfg(not(test))]
+                if let Ok(Some(target)) = promoted {
+                    let guard = executor.spawn(async move { target.spawn_guard() }).await;
+                    let _ = this.update(cx, |view, _| view.terminal.install_pty_guard(guard));
+                }
+                // Tests never start a guard: it would re-run the test binary.
+                #[cfg(test)]
+                drop(promoted);
             },
         )
         .detach();
@@ -2382,6 +2401,61 @@ mod tests {
             .expect("pending CWD publication");
         let spawn = constructor.find("cx.spawn(").expect("background spawn");
         assert!(publish < spawn, "{constructor}");
+    }
+
+    /// Issue #1129: the pane-open guard never spawns on the GPUI thread.
+    /// `promote_ghostty` and `TerminalState::Drop` run there and reach no
+    /// session-guard spawn; the view's one call sits in a background task.
+    #[test]
+    fn pane_open_guard_spawns_only_on_the_background_executor() {
+        // No trailing `(`, so a path use such as
+        // `.map(PaneGuardTarget::spawn_guard)` counts too.
+        const GUARD_SPAWNS: [&str; 3] = ["spawn_pty_guard", "spawn_guard", "spawn_session_guard"];
+        let pty = include_str!("pty_session.rs");
+        let promote = pty
+            .split("pub(super) fn promote_ghostty(")
+            .nth(1)
+            .and_then(|body| body.split("\n    }\n").next())
+            .expect("promote_ghostty body");
+        let drop_body = pty
+            .split("impl Drop for TerminalState {")
+            .nth(1)
+            .and_then(|body| body.split("\n}\n").next())
+            .expect("TerminalState::Drop body");
+        assert!(
+            drop_body.contains("spawn_process_group_guard("),
+            "{drop_body}"
+        );
+        for (name, body) in [
+            ("promote_ghostty", promote),
+            ("TerminalState::Drop", drop_body),
+        ] {
+            for spawn in GUARD_SPAWNS {
+                assert!(
+                    !body.contains(spawn),
+                    "{name} runs on the GPUI thread and must not call `{spawn}`"
+                );
+            }
+        }
+
+        let view = include_str!("view.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production terminal view source");
+        let calls: Vec<usize> = GUARD_SPAWNS
+            .iter()
+            .flat_map(|spawn| view.match_indices(spawn).map(|(at, _)| at))
+            .collect();
+        assert_eq!(calls.len(), 1, "one pane-open guard spawn in view.rs");
+        let mut start = calls[0].saturating_sub(120);
+        while !view.is_char_boundary(start) {
+            start -= 1;
+        }
+        let lead_in = &view[start..calls[0]];
+        assert!(
+            lead_in.contains("executor.spawn(async move"),
+            "the pane-open guard must spawn inside a background task: {lead_in}"
+        );
     }
 
     // --- strip_partial_ansi_tail tests ---

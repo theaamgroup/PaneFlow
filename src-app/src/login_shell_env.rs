@@ -84,8 +84,7 @@ pub(crate) fn side_env(name: &str) -> Option<std::ffi::OsString> {
 
 #[cfg(unix)]
 pub fn load_login_shell_env() {
-    use std::os::unix::process::CommandExt as _;
-    use std::process::{Command, Stdio};
+    use paneflow_process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
     // A terminal launch already inherited the login PATH from its parent shell
@@ -137,16 +136,11 @@ pub fn load_login_shell_env() {
         // hooks like direnv/asdf/mise are irrelevant here.)
         cmd.current_dir(home);
     }
-    cmd.stdin(Stdio::null()).stderr(Stdio::null());
-    // SAFETY: `setsid` is async-signal-safe and the only thing we do between
-    // fork and exec. Putting the capture shell in its own session means a stray
-    // rc script that opens `/dev/tty` can't grab our controlling terminal.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    cmd.stdin(Stdio::Null).stderr(Stdio::Null);
+    // Putting the capture shell in its own session means a stray rc script
+    // that opens `/dev/tty` can't grab our controlling terminal. A spawn
+    // attribute, so the capture never forks (issue #1126).
+    cmd.new_session();
 
     let stdout_only = paneflow_process::Pipes {
         stdout: true,
@@ -311,7 +305,7 @@ struct LoginShellCapture {
 /// if the read cannot be unblocked.
 #[cfg(unix)]
 fn capture_login_shell_stdout<R>(
-    child: &mut std::process::Child,
+    child: &mut paneflow_process::Child,
     mut stdout: R,
     deadline: std::time::Instant,
     marker: &[u8],
@@ -362,7 +356,7 @@ where
 
 #[cfg(unix)]
 fn wait_for_capture_child(
-    child: &mut std::process::Child,
+    child: &mut paneflow_process::Child,
     deadline: std::time::Instant,
     capture: &CaptureRead,
 ) -> CaptureWait {
@@ -549,7 +543,10 @@ fn is_posix_capture_shell(shell: &str) -> bool {
 /// reader-timeout arm, and the inherited PATH stands when the buffer never
 /// held a usable `PATH=` line.
 #[cfg(unix)]
-fn reap_login_shell_capture(child: &mut std::process::Child, deadline: std::time::Instant) -> bool {
+fn reap_login_shell_capture(
+    child: &mut paneflow_process::Child,
+    deadline: std::time::Instant,
+) -> bool {
     loop {
         match child.try_wait() {
             Ok(Some(_)) => return true,
@@ -572,7 +569,7 @@ fn reap_login_shell_capture(child: &mut std::process::Child, deadline: std::time
     }
 }
 
-fn terminate_login_shell_capture(child: &mut std::process::Child) {
+fn terminate_login_shell_capture(child: &mut paneflow_process::Child) {
     let child_pid = child.id();
     if child_pid <= i32::MAX as u32 {
         let pgid = child_pid as libc::pid_t;
@@ -691,25 +688,19 @@ mod tests {
         reap_login_shell_capture,
     };
     use crate::source_probe::source_slice;
-    use std::os::unix::process::CommandExt as _;
-    use std::process::{Command, Stdio};
+    use paneflow_process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
     /// The capture child is its own session, matching `load_login_shell_env`,
     /// so the process-group kill cannot reach this test.
-    fn spawn_session(script: &str) -> std::process::Child {
+    fn spawn_session(script: &str) -> paneflow_process::Child {
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg(script);
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-        cmd.spawn().expect("capture probe must spawn")
+        cmd.stdin(Stdio::Null)
+            .stdout(Stdio::Null)
+            .stderr(Stdio::Null)
+            .new_session();
+        cmd.start().expect("capture probe must spawn")
     }
 
     #[test]
@@ -900,7 +891,7 @@ mod tests {
     fn login_shell_env_adopts_path_when_a_background_job_holds_stdout() {
         use std::os::unix::io::FromRawFd;
 
-        struct KillOnDrop(Option<std::process::Child>);
+        struct KillOnDrop(Option<paneflow_process::Child>);
         impl Drop for KillOnDrop {
             fn drop(&mut self) {
                 let Some(child) = self.0.as_mut() else {
@@ -932,32 +923,27 @@ mod tests {
             // which `from_raw_fd` takes.
             let duped = unsafe { libc::dup(fd) };
             assert!(duped >= 0, "dup of the capture pipe failed");
-            unsafe { Stdio::from_raw_fd(duped) }
+            Stdio::Fd(unsafe { std::os::fd::OwnedFd::from_raw_fd(duped) })
         };
 
         let mut sleeper_cmd = Command::new("/bin/sleep");
         sleeper_cmd.arg("60");
         sleeper_cmd
-            .stdin(Stdio::null())
+            .stdin(Stdio::Null)
             .stdout(dup_stdio(write_fd))
-            .stderr(Stdio::null());
-        unsafe {
-            sleeper_cmd.pre_exec(|| {
-                // Own session: `kill(-writer_pgid)` must not reach this holder.
-                libc::setsid();
-                Ok(())
-            });
-        }
-        let sleeper = KillOnDrop(Some(sleeper_cmd.spawn().expect("stdout holder must spawn")));
+            .stderr(Stdio::Null)
+            // Own session: `kill(-writer_pgid)` must not reach this holder.
+            .new_session();
+        let sleeper = KillOnDrop(Some(sleeper_cmd.start().expect("stdout holder must spawn")));
 
         let script = "printf '%s\\n' '__PANEFLOW_LOGIN_ENV_V2__'; printf '%s\\n' 'PATH=/usr/bin:/bin:/opt/homebrew/bin'";
         let mut writer_cmd = Command::new("/bin/sh");
         writer_cmd.arg("-c").arg(script);
         writer_cmd
-            .stdin(Stdio::null())
+            .stdin(Stdio::Null)
             .stdout(dup_stdio(write_fd))
-            .stderr(Stdio::null());
-        let mut writer = KillOnDrop(Some(writer_cmd.spawn().expect("writer must spawn")));
+            .stderr(Stdio::Null);
+        let mut writer = KillOnDrop(Some(writer_cmd.start().expect("writer must spawn")));
 
         // SAFETY: the parent still owns `write_fd`; both children have their
         // own dups. Closing here drops the parent's write end only.

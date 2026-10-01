@@ -8,9 +8,12 @@ authors.workspace = true
 repository.workspace = true
 description = "Bounded external-process execution (wall-clock deadline + stdout cap) shared across Paneflow crates"
 
-# Zero external dependencies on purpose: this crate is a dependency of the
-# embedded `paneflow-shim`, so anything pulled in here inflates the shim binary
-# that ships inside the main executable (EP-002, US-005).
+# Only `libc` on purpose: this crate is a dependency of the embedded
+# `paneflow-shim`, so anything pulled in here inflates the shim binary that
+# ships inside the main executable (EP-002, US-005). The shim already links
+# `libc`, which is bindings only, so it adds nothing there.
+[dependencies]
+libc.workspace = true
 
 [features]
 # Exposes `test_support`, the hook that holds `spawn_piped`'s pipe window

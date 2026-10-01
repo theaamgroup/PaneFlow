@@ -15,8 +15,6 @@
 
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-#[cfg(unix)]
-use std::process::{ChildStdin, Command, Stdio};
 
 /// Identity and credential markers Claude Code exports into the processes it
 /// spawns. Single source for the process-env ACP scrub and the PTY overlay
@@ -125,9 +123,52 @@ pub fn scrub_claudecode_from_command(command: &mut std::process::Command) {
 #[cfg(unix)]
 pub const PTY_GUARD_SUBCOMMAND: &str = "__paneflow-pty-guard";
 
+/// The descriptor number a long-lived PTY guard finds its own copy of the
+/// PTY master at (issues #1123, #1126). Its `session:` argument names it.
+#[cfg(unix)]
+const PTY_GUARD_MASTER_FD: i32 = 3;
+
+/// A running session-mode PTY guard (issue #1129).
 #[cfg(unix)]
 pub struct PtyGuardHandle {
-    _stdin: ChildStdin,
+    /// The parent end of the guard's stdin control pipe. Dropping it is the
+    /// orderly-teardown signal.
+    _control: std::process::ChildStdin,
+    /// Set once the guard process has exited and been reaped.
+    exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The guard holds its own PTY master copy (`session:<fd>`), so on EOF
+    /// it looks for the session's groups itself. A `session:none` guard
+    /// signals only the shell leader's group.
+    covers_session: bool,
+}
+
+#[cfg(unix)]
+impl PtyGuardHandle {
+    /// Whether the guard process is still running, so closing the control
+    /// pipe will still make it run its shutdown ladder.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn is_live(&self) -> bool {
+        !self.exited.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Whether the guard was handed the PTY master (see `covers_session`).
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn covers_session(&self) -> bool {
+        self.covers_session
+    }
+}
+
+/// Whether `TerminalState::Drop` must start a frozen teardown guard per
+/// pinned group (issue #1129). Not when the pane-open guard is still running
+/// with its own PTY master copy: closing its control pipe makes it shut the
+/// session down. A guard that has exited, or one started `session:none`,
+/// does not cover the groups, so each gets its own guard.
+#[cfg(unix)]
+pub(crate) fn frozen_teardown_guards_needed(
+    pane_guard_live: bool,
+    pane_guard_covers_session: bool,
+) -> bool {
+    !(pane_guard_live && pane_guard_covers_session)
 }
 
 /// The one PID liveness probe: `kill(pid, 0)` with `ESRCH` semantics, so a
@@ -720,6 +761,41 @@ fn guard_session_still_authenticated(
     }
 }
 
+/// The program and leading arguments a guard process is started with: this
+/// executable in production, a libtest entrypoint in the spawn-path tests.
+#[cfg(unix)]
+struct GuardLauncher {
+    program: std::path::PathBuf,
+    leading_args: Vec<String>,
+    env: Vec<(String, String)>,
+}
+
+#[cfg(unix)]
+impl GuardLauncher {
+    #[cfg_attr(test, allow(dead_code))]
+    fn current_exe() -> Option<Self> {
+        match std::env::current_exe() {
+            Ok(program) => Some(Self {
+                program,
+                leading_args: Vec::new(),
+                env: Vec::new(),
+            }),
+            Err(err) => {
+                log::debug!("parent_guard: current_exe unavailable ({err}); PTY guard not started");
+                None
+            }
+        }
+    }
+}
+
+/// Start the long-lived session-mode guard for a pane that has just gone
+/// live (issue #1129).
+///
+/// Never call it on the GPUI thread: it walks the process table, and it
+/// spawns through [`paneflow_process::spawn_piped`], which waits for every
+/// spawn already in flight before it creates the control pipe. The view runs
+/// it on the background executor right after promotion and installs the
+/// handle when it arrives.
 #[cfg(target_os = "macos")]
 #[cfg_attr(test, allow(dead_code))]
 pub fn spawn_pty_guard(
@@ -727,80 +803,60 @@ pub fn spawn_pty_guard(
     child_proc_start: Option<u64>,
     pty_master_fd: i32,
 ) -> Option<PtyGuardHandle> {
+    let launcher = GuardLauncher::current_exe()?;
+    spawn_session_guard_with(&launcher, child_pgid, child_proc_start, pty_master_fd)
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_session_guard_with(
+    launcher: &GuardLauncher,
+    child_pgid: u32,
+    child_proc_start: Option<u64>,
+    pty_master_fd: i32,
+) -> Option<PtyGuardHandle> {
     let pinned_start = child_proc_start.or_else(|| pid_start_time(child_pgid));
     let group = pin_session_process_group(child_pgid, pinned_start)?;
-    spawn_process_group_guard_with_mode(group, Some(pty_master_fd))
-}
-
-#[cfg(unix)]
-#[cfg_attr(test, allow(dead_code))]
-pub(crate) fn spawn_process_group_guard(group: PinnedProcessGroup) -> Option<PtyGuardHandle> {
-    spawn_process_group_guard_with_mode(group, None)
-}
-
-#[cfg(unix)]
-fn spawn_process_group_guard_with_mode(
-    group: PinnedProcessGroup,
-    session_pty_master_fd: Option<i32>,
-) -> Option<PtyGuardHandle> {
-    if !pinned_process_group_is_current(&group) {
-        log::warn!(
-            "parent_guard: cannot validate PTY group {}; guard not started",
-            group.pgid
-        );
-        return None;
-    }
-    let Ok(exe) = std::env::current_exe() else {
-        log::debug!("parent_guard: current_exe unavailable; PTY guard not started");
-        return None;
+    let mut cmd = guard_command(launcher, &group)?;
+    // The guard's own copy of the master, at `PTY_GUARD_MASTER_FD`. `cmd`
+    // owns the parent's copy and closes it when this function returns, right
+    // after the spawn.
+    let covers_session = match pass_pty_master_to_child(&mut cmd, pty_master_fd) {
+        Ok(()) => true,
+        Err(err) => {
+            log::warn!(
+                "parent_guard: cannot duplicate PTY master for pgid {}: {err}; foreground hard-death guard unavailable",
+                group.pgid
+            );
+            false
+        }
     };
-
-    let mut cmd = Command::new(exe);
-    // The guard's own copy of the master. The parent's copy is dropped when
-    // this function returns, right after `spawn`.
-    let inherited_master =
-        session_pty_master_fd.and_then(|fd| match pass_pty_master_to_child(&mut cmd, fd) {
-            Ok(duplicate) => Some(duplicate),
-            Err(err) => {
-                log::warn!(
-                    "parent_guard: cannot duplicate PTY master for pgid {}: {err}; foreground hard-death guard unavailable",
-                    group.pgid
-                );
-                None
-            }
-        });
-    let mode_arg = match &inherited_master {
-        Some(fd) => format!("session:{}", fd.as_raw_fd()),
-        None if session_pty_master_fd.is_some() => "session:none".to_string(),
-        None => "frozen".to_string(),
+    cmd.arg(if covers_session {
+        format!("session:{PTY_GUARD_MASTER_FD}")
+    } else {
+        "session:none".to_string()
+    });
+    let control = paneflow_process::Pipes {
+        stdin: true,
+        ..paneflow_process::Pipes::default()
     };
-
-    cmd.arg(PTY_GUARD_SUBCOMMAND)
-        .arg(std::process::id().to_string())
-        .arg(group.pgid.to_string())
-        .arg(group.session_id.to_string())
-        .arg(serialize_member_pins(&group.members))
-        .arg(mode_arg);
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    use std::os::unix::process::CommandExt;
-    cmd.process_group(0);
-
-    match paneflow_process::spawn(&mut cmd) {
+    match paneflow_process::spawn_piped(&mut cmd, control) {
         Ok(mut child) => {
-            let Some(stdin) = child.stdin.take() else {
+            let Some(control) = child.stdin.take() else {
                 log::warn!(
                     "parent_guard: PTY guard for pgid {} has no control pipe",
                     group.pgid
                 );
                 let _ = child.kill();
+                reap_guard(child, None);
                 return None;
             };
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-            Some(PtyGuardHandle { _stdin: stdin })
+            let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            reap_guard(child, Some(std::sync::Arc::clone(&exited)));
+            Some(PtyGuardHandle {
+                _control: control,
+                exited,
+                covers_session,
+            })
         }
         Err(err) => {
             log::warn!(
@@ -812,43 +868,113 @@ fn spawn_process_group_guard_with_mode(
     }
 }
 
-/// Give the child `cmd` spawns its own copy of `pty_master_fd`, at the
-/// number of the returned descriptor, and give it to no other child
-/// (issue #1123).
+/// Start a frozen-mode teardown guard for `group` from `TerminalState::Drop`,
+/// before the app sends its own SIGTERM, so the TERM-to-KILL ladder survives
+/// an immediate app exit. Returns whether the guard started.
+///
+/// This runs on the GPUI thread, so it has no control pipe (issue #1129):
+/// stdin is `/dev/null`, the guard reads EOF on its first poll and runs the
+/// ladder at once, which is what closing the pipe right after SIGTERM used
+/// to trigger.
+#[cfg(unix)]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn spawn_process_group_guard(group: PinnedProcessGroup) -> bool {
+    GuardLauncher::current_exe().is_some_and(|launcher| spawn_frozen_guard_with(&launcher, &group))
+}
+
+#[cfg(unix)]
+fn spawn_frozen_guard_with(launcher: &GuardLauncher, group: &PinnedProcessGroup) -> bool {
+    let Some(mut cmd) = guard_command(launcher, group) else {
+        return false;
+    };
+    cmd.arg("frozen").stdin(paneflow_process::Stdio::Null);
+    match cmd.start() {
+        Ok(child) => {
+            reap_guard(child, None);
+            true
+        }
+        Err(err) => {
+            log::warn!(
+                "parent_guard: failed to start PTY guard for pgid {}: {err}",
+                group.pgid
+            );
+            false
+        }
+    }
+}
+
+/// The guard command for `group`, every argument but the mode, or `None`
+/// when the group no longer matches its pins.
+#[cfg(unix)]
+fn guard_command(
+    launcher: &GuardLauncher,
+    group: &PinnedProcessGroup,
+) -> Option<paneflow_process::Command> {
+    if !pinned_process_group_is_current(group) {
+        log::warn!(
+            "parent_guard: cannot validate PTY group {}; guard not started",
+            group.pgid
+        );
+        return None;
+    }
+    let mut cmd = paneflow_process::Command::new(&launcher.program);
+    cmd.args(&launcher.leading_args)
+        .envs(launcher.env.iter().map(|(key, value)| (key, value)))
+        .arg(PTY_GUARD_SUBCOMMAND)
+        .arg(std::process::id().to_string())
+        .arg(group.pgid.to_string())
+        .arg(group.session_id.to_string())
+        .arg(serialize_member_pins(&group.members))
+        .stdout(paneflow_process::Stdio::Null)
+        .stderr(paneflow_process::Stdio::Null)
+        .process_group(0);
+    Some(cmd)
+}
+
+/// Reap a guard on its own thread and record its exit in `exited`.
+#[cfg(unix)]
+fn reap_guard(
+    mut child: paneflow_process::Child,
+    exited: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        if let Some(exited) = exited {
+            exited.store(true, std::sync::atomic::Ordering::Release);
+        }
+    });
+}
+
+/// Give the child `cmd` starts its own copy of `pty_master_fd`, at
+/// [`PTY_GUARD_MASTER_FD`], and give it to no other child (issues #1123,
+/// #1126).
 ///
 /// The parent's copy is close-on-exec from the moment it exists
-/// (`F_DUPFD_CLOEXEC`), so a child another thread spawns first never
-/// inherits it. Only the forked child clears the flag, in `pre_exec`, just
-/// before its exec. Drop the returned descriptor once `spawn` returns.
-///
-/// A `pre_exec` closure makes std `fork` and `exec` this child instead of
-/// using `posix_spawn`. The closure runs in the fork of a multi-threaded
-/// process, so it must stay async-signal-safe: no allocation, locks, or
-/// logging.
+/// (`F_DUPFD_CLOEXEC`), so no other child inherits it. `cmd` owns it and
+/// hands it to its child with a `posix_spawn` `dup2` file action, so the
+/// guard spawns without a fork. It sits above the guard's number, so that
+/// `dup2` never lands on itself.
 #[cfg(unix)]
-fn pass_pty_master_to_child(cmd: &mut Command, pty_master_fd: i32) -> std::io::Result<OwnedFd> {
-    use std::os::unix::process::CommandExt;
-
+fn pass_pty_master_to_child(
+    cmd: &mut paneflow_process::Command,
+    pty_master_fd: i32,
+) -> std::io::Result<()> {
     // SAFETY: fcntl only reads `pty_master_fd`. F_DUPFD_CLOEXEC returns a
-    // fresh descriptor at 3 or above (never a stdio slot), or -1.
-    let duplicate = unsafe { libc::fcntl(pty_master_fd, libc::F_DUPFD_CLOEXEC, 3) };
+    // fresh descriptor above `PTY_GUARD_MASTER_FD`, or -1.
+    let duplicate = unsafe {
+        libc::fcntl(
+            pty_master_fd,
+            libc::F_DUPFD_CLOEXEC,
+            PTY_GUARD_MASTER_FD + 1,
+        )
+    };
     if duplicate < 0 {
         return Err(std::io::Error::last_os_error());
     }
     // SAFETY: this is the only owner of the fresh duplicate in the parent.
     let duplicate = unsafe { OwnedFd::from_raw_fd(duplicate) };
-    let inherited = duplicate.as_raw_fd();
-    // SAFETY: fcntl is async-signal-safe, and the closure touches only the
-    // child's copy of the descriptor, which stays open until exec.
-    unsafe {
-        cmd.pre_exec(move || {
-            if libc::fcntl(inherited, libc::F_SETFD, 0) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    Ok(duplicate)
+    cmd.pass_fd(duplicate, PTY_GUARD_MASTER_FD);
+    Ok(())
 }
 
 /// A test child that is killed and reaped however the test ends, so a failed
@@ -1092,6 +1218,7 @@ fn control_pipe_closed() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
 
     const SUBPROCESS_GUARD_GROUP_ENV: &str = "PANEFLOW_TEST_GUARD_GROUP";
     const SUBPROCESS_GUARD_MASTER_ENV: &str = "PANEFLOW_TEST_GUARD_MASTER";
@@ -1168,20 +1295,27 @@ mod tests {
                 .stderr(Stdio::null());
             command
         };
-        let mut guard_command = sleeper();
-        let guard_copy = pass_pty_master_to_child(&mut guard_command, master.as_raw_fd())
+        let mut guard_command = paneflow_process::Command::from(&sleeper());
+        guard_command
+            .stdin(paneflow_process::Stdio::Null)
+            .stdout(paneflow_process::Stdio::Null)
+            .stderr(paneflow_process::Stdio::Null);
+        pass_pty_master_to_child(&mut guard_command, master.as_raw_fd())
             .expect("duplicate the master for the guard");
-        let guard_fd = guard_copy.as_raw_fd();
-        // A spawn on another thread lands between the duplicate and the
-        // guard's own spawn.
+        // A std spawn, which inherits every descriptor not marked
+        // close-on-exec, lands between the duplicate and the guard's own
+        // spawn.
         let bystander =
             KillOnDrop(paneflow_process::spawn(&mut sleeper()).expect("spawn bystander"));
-        let guard =
-            KillOnDrop(paneflow_process::spawn(&mut guard_command).expect("spawn guard stand-in"));
-        drop(guard_copy);
+        let mut guard = guard_command.start().expect("spawn guard stand-in");
+        // Closes the parent's copy.
+        drop(guard_command);
 
         let bystander_held = vnode_devices_held_by(bystander.0.id() as i32);
-        let guard_held = vnode_devices_held_by(guard.0.id() as i32);
+        let guard_held = vnode_devices_held_by(guard.id() as i32);
+        let _ = guard.kill();
+        let _ = guard.wait();
+        let own_held = vnode_devices_held_by(std::process::id() as i32);
 
         let leaked: Vec<i32> = bystander_held
             .iter()
@@ -1199,8 +1333,18 @@ mod tests {
             .collect();
         assert_eq!(
             guard_masters,
-            vec![guard_fd],
+            vec![PTY_GUARD_MASTER_FD],
             "the guard holds its master exactly at the number its argument names"
+        );
+        let parent_masters: Vec<i32> = own_held
+            .iter()
+            .filter(|(_, rdev)| *rdev == device)
+            .map(|(fd, _)| *fd)
+            .collect();
+        assert_eq!(
+            parent_masters,
+            vec![master.as_raw_fd()],
+            "the parent's copy for the guard is closed once the guard has started"
         );
     }
 
@@ -1575,6 +1719,273 @@ mod tests {
             run_pty_guard_with_groups(parent_pid, group, PtyGuardMode::Frozen, true, Vec::new()),
             0
         );
+    }
+
+    /// Set by [`test_launcher`] so [`pty_guard_launcher_entrypoint`] runs.
+    const GUARD_LAUNCHER_ENV: &str = "PANEFLOW_TEST_GUARD_LAUNCHER";
+
+    /// The guard the spawn-path tests start: this test binary, which runs
+    /// the real guard verb on the arguments after `--`. The other arguments
+    /// are libtest filters that `--exact` matches to no test.
+    #[cfg(unix)]
+    #[test]
+    fn pty_guard_launcher_entrypoint() {
+        if std::env::var_os(GUARD_LAUNCHER_ENV).is_none() {
+            return;
+        }
+        let args: Vec<String> = std::env::args().collect();
+        let verb = args
+            .iter()
+            .position(|arg| arg == PTY_GUARD_SUBCOMMAND)
+            .expect("guard verb in the launcher arguments");
+        let guard_args: Vec<String> = std::iter::once(args[0].clone())
+            .chain(args[verb..].iter().cloned())
+            .collect();
+        std::process::exit(run_pty_guard_from_args(&guard_args));
+    }
+
+    /// Starts guards through [`pty_guard_launcher_entrypoint`] instead of
+    /// the production executable, which a test binary is not.
+    #[cfg(unix)]
+    fn test_launcher() -> GuardLauncher {
+        GuardLauncher {
+            program: std::env::current_exe().expect("current test executable"),
+            leading_args: [
+                "--exact",
+                "agents::parent_guard::tests::pty_guard_launcher_entrypoint",
+                "--nocapture",
+                "--",
+            ]
+            .map(String::from)
+            .to_vec(),
+            env: vec![(GUARD_LAUNCHER_ENV.to_string(), "1".to_string())],
+        }
+    }
+
+    /// Wait for `child` to exit within the fixture budget.
+    #[cfg(unix)]
+    fn wait_for_fixture_exit(
+        child: &mut std::process::Child,
+        what: &str,
+    ) -> std::process::ExitStatus {
+        let deadline = std::time::Instant::now() + FIXTURE_WAIT_BUDGET;
+        loop {
+            if let Some(status) = child.try_wait().expect("try_wait fixture") {
+                return status;
+            }
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Issue #1129: a close-time guard has `/dev/null` for stdin, no control
+    /// pipe. It reads EOF on its first poll and runs the TERM-to-KILL ladder
+    /// on its pinned group, through the real spawn path.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn close_time_guard_with_null_stdin_kills_its_pinned_group() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "trap '' TERM; echo ready; exec sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        // SAFETY: setsid runs in the forked child before exec and gives this
+        // fixture its own process group, so the guard can signal -pid.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().expect("spawn TERM-ignoring group");
+        let pgid = child.id();
+        let mut cleanup = KillGroupOnDrop(Some(pgid as i32));
+        let mut ready = String::new();
+        BufReader::new(child.stdout.take().expect("piped stdout"))
+            .read_line(&mut ready)
+            .expect("read readiness line");
+        assert_eq!(ready.trim_end(), "ready");
+
+        let pinned_start = pid_start_time(pgid).expect("pin child start time");
+        let group =
+            pin_leader_process_group(pgid, Some(pinned_start)).expect("pin child process group");
+        assert!(
+            spawn_frozen_guard_with(&test_launcher(), &group),
+            "the close-time guard must start"
+        );
+
+        let status = wait_for_fixture_exit(
+            &mut child,
+            "a close-time guard with a null stdin did not tear down its group",
+        );
+        cleanup.reaped();
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "a TERM-ignoring group must reach the guard's SIGKILL escalation"
+        );
+    }
+
+    /// Issue #1129: a pane-open guard handle that arrives after its pane is
+    /// gone is dropped, and that alone shuts the PTY session down. While the
+    /// handle is held, the guard leaves the session alone.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn late_pane_open_guard_handle_dropped_kills_the_session() {
+        use std::io::Read;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        use std::time::{Duration, Instant};
+
+        let mut master_fd = -1;
+        let mut slave_fd = -1;
+        // SAFETY: openpty initializes both fd outputs using default terminal
+        // settings when termios/winsize are null.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master_fd,
+                    &mut slave_fd,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        // SAFETY: openpty returned two fresh descriptors this test owns; the
+        // master is the app's copy, close-on-exec like the pane's.
+        let (mut master, slave) = unsafe {
+            libc::fcntl(master_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(slave_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            (
+                std::fs::File::from_raw_fd(master_fd),
+                OwnedFd::from_raw_fd(slave_fd),
+            )
+        };
+        let stdio = || Stdio::from(slave.try_clone().expect("duplicate the slave"));
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "trap '' HUP TERM; echo __PANE_READY__; exec sleep 30"])
+            .stdin(stdio())
+            .stdout(stdio())
+            .stderr(stdio());
+        // SAFETY: only async-signal-safe syscalls run before exec. The shell
+        // becomes session leader and takes the PTY as its terminal.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY.into(), 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut shell = command.spawn().expect("spawn the pane shell");
+        drop(command);
+        drop(slave);
+        let shell_pid = shell.id();
+        let mut cleanup = KillGroupOnDrop(Some(shell_pid as i32));
+
+        // SAFETY: nonblocking reads keep a broken fixture from hanging.
+        unsafe {
+            let flags = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
+            libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+        let deadline = Instant::now() + FIXTURE_WAIT_BUDGET;
+        let mut output = Vec::new();
+        let mut buffer = [0u8; 256];
+        while !String::from_utf8_lossy(&output).contains("__PANE_READY__") {
+            match master.read(&mut buffer) {
+                Ok(read) => output.extend_from_slice(&buffer[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("read the pane PTY: {error}"),
+            }
+            assert!(Instant::now() < deadline, "pane shell never got ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // As the view does: the spawn runs off the GPUI thread.
+        let start = pid_start_time(shell_pid);
+        let master_raw = master.as_raw_fd();
+        let handle = std::thread::spawn(move || {
+            spawn_session_guard_with(&test_launcher(), shell_pid, start, master_raw)
+        })
+        .join()
+        .expect("guard spawn thread")
+        .expect("the pane-open guard must start");
+
+        // An open control pipe is not EOF: the session must survive it.
+        std::thread::sleep(GUARD_POLL_INTERVAL * 2 + Duration::from_millis(200));
+        assert!(
+            shell.try_wait().expect("try_wait shell").is_none(),
+            "the pane-open guard must leave a live pane alone while its handle is held"
+        );
+        assert!(
+            handle.is_live(),
+            "the pane-open guard must still be running"
+        );
+
+        // The view is gone, so the late handle is dropped.
+        drop(handle);
+        let status = wait_for_fixture_exit(
+            &mut shell,
+            "dropping the late pane-open guard handle did not shut the session down",
+        );
+        cleanup.reaped();
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "a TERM- and HUP-ignoring shell must reach the guard's SIGKILL"
+        );
+        drop(master);
+    }
+
+    /// SIGKILLs a fixture-owned process group however the test ends, until
+    /// [`KillGroupOnDrop::reaped`] disarms it.
+    #[cfg(unix)]
+    struct KillGroupOnDrop(Option<i32>);
+
+    #[cfg(unix)]
+    impl KillGroupOnDrop {
+        /// The fixture's only process was reaped, so its group id may be
+        /// reused by now: never signal it.
+        fn reaped(&mut self) {
+            self.0 = None;
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for KillGroupOnDrop {
+        fn drop(&mut self) {
+            if let Some(pgid) = self.0 {
+                // SAFETY: the group was created by this fixture and its
+                // leader has not been reaped.
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    /// Issue #1129: `Drop` skips the per-group frozen guards only while the
+    /// pane-open guard is running and holds the PTY master.
+    #[cfg(unix)]
+    #[test]
+    fn frozen_teardown_guards_are_skipped_only_for_a_live_session_covering_guard() {
+        assert!(!frozen_teardown_guards_needed(true, true));
+        assert!(
+            frozen_teardown_guards_needed(false, true),
+            "an exited guard covers nothing"
+        );
+        assert!(
+            frozen_teardown_guards_needed(true, false),
+            "a session:none guard signals only the leader's group"
+        );
+        assert!(frozen_teardown_guards_needed(false, false));
     }
 
     #[cfg(unix)]
