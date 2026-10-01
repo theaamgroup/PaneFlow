@@ -1687,7 +1687,7 @@ mod tests {
             std::env::temp_dir().join(format!("paneflow-process-noshebang-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let script = dir.join("no-shebang");
-        std::fs::write(&script, "printf '%s|%s' \"$1\" \"$2\"\n").expect("write script");
+        std::fs::write(&script, "printf '%s|%s|%s' \"$0\" \"$1\" \"$2\"\n").expect("write script");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
         let (mut reader, writer) = io::pipe().expect("pipe");
@@ -1704,14 +1704,49 @@ mod tests {
         assert!(started.expect("a shebang-less script must start").success());
         let mut text = String::new();
         reader.read_to_string(&mut text).expect("read");
-        assert_eq!(text, "first arg|second");
+        // `$0` is the resolved script path, as `sh <path> args...` sets it.
+        assert_eq!(text, format!("{}|first arg|second", script.display()));
     }
 
     /// A descriptor plan whose file actions would clobber each other is
     /// refused before anything is spawned.
+    ///
+    /// A source below 3 has to be an `OwnedFd` at a stdio number, so those
+    /// cases borrow this process's stdin (fd 0) and forget the command
+    /// before any assertion, so it is never closed.
     #[test]
     fn descriptor_plans_that_clobber_each_other_are_refused() {
-        use std::os::fd::AsRawFd;
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        let refused_with_stdin_source = |configure: fn(&mut Command, OwnedFd)| {
+            let mut command = sleeper();
+            // SAFETY: fd 0 is open for the whole test run; `forget` below
+            // keeps this `OwnedFd` from ever closing it.
+            configure(&mut command, unsafe { OwnedFd::from_raw_fd(0) });
+            let started = command.start();
+            std::mem::forget(command);
+            started
+                .map(|mut child| {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                })
+                .expect_err("plan must be refused")
+                .kind()
+        };
+        // A `pass_fd` source below 3.
+        assert_eq!(
+            refused_with_stdin_source(|command, stdin| {
+                command.pass_fd(stdin, 9);
+            }),
+            io::ErrorKind::InvalidInput
+        );
+        // A stdio source that is a lower slot: stdin is set up first.
+        assert_eq!(
+            refused_with_stdin_source(|command, stdin| {
+                command.stderr(stdin);
+            }),
+            io::ErrorKind::InvalidInput
+        );
 
         let fd = || -> OwnedFd { io::pipe().expect("pipe").1.into() };
         let refused = |command: &mut Command| {
@@ -1735,6 +1770,11 @@ mod tests {
         );
         assert_eq!(
             refused(sleeper().pass_fd(fd(), 7).pass_fd(fd(), 7)),
+            io::ErrorKind::InvalidInput
+        );
+        // A pass target that is also inherited.
+        assert_eq!(
+            refused(sleeper().inherit_fd(8).pass_fd(fd(), 8)),
             io::ErrorKind::InvalidInput
         );
         // The second source is the first target.

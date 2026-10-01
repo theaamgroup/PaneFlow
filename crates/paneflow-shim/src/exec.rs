@@ -151,9 +151,10 @@ pub(crate) fn run_real(tool: &str, path: &Path, args: &[OsString]) -> (ExitCode,
 
 /// Start the agent with `inherited` kept open at their own numbers.
 ///
-/// A descriptor listed a moment ago can be gone by the spawn (`EBADF`), or
-/// refused (`EPERM`). Losing a pass-through descriptor is better than not
-/// starting the agent at all, so that case retries once without them.
+/// A descriptor listed a moment ago can be closed by the spawn, which fails
+/// it with `EBADF`. Losing that descriptor is better than not starting the
+/// agent at all, so that case retries once with only the listed descriptors
+/// that are still open.
 pub(crate) fn start_agent(
     cmd: &mut paneflow_process::Command,
     inherited: &[std::os::fd::RawFd],
@@ -162,15 +163,22 @@ pub(crate) fn start_agent(
         cmd.inherit_fd(fd);
     }
     match cmd.start() {
-        Err(error)
-            if !inherited.is_empty()
-                && matches!(error.raw_os_error(), Some(libc::EBADF | libc::EPERM)) =>
-        {
+        Err(error) if !inherited.is_empty() && error.raw_os_error() == Some(libc::EBADF) => {
+            // SAFETY: `F_GETFD` only reads the flags of `fd`, open or not.
+            let still_open: Vec<std::os::fd::RawFd> = inherited
+                .iter()
+                .copied()
+                .filter(|&fd| unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0)
+                .collect();
             crate::diagnose(&format!(
                 "agent spawn with inherited descriptors {inherited:?} failed ({error}); \
-                 retrying without them"
+                 retrying with the ones still open, {still_open:?}"
             ));
-            cmd.clear_inherited_fds().start()
+            cmd.clear_inherited_fds();
+            for fd in still_open {
+                cmd.inherit_fd(fd);
+            }
+            cmd.start()
         }
         started => started,
     }

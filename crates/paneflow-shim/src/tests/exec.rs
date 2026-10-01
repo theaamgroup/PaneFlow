@@ -80,42 +80,38 @@ fn parent_death_guard_does_not_signal_once_child_is_reaped() {
     );
 }
 
-/// The agent keeps a descriptor its shell passed on, and still starts when a
-/// listed descriptor is gone by the spawn (#1126).
+/// The agent keeps a descriptor its shell passed on, with or without another
+/// listed descriptor that is gone by the spawn (#1126).
 #[test]
 fn agent_keeps_inherited_descriptors_and_starts_without_a_closed_one() {
     use std::io::Read;
     use std::os::fd::AsRawFd;
 
-    let (mut reader, writer) = std::io::pipe().expect("pipe");
-    let passed = writer.as_raw_fd();
-    let mut command = paneflow_process::Command::new("/bin/sh");
-    command
-        .arg("-c")
-        .arg(format!("printf passed >&{passed}"))
-        .stdin(paneflow_process::Stdio::Null)
-        .stdout(paneflow_process::Stdio::Null)
-        .stderr(paneflow_process::Stdio::Null);
-    let status = crate::exec::start_agent(&mut command, &[passed])
-        .and_then(|mut child| child.wait())
-        .expect("agent with an inherited descriptor");
-    drop(writer);
-    let mut text = String::new();
-    reader.read_to_string(&mut text).expect("read");
-    assert!(status.success(), "{status:?}");
-    assert_eq!(text, "passed");
-
     // Far above any descriptor this test process opens.
     const CLOSED: i32 = 4000;
-    let mut command = paneflow_process::Command::new("/usr/bin/true");
-    command
-        .stdin(paneflow_process::Stdio::Null)
-        .stdout(paneflow_process::Stdio::Null)
-        .stderr(paneflow_process::Stdio::Null);
-    let status = crate::exec::start_agent(&mut command, &[CLOSED])
-        .and_then(|mut child| child.wait())
-        .expect("a closed inherited descriptor must not stop the agent");
-    assert!(status.success(), "{status:?}");
+    for listed_closed in [&[][..], &[CLOSED][..]] {
+        let (mut reader, writer) = std::io::pipe().expect("pipe");
+        let passed = writer.as_raw_fd();
+        let mut command = paneflow_process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(format!("printf passed >&{passed}"))
+            .stdin(paneflow_process::Stdio::Null)
+            .stdout(paneflow_process::Stdio::Null)
+            .stderr(paneflow_process::Stdio::Null);
+        let inherited: Vec<i32> = listed_closed.iter().copied().chain([passed]).collect();
+        let status = crate::exec::start_agent(&mut command, &inherited)
+            .and_then(|mut child| child.wait())
+            .expect("a closed inherited descriptor must not stop the agent");
+        drop(writer);
+        let mut text = String::new();
+        reader.read_to_string(&mut text).expect("read");
+        assert!(status.success(), "{inherited:?}: {status:?}");
+        assert_eq!(
+            text, "passed",
+            "the open descriptor must still reach the agent: {inherited:?}"
+        );
+    }
 }
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {

@@ -640,8 +640,9 @@ impl FileActions {
     }
 
     /// Stdio first, then the passed descriptors, then the inherited ones, then
-    /// the working directory. [`check_descriptor_plan`] rules out every
-    /// ordering in which one action would replace another's source first.
+    /// the working directory. [`check_descriptor_plan`] refuses the plans in
+    /// which, with that order, one action would replace another's source
+    /// before it is copied.
     fn configure(&mut self, command: &Command, cwd: Option<&CString>) -> io::Result<()> {
         check_descriptor_plan(command)?;
         for (target, stdio) in [&command.stdin, &command.stdout, &command.stderr]
@@ -712,9 +713,10 @@ impl Drop for FileActions {
 }
 
 /// Refuse a descriptor plan whose file actions would clobber each other:
-/// a `pass_fd` source or target in 0-2 (the stdio actions run first and may
-/// have replaced it), a target given twice or also inherited, a source that
-/// is another `pass_fd`'s target, or an `inherit_fd` below 3.
+/// a stdio `Fd` source that is a lower stdio slot, a `pass_fd` source or
+/// target in 0-2 (the stdio actions run first and may have replaced it), a
+/// target given twice or also inherited, a source that is another
+/// `pass_fd`'s target, or an `inherit_fd` below 3.
 fn check_descriptor_plan(command: &Command) -> io::Result<()> {
     let invalid = |reason: &str| {
         Err(io::Error::new(
@@ -724,6 +726,20 @@ fn check_descriptor_plan(command: &Command) -> io::Result<()> {
     };
     if command.inherited_fds.iter().any(|&fd| fd < 3) {
         return invalid("inherit_fd names a stdio slot");
+    }
+    // Slots are set in order 0, 1, 2: a source below its own slot has
+    // already been replaced by then.
+    for (slot, stdio) in [&command.stdin, &command.stdout, &command.stderr]
+        .into_iter()
+        .enumerate()
+    {
+        let lower_slot = match stdio {
+            Stdio::Fd(fd) => usize::try_from(fd.as_raw_fd()).is_ok_and(|source| source < slot),
+            Stdio::Inherit | Stdio::Null => false,
+        };
+        if lower_slot {
+            return invalid("a stdio source is a lower stdio slot, already replaced");
+        }
     }
     let targets: Vec<RawFd> = command
         .passed_fds
