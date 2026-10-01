@@ -2408,7 +2408,9 @@ mod tests {
     /// session-guard spawn; the view's one call sits in a background task.
     #[test]
     fn pane_open_guard_spawns_only_on_the_background_executor() {
-        const GUARD_SPAWNS: [&str; 3] = ["spawn_pty_guard(", "spawn_guard(", "spawn_session_guard"];
+        // No trailing `(`, so a path use such as
+        // `.map(PaneGuardTarget::spawn_guard)` counts too.
+        const GUARD_SPAWNS: [&str; 3] = ["spawn_pty_guard", "spawn_guard", "spawn_session_guard"];
         let pty = include_str!("pty_session.rs");
         let promote = pty
             .split("pub(super) fn promote_ghostty(")
@@ -2445,7 +2447,11 @@ mod tests {
             .flat_map(|spawn| view.match_indices(spawn).map(|(at, _)| at))
             .collect();
         assert_eq!(calls.len(), 1, "one pane-open guard spawn in view.rs");
-        let lead_in = &view[calls[0].saturating_sub(120)..calls[0]];
+        let mut start = calls[0].saturating_sub(120);
+        while !view.is_char_boundary(start) {
+            start -= 1;
+        }
+        let lead_in = &view[start..calls[0]];
         assert!(
             lead_in.contains("executor.spawn(async move"),
             "the pane-open guard must spawn inside a background task: {lead_in}"

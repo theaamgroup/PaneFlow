@@ -136,16 +136,39 @@ pub struct PtyGuardHandle {
     _control: std::process::ChildStdin,
     /// Set once the guard process has exited and been reaped.
     exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The guard holds its own PTY master copy (`session:<fd>`), so on EOF
+    /// it looks for the session's groups itself. A `session:none` guard
+    /// signals only the shell leader's group.
+    covers_session: bool,
 }
 
 #[cfg(unix)]
 impl PtyGuardHandle {
     /// Whether the guard process is still running, so closing the control
-    /// pipe will still make it re-enumerate and shut down the session.
+    /// pipe will still make it run its shutdown ladder.
     #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn is_live(&self) -> bool {
         !self.exited.load(std::sync::atomic::Ordering::Acquire)
     }
+
+    /// Whether the guard was handed the PTY master (see `covers_session`).
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn covers_session(&self) -> bool {
+        self.covers_session
+    }
+}
+
+/// Whether `TerminalState::Drop` must start a frozen teardown guard per
+/// pinned group (issue #1129). Not when the pane-open guard is still running
+/// with its own PTY master copy: closing its control pipe makes it shut the
+/// session down. A guard that has exited, or one started `session:none`,
+/// does not cover the groups, so each gets its own guard.
+#[cfg(unix)]
+pub(crate) fn frozen_teardown_guards_needed(
+    pane_guard_live: bool,
+    pane_guard_covers_session: bool,
+) -> bool {
+    !(pane_guard_live && pane_guard_covers_session)
 }
 
 /// The one PID liveness probe: `kill(pid, 0)` with `ESRCH` semantics, so a
@@ -797,17 +820,21 @@ fn spawn_session_guard_with(
     // The guard's own copy of the master, at `PTY_GUARD_MASTER_FD`. `cmd`
     // owns the parent's copy and closes it when this function returns, right
     // after the spawn.
-    let mode_arg = match pass_pty_master_to_child(&mut cmd, pty_master_fd) {
-        Ok(()) => format!("session:{PTY_GUARD_MASTER_FD}"),
+    let covers_session = match pass_pty_master_to_child(&mut cmd, pty_master_fd) {
+        Ok(()) => true,
         Err(err) => {
             log::warn!(
                 "parent_guard: cannot duplicate PTY master for pgid {}: {err}; foreground hard-death guard unavailable",
                 group.pgid
             );
-            "session:none".to_string()
+            false
         }
     };
-    cmd.arg(mode_arg);
+    cmd.arg(if covers_session {
+        format!("session:{PTY_GUARD_MASTER_FD}")
+    } else {
+        "session:none".to_string()
+    });
     let control = paneflow_process::Pipes {
         stdin: true,
         ..paneflow_process::Pipes::default()
@@ -828,6 +855,7 @@ fn spawn_session_guard_with(
             Some(PtyGuardHandle {
                 _control: control,
                 exited,
+                covers_session,
             })
         }
         Err(err) => {
@@ -1775,7 +1803,7 @@ mod tests {
         }
         let mut child = command.spawn().expect("spawn TERM-ignoring group");
         let pgid = child.id();
-        let _cleanup = KillGroupOnDrop(pgid as i32);
+        let mut cleanup = KillGroupOnDrop(Some(pgid as i32));
         let mut ready = String::new();
         BufReader::new(child.stdout.take().expect("piped stdout"))
             .read_line(&mut ready)
@@ -1794,6 +1822,7 @@ mod tests {
             &mut child,
             "a close-time guard with a null stdin did not tear down its group",
         );
+        cleanup.reaped();
         assert_eq!(
             status.signal(),
             Some(libc::SIGKILL),
@@ -1859,7 +1888,7 @@ mod tests {
         drop(command);
         drop(slave);
         let shell_pid = shell.id();
-        let _cleanup = KillGroupOnDrop(shell_pid as i32);
+        let mut cleanup = KillGroupOnDrop(Some(shell_pid as i32));
 
         // SAFETY: nonblocking reads keep a broken fixture from hanging.
         unsafe {
@@ -1906,6 +1935,7 @@ mod tests {
             &mut shell,
             "dropping the late pane-open guard handle did not shut the session down",
         );
+        cleanup.reaped();
         assert_eq!(
             status.signal(),
             Some(libc::SIGKILL),
@@ -1914,18 +1944,48 @@ mod tests {
         drop(master);
     }
 
-    /// SIGKILLs a fixture-owned process group however the test ends.
+    /// SIGKILLs a fixture-owned process group however the test ends, until
+    /// [`KillGroupOnDrop::reaped`] disarms it.
     #[cfg(unix)]
-    struct KillGroupOnDrop(i32);
+    struct KillGroupOnDrop(Option<i32>);
+
+    #[cfg(unix)]
+    impl KillGroupOnDrop {
+        /// The fixture's only process was reaped, so its group id may be
+        /// reused by now: never signal it.
+        fn reaped(&mut self) {
+            self.0 = None;
+        }
+    }
 
     #[cfg(unix)]
     impl Drop for KillGroupOnDrop {
         fn drop(&mut self) {
-            // SAFETY: the group was created by this fixture.
-            unsafe {
-                libc::kill(-self.0, libc::SIGKILL);
+            if let Some(pgid) = self.0 {
+                // SAFETY: the group was created by this fixture and its
+                // leader has not been reaped.
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
             }
         }
+    }
+
+    /// Issue #1129: `Drop` skips the per-group frozen guards only while the
+    /// pane-open guard is running and holds the PTY master.
+    #[cfg(unix)]
+    #[test]
+    fn frozen_teardown_guards_are_skipped_only_for_a_live_session_covering_guard() {
+        assert!(!frozen_teardown_guards_needed(true, true));
+        assert!(
+            frozen_teardown_guards_needed(false, true),
+            "an exited guard covers nothing"
+        );
+        assert!(
+            frozen_teardown_guards_needed(true, false),
+            "a session:none guard signals only the leader's group"
+        );
+        assert!(frozen_teardown_guards_needed(false, false));
     }
 
     #[cfg(unix)]

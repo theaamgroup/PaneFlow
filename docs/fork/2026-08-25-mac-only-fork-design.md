@@ -330,6 +330,27 @@ Found during the inventory. Each one would have cost a debugging session.
       the exclusion, so a slow spawn in flight (a first-exec Gatekeeper
       scan) cannot push pane startup past `STARTUP_REPORT_TIMEOUT`.
 
+    Since #1126 the guard spawns with `posix_spawn` again and gets its master
+    copy at fd 3 through a `dup2` file action, so the `pre_exec` above is gone.
+
+    **Amended 2026-10-01 (#1129): no guard spawn needs a pipe on the GPUI thread.**
+    - The pane-open (session-mode) guard is no longer spawned in
+      `promote_ghostty`. The view starts it in its own background task right
+      after promotion, from `TerminalState::pane_guard_target`, with its
+      control pipe from `spawn_piped`, and installs the handle when it
+      arrives. Until then the pane has no hard-death guard; that short
+      window is accepted. A handle that arrives after the pane closed is
+      dropped, and the EOF makes the guard shut the session down.
+    - `Drop` still starts its frozen per-group guards before SIGTERM, but
+      their stdin is `/dev/null`: each reads EOF on its first poll and runs
+      the TERM-to-KILL ladder at once.
+    - `Drop` skips those frozen guards while the pane-open guard is still
+      running with its own master copy (`frozen_teardown_guards_needed`); on
+      EOF it signals the groups it finds through that copy. Once the shell
+      leader has exited, that lookup can fail and it falls back to the groups
+      it observed at its last 5 s refresh, so a group created after that
+      snapshot is covered only by `Drop`'s in-process SIGKILL timer.
+
 ## Verification: Ghostty is unreachable on macOS (historical - reversed by #184 Phase 2, 2026-08-31)
 
 This section records the 2026-08-25 finding that justified stage 2a. It is no longer true: upstream v0.10.0 runs macOS on libghostty-vt and this fork does too. Kept because the SearchEngine-lift note under it still explains a shape of the code.

@@ -2756,14 +2756,24 @@ impl Drop for TerminalState {
 
         if !groups.is_empty() {
             // 2. External watchers for every captured group BEFORE any signal, so
-            //    orderly teardown survives immediate application exit. A live
-            //    pane-open guard already covers them: on EOF it re-pins the
-            //    foreground and every session group itself. Otherwise each
+            //    orderly teardown survives immediate application exit. Each
             //    group gets a frozen guard with a `/dev/null` stdin, which runs
             //    the TERM-to-KILL ladder at once and needs no pipe on this
-            //    thread (issue #1129).
+            //    thread (issue #1129). They are skipped while the pane-open
+            //    guard is running with its own PTY master copy: on EOF it
+            //    signals the groups it finds in the session through that copy.
+            //    Trade-off: once the shell leader has exited, that lookup can
+            //    fail, and the guard falls back to the groups it last observed,
+            //    refreshed only every `SESSION_SNAPSHOT_REFRESH` (5 s). A group
+            //    created since that snapshot is then left to the local SIGKILL
+            //    timer below, which does not survive an immediate app exit.
             #[cfg(all(target_os = "macos", not(test)))]
-            if !self.pty_guard.as_ref().is_some_and(|guard| guard.is_live()) {
+            if crate::agents::parent_guard::frozen_teardown_guards_needed(
+                self.pty_guard.as_ref().is_some_and(|guard| guard.is_live()),
+                self.pty_guard
+                    .as_ref()
+                    .is_some_and(|guard| guard.covers_session()),
+            ) {
                 for group in &groups {
                     crate::agents::parent_guard::spawn_process_group_guard(group.clone());
                 }
