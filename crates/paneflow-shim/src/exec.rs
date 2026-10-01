@@ -24,8 +24,9 @@ use std::io::Write;
 // replacement. US-005 introduced the `HookConfigGuard` drop-cleanup contract,
 // which is incompatible with `exec()` - process replacement skips every Rust
 // destructor, so the guard would never fire. The agent now spawns through
-// `paneflow_process::spawn` and is then waited on; the shim pays one fork
-// (~1-3 ms, well under the 15 ms budget) in exchange for reliable cleanup.
+// `paneflow_process::Command` (`posix_spawn`) and is then waited on; the shim
+// pays one spawn (~1-3 ms, well under the 15 ms budget) in exchange for
+// reliable cleanup.
 //
 // `Command` inherits the parent env by default, so `.envs(env::vars_os())`
 // is redundant - but the PRD AC bullet 5 lists it explicitly to make the
@@ -44,7 +45,7 @@ use std::io::Write;
 // emitted and the server keeps today's `ai.stop`-driven behavior.
 
 /// Environment `run_real` gives the agent: inherited variables plus PaneFlow identity.
-fn configure_agent_command(cmd: &mut std::process::Command, tool: &str) {
+fn configure_agent_command(cmd: &mut paneflow_process::Command, tool: &str) {
     cmd.envs(env::vars_os())
         .env("PANEFLOW_AI_TOOL", tool)
         // PANEFLOW_AI_PID - stable session identity propagated to every
@@ -61,14 +62,14 @@ fn configure_agent_command(cmd: &mut std::process::Command, tool: &str) {
 }
 
 pub(crate) fn run_real(tool: &str, path: &Path, args: &[OsString]) -> (ExitCode, Option<i32>) {
-    let mut cmd = std::process::Command::new(path);
+    let mut cmd = paneflow_process::Command::new(path);
     cmd.args(args);
     configure_agent_command(&mut cmd, tool);
 
     // Unix only: reset signal disposition + unblock SIGINT in the child.
     //
-    // Required because Rust's `Command` inherits the parent's signal mask
-    // and dispositions across `execve`. The parent installs:
+    // Required because a child inherits the parent's ignored dispositions
+    // across `execve`. The parent installs:
     //   - `SIG_IGN` for SIGHUP/SIGTERM (shim survives PTY close / kill)
     //   - `SIG_BLOCK` mask for SIGINT (consumed synchronously by the
     //     `sigwait` thread in `install_sigint_watcher`, so the shim can
@@ -76,35 +77,20 @@ pub(crate) fn run_real(tool: &str, path: &Path, args: &[OsString]) -> (ExitCode,
     //     mid-response interrupts where claude/codex intentionally fire
     //     no `Stop` hook of their own).
     //
-    // Without this `pre_exec` reset+unblock, the child would inherit both
-    // and Ctrl+C would do absolutely nothing (the AI would never see it,
-    // since `SIG_BLOCK`'d signals on a process stay blocked across
-    // `execve`).
-    //
-    // `pre_exec` runs in the forked child between fork() and execve(). All
-    // calls below are async-signal-safe.
+    // Without the reset, Ctrl+C would do absolutely nothing (the AI would
+    // never see it). `paneflow_process::Command` always starts the child
+    // with an empty signal mask, so the SIGINT block never crosses `execve`;
+    // these are `posix_spawn` signal defaults, so the agent spawns without a
+    // fork or a `pre_exec` (issue #1126).
     #[cfg(unix)]
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            libc::signal(libc::SIGINT, libc::SIG_DFL);
-            libc::signal(libc::SIGHUP, libc::SIG_DFL);
-            libc::signal(libc::SIGTERM, libc::SIG_DFL);
-            let mut set: libc::sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&mut set);
-            libc::sigaddset(&mut set, libc::SIGINT);
-            libc::sigaddset(&mut set, libc::SIGHUP);
-            libc::sigaddset(&mut set, libc::SIGTERM);
-            libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
-
-            Ok(())
-        });
+    for signal in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM] {
+        cmd.default_signal(signal);
     }
 
-    // Install signal isolation BEFORE spawn so the child inherits the
-    // mask/dispositions at fork (then `pre_exec` flips them back for the
-    // child only). Doing this BEFORE the spawn closes the race window
-    // where a Ctrl+C could land between spawn and signal-install.
+    // Install signal isolation BEFORE spawn; the spawn attributes above
+    // flip it back for the child only. Doing this BEFORE the spawn closes
+    // the race window where a Ctrl+C could land between spawn and
+    // signal-install.
     #[cfg(unix)]
     ignore_terminal_signals();
     #[cfg(unix)]
@@ -121,11 +107,19 @@ pub(crate) fn run_real(tool: &str, path: &Path, args: &[OsString]) -> (ExitCode,
     #[cfg(target_os = "macos")]
     let child_reaped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // Issue #1127: through `paneflow_process` like every other shim child, so
-    // the agent never copies a hook pipe another thread is still marking
-    // close-on-exec. `pre_exec` keeps this on std's fork path, whose own
-    // exec-status pipe is tracked separately (#1126).
-    let mut child = match paneflow_process::spawn(&mut cmd) {
+    // Issues #1127, #1126: through `paneflow_process` like every other shim
+    // child, so the agent never copies a hook pipe another thread is still
+    // marking close-on-exec. It does keep every descriptor the shim was
+    // handed on purpose, as a plain spawn would: the user's shell may pass
+    // one, such as `claude --mcp-config <(...)`'s `/dev/fd/63`. Listing them
+    // inside the spawn exclusion means no half-made hook pipe is among them.
+    let inherited =
+        paneflow_process::with_spawns_excluded(paneflow_process::inheritable_descriptors)
+            .unwrap_or_else(|e| {
+                crate::diagnose(&format!("cannot list inherited descriptors: {e}"));
+                Vec::new()
+            });
+    let mut child = match start_agent(&mut cmd, &inherited) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("paneflow-shim: spawn '{}' failed: {e}", path.display());
@@ -152,6 +146,33 @@ pub(crate) fn run_real(tool: &str, path: &Path, args: &[OsString]) -> (ExitCode,
             eprintln!("paneflow-shim: wait on '{}' failed: {e}", path.display());
             (ExitCode::from(1), None)
         }
+    }
+}
+
+/// Start the agent with `inherited` kept open at their own numbers.
+///
+/// A descriptor listed a moment ago can be gone by the spawn (`EBADF`), or
+/// refused (`EPERM`). Losing a pass-through descriptor is better than not
+/// starting the agent at all, so that case retries once without them.
+pub(crate) fn start_agent(
+    cmd: &mut paneflow_process::Command,
+    inherited: &[std::os::fd::RawFd],
+) -> std::io::Result<paneflow_process::Child> {
+    for &fd in inherited {
+        cmd.inherit_fd(fd);
+    }
+    match cmd.start() {
+        Err(error)
+            if !inherited.is_empty()
+                && matches!(error.raw_os_error(), Some(libc::EBADF | libc::EPERM)) =>
+        {
+            crate::diagnose(&format!(
+                "agent spawn with inherited descriptors {inherited:?} failed ({error}); \
+                 retrying without them"
+            ));
+            cmd.clear_inherited_fds().start()
+        }
+        started => started,
     }
 }
 
@@ -232,7 +253,7 @@ pub(crate) fn install_sigint_watcher(tool: &str) {
     // SAFETY: `pthread_sigmask` is thread-safe and only mutates the
     // calling thread's signal mask. Blocking SIGINT here propagates to
     // every thread spawned afterward (POSIX inheritance rule). The
-    // `pre_exec` hook in `run_real` re-unblocks SIGINT in the child.
+    // agent spawn in `run_real` starts the child with an empty mask.
     unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut set);
@@ -317,7 +338,7 @@ pub(crate) fn send_interrupt_stop(hook_path: &Path, tool: &str) {
         return;
     }
 
-    let mut cmd = std::process::Command::new(hook_path);
+    let mut cmd = paneflow_process::Command::new(hook_path);
     cmd.arg("Stop")
         .env("PANEFLOW_AI_TOOL", tool)
         .env("PANEFLOW_AI_PID", std::process::id().to_string())
@@ -325,8 +346,8 @@ pub(crate) fn send_interrupt_stop(hook_path: &Path, tool: &str) {
             PANEFLOW_AI_EVENT_SOURCE_ENV,
             PANEFLOW_AI_EVENT_SOURCE_INTERRUPT,
         )
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdout(paneflow_process::Stdio::Null)
+        .stderr(paneflow_process::Stdio::Null);
     let spawned = paneflow_process::spawn_piped(
         &mut cmd,
         paneflow_process::Pipes {
