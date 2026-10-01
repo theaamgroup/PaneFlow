@@ -28,7 +28,6 @@ pub(crate) const WRAPPED_TOOLS: &[&str] = &[
     "opencode",
     "grok",
     "cursor-agent",
-    "gemini",
     "agy",
     "copilot",
     "muse",

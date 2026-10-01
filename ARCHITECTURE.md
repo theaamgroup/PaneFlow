@@ -142,7 +142,7 @@ PaneFlowApp (Entity<Render>)           ← src-app/src/main.rs
 | `paneflow-config` | `crates/paneflow-config/` | Library | Config schema, JSON loader, file watcher |
 | `paneflow-ipc-client` | `crates/paneflow-ipc-client/` | Library | Blocking JSON-RPC client for the local socket |
 | `paneflow-mcp-install` | `crates/paneflow-mcp-install/` | Library | **Uninstall-only and temporary.** `cleanup.rs::remove_legacy_bridge` removes the `paneflow` MCP entries the retired bridge installed, and a later launch that finds none deletes its extracted binary (see below). #868 deletes the crate once the cleanup has shipped in two releases |
-| `paneflow-shim` | `crates/paneflow-shim/` | Binary | PATH shim wrapping nine agent CLIs |
+| `paneflow-shim` | `crates/paneflow-shim/` | Binary | PATH shim wrapping eight agent CLIs |
 | `paneflow-ai-hook` | `crates/paneflow-ai-hook/` | Binary | Hook binary agents invoke to report lifecycle events |
 | `paneflow-process` | `crates/paneflow-process/` | Library | Bounded subprocess execution (deadline + stdout cap); `spawn` is the one entry point for non-PTY children (system opens go through `external_open::open_with_system_handler`, not `open::that`) and holds the spawn exclusion the IPC server creates its sockets under (#1115) and pane startup opens its PTY under, for at most 250 ms (#1123); `spawn_piped` is the same entry point for a child with stdio pipes, which it creates inside that exclusion instead of `Stdio::piped()` (#1124); the shim's agent and interrupt Stop hook spawn through it too, enforced by a shim source guard (#1127); the `test-support` feature exposes the pipe-window hook to dev-dependency tests only |
 | `paneflow-agent-config` | `crates/paneflow-agent-config/` | Library | Shared agent config, hooks, locking, Claude hook shapes |
@@ -288,7 +288,7 @@ agent CLI (claude, codex, opencode, …)
 
 - **Shim**: launching an agent from Paneflow puts a shim directory first in
   `PATH`. The shim records the real PID and process start time (PID-reuse
-  safe), then execs the real binary. Nine agent CLIs are recognized by
+  safe), then execs the real binary. Eight agent CLIs are recognized by
   name; unknown tools are reported as themselves.
 - **Hooks**: agents that support lifecycle hooks (Claude Code, Codex, …)
   report `session_start`, `prompt_submit`, `tool_use`, `notification`, `stop`,
@@ -427,7 +427,7 @@ app-owned state goes through them. The IPC socket does not follow it:
 both.
 
 Every pane's `PANEFLOW_BIN_DIR` (`~/Library/Caches/paneflow/bin/<version>/`)
-holds the nine agent shims, `paneflow-ai-hook`, and a `paneflow` symlink to the
+holds the eight agent shims, `paneflow-ai-hook`, and a `paneflow` symlink to the
 running executable (`ai_hooks/extract.rs::link_cli_into`, #440), so `paneflow
 send` / `paneflow hooks` work inside a pane without the user linking the
 bundle binary onto their login PATH. The link is re-pointed at launch when

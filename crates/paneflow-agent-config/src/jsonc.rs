@@ -41,8 +41,7 @@ pub fn remove_entry(
 /// Remove `entry_key` from the object at `container_path`.
 ///
 /// An empty path is the root object. `Ok(None)` when the container or the
-/// entry is already absent. This is the inverse of [`insert_entry`] for a
-/// member that function just added.
+/// entry is already absent.
 pub fn remove_at(
     input: &str,
     container_path: &[&str],
@@ -80,169 +79,6 @@ pub fn remove_at(
         )));
     }
     Ok(Some(updated))
-}
-
-/// Insert `entry_key` as the last member of the object at `container_path`.
-///
-/// An empty path is the root object. Comments, trailing commas, and every
-/// byte outside the new member stay put. Removing the inserted member with
-/// [`remove_at`] restores the previous bytes.
-pub fn insert_entry(
-    input: &str,
-    container_path: &[&str],
-    entry_key: &str,
-    value: &Value,
-) -> Result<String, JsoncError> {
-    let semantic = parse(input)?;
-    let container = walk_required(&semantic, container_path)?;
-    let container = container.as_object().ok_or_else(|| {
-        JsoncError::invalid(not_object_message(container_path, container_path.len()))
-    })?;
-    if container.contains_key(entry_key) {
-        return Err(JsoncError::invalid(format!(
-            "entry `{entry_key}` already exists"
-        )));
-    }
-
-    let document = Parser::new(input).parse_document()?;
-    let container_node = resolve(&document, container_path)?;
-    let object = container_node.object.as_ref().ok_or_else(|| {
-        JsoncError::invalid(not_object_message(container_path, container_path.len()))
-    })?;
-    if member_index(object, entry_key).is_some() {
-        return Err(JsoncError::invalid(format!(
-            "entry `{entry_key}` already exists"
-        )));
-    }
-    let updated = insert_span(
-        input,
-        container_node,
-        b'}',
-        &object_spans(object),
-        &render_member(entry_key, value)?,
-    )?;
-    let got = parse(&updated)?;
-    let mut expected = semantic;
-    insert_semantic(&mut expected, container_path, entry_key, value.clone())?;
-    if got != expected {
-        return Err(JsoncError::invalid(format!(
-            "internal error: jsonc splice changed more than `{}`",
-            display_path(container_path, entry_key)
-        )));
-    }
-    Ok(updated)
-}
-
-/// Append `value` to the array at `array_path` without reserializing it.
-pub fn append_array_element(
-    input: &str,
-    array_path: &[&str],
-    value: &Value,
-) -> Result<String, JsoncError> {
-    let semantic = parse(input)?;
-    let array = walk_required(&semantic, array_path)?;
-    if !array.is_array() {
-        return Err(JsoncError::invalid(format!(
-            "config key `{}` must be an array",
-            array_path.last().copied().unwrap_or("root")
-        )));
-    }
-
-    let document = Parser::new(input).parse_document()?;
-    let array_node = resolve(&document, array_path)?;
-    let elements = array_node.array.as_ref().ok_or_else(|| {
-        JsoncError::invalid(format!(
-            "config key `{}` must be an array",
-            array_path.last().copied().unwrap_or("root")
-        ))
-    })?;
-    let updated = insert_span(
-        input,
-        array_node,
-        b']',
-        &array_spans(elements),
-        &render_value(value)?,
-    )?;
-    let got = parse(&updated)?;
-    let mut expected = semantic;
-    let appended = walk_mut(&mut expected, array_path)?
-        .as_array_mut()
-        .is_some_and(|array| {
-            array.push(value.clone());
-            true
-        });
-    if !appended || got != expected {
-        return Err(JsoncError::invalid(format!(
-            "internal error: jsonc splice changed more than `{}`",
-            array_path.join(".")
-        )));
-    }
-    Ok(updated)
-}
-
-/// Remove array elements for which `predicate` is true.
-///
-/// `Ok(None)` when the path is absent, is not an array, or contains no match.
-/// A match that cannot be removed without touching other bytes is an error,
-/// and the returned text is the only candidate a caller should write.
-pub fn remove_array_elements(
-    input: &str,
-    array_path: &[&str],
-    predicate: impl Fn(&Value) -> bool,
-) -> Result<Option<String>, JsoncError> {
-    remove_matching(input, array_path, |semantic| {
-        let array = walk_lenient(semantic, array_path)?.as_array()?;
-        array
-            .iter()
-            .position(&predicate)
-            .map(|index| CutTarget::Array { index })
-    })
-}
-
-/// Remove elements of the `inner_key` array inside elements of `outer_path`.
-///
-/// Used when a matcher group mixes a managed handler with a user's handler:
-/// the managed command goes, and the group stays. `Ok(None)` when nothing
-/// matches or the path is not an array of objects.
-pub fn remove_nested_array_elements(
-    input: &str,
-    outer_path: &[&str],
-    inner_key: &str,
-    predicate: impl Fn(&Value) -> bool,
-) -> Result<Option<String>, JsoncError> {
-    remove_matching(input, outer_path, |semantic| {
-        let outer = walk_lenient(semantic, outer_path)?.as_array()?;
-        outer.iter().enumerate().find_map(|(outer_index, group)| {
-            let inner = group.get(inner_key)?.as_array()?;
-            let inner_index = inner.iter().position(&predicate)?;
-            Some(CutTarget::Nested {
-                outer_index,
-                inner_key: inner_key.to_string(),
-                inner_index,
-            })
-        })
-    })
-}
-
-/// Whether the value at `path` contains a `//` or `/* */` comment outside a string.
-///
-/// Missing paths are `false`. A span that cannot be scanned is `true`, so a
-/// caller that deletes the value only when this is false keeps the comment.
-pub fn value_contains_comment(input: &str, path: &[&str]) -> Result<bool, JsoncError> {
-    let semantic = parse(input)?;
-    if walk_optional(&semantic, path)?.is_none() {
-        return Ok(false);
-    }
-    let document = Parser::new(input).parse_document()?;
-    let node = resolve(&document, path)?;
-    if node.end < node.start || node.end > input.len() {
-        return Ok(true);
-    }
-    let slice = &input[node.start..node.end];
-    match strip_comments(slice) {
-        Ok(stripped) => Ok(stripped != slice),
-        Err(_) => Ok(true),
-    }
 }
 
 fn remove_member(input: &str, object: &ObjectNode, index: usize) -> String {
@@ -298,331 +134,6 @@ fn member_index(object: &ObjectNode, key: &str) -> Option<usize> {
     object.members.iter().position(|member| member.key == key)
 }
 
-fn object_spans(object: &ObjectNode) -> Vec<ExistingSpan> {
-    object
-        .members
-        .iter()
-        .map(|member| ExistingSpan {
-            start: member.start,
-            value_end: member.value.end,
-            has_comma: member.comma.is_some(),
-        })
-        .collect()
-}
-
-fn array_spans(array: &ArrayNode) -> Vec<ExistingSpan> {
-    array
-        .elements
-        .iter()
-        .map(|element| ExistingSpan {
-            start: element.start,
-            value_end: element.value.end,
-            has_comma: element.comma.is_some(),
-        })
-        .collect()
-}
-
-struct ExistingSpan {
-    start: usize,
-    value_end: usize,
-    has_comma: bool,
-}
-
-struct Insertion {
-    comma_at: Option<usize>,
-    at: usize,
-    text: String,
-}
-
-enum CutTarget {
-    Array {
-        index: usize,
-    },
-    Nested {
-        outer_index: usize,
-        inner_key: String,
-        inner_index: usize,
-    },
-}
-
-fn remove_matching(
-    input: &str,
-    array_path: &[&str],
-    mut find: impl FnMut(&Value) -> Option<CutTarget>,
-) -> Result<Option<String>, JsoncError> {
-    let mut current = input.to_string();
-    let mut changed = false;
-    for _ in 0..10_000 {
-        let semantic = parse(&current)?;
-        let Some(target) = find(&semantic) else {
-            if changed {
-                return Ok(Some(current));
-            }
-            return Ok(None);
-        };
-        let document = Parser::new(&current).parse_document()?;
-        let node = resolve(&document, array_path)?;
-        let updated = cut_array_element(&current, node, &target)?;
-        let got = parse(&updated)?;
-        let mut expected = semantic;
-        forget_array_element(&mut expected, array_path, &target)?;
-        if got != expected {
-            return Err(JsoncError::invalid(
-                "internal error: jsonc splice changed more than the removed array element",
-            ));
-        }
-        current = updated;
-        changed = true;
-    }
-    Err(JsoncError::invalid(
-        "internal error: jsonc array removal did not finish",
-    ))
-}
-
-fn cut_array_element(input: &str, node: &Node, target: &CutTarget) -> Result<String, JsoncError> {
-    let array = node.array.as_ref().ok_or_else(|| {
-        JsoncError::invalid("internal error: jsonc array disappeared during splice")
-    })?;
-    match target {
-        CutTarget::Array { index } => {
-            if *index >= array.elements.len() {
-                return Err(JsoncError::invalid(
-                    "internal error: jsonc array index does not match the parsed value",
-                ));
-            }
-            Ok(remove_element(input, array, *index))
-        }
-        CutTarget::Nested {
-            outer_index,
-            inner_key,
-            inner_index,
-        } => {
-            let element = array.elements.get(*outer_index).ok_or_else(|| {
-                JsoncError::invalid(
-                    "internal error: jsonc array index does not match the parsed value",
-                )
-            })?;
-            let object = element.value.object.as_ref().ok_or_else(|| {
-                JsoncError::invalid("internal error: jsonc element is not an object")
-            })?;
-            let member = member_index(object, inner_key).ok_or_else(|| {
-                JsoncError::invalid(format!("could not locate entry `{inner_key}`"))
-            })?;
-            let inner =
-                object.members[member].value.array.as_ref().ok_or_else(|| {
-                    JsoncError::invalid(format!("`{inner_key}` must be an array"))
-                })?;
-            if *inner_index >= inner.elements.len() {
-                return Err(JsoncError::invalid(
-                    "internal error: jsonc array index does not match the parsed value",
-                ));
-            }
-            Ok(remove_element(input, inner, *inner_index))
-        }
-    }
-}
-
-fn forget_array_element(
-    expected: &mut Value,
-    array_path: &[&str],
-    target: &CutTarget,
-) -> Result<(), JsoncError> {
-    match target {
-        CutTarget::Array { index } => {
-            let array = walk_mut(expected, array_path)?
-                .as_array_mut()
-                .ok_or_else(|| {
-                    JsoncError::invalid("internal error: jsonc array disappeared during splice")
-                })?;
-            if *index >= array.len() {
-                return Err(JsoncError::invalid(
-                    "internal error: jsonc array index does not match the parsed value",
-                ));
-            }
-            array.remove(*index);
-            Ok(())
-        }
-        CutTarget::Nested {
-            outer_index,
-            inner_key,
-            inner_index,
-        } => {
-            let group = walk_mut(expected, array_path)?
-                .as_array_mut()
-                .and_then(|groups| groups.get_mut(*outer_index))
-                .ok_or_else(|| {
-                    JsoncError::invalid(
-                        "internal error: jsonc array index does not match the parsed value",
-                    )
-                })?;
-            let inner = group
-                .get_mut(inner_key)
-                .and_then(Value::as_array_mut)
-                .ok_or_else(|| JsoncError::invalid(format!("`{inner_key}` must be an array")))?;
-            if *inner_index >= inner.len() {
-                return Err(JsoncError::invalid(
-                    "internal error: jsonc array index does not match the parsed value",
-                ));
-            }
-            inner.remove(*inner_index);
-            Ok(())
-        }
-    }
-}
-
-fn insert_span(
-    input: &str,
-    container: &Node,
-    closing: u8,
-    items: &[ExistingSpan],
-    body: &str,
-) -> Result<String, JsoncError> {
-    if container.end == 0 || container.end > input.len() {
-        return Err(JsoncError::invalid(
-            "internal error: jsonc container span is out of range",
-        ));
-    }
-    let close = container.end - 1;
-    if input.as_bytes().get(close) != Some(&closing) {
-        return Err(JsoncError::invalid(
-            "internal error: jsonc container is not closed",
-        ));
-    }
-    if body.is_empty() {
-        return Err(JsoncError::invalid(
-            "internal error: jsonc insertion is empty",
-        ));
-    }
-    let plan = plan_insertion(input, container.start, close, items, body);
-    apply_insertion(input, plan)
-}
-
-fn plan_insertion(
-    input: &str,
-    open: usize,
-    close: usize,
-    items: &[ExistingSpan],
-    body: &str,
-) -> Insertion {
-    let newline = if input.contains("\r\n") { "\r\n" } else { "\n" };
-    if items.is_empty() {
-        let interior = &input[open + 1..close];
-        if interior.contains('\n') {
-            Insertion {
-                comma_at: None,
-                at: line_start(input, close),
-                text: format!("  {body}{newline}"),
-            }
-        } else {
-            Insertion {
-                comma_at: None,
-                at: close,
-                text: body.to_string(),
-            }
-        }
-    } else {
-        let last = &items[items.len() - 1];
-        if on_its_own_line(input, close) {
-            let indent = item_indent(input, last.start);
-            let at = line_start(input, close);
-            if last.has_comma {
-                Insertion {
-                    comma_at: None,
-                    at,
-                    text: format!("{indent}{body},{newline}"),
-                }
-            } else {
-                Insertion {
-                    comma_at: Some(last.value_end),
-                    at,
-                    text: format!("{indent}{body}{newline}"),
-                }
-            }
-        } else if last.has_comma {
-            Insertion {
-                comma_at: None,
-                at: close,
-                text: format!("{body},"),
-            }
-        } else {
-            Insertion {
-                comma_at: Some(last.value_end),
-                at: close,
-                text: body.to_string(),
-            }
-        }
-    }
-}
-
-fn apply_insertion(input: &str, plan: Insertion) -> Result<String, JsoncError> {
-    if plan.at > input.len()
-        || !input.is_char_boundary(plan.at)
-        || plan
-            .comma_at
-            .is_some_and(|index| index > plan.at || !input.is_char_boundary(index))
-    {
-        return Err(JsoncError::invalid(
-            "internal error: jsonc insertion point is not a char boundary",
-        ));
-    }
-    let mut output = input.to_string();
-    output.insert_str(plan.at, &plan.text);
-    if let Some(comma_at) = plan.comma_at {
-        output.insert(comma_at, ',');
-    }
-    Ok(output)
-}
-
-fn line_start(input: &str, index: usize) -> usize {
-    input[..index].rfind('\n').map_or(0, |newline| newline + 1)
-}
-
-fn on_its_own_line(input: &str, close: usize) -> bool {
-    let start = line_start(input, close);
-    input[start..close]
-        .bytes()
-        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r'))
-}
-
-fn item_indent(input: &str, item_start: usize) -> String {
-    let start = line_start(input, item_start);
-    let prefix = &input[start..item_start];
-    if !prefix.is_empty() && prefix.bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
-        prefix.to_string()
-    } else {
-        "  ".to_string()
-    }
-}
-
-fn render_member(key: &str, value: &Value) -> Result<String, JsoncError> {
-    let key = serde_json::to_string(key)
-        .map_err(|error| JsoncError::invalid(format!("could not render JSON key: {error}")))?;
-    Ok(format!("{key}:{}", render_value(value)?))
-}
-
-fn render_value(value: &Value) -> Result<String, JsoncError> {
-    serde_json::to_string(value)
-        .map_err(|error| JsoncError::invalid(format!("could not render JSON value: {error}")))
-}
-
-fn insert_semantic(
-    root: &mut Value,
-    path: &[&str],
-    key: &str,
-    value: Value,
-) -> Result<(), JsoncError> {
-    let container = walk_mut(root, path)?;
-    let object = container
-        .as_object_mut()
-        .ok_or_else(|| JsoncError::invalid(not_object_message(path, path.len())))?;
-    object.insert(key.to_string(), value);
-    Ok(())
-}
-
-fn walk_required<'a>(value: &'a Value, path: &[&str]) -> Result<&'a Value, JsoncError> {
-    walk_optional(value, path)?.ok_or_else(|| JsoncError::invalid(missing_message(path)))
-}
-
 fn walk_optional<'a>(value: &'a Value, path: &[&str]) -> Result<Option<&'a Value>, JsoncError> {
     let mut cursor = value;
     for (depth, key) in path.iter().enumerate() {
@@ -635,10 +146,6 @@ fn walk_optional<'a>(value: &'a Value, path: &[&str]) -> Result<Option<&'a Value
         cursor = next;
     }
     Ok(Some(cursor))
-}
-
-fn walk_lenient<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
-    walk_optional(value, path).ok().flatten()
 }
 
 fn walk_mut<'a>(value: &'a mut Value, path: &[&str]) -> Result<&'a mut Value, JsoncError> {
@@ -675,13 +182,6 @@ fn not_object_message(path: &[&str], depth: usize) -> String {
     }
 }
 
-fn missing_message(path: &[&str]) -> String {
-    match path.last() {
-        Some(key) => format!("could not locate config key `{key}`"),
-        None => "could not locate config root".to_string(),
-    }
-}
-
 fn display_path(container_path: &[&str], entry_key: &str) -> String {
     if container_path.is_empty() {
         entry_key.to_string()
@@ -690,29 +190,10 @@ fn display_path(container_path: &[&str], entry_key: &str) -> String {
     }
 }
 
-fn remove_element(input: &str, array: &ArrayNode, index: usize) -> String {
-    let element = &array.elements[index];
-    let mut output = input.to_string();
-    if let Some(comma) = &element.comma {
-        output.replace_range(whole_lines(input, element.start..comma.end), "");
-    } else if let Some(previous_comma) = index
-        .checked_sub(1)
-        .and_then(|previous| array.elements[previous].comma.as_ref())
-    {
-        output.replace_range(whole_lines(input, element.start..element.value.end), "");
-        output.replace_range(previous_comma.clone(), "");
-    } else {
-        output.replace_range(whole_lines(input, element.start..element.value.end), "");
-    }
-    output
-}
-
 #[derive(Debug)]
 struct Node {
-    start: usize,
     end: usize,
     object: Option<ObjectNode>,
-    array: Option<ArrayNode>,
 }
 
 #[derive(Debug)]
@@ -723,18 +204,6 @@ struct ObjectNode {
 #[derive(Debug)]
 struct Member {
     key: String,
-    start: usize,
-    value: Node,
-    comma: Option<Range<usize>>,
-}
-
-#[derive(Debug)]
-struct ArrayNode {
-    elements: Vec<Element>,
-}
-
-#[derive(Debug)]
-struct Element {
     start: usize,
     value: Node,
     comma: Option<Range<usize>>,
@@ -795,13 +264,10 @@ impl<'a> Parser<'a> {
                 node
             }
             Some(b'"') => {
-                let start = self.position;
                 self.parse_string()?;
                 Ok(Node {
-                    start,
                     end: self.position,
                     object: None,
-                    array: None,
                 })
             }
             Some(_) => self.parse_primitive(),
@@ -810,7 +276,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_object(&mut self) -> Result<Node, JsoncError> {
-        let start = self.position;
         self.expect(b'{')?;
         let mut members: Vec<Member> = Vec::new();
         // A set, not a scan of `members`: a `~/.claude.json` can hold
@@ -821,10 +286,8 @@ impl<'a> Parser<'a> {
             if self.peek() == Some(b'}') {
                 self.position += 1;
                 return Ok(Node {
-                    start,
                     end: self.position,
                     object: Some(ObjectNode { members }),
-                    array: None,
                 });
             }
 
@@ -862,36 +325,25 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_array(&mut self) -> Result<Node, JsoncError> {
-        let start = self.position;
         self.expect(b'[')?;
-        let mut elements: Vec<Element> = Vec::new();
+        // Array elements are validated, not recorded: no splice targets them.
         loop {
             self.skip_trivia()?;
             if self.peek() == Some(b']') {
                 self.position += 1;
                 return Ok(Node {
-                    start,
                     end: self.position,
                     object: None,
-                    array: Some(ArrayNode { elements }),
                 });
             }
-            let value = self.parse_value()?;
-            let element_start = value.start;
+            self.parse_value()?;
             self.skip_trivia()?;
-            let comma = if self.peek() == Some(b',') {
-                let comma = self.position..self.position + 1;
+            let missing_comma = if self.peek() == Some(b',') {
                 self.position += 1;
-                Some(comma)
+                false
             } else {
-                None
+                true
             };
-            let missing_comma = comma.is_none();
-            elements.push(Element {
-                start: element_start,
-                value,
-                comma,
-            });
             if missing_comma && self.peek() != Some(b']') {
                 return Err(self.error("expected `,` or `]` after array value"));
             }
@@ -931,10 +383,8 @@ impl<'a> Parser<'a> {
             return Err(self.error("expected a JSON value"));
         }
         Ok(Node {
-            start,
             end: self.position,
             object: None,
-            array: None,
         })
     }
 
@@ -1262,84 +712,6 @@ mod tests {
             let inside = format!("{{\"mcp\":{{\"paneflow\":{}}}}}", nested(125, object));
             assert!(remove_entry(&inside, "mcp", "paneflow").unwrap().is_some());
             assert!(parse(&nested(128, object)).is_err());
-        }
-    }
-
-    fn assert_insert_round_trip(source: &str, path: &[&str], key: &str, value: Value) {
-        let inserted = insert_entry(source, path, key, &value).unwrap();
-        assert_ne!(inserted, source);
-        if source.contains("//") {
-            assert!(inserted.contains("//"), "{inserted}");
-        }
-        if source.contains("/*") {
-            assert!(inserted.contains("/*"), "{inserted}");
-        }
-        let removed = remove_at(&inserted, path, key).unwrap().unwrap();
-        assert_eq!(removed, source, "inserted:\n{inserted}");
-    }
-
-    #[test]
-    fn insert_entry_is_the_inverse_of_remove() {
-        let value = serde_json::json!({"BeforeAgent":[{"matcher":"*","hooks":[{"command":"paneflow-ai-hook UserPromptSubmit","timeout":5000}]}]});
-        assert_insert_round_trip(
-            "{\n  // Gemini accepts comments in settings.json\n  \"theme\": \"Default\"\n}\n",
-            &[],
-            "hooks",
-            value.clone(),
-        );
-        assert_insert_round_trip(
-            "{\n  \"theme\": \"Default\",\n}\n",
-            &[],
-            "hooks",
-            value.clone(),
-        );
-        assert_insert_round_trip("{ \"theme\": \"Default\" }", &[], "hooks", value.clone());
-        assert_insert_round_trip("{}", &[], "hooks", value.clone());
-        assert_insert_round_trip("{\n}\n", &[], "hooks", value.clone());
-        assert_insert_round_trip(
-            "{\r\n  \"theme\": \"Default\"\r\n}\r\n",
-            &[],
-            "hooks",
-            value.clone(),
-        );
-        assert_insert_round_trip(
-            "{\n  /* block */\n  \"theme\": \"Default\" // keep\n}\n",
-            &[],
-            "hooks",
-            value.clone(),
-        );
-        assert_insert_round_trip(
-            "{\n  \"hooks\": {\n    // reserved\n  }\n}\n",
-            &["hooks"],
-            "BeforeAgent",
-            serde_json::json!([{"matcher":"*"}]),
-        );
-    }
-
-    #[test]
-    fn append_array_element_is_the_inverse_of_remove() {
-        let cases = [
-            "{\n  \"hooks\": {\n    \"BeforeAgent\": [\n      { \"command\": \"mine\" }\n    ]\n  }\n}\n",
-            "{\n  \"hooks\": {\n    \"BeforeAgent\": [{ \"command\": \"mine\" },]\n  }\n}\n",
-            "{\"hooks\":{\"BeforeAgent\":[{\"command\":\"mine\"}]}}",
-            "{\n  \"hooks\": {\n    \"BeforeAgent\": []\n  }\n}\n",
-            "{\n  \"hooks\": {\n    \"BeforeAgent\": [\n    ]\n  }\n}\n",
-        ];
-        let value = serde_json::json!({"command":"paneflow-ai-hook UserPromptSubmit"});
-        for source in cases {
-            let appended = append_array_element(source, &["hooks", "BeforeAgent"], &value).unwrap();
-            assert!(appended.contains("paneflow-ai-hook"), "{appended}");
-            assert!(
-                source.contains("mine") == appended.contains("mine"),
-                "{appended}"
-            );
-            let removed = remove_array_elements(&appended, &["hooks", "BeforeAgent"], |element| {
-                element.get("command").and_then(Value::as_str)
-                    == Some("paneflow-ai-hook UserPromptSubmit")
-            })
-            .unwrap()
-            .unwrap();
-            assert_eq!(removed, source, "appended:\n{appended}");
         }
     }
 }

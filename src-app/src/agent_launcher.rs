@@ -1,6 +1,6 @@
 //! Terminal-agent launcher: the CLI coding agents Paneflow starts in a
-//! terminal pane (Claude Code, Codex, OpenCode, Grok, Cursor, Gemini,
-//! Antigravity, Copilot, and Muse Code). Both the tab-bar launcher buttons
+//! terminal pane (Claude Code, Codex, OpenCode, Grok, Cursor, Antigravity,
+//! Copilot, and Muse Code). Both the tab-bar launcher buttons
 //! (`pane.rs`) and the new-pane picker iterate this single
 //! source of truth so the per-agent visibility gate and the "respect
 //! bypass" contract can never drift between them.
@@ -25,7 +25,6 @@ pub enum TerminalAgent {
     OpenCode,
     Grok,
     Cursor,
-    Gemini,
     Antigravity,
     Copilot,
     Muse,
@@ -34,13 +33,12 @@ pub enum TerminalAgent {
 impl TerminalAgent {
     /// Every variant, in display order (matches the tab-bar button row).
     /// The relative order of retained agents stays stable across upgrades.
-    pub const ALL: [TerminalAgent; 9] = [
+    pub const ALL: [TerminalAgent; 8] = [
         TerminalAgent::ClaudeCode,
         TerminalAgent::Codex,
         TerminalAgent::OpenCode,
         TerminalAgent::Grok,
         TerminalAgent::Cursor,
-        TerminalAgent::Gemini,
         TerminalAgent::Antigravity,
         TerminalAgent::Copilot,
         TerminalAgent::Muse,
@@ -63,7 +61,6 @@ impl TerminalAgent {
             TerminalAgent::OpenCode => "OpenCode",
             TerminalAgent::Grok => "Grok",
             TerminalAgent::Cursor => "Cursor",
-            TerminalAgent::Gemini => "Gemini",
             TerminalAgent::Antigravity => "Antigravity",
             TerminalAgent::Copilot => "Copilot",
             TerminalAgent::Muse => "Muse Code",
@@ -77,7 +74,6 @@ impl TerminalAgent {
             TerminalAgent::OpenCode => "icons/opencode-color.svg",
             TerminalAgent::Grok => "agents/grok.svg",
             TerminalAgent::Cursor => "agents/cursor.svg",
-            TerminalAgent::Gemini => "agents/gemini-color.svg",
             TerminalAgent::Antigravity => "agents/antigravity-color.svg",
             TerminalAgent::Copilot => "agents/githubcopilot.svg",
             TerminalAgent::Muse => "agents/muse-color.svg",
@@ -103,7 +99,6 @@ impl TerminalAgent {
             | TerminalAgent::OpenCode
             | TerminalAgent::Grok
             | TerminalAgent::Cursor
-            | TerminalAgent::Gemini
             | TerminalAgent::Antigravity
             | TerminalAgent::Copilot => None,
         }
@@ -116,7 +111,7 @@ impl TerminalAgent {
     /// `img()` rasterizes the SVG (resvg) and preserves every fill. A
     /// single-color brand logo stays monochrome and uses `accent()`.
     pub fn icon_multicolor(self) -> bool {
-        matches!(self, TerminalAgent::Antigravity | TerminalAgent::Gemini)
+        matches!(self, TerminalAgent::Antigravity)
     }
 
     /// Stable persistence tag for the session.json `terminal_agent`
@@ -129,7 +124,6 @@ impl TerminalAgent {
             TerminalAgent::OpenCode => "opencode",
             TerminalAgent::Grok => "grok",
             TerminalAgent::Cursor => "cursor",
-            TerminalAgent::Gemini => "gemini",
             TerminalAgent::Antigravity => "antigravity",
             TerminalAgent::Copilot => "copilot",
             TerminalAgent::Muse => "muse",
@@ -182,7 +176,6 @@ impl TerminalAgent {
             "opencode" => Some(TerminalAgent::OpenCode),
             "grok" => Some(TerminalAgent::Grok),
             "cursor" => Some(TerminalAgent::Cursor),
-            "gemini" => Some(TerminalAgent::Gemini),
             "antigravity" => Some(TerminalAgent::Antigravity),
             "copilot" => Some(TerminalAgent::Copilot),
             "muse" => Some(TerminalAgent::Muse),
@@ -216,7 +209,6 @@ impl TerminalAgent {
             TerminalAgent::OpenCode => config.opencode_button_visible,
             TerminalAgent::Grok => config.grok_button_visible,
             TerminalAgent::Cursor => config.cursor_button_visible,
-            TerminalAgent::Gemini => config.gemini_button_visible,
             TerminalAgent::Antigravity => config.antigravity_button_visible,
             TerminalAgent::Copilot => config.copilot_button_visible,
             TerminalAgent::Muse => config.muse_button_visible,
@@ -241,7 +233,6 @@ impl TerminalAgent {
             TerminalAgent::OpenCode => "opencode_button_visible",
             TerminalAgent::Grok => "grok_button_visible",
             TerminalAgent::Cursor => "cursor_button_visible",
-            TerminalAgent::Gemini => "gemini_button_visible",
             TerminalAgent::Antigravity => "antigravity_button_visible",
             TerminalAgent::Copilot => "copilot_button_visible",
             TerminalAgent::Muse => "muse_button_visible",
@@ -257,7 +248,6 @@ impl TerminalAgent {
             TerminalAgent::OpenCode => "opencode",
             TerminalAgent::Grok => "grok",
             TerminalAgent::Cursor => "cursor-agent",
-            TerminalAgent::Gemini => "gemini",
             TerminalAgent::Antigravity => "agy",
             TerminalAgent::Copilot => "copilot",
             TerminalAgent::Muse => "muse",
@@ -313,7 +303,6 @@ impl TerminalAgent {
             TerminalAgent::OpenCode => Some(SessionAgent::OpenCode),
             TerminalAgent::Grok => Some(SessionAgent::Grok),
             TerminalAgent::Cursor => Some(SessionAgent::Cursor),
-            TerminalAgent::Gemini => Some(SessionAgent::Gemini),
             _ => None,
         }
     }
@@ -927,6 +916,7 @@ mod tests {
             ("qoder", "qodercli"),
             ("openclaw", "openclaw"),
             ("deepseek_harness", "dsh"),
+            ("gemini", "gemini"),
         ] {
             assert_eq!(TerminalAgent::from_tag(tag), None, "retired tag {tag}");
             assert_eq!(
@@ -948,7 +938,8 @@ mod tests {
             "amp_button_visible": true, "kiro_button_visible": true,
             "codebuddy_button_visible": true, "factory_button_visible": true,
             "qoder_button_visible": true, "openclaw_button_visible": true,
-            "deepseek_harness_button_visible": true, "codex_button_visible": true,
+            "deepseek_harness_button_visible": true, "gemini_button_visible": true,
+            "codex_button_visible": true,
         }))
         .unwrap();
         let visible: Vec<_> = TerminalAgent::ALL
@@ -957,6 +948,38 @@ mod tests {
             .map(TerminalAgent::tag)
             .collect();
         assert_eq!(visible, ["codex"]);
+    }
+
+    /// Issue #1132 removed Gemini CLI; Antigravity keeps its launcher,
+    /// identity, multicolor mark, opt-in visibility, and bare `agy` command.
+    #[test]
+    fn antigravity_launcher_stays_supported_after_gemini_removal() {
+        let agent = TerminalAgent::Antigravity;
+        assert!(TerminalAgent::ALL.contains(&agent));
+        assert_eq!(agent.display_name(), "Antigravity");
+        assert_eq!(agent.icon_path(), "agents/antigravity-color.svg");
+        assert!(agent.icon_multicolor());
+        assert_eq!(agent.accent(), None);
+        assert_eq!(TerminalAgent::from_tag("antigravity"), Some(agent));
+        assert_eq!(TerminalAgent::from_binary("agy"), Some(agent));
+        assert_eq!(
+            TerminalAgent::from_launch_command("clear && agy"),
+            Some(agent)
+        );
+        assert_eq!(agent.button_visibility_key(), "antigravity_button_visible");
+        assert_eq!(agent.command(&PaneFlowConfig::default()), "agy");
+        assert_eq!(agent.session_agent(), None);
+
+        let config = PaneFlowConfig::default();
+        assert!(
+            !agent.is_visible_with(&config, |_| true),
+            "opt-in by default"
+        );
+        let shown = PaneFlowConfig {
+            antigravity_button_visible: Some(true),
+            ..Default::default()
+        };
+        assert!(TerminalAgent::visible(&shown).contains(&agent));
     }
 
     /// Issue #518: `contains` is read from render frames, so a failed probe
@@ -1078,16 +1101,16 @@ mod tests {
         // is deterministic on any machine (and never touches the filesystem
         // here - the `unwrap_or_else` install probe is short-circuited).
         let shown = PaneFlowConfig {
-            gemini_button_visible: Some(true),
+            antigravity_button_visible: Some(true),
             ..Default::default()
         };
-        assert!(TerminalAgent::Gemini.is_visible(&shown));
+        assert!(TerminalAgent::Antigravity.is_visible(&shown));
 
         let hidden = PaneFlowConfig {
-            gemini_button_visible: Some(false),
+            antigravity_button_visible: Some(false),
             ..Default::default()
         };
-        assert!(!TerminalAgent::Gemini.is_visible(&hidden));
+        assert!(!TerminalAgent::Antigravity.is_visible(&hidden));
     }
 
     #[test]
@@ -1115,10 +1138,10 @@ mod tests {
     #[test]
     fn explicit_visibility_does_not_consult_install_detection() {
         let shown = PaneFlowConfig {
-            gemini_button_visible: Some(true),
+            antigravity_button_visible: Some(true),
             ..Default::default()
         };
-        assert!(TerminalAgent::Gemini.is_visible_with(&shown, |_| {
+        assert!(TerminalAgent::Antigravity.is_visible_with(&shown, |_| {
             unreachable!("explicit true must short-circuit install detection")
         }));
 
@@ -1238,10 +1261,6 @@ mod tests {
         assert_eq!(
             TerminalAgent::Cursor.session_agent(),
             Some(SessionAgent::Cursor)
-        );
-        assert_eq!(
-            TerminalAgent::Gemini.session_agent(),
-            Some(SessionAgent::Gemini)
         );
         assert_eq!(TerminalAgent::Antigravity.session_agent(), None);
         assert_eq!(TerminalAgent::Copilot.session_agent(), None);

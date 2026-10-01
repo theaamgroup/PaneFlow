@@ -189,7 +189,7 @@ A sidebar keeps your past chats one click away.
 ## Project threads, any agent
 
 Inside a project, run multiple threads - independent agent sessions -
-and choose which CLI drives each one: Claude Code, Codex, OpenCode, Grok, Cursor, Gemini,
+and choose which CLI drives each one: Claude Code, Codex, OpenCode, Grok, Cursor,
 Antigravity, Copilot, Muse Code, or any other CLI on your `PATH`. Mix
 them per thread, so one thread can plan with Codex while another
 implements with Claude Code, side by side in the same project.

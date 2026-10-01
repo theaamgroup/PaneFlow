@@ -358,7 +358,6 @@ fn report_other_agents(out: &mut dyn Write) {
     report_detected_other_agents(
         out,
         which::which("codex").is_ok(),
-        which::which("gemini").is_ok(),
         which::which("opencode").is_ok(),
     );
 }
@@ -366,19 +365,12 @@ fn report_other_agents(out: &mut dyn Write) {
 fn report_detected_other_agents(
     out: &mut dyn Write,
     codex_detected: bool,
-    gemini_detected: bool,
     opencode_detected: bool,
 ) {
     if codex_detected {
         let _ = writeln!(
             out,
             "codex: hooks injected per-launch by the shim (no user-scope install)"
-        );
-    }
-    if gemini_detected {
-        let _ = writeln!(
-            out,
-            "gemini: hooks injected per-launch by the shim (no user-scope install)"
         );
     }
     if opencode_detected {
@@ -667,17 +659,21 @@ mod tests {
     }
 
     #[test]
-    fn report_other_agents_describes_gemini_and_opencode_as_shim_injected() {
+    fn report_other_agents_describes_codex_and_opencode_as_shim_injected() {
         let mut out = Vec::new();
-        report_detected_other_agents(&mut out, true, true, true);
+        report_detected_other_agents(&mut out, true, true);
         let output = String::from_utf8(out).unwrap();
 
-        for agent in ["codex", "gemini", "opencode"] {
+        for agent in ["codex", "opencode"] {
             assert!(
                 output.contains(&format!("{agent}: hooks injected per-launch by the shim")),
                 "missing shim-injection status for {agent}: {output}"
             );
         }
+        assert!(
+            !output.contains("gemini"),
+            "Gemini CLI is retired: {output}"
+        );
         assert!(!output.contains("no notification-hook mechanism"));
         assert!(!output.contains("unsupported"));
     }

@@ -7,7 +7,7 @@
 //! <dirs::cache_dir()>/paneflow/bin/<version>/
 //!     ├── claude                  ← copy of paneflow-shim
 //!     ├── codex                   ← copy of paneflow-shim
-//!     ├── …one per TerminalAgent binary (gemini, cursor-agent, …)
+//!     ├── …one per TerminalAgent binary (cursor-agent, agy, …)
 //!     ├── paneflow-ai-hook        ← copy of paneflow-ai-hook
 //!     └── paneflow                ← symlink to the running app executable (#440)
 //! ```
@@ -72,7 +72,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// callback. `(basename, source)` where `source` is the name inside the
 /// embed folder.
 ///
-/// Wrapping is UNCONDITIONAL for all nine supported agents (not gated on the real CLI
+/// Wrapping is UNCONDITIONAL for all eight supported agents (not gated on the real CLI
 /// being installed): probing Paneflow's own `$PATH` would silently disable
 /// hooks whenever the app is launched from a desktop entry with a minimal
 /// PATH while the PTY's login shell resolves the agent fine. The cost is
@@ -320,6 +320,7 @@ fn remove_retired_wrappers(target_dir: &Path) -> Result<()> {
         "qodercli",
         "openclaw",
         "dsh",
+        "gemini",
     ] {
         let path = target_dir.join(binary);
         match std::fs::remove_file(&path) {
@@ -1241,6 +1242,7 @@ mod tests {
             "qodercli",
             "openclaw",
             "dsh",
+            "gemini",
         ];
         for binary in retired {
             std::fs::write(dir.join(binary), b"old shim").unwrap();

@@ -827,7 +827,7 @@ mod tests {
                 TerminalAgent::Codex,
                 "The output says Approval requested: cargo test",
             ),
-            (TerminalAgent::Gemini, "Approval requested: cargo test"),
+            (TerminalAgent::Cursor, "Approval requested: cargo test"),
         ] {
             assert_eq!(notification_lifecycle_event(tool, message, ""), None);
         }

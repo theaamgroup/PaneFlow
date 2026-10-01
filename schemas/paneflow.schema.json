@@ -352,11 +352,6 @@
       "description": "Show the built-in 'Cursor' command button. True/false always wins; null/omitted defaults off even when installed.",
       "default": null
     },
-    "gemini_button_visible": {
-      "type": ["boolean", "null"],
-      "description": "Show the built-in 'Gemini' command button. True/false always wins; null/omitted defaults off even when installed.",
-      "default": null
-    },
     "antigravity_button_visible": {
       "type": ["boolean", "null"],
       "description": "Show the built-in 'Antigravity' command button. True/false always wins; null/omitted defaults off even when installed.",

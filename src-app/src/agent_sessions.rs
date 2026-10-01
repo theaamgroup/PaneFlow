@@ -14,17 +14,15 @@ pub enum SessionAgent {
     OpenCode,
     Grok,
     Cursor,
-    Gemini,
 }
 
 impl SessionAgent {
-    pub const ALL: [SessionAgent; 6] = [
+    pub const ALL: [SessionAgent; 5] = [
         SessionAgent::Claude,
         SessionAgent::Codex,
         SessionAgent::OpenCode,
         SessionAgent::Grok,
         SessionAgent::Cursor,
-        SessionAgent::Gemini,
     ];
 
     pub(crate) fn index(self) -> usize {
@@ -34,7 +32,6 @@ impl SessionAgent {
             SessionAgent::OpenCode => 2,
             SessionAgent::Grok => 3,
             SessionAgent::Cursor => 4,
-            SessionAgent::Gemini => 5,
         }
     }
 
@@ -46,7 +43,6 @@ impl SessionAgent {
             SessionAgent::OpenCode => TerminalAgent::OpenCode,
             SessionAgent::Grok => TerminalAgent::Grok,
             SessionAgent::Cursor => TerminalAgent::Cursor,
-            SessionAgent::Gemini => TerminalAgent::Gemini,
         }
     }
 
@@ -605,9 +601,6 @@ pub(crate) fn read_sessions_for_cwd_with_omitted_within(
         SessionAgent::Cursor => {
             crate::command_sessions::read_cursor_sessions_for_cwd(cwd, budget_until)
         }
-        SessionAgent::Gemini => {
-            crate::command_sessions::read_gemini_sessions_for_cwd(cwd, budget_until)
-        }
         SessionAgent::Grok => {
             crate::command_sessions::read_grok_sessions_for_cwd(cwd, budget_until)
         }
@@ -907,7 +900,7 @@ pub(crate) fn attribution_for_column_within(
                 all.extend(read_sessions_for_cwd(agent, cwd))
             }
             // Command-backed readers spawn a CLI, so they share one budget.
-            SessionAgent::Grok | SessionAgent::Cursor | SessionAgent::Gemini => {
+            SessionAgent::Grok | SessionAgent::Cursor => {
                 all.extend(read_sessions_for_cwd_with_omitted_within(agent, cwd, budget_until).0)
             }
         }
@@ -1075,11 +1068,7 @@ mod tests {
         let _clear = ClearOverride;
 
         let cwd = dir.path().to_string_lossy().into_owned();
-        let agents = [
-            SessionAgent::Grok,
-            SessionAgent::Cursor,
-            SessionAgent::Gemini,
-        ];
+        let agents = [SessionAgent::Grok, SessionAgent::Cursor];
 
         // The stub has to be what the readers spawn. With the vendor CLIs
         // absent, every budget returns NotFound and this test cannot fail.
@@ -1117,7 +1106,7 @@ mod tests {
             opencode_button_visible: Some(true),
             grok_button_visible: Some(false),
             cursor_button_visible: Some(false),
-            gemini_button_visible: Some(false),
+            antigravity_button_visible: Some(true),
             muse_button_visible: Some(true),
             ..Default::default()
         };

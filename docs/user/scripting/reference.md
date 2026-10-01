@@ -101,7 +101,7 @@ text in an untrusted terminal envelope unless the call passes
 | Field               | Meaning                                                                                         |
 | ------------------- | ----------------------------------------------------------------------------------------------- |
 | `pid`               | Agent process id, when known                                                                    |
-| `tool`              | Agent family such as `claude`, `codex`, `opencode`, or `gemini`                                 |
+| `tool`              | Agent family such as `claude`, `codex`, `opencode`, or `cursor-agent`                           |
 | `state`             | `thinking`, `waiting_for_input`, `finished`, `errored`, `stalled`, `idle`, or `unknown_running` |
 | `hooked`            | Whether lifecycle hook events are attached                                                      |
 | `reason`            | Detection reason, including `no_hook`                                                           |

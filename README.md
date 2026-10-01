@@ -2,7 +2,7 @@
 
 **A native macOS workspace for running coding agents side by side.**
 
-Run Claude Code, Codex, Gemini CLI, opencode, or another command-line agent
+Run Claude Code, Codex, opencode, or another command-line agent
 in terminal panes you can watch and type into. Keep projects organized,
 see which agents need your attention, and review their changes without
 switching between terminal windows.
