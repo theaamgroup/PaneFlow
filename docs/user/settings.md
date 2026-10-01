@@ -28,8 +28,8 @@ can perform.
 
 `claude_code_bypass_permissions` only affects Claude Code launches. When
 enabled, PaneFlow launches Claude Code with
-`--permission-mode bypassPermissions`. It does not change Codex,
-OpenCode, or Gemini behavior.
+`--permission-mode bypassPermissions`. It does not change any other
+agent's behavior.
 
 ## Config-only controls
 

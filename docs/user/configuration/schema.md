@@ -120,7 +120,7 @@ material disappears after a backdrop change, this is why.
 
 Each button visibility key is `boolean or null`. `true` always shows the
 button and `false` always hides it. `null` or an omitted key shows Claude
-Code, Codex, or Grok only when that CLI is installed; the other 15 agents
+Code, Codex, or Grok only when that CLI is installed; the other five agents
 default off even when installed.
 
 | Key | Agent | Null/omitted default |
@@ -130,10 +130,14 @@ default off even when installed.
 | `grok_button_visible` | Grok | On if installed |
 | `opencode_button_visible` | Opencode | Off |
 | `cursor_button_visible` | Cursor | Off |
-| `gemini_button_visible` | Gemini | Off |
 | `antigravity_button_visible` | Antigravity | Off |
 | `copilot_button_visible` | Copilot | Off |
 | `muse_button_visible` | Muse Code | Off |
+
+A `gemini_button_visible` key left by an older build is accepted and ignored
+(issue #1132). Gemini CLI is no longer a built-in agent, and the editor schema
+omits the key, so an editor that validates against it flags the leftover key.
+You can delete it.
 
 ## Terminal block
 
@@ -242,7 +246,6 @@ flag the key. Repeatable layouts come from session restore.
   "opencode_button_visible": null,
   "grok_button_visible": null,
   "cursor_button_visible": null,
-  "gemini_button_visible": null,
   "antigravity_button_visible": null,
   "copilot_button_visible": null,
   "muse_button_visible": null

@@ -46,7 +46,6 @@ fn test_serialization_roundtrip() {
         opencode_button_visible: None,
         grok_button_visible: None,
         cursor_button_visible: None,
-        gemini_button_visible: None,
         antigravity_button_visible: None,
         copilot_button_visible: None,
         muse_button_visible: None,
@@ -382,6 +381,39 @@ fn new_tab_branches_inherit_override_and_preserve_legacy_preferences() {
         PaneFlowConfig::default().new_tab_branch_for_workspace("/projects/another"),
         Some("main")
     );
+}
+
+/// Issue #1132: Gemini CLI support is retired. A config written by an older
+/// build still carries `gemini_button_visible`; it must load with every other
+/// setting intact, and the stale key is not part of the typed config.
+#[test]
+fn retired_gemini_button_visible_loads_without_changing_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("paneflow.json");
+    for value in [
+        serde_json::json!(true),
+        serde_json::json!(false),
+        serde_json::json!(null),
+        serde_json::json!("invalid"),
+    ] {
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "gemini_button_visible": value,
+                "antigravity_button_visible": true,
+                "font_size": 17.0,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let config = load_config_from_path(&path);
+        assert_eq!(config.font_size, Some(17.0));
+        assert_eq!(config.antigravity_button_visible, Some(true));
+        assert!(serde_json::to_value(config)
+            .unwrap()
+            .get("gemini_button_visible")
+            .is_none());
+    }
 }
 
 #[test]

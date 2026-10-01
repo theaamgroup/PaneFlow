@@ -1532,7 +1532,6 @@ fn resume_command_spec(
             spec.push_arg(format!("--resume={session_id}"));
             spec
         }
-        SessionAgent::Gemini => resume_flag_spec("gemini", session_id),
     };
     debug_assert!(crate::agent_launcher::is_plain_shell_token(session_id));
     Some(spec)
@@ -1594,7 +1593,6 @@ mod tests {
             (SessionAgent::OpenCode, format!("opencode --session {id}")),
             (SessionAgent::Grok, format!("grok --resume {id}")),
             (SessionAgent::Cursor, format!("cursor-agent --resume={id}")),
-            (SessionAgent::Gemini, format!("gemini --resume {id}")),
         ];
 
         for (agent, expected) in cases {

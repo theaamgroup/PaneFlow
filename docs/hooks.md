@@ -81,7 +81,7 @@ Only **Claude Code** exposes a verified, file-based user-scope notification-hook
 surface, so it is the only agent that receives a persistent install
 (`paneflow hooks setup`). Every other integration is EPHEMERAL: injected by
 the shim when the agent launches inside a PaneFlow terminal, removed when it
-exits. The shim wraps all nine `TerminalAgent` binaries; whatever has no hook
+exits. The shim wraps all eight `TerminalAgent` binaries; whatever has no hook
 surface below still gets the universal lifecycle (`ai.exit` on crash,
 `ai.session_end` on quit) plus the sidebar's "running" row from the process
 scan.
@@ -90,7 +90,6 @@ scan.
 |-------|-----------|----------------------|---------------|
 | Claude Code | Claude hooks (matcher groups) | `./.claude/settings.local.json` | UserPromptSubmit, Notification, Stop, Pre/PostToolUse, SubagentStart/Stop |
 | Codex | hooks.json + TOML feature flag | `./.codex/hooks.json` | SessionStart, UserPromptSubmit, Stop, Pre/PostToolUse, PermissionRequest, SubagentStart/Stop |
-| Gemini CLI | matcher-group hooks in settings | `~/.gemini/settings.json` | BeforeAgent→UserPromptSubmit, AfterAgent→Stop, Before/AfterTool→Pre/PostToolUse |
 | Cursor | flat hooks.json (`version: 1`) | `~/.cursor/hooks.json` | beforeSubmitPrompt, stop, pre/postToolUse, subagentStart/Stop |
 | OpenCode | TS plugin + `plugin` entry | `~/.config/opencode/plugins/paneflow-status.ts` + `opencode.json` | chat.message, tool.execute.before/after, session.created/status/idle (child sessions as subagents), permission.asked |
 | Grok | dedicated merged hook file (wholly PaneFlow-owned) | `~/.grok/hooks/paneflow.json` | UserPromptSubmit, Stop, Pre/PostToolUse, PermissionRequest, SubagentStart/Stop |
@@ -136,6 +135,15 @@ outside a PaneFlow terminal.
 Tools without a supported hook surface: **Copilot CLI** (no hooks or JSON
 stream) and **Antigravity** (no stable public hook surface). They still get
 the universal exit/session-end lifecycle and the "running" row.
+
+Gemini CLI is no longer wrapped (issue #1132). A `gemini` you run in a pane is
+a plain process: no hooks, no agent pill, no sessions-sidebar entry. Earlier
+builds injected `paneflow-status` matcher groups into `~/.gemini/settings.json`
+for each session and removed them on exit; a shim that was killed could leave
+them behind. To clean up by hand, look under `hooks.BeforeAgent`,
+`hooks.AfterAgent`, `hooks.BeforeTool`, and `hooks.AfterTool`. Remove each
+hook entry named `paneflow-status` (its command runs `paneflow-ai-hook`), then
+delete its matcher group if the group is now empty.
 
 ## Parent-death and interrupt guards
 

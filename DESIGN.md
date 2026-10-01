@@ -483,11 +483,11 @@ is 9 (`pane.rs:150`), sized to sit inside a 15 px chip (5.3). Apart from it no
 glyph outside 10–16 and 18 exists, and every larger `size(px(N.))` is an icon
 button *box*, not a glyph.
 
-The fork ships nine agent launchers: Claude Code, Codex, OpenCode, Grok,
-Cursor, Gemini, Antigravity, Copilot, and Muse Code. Marks live in
-`src-app/assets/agents/` for the six secondary agents and in `icons/` for
+The fork ships eight agent launchers: Claude Code, Codex, OpenCode, Grok,
+Cursor, Antigravity, Copilot, and Muse Code. Marks live in
+`src-app/assets/agents/` for the five secondary agents and in `icons/` for
 Claude, Codex, and OpenCode. `TerminalAgent::icon_multicolor` is the authority
-on rendering: Antigravity and Gemini render through `img()`.
+on rendering: only Antigravity renders through `img()`.
 `TerminalAgent::accent()` returns brand colors for Claude (`#d97757`) and
 Muse Code (`#0081FB`); the other monochrome marks use the theme text color.
 The launcher picker and AI Agent settings expose only these supported agents;

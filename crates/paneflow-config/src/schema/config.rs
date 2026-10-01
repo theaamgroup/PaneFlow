@@ -232,10 +232,6 @@ pub struct PaneFlowConfig {
     /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub cursor_button_visible: Option<bool>,
-    /// Show the built-in "Gemini" command button in the tab bar.
-    /// Explicit booleans override; `None` defaults hidden even when installed.
-    #[serde(default, deserialize_with = "lenient_value_or_default")]
-    pub gemini_button_visible: Option<bool>,
     /// Show the built-in "Antigravity" command button in the tab bar.
     /// Explicit booleans override; `None` defaults hidden even when installed.
     #[serde(default, deserialize_with = "lenient_value_or_default")]

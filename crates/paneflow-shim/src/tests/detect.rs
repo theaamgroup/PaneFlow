@@ -310,6 +310,7 @@ fn retired_agent_binaries_are_not_wrapped() {
         "qodercli",
         "openclaw",
         "dsh",
+        "gemini",
     ] {
         assert_eq!(
             crate::detect::detect_tool_from_stem(binary),

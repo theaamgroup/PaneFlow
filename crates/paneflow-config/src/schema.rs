@@ -119,7 +119,6 @@ mod tests {
             opencode_button_visible: Some(true),
             grok_button_visible: Some(true),
             cursor_button_visible: Some(true),
-            gemini_button_visible: Some(true),
             antigravity_button_visible: Some(true),
             copilot_button_visible: Some(true),
             muse_button_visible: Some(true),

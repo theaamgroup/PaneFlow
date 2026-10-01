@@ -643,7 +643,7 @@ mod tests {
             state(Some(TerminalAgent::Grok), true, None, false),
             state(Some(TerminalAgent::Codex), true, None, true),
             state(
-                Some(TerminalAgent::Gemini),
+                Some(TerminalAgent::Cursor),
                 false,
                 Some(now + Duration::from_secs(5)),
                 true,

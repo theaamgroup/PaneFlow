@@ -1,11 +1,11 @@
 //! AI tool type definitions shared across the app.
 //!
 //! The tool identity is [`crate::agent_launcher::TerminalAgent`] - the same
-//! 16-agent taxonomy as the terminal launchers (single source of truth:
+//! agent taxonomy as the terminal launchers (single source of truth:
 //! binaries are the wire ids, `display_name`/`accent`/`display_rank` come
 //! for free). The historical 2-variant `AiTool` enum was folded into it
 //! when hook support grew past Claude Code + Codex; on the wire, `tool` is
-//! the agent's binary name (`claude`, `codex`, `gemini`, …) resolved via
+//! the agent's binary name (`claude`, `codex`, `cursor-agent`, …) resolved via
 //! [`TerminalAgent::from_binary`], and an UNKNOWN string is now rejected
 //! instead of silently retyped as Claude.
 //!

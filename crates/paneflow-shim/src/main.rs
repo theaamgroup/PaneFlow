@@ -10,7 +10,7 @@
 //! PaneFlow AI-binary shim.
 //!
 //! Copied (by US-008 extraction) under every `TerminalAgent` binary name
-//! (`claude`, `codex`, `gemini`, `cursor-agent`, …) into the PaneFlow bin
+//! (`claude`, `codex`, `cursor-agent`, …) into the PaneFlow bin
 //! cache dir, which US-009 prepends to the PTY's `$PATH`. When the user
 //! runs one of those tools, this shim:
 //!
@@ -48,9 +48,9 @@ mod hooks;
 use detect::{detect_tool, find_real_binary};
 use exec::run_real;
 use hooks::{
-    merge_cursor_hooks, merge_gemini_hooks, remove_cursor_hooks, remove_gemini_hooks,
-    CodexHookConfigGuard, GrokHookFileGuard, HookConfigGuard, HookInstall, HookInstallSkip,
-    ManagedHookConfigGuard, ManagedHookSpec, MuseHookConfigGuard, OpenCodePluginGuard,
+    merge_cursor_hooks, remove_cursor_hooks, CodexHookConfigGuard, GrokHookFileGuard,
+    HookConfigGuard, HookInstall, HookInstallSkip, ManagedHookConfigGuard, ManagedHookSpec,
+    MuseHookConfigGuard, OpenCodePluginGuard,
 };
 
 // ---------------------------------------------------------------------------
@@ -123,7 +123,7 @@ fn main() -> ExitCode {
         eprintln!(
             "paneflow-shim: invoked under an unexpected name; copy or \
              hardlink this binary under one of the PaneFlow-wrapped agent \
-             CLI names ('claude', 'codex', 'gemini', …) and put that \
+             CLI names ('claude', 'codex', 'cursor-agent', …) and put that \
              directory first on $PATH."
         );
         return ExitCode::from(2);
@@ -216,17 +216,9 @@ fn install_hook_guard(tool: &str) -> std::io::Result<HookInstall<ToolHookGuard>>
     match tool {
         "claude" => HookConfigGuard::install().map(|outcome| outcome.map(ToolHookGuard::Claude)),
         "codex" => CodexHookConfigGuard::install().map(|outcome| outcome.map(ToolHookGuard::Codex)),
-        // User-scope JSON agents (their project files are primary configs,
-        // often git-tracked - mutating those would churn the user's diff for
-        // the whole session). Gemini is matcher-grouped; Cursor is flat.
-        "gemini" => ManagedHookConfigGuard::install_in_home(ManagedHookSpec::new(
-            ".gemini",
-            "settings.json",
-            "Gemini CLI",
-            merge_gemini_hooks,
-            remove_gemini_hooks,
-        ))
-        .map(|outcome| outcome.map(ToolHookGuard::Managed)),
+        // User-scope JSON agent (its project file is a primary config, often
+        // git-tracked - mutating it would churn the user's diff for the whole
+        // session). Cursor's hooks.json is flat.
         "cursor-agent" => ManagedHookConfigGuard::install_in_home(ManagedHookSpec::new(
             ".cursor",
             "hooks.json",

@@ -8,9 +8,9 @@ use crate::hooks::{
     enable_codex_feature_flag, CodexHookConfigGuard, CODEX_HOOK_EVENTS, CODEX_TOML_MARKER,
 };
 use crate::hooks::{
-    is_paneflow_hook_command, merge_cursor_hooks, merge_gemini_hooks, remove_cursor_hooks,
-    remove_gemini_hooks, resolve_hook_command, GrokHookFileGuard, InvalidJsonPolicy,
-    ManagedHookConfigGuard, ManagedHookSpec, OpenCodePluginGuard, CLAUDE_HOOK_EVENTS,
+    is_paneflow_hook_command, merge_cursor_hooks, remove_cursor_hooks, resolve_hook_command,
+    GrokHookFileGuard, InvalidJsonPolicy, ManagedHookConfigGuard, ManagedHookSpec,
+    OpenCodePluginGuard, CLAUDE_HOOK_EVENTS,
 };
 use serde_json::json;
 
@@ -21,41 +21,6 @@ fn command_preserves_event_arg(command: &str, event: &str) -> bool {
 }
 
 // ---------- Multi-agent: clones + JSON/TS/YAML guards ----------
-
-#[test]
-fn gemini_nested_merge_writes_official_shape_and_roundtrips() {
-    let mut root = json!({});
-    merge_gemini_hooks(&mut root).unwrap();
-    // Foreign key on the config side…
-    let before_agent = root["hooks"]["BeforeAgent"].as_array().unwrap();
-    assert_eq!(before_agent.len(), 1);
-    let group = &before_agent[0];
-    assert_eq!(group["matcher"], json!("*"));
-    let inner = group["hooks"].as_array().unwrap();
-    assert_eq!(inner.len(), 1);
-    assert_eq!(inner[0]["name"], json!("paneflow-status"));
-    assert_eq!(inner[0]["type"], json!("command"));
-    assert_eq!(
-        inner[0]["timeout"],
-        json!(5000),
-        "Gemini hook timeout is milliseconds"
-    );
-    // …canonical Claude-shaped event in the command arg.
-    let cmd = inner[0]["command"].as_str().unwrap();
-    assert!(
-        command_preserves_event_arg(cmd, "UserPromptSubmit"),
-        "BeforeAgent must invoke the canonical UserPromptSubmit: {cmd}"
-    );
-    // No Paneflow-only marker field (stricter parsers).
-    assert!(group.get("_paneflow_managed").is_none());
-    assert!(group.get("command").is_none());
-    // Idempotent merge.
-    merge_gemini_hooks(&mut root).unwrap();
-    assert_eq!(root["hooks"]["BeforeAgent"].as_array().unwrap().len(), 1);
-    // Removal restores an empty tree.
-    remove_gemini_hooks(&mut root);
-    assert_eq!(root, json!({}));
-}
 
 #[test]
 fn cursor_flat_merge_stamps_version_and_preserves_user_entries() {
@@ -113,19 +78,19 @@ fn merge_cursor_hooks_refuses_non_array_event_value() {
 #[test]
 fn managed_guard_refuses_invalid_primary_user_config() {
     let td = tempfile::TempDir::new().unwrap();
-    let dir = td.path().join(".gemini");
+    let dir = td.path().join(".cursor");
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("settings.json");
+    let path = dir.join("hooks.json");
     std::fs::write(&path, "{ broken").unwrap();
 
     let guard = ManagedHookConfigGuard::install_at(
         &dir,
         ManagedHookSpec::new(
-            ".gemini",
-            "settings.json",
-            "Gemini",
-            merge_gemini_hooks,
-            remove_gemini_hooks,
+            ".cursor",
+            "hooks.json",
+            "Cursor",
+            merge_cursor_hooks,
+            remove_cursor_hooks,
         ),
         InvalidJsonPolicy::Refuse,
     );
@@ -138,51 +103,79 @@ fn managed_guard_refuses_invalid_primary_user_config() {
     );
 }
 
-#[test]
-fn gemini_install_preserves_commented_settings() {
-    let td = tempfile::TempDir::new().unwrap();
-    let dir = td.path().join(".gemini");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("settings.json");
-    let original =
-        "{\n  // Gemini accepts comments in settings.json\n  \"theme\": \"Default\"\n}\n";
-    std::fs::write(&path, original).unwrap();
-
-    let guard = ManagedHookConfigGuard::install_at(
-        &dir,
-        ManagedHookSpec::new(
-            ".gemini",
-            "settings.json",
-            "Gemini",
-            merge_gemini_hooks,
-            remove_gemini_hooks,
-        ),
-        InvalidJsonPolicy::Refuse,
+fn cursor_spec() -> ManagedHookSpec {
+    ManagedHookSpec::new(
+        ".cursor",
+        "hooks.json",
+        "Cursor",
+        merge_cursor_hooks,
+        remove_cursor_hooks,
     )
-    .expect("commented Gemini settings must install");
+}
 
-    let installed = std::fs::read_to_string(&path).unwrap();
-    assert!(
-        installed.contains("// Gemini accepts comments in settings.json"),
-        "comment must survive install:\n{installed}"
-    );
-    let parsed = paneflow_agent_config::jsonc::parse(&installed).expect("installed JSONC");
-    assert_eq!(parsed["theme"], json!("Default"));
-    for event in ["BeforeAgent", "AfterAgent", "BeforeTool", "AfterTool"] {
-        let command = parsed["hooks"][event][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap_or("");
+/// #1132 rewrote `ManagedHookConfigGuard::drop` when the Gemini JSONC path
+/// went. Install into a user's existing Cursor hooks.json, then drop: the
+/// managed entries come out and the user's content is back as it was.
+#[test]
+fn managed_guard_round_trip_restores_existing_user_hooks() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".cursor");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("hooks.json");
+    let original = json!({
+        "version": 1,
+        "hooks": { "preToolUse": [ { "command": "/usr/bin/audit-tool" } ] }
+    });
+    std::fs::write(&path, serde_json::to_string_pretty(&original).unwrap()).unwrap();
+
+    let guard = ManagedHookConfigGuard::install_at(&dir, cursor_spec(), InvalidJsonPolicy::Refuse)
+        .expect("existing Cursor hooks.json must install");
+    let installed = read_json(&path);
+    for event in ["beforeSubmitPrompt", "stop", "preToolUse"] {
+        let entries = installed["hooks"][event].as_array().unwrap();
         assert!(
-            is_paneflow_hook_command(command),
-            "{event} hook missing from {installed}"
+            entries.iter().any(|entry| entry["command"]
+                .as_str()
+                .is_some_and(is_paneflow_hook_command)),
+            "{event} hook missing: {installed}"
         );
     }
+    assert_eq!(
+        installed["hooks"]["preToolUse"][0]["command"],
+        json!("/usr/bin/audit-tool")
+    );
 
     drop(guard);
+    assert!(path.exists(), "a user-owned file must never be deleted");
     assert_eq!(
-        std::fs::read(&path).unwrap(),
-        original.as_bytes(),
-        "drop must restore the original bytes"
+        read_json(&path),
+        original,
+        "drop must restore the user's hooks"
+    );
+    assert!(dir.is_dir());
+}
+
+/// When the guard created the file and its directory, drop removes both.
+#[test]
+fn managed_guard_round_trip_removes_the_file_and_directory_it_created() {
+    let td = tempfile::TempDir::new().unwrap();
+    let dir = td.path().join(".cursor");
+    let path = dir.join("hooks.json");
+    assert!(!dir.exists());
+
+    let guard = ManagedHookConfigGuard::install_at(&dir, cursor_spec(), InvalidJsonPolicy::Refuse)
+        .expect("fresh Cursor install must succeed");
+    let installed = read_json(&path);
+    assert_eq!(installed["version"], json!(1));
+    assert!(installed["hooks"]["stop"][0]["command"]
+        .as_str()
+        .is_some_and(is_paneflow_hook_command));
+
+    drop(guard);
+    assert!(!path.exists(), "the file the guard created must be removed");
+    assert!(
+        !dir.exists(),
+        "the directory the guard created must be removed"
     );
 }
 

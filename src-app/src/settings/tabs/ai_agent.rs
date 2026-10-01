@@ -64,12 +64,6 @@ const SETTINGS_AGENT_ORDER: &[AgentToggleRow] = &[
         agent: TerminalAgent::Cursor,
     },
     AgentToggleRow {
-        id: "row-gemini-visible",
-        title: "Gemini",
-        description: "Show the Gemini launcher button in every tab bar.",
-        agent: TerminalAgent::Gemini,
-    },
-    AgentToggleRow {
         id: "row-antigravity-visible",
         title: "Antigravity",
         description: "Show the Antigravity launcher button in every tab bar.",

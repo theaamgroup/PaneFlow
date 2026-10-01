@@ -130,9 +130,7 @@ const NAV_GROUPS: &[NavGroup] = &[
             section: SettingsSection::AiAgent,
             label: "AI Agent",
             icon: "icons/sparkles.svg",
-            keywords: &[
-                "ai", "agent", "claude", "codex", "gemini", "launcher", "tab bar",
-            ],
+            keywords: &["ai", "agent", "claude", "codex", "launcher", "tab bar"],
         }],
     },
 ];
