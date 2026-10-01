@@ -2099,24 +2099,18 @@ mod spawn_exclusion_tests {
             // inherits every descriptor not marked close-on-exec, and a
             // `pre_exec` puts it on std's fork path.
             "paneflow_process::spawn(",
-            // A hand-made pipe outside `spawn_piped`'s window.
-            HAND_MADE_PIPE,
+            // A hand-made pipe outside `spawn_piped`'s window. The PTY guard
+            // gets its control pipe from `spawn_piped` too, now that it
+            // spawns off the render thread (#1129).
+            "io::pipe()",
             "libc::pipe(",
             // The pane shell's fork-path spawn (portable-pty's `pre_exec`),
             // allowed only in its one wrapper below.
             PTY_SPAWN,
         ];
         const PIPED: &str = "Stdio::piped()";
-        const HAND_MADE_PIPE: &str = "io::pipe()";
         const PTY_SPAWN: &str = "spawn_command(";
-        // The PTY guard spawns on the render thread, where `spawn_piped`'s
-        // wait for in-flight spawns could stall the UI, so it makes its
-        // control pipe itself; that moves to `spawn_piped` once the spawn
-        // leaves that thread (#1129). Drop this entry then.
-        let allowed = [
-            (HAND_MADE_PIPE, root.join("agents/parent_guard.rs")),
-            (PTY_SPAWN, root.join("terminal/ghostty_session.rs")),
-        ];
+        let allowed = [(PTY_SPAWN, root.join("terminal/ghostty_session.rs"))];
         assert!(
             allowed.iter().all(|(_, path)| path.is_file()),
             "an allowlist entry no longer exists: {allowed:?}"
