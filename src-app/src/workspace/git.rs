@@ -332,8 +332,7 @@ fn read_stdout_prefix(
     deadline_at: std::time::Instant,
     cap: u64,
 ) -> Option<Vec<u8>> {
-    use std::os::unix::process::CommandExt;
-    use std::process::Stdio;
+    use paneflow_process::Stdio;
     use std::sync::mpsc::TryRecvError;
 
     let remaining = deadline_at.checked_duration_since(std::time::Instant::now())?;
@@ -341,10 +340,8 @@ fn read_stdout_prefix(
         return None;
     }
     let cap = usize::try_from(cap).ok()?;
-    let mut cmd = git_listing_command(cwd, args);
-    cmd.stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0);
+    let mut cmd = paneflow_process::Command::from(&git_listing_command(cwd, args));
+    cmd.stdin(Stdio::Null).stderr(Stdio::Null).process_group(0);
     let stdout_only = paneflow_process::Pipes {
         stdout: true,
         ..paneflow_process::Pipes::default()
@@ -466,7 +463,7 @@ fn complete_nul_records(mut bytes: Vec<u8>, cap: usize) -> Vec<u8> {
     }
 }
 
-fn stop_child(child: &mut std::process::Child) {
+fn stop_child(child: &mut paneflow_process::Child) {
     if matches!(child.try_wait(), Ok(Some(_))) {
         return;
     }

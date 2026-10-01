@@ -1,25 +1,31 @@
 //! Bounded external-process execution shared across Paneflow crates.
 //!
-//! `std`-only, zero external dependencies, so it can be a dependency of the
-//! embedded `paneflow-shim` without inflating the binary that ships inside the
-//! main executable (EP-002, US-005).
+//! Its only dependency is `libc`, which the embedded `paneflow-shim` already
+//! links, so it does not inflate the binary that ships inside the main
+//! executable (EP-002, US-005).
 //!
 //! [`run_with_timeout`] gives non-interactive subprocesses a wall-clock deadline
 //! and strict stdout/stderr capture limits. It is synchronous and is meant to
 //! run on a background thread, never on the GPUI render thread.
 //!
-//! [`spawn`] is the one place PaneFlow starts a non-PTY child. It keeps spawns
-//! out of the windows where the IPC server's sockets are not close-on-exec yet
-//! (issue #1115). [`spawn_piped`] does the same for a child's stdio pipes
-//! (issue #1124).
+//! [`Command`] is how PaneFlow starts a non-PTY child: `posix_spawn` with
+//! `POSIX_SPAWN_CLOEXEC_DEFAULT`, so the child inherits only the descriptors
+//! it is given (issue #1126). [`spawn_piped`], [`run_with_timeout`] and
+//! [`spawn_detached`] build on it. The spawn exclusion that kept spawns out of
+//! the windows where the IPC server's sockets (issue #1115) and stdio pipes
+//! (issue #1124) are not close-on-exec yet still applies to every spawn.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
+mod posix;
+
+pub use posix::{inheritable_descriptors, Child, Command, Stdio};
 
 use std::error::Error;
 use std::fmt;
 use std::io::{self, PipeReader, PipeWriter, Read, Write};
 use std::os::fd::OwnedFd;
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{ChildStderr, ChildStdin, ChildStdout, ExitStatus};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::{OnceLock, PoisonError, RwLock, TryLockError};
 use std::thread;
@@ -42,8 +48,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// `FD_CLOEXEC` by a second `fcntl`.
 /// A `posix_spawn` or `fork` on another thread between the two calls copies
 /// the descriptor into the child, where it survives exec for the child's
-/// whole life. [`spawn`] holds the shared side for the length of the
-/// `Command::spawn` call, so spawns never wait on each other.
+/// whole life. [`Command::start`] and [`spawn`] hold the shared side for the
+/// length of the spawn call, so spawns never wait on each other. A
+/// [`Command`] child can no longer copy such a descriptor (issue #1126); the
+/// exclusion stays for std spawns until every one is gone.
 /// [`with_spawns_excluded`] and [`try_with_spawns_excluded`] hold the
 /// exclusive side across the create-then-mark window. The exclusive side is
 /// only ever tried, never queued for: a queued writer would make every later
@@ -59,17 +67,24 @@ static SPAWN_EXCLUSION: RwLock<()> = RwLock::new(());
 /// How often [`with_spawns_excluded`] retries while a spawn is in flight.
 const SPAWN_EXCLUSION_RETRY: Duration = Duration::from_millis(1);
 
-/// Spawn `command`, never while a [`with_spawns_excluded`] or
+/// Spawn a std `command`, never while a [`with_spawns_excluded`] or
 /// [`try_with_spawns_excluded`] window is open (issue #1115).
 ///
-/// Use this instead of `Command::spawn` for every child PaneFlow starts
-/// outside the PTY: a descriptor another thread is still marking
-/// close-on-exec cannot leak into the child.
-pub fn spawn(command: &mut Command) -> io::Result<Child> {
+/// Production code starts children with [`Command::start`] instead
+/// (issue #1126). std's child inherits every descriptor that is not
+/// close-on-exec, and a `pre_exec` closure makes std fork and then wait on
+/// an exec-status pipe that a concurrent `posix_spawn` can copy. This stays
+/// for tests that need a `pre_exec` to hold a spawn in flight.
+pub fn spawn(command: &mut std::process::Command) -> io::Result<std::process::Child> {
+    with_spawn_shared_side(|| command.spawn())
+}
+
+/// Run `spawn` under the shared side of [`SPAWN_EXCLUSION`].
+pub(crate) fn with_spawn_shared_side<T>(spawn: impl FnOnce() -> T) -> T {
     let _shared = SPAWN_EXCLUSION
         .read()
         .unwrap_or_else(PoisonError::into_inner);
-    command.spawn()
+    spawn()
 }
 
 /// Which of a child's standard streams [`spawn_piped`] connects to the parent.
@@ -80,28 +95,26 @@ pub struct Pipes {
     pub stderr: bool,
 }
 
-/// [`spawn`] with a pipe to the parent for each stream `pipes` selects. Use it
-/// instead of passing `Stdio::piped()` to [`spawn`] (issue #1124).
+/// [`Command::start`] with a pipe to the parent for each stream `pipes`
+/// selects (issue #1124).
 ///
-/// On macOS, std makes each `Stdio::piped()` pair inside `Command::spawn`
-/// with `pipe()` and then marks each end close-on-exec in a separate
-/// `fcntl`. [`spawn`] holds only the shared side, so a concurrent spawn in
-/// that window copies the pipe ends into its own child. A reader then waits
-/// for that unrelated child to exit before it sees EOF.
+/// On macOS `pipe()` returns ends that are only marked close-on-exec by a
+/// separate `fcntl`. A [`Command`] child never inherits them, but a std
+/// spawn in that window (a test's [`spawn`], or the PTY shell's fork) would.
 ///
-/// This creates the pipes itself inside a [`with_spawns_excluded`] window
-/// and spawns under the shared side as usual. The window lasts a few
-/// syscalls, so other spawners, the render thread included, wait for
-/// microseconds at most. Opening it, though, waits for every spawn already
-/// in flight to return: while another thread's spawn call is slow (a 12-20 s
-/// first-exec Gatekeeper scan, for example), this call waits as long before
-/// its own child starts. Keep it off the render thread. Holding the exclusive
-/// side across the whole spawn instead would make every other spawner wait
-/// on this one as well.
+/// This creates the pipes inside a [`with_spawns_excluded`] window and spawns
+/// under the shared side as usual. The window lasts a few syscalls, so other
+/// spawners, the render thread included, wait for microseconds at most.
+/// Opening it, though, waits for every spawn already in flight to return:
+/// while another thread's spawn call is slow (a 12-20 s first-exec
+/// Gatekeeper scan, for example), this call waits as long before its own
+/// child starts. Keep it off the render thread. Holding the exclusive side
+/// across the whole spawn instead would make every other spawner wait on
+/// this one as well.
 ///
-/// The selected streams on `command` are reset to `Stdio::null()` before this
-/// returns, which closes the parent's copy of the child's ends. The pipes'
-/// parent ends are returned in `Child::stdin`, `stdout` and `stderr`.
+/// The selected streams on `command` are reset to [`Stdio::Null`] before
+/// this returns, which closes the parent's copy of the child's ends. The
+/// pipes' parent ends are returned in `Child::stdin`, `stdout` and `stderr`.
 pub fn spawn_piped(command: &mut Command, pipes: Pipes) -> io::Result<Child> {
     let StdioPipes {
         stdin,
@@ -125,17 +138,17 @@ pub fn spawn_piped(command: &mut Command, pipes: Pipes) -> io::Result<Child> {
         parent_stderr = Some(ChildStderr::from(OwnedFd::from(parent_end)));
     }
 
-    let spawned = spawn(command);
+    let spawned = command.start();
     // `Command` owns the child's ends until its stdio is replaced. Close
     // them now: a reader sees EOF only once every write end is closed.
     if pipes.stdin {
-        command.stdin(Stdio::null());
+        command.stdin(Stdio::Null);
     }
     if pipes.stdout {
-        command.stdout(Stdio::null());
+        command.stdout(Stdio::Null);
     }
     if pipes.stderr {
-        command.stderr(Stdio::null());
+        command.stderr(Stdio::Null);
     }
 
     let mut child = spawned?;
@@ -211,8 +224,8 @@ pub mod test_support {
     }
 }
 
-/// Run `create` while no [`spawn`] call is in flight, or return `None`
-/// without running it when one is.
+/// Run `create` while no [`Command::start`] or [`spawn`] call is in flight,
+/// or return `None` without running it when one is.
 ///
 /// For poll loops, such as a non-blocking `accept`: the caller retries on its
 /// next tick instead of waiting.
@@ -225,11 +238,15 @@ pub fn try_with_spawns_excluded<T>(create: impl FnOnce() -> T) -> Option<T> {
     Some(create())
 }
 
-/// Run `create` while no [`spawn`] call is in flight, waiting for in-flight
-/// spawns to return first. Keep `create` short: spawns wait while it runs.
+/// Run `create` while no [`Command::start`] or [`spawn`] call is in flight,
+/// waiting for in-flight spawns to return first. Keep `create` short: spawns
+/// wait while it runs. Never call it on the render thread: an in-flight
+/// spawn can take seconds (a first-exec Gatekeeper scan).
 ///
 /// `create` must also mark every descriptor it opens close-on-exec before it
-/// returns, as `interprocess` and `std` do.
+/// returns, as `interprocess` and `std` do. Since issue #1126 only a std
+/// spawn ([`spawn`], or the PTY shell's fork) could still copy one that is
+/// not marked yet.
 pub fn with_spawns_excluded<T>(create: impl FnOnce() -> T) -> T {
     loop {
         match SPAWN_EXCLUSION.try_write() {
@@ -351,7 +368,7 @@ impl Error for ProcError {
 /// - the child leads its own process group; every error path terminates that
 ///   group best-effort before cleanup is detached.
 pub fn run_with_timeout(
-    cmd: Command,
+    cmd: std::process::Command,
     deadline: Duration,
     stdout_cap: u64,
 ) -> Result<BoundedOutput, ProcError> {
@@ -361,7 +378,7 @@ pub fn run_with_timeout(
 /// [`run_with_timeout`] that writes `stdin` to the child and closes the pipe
 /// (EOF) so plumbing such as `git cat-file --batch` can read a request set.
 pub fn run_with_timeout_stdin(
-    cmd: Command,
+    cmd: std::process::Command,
     stdin: &[u8],
     deadline: Duration,
     stdout_cap: u64,
@@ -371,7 +388,7 @@ pub fn run_with_timeout_stdin(
 
 /// [`run_with_timeout`] with an explicit stderr capture cap.
 fn run_with_timeout_capped(
-    cmd: Command,
+    cmd: std::process::Command,
     deadline: Duration,
     stdout_cap: u64,
     stderr_cap: u64,
@@ -379,8 +396,10 @@ fn run_with_timeout_capped(
     run_bounded(cmd, None, deadline, stdout_cap, stderr_cap)
 }
 
+/// `cmd` contributes its program, arguments, environment changes and working
+/// directory (see `From<&std::process::Command>` for [`Command`]).
 fn run_bounded(
-    mut cmd: Command,
+    cmd: std::process::Command,
     stdin: Option<&[u8]>,
     deadline: Duration,
     stdout_cap: u64,
@@ -389,8 +408,9 @@ fn run_bounded(
     let stdout_cap = validate_capture_cap(stdout_cap)?;
     let stderr_cap = validate_capture_cap(stderr_cap)?;
 
+    let mut cmd = Command::from(&cmd);
     if stdin.is_none() {
-        cmd.stdin(Stdio::null());
+        cmd.stdin(Stdio::Null);
     }
     let pipes = Pipes {
         stdin: stdin.is_some(),
@@ -398,7 +418,7 @@ fn run_bounded(
         stderr: true,
     };
 
-    configure_process_tree(&mut cmd);
+    cmd.process_group(0);
     // Prepare the reaper before spawning the child. Once a process exists,
     // every error path can hand it to this already-running thread without
     // risking a late thread-spawn failure or blocking the caller's deadline.
@@ -474,12 +494,6 @@ fn run_bounded(
         stdout,
         stderr,
     })
-}
-
-#[cfg(unix)]
-fn configure_process_tree(cmd: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    cmd.process_group(0);
 }
 
 fn poll_sleep_duration(start: Instant, deadline: Duration) -> Option<Duration> {
@@ -764,8 +778,8 @@ fn drain_ready_reader_messages(
 const DETACHED_REAP_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Channel to the shared detached-child reaper. `None` when the reaper thread
-/// could not be started, in which case [`spawn_detached`] degrades to the plain
-/// `Command::spawn` behavior rather than dropping the launch.
+/// could not be started, in which case [`spawn_detached`] still starts the
+/// child and leaves it unreaped rather than dropping the launch.
 static DETACHED_REAPER: OnceLock<Option<mpsc::Sender<Child>>> = OnceLock::new();
 
 /// Spawn a process Paneflow launches but never observes (an editor, a file
@@ -782,8 +796,12 @@ static DETACHED_REAPER: OnceLock<Option<mpsc::Sender<Child>>> = OnceLock::new();
 /// This never waits synchronously: it returns as soon as the spawn itself
 /// succeeds or fails, so it is safe to call from the render thread. Only spawn
 /// errors are reported; the child's exit code is deliberately discarded.
-pub fn spawn_detached(command: &mut Command) -> io::Result<()> {
-    let child = spawn(command)?;
+///
+/// The child is started with [`Command::start`] from `command`'s program,
+/// arguments, environment changes and working directory, with inherited
+/// stdio (issue #1126).
+pub fn spawn_detached(command: &mut std::process::Command) -> io::Result<()> {
+    let child = Command::from(&*command).start()?;
     // A missing or dead reaper is not worth failing the launch over: the child
     // is already running and the caller wanted it running. Dropping the handle
     // here is exactly the pre-existing behavior.
@@ -878,19 +896,19 @@ mod tests {
 
     /// Shell wrapper so the behavior tests stay readable across platforms.
     #[cfg(unix)]
-    fn sh(script: &str) -> Command {
-        let mut c = Command::new("sh");
+    fn sh(script: &str) -> std::process::Command {
+        let mut c = std::process::Command::new("sh");
         c.arg("-c").arg(script);
         c
     }
 
     #[cfg(unix)]
-    fn stdout_command() -> Command {
+    fn stdout_command() -> std::process::Command {
         sh("printf hello")
     }
 
     #[cfg(unix)]
-    fn sleep_command() -> Command {
+    fn sleep_command() -> std::process::Command {
         sh("sleep 30")
     }
 
@@ -906,6 +924,17 @@ mod tests {
     }
 
     use super::test_support::set_pipe_window_hook;
+
+    /// Held by the test that spawns through std and by every test that
+    /// leaves a descriptor inheritable outside the exclusion, so that std
+    /// child never copies it.
+    static STD_SPAWN_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn std_spawn_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        STD_SPAWN_TEST
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 
     /// Issue #1124: the pipes [`spawn_piped`] creates are never copied into
     /// a concurrent spawn's child.
@@ -951,8 +980,8 @@ mod tests {
         let mut holder = spawn_piped(
             Command::new("/bin/sleep")
                 .arg("30")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null()),
+                .stdout(Stdio::Null)
+                .stderr(Stdio::Null),
             Pipes {
                 stdin: true,
                 ..Pipes::default()
@@ -984,7 +1013,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_piped_hands_back_parent_ends_and_closes_child_ends() {
-        let mut command = sh("cat; printf done >&2");
+        let mut command = Command::from(&sh("cat; printf done >&2"));
         let mut child = spawn_piped(
             &mut command,
             Pipes {
@@ -1025,10 +1054,22 @@ mod tests {
         assert_eq!(stdout, b"echoed");
         assert_eq!(stderr, b"done");
 
-        // The reset stdio means a second spawn gets no pipes.
-        let again = spawn(&mut command).and_then(|child| child.wait_with_output());
-        let again = again.expect("respawn");
-        assert!(again.stdout.is_empty() && again.stderr.is_empty());
+        // The reset stdio is `/dev/null`: `cat` reads EOF at once and exits.
+        let mut again = command.start().expect("respawn");
+        assert!(again.stdin.is_none() && again.stdout.is_none() && again.stderr.is_none());
+        let (done_tx, done_rx) = mpsc::channel();
+        let pid = again.id();
+        thread::spawn(move || {
+            let _ = done_tx.send(again.wait());
+        });
+        let status = done_rx.recv_timeout(Duration::from_secs(10));
+        if status.is_err() {
+            // SAFETY: the waiter thread has not reaped `pid` yet, so it is
+            // still this test's child.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        }
+        let status = status.expect("a respawn with reset stdio must not wait on a pipe");
+        assert!(status.expect("wait").success());
     }
 
     /// Issue #1115: a descriptor created inside a [`with_spawns_excluded`]
@@ -1047,6 +1088,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Barrier};
 
+        let _std_spawn = std_spawn_test_lock();
         let window_open = Arc::new(Barrier::new(2));
         let window_closed = Arc::new(AtomicBool::new(false));
         let creator = {
@@ -1074,11 +1116,11 @@ mod tests {
 
         window_open.wait();
         let mut child = spawn(
-            Command::new("/bin/sleep")
+            std::process::Command::new("/bin/sleep")
                 .arg("30")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null()),
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
         )
         .expect("spawn /bin/sleep");
         let spawned_after_window = window_closed.load(Ordering::SeqCst);
@@ -1215,8 +1257,10 @@ mod tests {
 
     #[test]
     fn spawn_detached_reports_spawn_failure() {
-        let err = spawn_detached(&mut Command::new("paneflow-no-such-binary-4f2a"))
-            .expect_err("a missing binary must surface as a spawn error");
+        let err = spawn_detached(&mut std::process::Command::new(
+            "paneflow-no-such-binary-4f2a",
+        ))
+        .expect_err("a missing binary must surface as a spawn error");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
@@ -1295,7 +1339,7 @@ mod tests {
         let me = std::process::id().to_string();
         // Through the spawn exclusion like every other child: a plain
         // `output()` could copy the socket another test holds inheritable.
-        let mut ps = Command::new("ps");
+        let mut ps = std::process::Command::new("ps");
         ps.args(["-A", "-o", "ppid=,stat="]);
         let out = run_with_timeout(ps, Duration::from_secs(10), 4 << 20)
             .expect("ps must run to count zombie children");
@@ -1325,7 +1369,8 @@ mod tests {
     #[test]
     fn spawn_detached_reaps_short_lived_children() {
         for _ in 0..4 {
-            spawn_detached(&mut Command::new("true")).expect("`true` must be spawnable");
+            spawn_detached(&mut std::process::Command::new("true"))
+                .expect("`true` must be spawnable");
         }
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -1339,5 +1384,422 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// A child that is killed and reaped however the test ends.
+    struct KillOnDrop(Child);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn sleeper() -> Command {
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .stdin(Stdio::Null)
+            .stdout(Stdio::Null)
+            .stderr(Stdio::Null);
+        command
+    }
+
+    fn descriptors_of_child(child: &Child) -> Vec<(i32, u32)> {
+        posix::descriptors_of(child.id() as libc::pid_t).expect("list the child's descriptors")
+    }
+
+    /// Issue #1126: a [`Command`] child holds none of a pipe this process
+    /// left inheritable, and a reader of that pipe sees EOF as soon as the
+    /// parent closes its write end.
+    ///
+    /// Both ends stay not close-on-exec for the whole spawn, the state
+    /// macOS leaves a fresh `pipe()` in until its follow-up `fcntl` (std's
+    /// exec-status pipe and `Stdio::piped()` included). A std `posix_spawn`
+    /// child copies both ends and keeps the write end for its 30 s life.
+    #[test]
+    fn spawned_child_holds_no_descriptor_the_parent_left_inheritable() {
+        use std::os::fd::AsRawFd;
+
+        let _std_spawn = std_spawn_test_lock();
+        let (mut reader, writer) = io::pipe().expect("pipe");
+        set_cloexec(reader.as_raw_fd(), false);
+        set_cloexec(writer.as_raw_fd(), false);
+
+        let child = KillOnDrop(sleeper().start().expect("spawn /bin/sleep"));
+        let held = descriptors_of_child(&child.0);
+
+        drop(writer);
+        let (read_tx, read_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut byte = [0_u8; 1];
+            let _ = read_tx.send(reader.read(&mut byte).map_err(|error| error.kind()));
+        });
+        let read = read_rx.recv_timeout(Duration::from_secs(2));
+
+        // Its stdio is `/dev/null`, so any pipe it holds is this test's. Only
+        // pipes count: a vnode `dyld` holds while `/bin/sleep` starts is not
+        // a leak.
+        let pipes: Vec<i32> = held
+            .iter()
+            .filter(|(_, kind)| *kind == libc::PROX_FDTYPE_PIPE as u32)
+            .map(|(fd, _)| *fd)
+            .collect();
+        assert!(
+            pipes.is_empty(),
+            "the child holds pipe descriptors it was never given: {pipes:?} (all: {held:?})"
+        );
+        assert_eq!(
+            read,
+            Ok(Ok(0)),
+            "the pipe's reader must see EOF once the parent closes the write end"
+        );
+    }
+
+    /// `inheritable_descriptors` lists a descriptor left inheritable on
+    /// purpose and skips one marked close-on-exec, so the shim's agent keeps
+    /// the first and never gets the second.
+    #[test]
+    fn inheritable_descriptors_lists_only_descriptors_left_inheritable() {
+        use std::os::fd::AsRawFd;
+
+        let _std_spawn = std_spawn_test_lock();
+        let (kept, closed) = io::pipe().expect("pipe");
+        set_cloexec(kept.as_raw_fd(), false);
+        let listed = with_spawns_excluded(inheritable_descriptors).expect("list descriptors");
+        assert!(listed.contains(&kept.as_raw_fd()), "{listed:?}");
+        assert!(!listed.contains(&closed.as_raw_fd()), "{listed:?}");
+        assert!(listed.iter().all(|fd| *fd > 2), "{listed:?}");
+    }
+
+    /// The three stdio slots and every descriptor named with `pass_fd` or
+    /// `inherit_fd` reach the child at the number asked for.
+    #[test]
+    fn passed_and_inherited_descriptors_reach_the_child() {
+        use std::os::fd::AsRawFd;
+
+        let (mut passed_reader, passed_writer) = io::pipe().expect("pipe");
+        let (mut inherited_reader, inherited_writer) = io::pipe().expect("pipe");
+        let inherited = inherited_writer.as_raw_fd();
+        let target = if inherited == 5 { 6 } else { 5 };
+        let (mut stdout_reader, stdout_writer) = io::pipe().expect("pipe");
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(format!(
+                "printf passed >&{target}; printf kept >&{inherited}; printf out"
+            ))
+            .stdin(Stdio::Null)
+            .stdout(stdout_writer)
+            .stderr(Stdio::Null)
+            .pass_fd(passed_writer.into(), target)
+            .inherit_fd(inherited);
+        let mut child = KillOnDrop(command.start().expect("spawn sh"));
+        drop(command);
+        drop(inherited_writer);
+        let status = child.0.wait().expect("wait");
+
+        let read = |reader: &mut io::PipeReader| {
+            let mut text = String::new();
+            reader.read_to_string(&mut text).expect("read");
+            text
+        };
+        assert!(status.success(), "{status:?}");
+        assert_eq!(read(&mut passed_reader), "passed");
+        assert_eq!(read(&mut inherited_reader), "kept");
+        assert_eq!(read(&mut stdout_reader), "out");
+    }
+
+    /// The `pre_exec` work PaneFlow used to do in the forked child is a
+    /// spawn attribute now: a new session, a new process group.
+    #[test]
+    fn session_and_process_group_attributes_apply() {
+        let mut session = sleeper();
+        session.new_session();
+        let session = KillOnDrop(session.start().expect("spawn session leader"));
+        let mut group = sleeper();
+        group.process_group(0);
+        let group = KillOnDrop(group.start().expect("spawn group leader"));
+
+        let session_pid = session.0.id() as libc::pid_t;
+        let group_pid = group.0.id() as libc::pid_t;
+        // SAFETY: `getsid`/`getpgid` only read the ids of a live child.
+        let (sid, pgid) = unsafe { (libc::getsid(session_pid), libc::getpgid(group_pid)) };
+        // SAFETY: as above.
+        let own_sid = unsafe { libc::getsid(0) };
+        assert_eq!(
+            sid, session_pid,
+            "new_session must make the child a session leader"
+        );
+        assert_eq!(
+            pgid, group_pid,
+            "process_group(0) must make the child a group leader"
+        );
+        // SAFETY: as above.
+        let group_sid = unsafe { libc::getsid(group_pid) };
+        assert_eq!(
+            group_sid, own_sid,
+            "a new group stays in the parent's session"
+        );
+    }
+
+    /// The child starts with an empty signal mask, `SIGPIPE` at its default
+    /// as std leaves it, and every `default_signal` reset. A shell started
+    /// with a signal ignored cannot catch it, so `kill -SIG $$` only kills
+    /// it when the disposition was reset.
+    #[test]
+    fn child_signal_mask_is_empty_and_default_signals_are_reset() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let suicide = |signal: &str| {
+            let mut command = Command::new("/bin/sh");
+            command
+                .arg("-c")
+                .arg(format!("kill -{signal} $$; exit 0"))
+                .stdin(Stdio::Null)
+                .stdout(Stdio::Null)
+                .stderr(Stdio::Null);
+            command
+        };
+
+        // std ignores SIGPIPE in this process.
+        let status = suicide("PIPE")
+            .start()
+            .expect("spawn")
+            .wait()
+            .expect("wait");
+        assert_eq!(status.signal(), Some(libc::SIGPIPE), "{status:?}");
+
+        // A signal blocked on the spawning thread is unblocked in the child.
+        let blocked = thread::spawn(move || {
+            // SAFETY: changes only this short-lived thread's own mask.
+            unsafe {
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGUSR1);
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+            }
+            suicide("USR1")
+                .start()
+                .expect("spawn")
+                .wait()
+                .expect("wait")
+        })
+        .join()
+        .expect("spawning thread");
+        assert_eq!(blocked.signal(), Some(libc::SIGUSR1), "{blocked:?}");
+
+        // A disposition the parent ignores survives exec unless reset.
+        // SAFETY: SIGUSR2 is unused by the test harness; restored below.
+        let previous = unsafe { libc::signal(libc::SIGUSR2, libc::SIG_IGN) };
+        let ignored = suicide("USR2").start().and_then(|mut child| child.wait());
+        let reset = suicide("USR2")
+            .default_signal(libc::SIGUSR2)
+            .start()
+            .and_then(|mut child| child.wait());
+        // SAFETY: restores the disposition saved above.
+        unsafe { libc::signal(libc::SIGUSR2, previous) };
+        let ignored = ignored.expect("spawn with SIGUSR2 ignored");
+        let reset = reset.expect("spawn with SIGUSR2 reset");
+        assert!(
+            ignored.success(),
+            "an ignored signal stays ignored: {ignored:?}"
+        );
+        assert_eq!(reset.signal(), Some(libc::SIGUSR2), "{reset:?}");
+    }
+
+    /// Program lookup matches std: a bare name searches the child's `PATH`,
+    /// a relative path resolves against the child's working directory, and
+    /// a missing program is `NotFound`.
+    #[test]
+    fn program_lookup_matches_std() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("paneflow-process-lookup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let stub = dir.join("paneflow-lookup-stub");
+        std::fs::write(&stub, "#!/bin/sh\nexit 7\n").expect("write stub");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let run = |command: &mut Command| {
+            command
+                .stdin(Stdio::Null)
+                .stdout(Stdio::Null)
+                .stderr(Stdio::Null)
+                .start()
+                .and_then(|mut child| child.wait())
+        };
+
+        let on_path = run(Command::new("paneflow-lookup-stub").env("PATH", &dir));
+        let relative = run(Command::new("./paneflow-lookup-stub").current_dir(&dir));
+        let system = run(&mut Command::new("true"));
+        let missing = run(&mut Command::new("paneflow-no-such-binary-4f2a"));
+        let bad_cwd = run(Command::new("/usr/bin/true").current_dir(dir.join("missing")));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(on_path.expect("PATH lookup").code(), Some(7));
+        assert_eq!(relative.expect("relative to cwd").code(), Some(7));
+        assert!(system.expect("parent PATH lookup").success());
+        assert_eq!(
+            missing.expect_err("missing program").kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            bad_cwd.expect_err("missing working directory").kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    /// The environment is the parent's with the command's changes applied.
+    #[test]
+    fn environment_changes_apply() {
+        let (mut reader, writer) = io::pipe().expect("pipe");
+        let home = std::env::var("HOME").unwrap_or_default();
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("printf '%s|%s|%s' \"$PANEFLOW_SET\" \"${HOME-unset}\" \"${PANEFLOW_GONE-unset}\"")
+            .env("PANEFLOW_SET", "one")
+            .env("PANEFLOW_GONE", "two")
+            .env_remove("PANEFLOW_GONE")
+            .stdin(Stdio::Null)
+            .stdout(writer)
+            .stderr(Stdio::Null);
+        let mut child = command.start().expect("spawn sh");
+        drop(command);
+        assert!(child.wait().expect("wait").success());
+        let mut text = String::new();
+        reader.read_to_string(&mut text).expect("read");
+        assert_eq!(text, format!("one|{home}|unset"));
+    }
+
+    /// A script without a `#!` line runs through `/bin/sh` with its
+    /// arguments, as std's `execvp` fallback ran it; plain `posix_spawn`
+    /// fails it with `ENOEXEC`.
+    #[test]
+    fn script_without_a_shebang_runs_through_sh() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("paneflow-process-noshebang-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let script = dir.join("no-shebang");
+        std::fs::write(&script, "printf '%s|%s|%s' \"$0\" \"$1\" \"$2\"\n").expect("write script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let (mut reader, writer) = io::pipe().expect("pipe");
+        let mut command = Command::new(&script);
+        command
+            .args(["first arg", "second"])
+            .stdin(Stdio::Null)
+            .stdout(writer)
+            .stderr(Stdio::Null);
+        let started = command.start().and_then(|mut child| child.wait());
+        drop(command);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(started.expect("a shebang-less script must start").success());
+        let mut text = String::new();
+        reader.read_to_string(&mut text).expect("read");
+        // `$0` is the resolved script path, as `sh <path> args...` sets it.
+        assert_eq!(text, format!("{}|first arg|second", script.display()));
+    }
+
+    /// A descriptor plan whose file actions would clobber each other is
+    /// refused before anything is spawned.
+    ///
+    /// A source below 3 has to be an `OwnedFd` at a stdio number, so those
+    /// cases borrow this process's stdin (fd 0) and forget the command
+    /// before any assertion, so it is never closed.
+    #[test]
+    fn descriptor_plans_that_clobber_each_other_are_refused() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        let refused_with_stdin_source = |configure: fn(&mut Command, OwnedFd)| {
+            let mut command = sleeper();
+            // SAFETY: fd 0 is open for the whole test run; `forget` below
+            // keeps this `OwnedFd` from ever closing it.
+            configure(&mut command, unsafe { OwnedFd::from_raw_fd(0) });
+            let started = command.start();
+            std::mem::forget(command);
+            started
+                .map(|mut child| {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                })
+                .expect_err("plan must be refused")
+                .kind()
+        };
+        // A `pass_fd` source below 3.
+        assert_eq!(
+            refused_with_stdin_source(|command, stdin| {
+                command.pass_fd(stdin, 9);
+            }),
+            io::ErrorKind::InvalidInput
+        );
+        // A stdio source that is a lower slot: stdin is set up first.
+        assert_eq!(
+            refused_with_stdin_source(|command, stdin| {
+                command.stderr(stdin);
+            }),
+            io::ErrorKind::InvalidInput
+        );
+
+        let fd = || -> OwnedFd { io::pipe().expect("pipe").1.into() };
+        let refused = |command: &mut Command| {
+            command
+                .start()
+                .map(|mut child| {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                })
+                .expect_err("plan must be refused")
+                .kind()
+        };
+
+        assert_eq!(
+            refused(sleeper().pass_fd(fd(), 2)),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            refused(sleeper().inherit_fd(1)),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            refused(sleeper().pass_fd(fd(), 7).pass_fd(fd(), 7)),
+            io::ErrorKind::InvalidInput
+        );
+        // A pass target that is also inherited.
+        assert_eq!(
+            refused(sleeper().inherit_fd(8).pass_fd(fd(), 8)),
+            io::ErrorKind::InvalidInput
+        );
+        // The second source is the first target.
+        let second = fd();
+        let target = second.as_raw_fd();
+        assert_eq!(
+            refused(sleeper().pass_fd(fd(), target).pass_fd(second, 9)),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    /// Inheriting a descriptor that is not open fails the spawn with
+    /// `EBADF`, which the shim's agent spawn retries without inheriting.
+    #[test]
+    fn inheriting_a_closed_descriptor_fails_with_ebadf() {
+        // Far above any descriptor this test process opens.
+        const CLOSED: i32 = 4000;
+        let error = sleeper()
+            .inherit_fd(CLOSED)
+            .start()
+            .map(|mut child| {
+                let _ = child.kill();
+                let _ = child.wait();
+            })
+            .expect_err("a closed descriptor cannot be inherited");
+        assert_eq!(error.raw_os_error(), Some(libc::EBADF), "{error:?}");
     }
 }

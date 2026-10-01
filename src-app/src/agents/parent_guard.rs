@@ -15,8 +15,6 @@
 
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-#[cfg(unix)]
-use std::process::{ChildStdin, Command, Stdio};
 
 /// Identity and credential markers Claude Code exports into the processes it
 /// spawns. Single source for the process-env ACP scrub and the PTY overlay
@@ -125,9 +123,16 @@ pub fn scrub_claudecode_from_command(command: &mut std::process::Command) {
 #[cfg(unix)]
 pub const PTY_GUARD_SUBCOMMAND: &str = "__paneflow-pty-guard";
 
+/// The descriptor number a long-lived PTY guard finds its own copy of the
+/// PTY master at (issues #1123, #1126). Its `session:` argument names it.
+#[cfg(unix)]
+const PTY_GUARD_MASTER_FD: i32 = 3;
+
 #[cfg(unix)]
 pub struct PtyGuardHandle {
-    _stdin: ChildStdin,
+    /// The parent end of the guard's stdin control pipe. Dropping it is the
+    /// orderly-teardown signal.
+    _control: std::io::PipeWriter,
 }
 
 /// The one PID liveness probe: `kill(pid, 0)` with `ESRCH` semantics, so a
@@ -755,52 +760,62 @@ fn spawn_process_group_guard_with_mode(
         return None;
     };
 
-    let mut cmd = Command::new(exe);
-    // The guard's own copy of the master. The parent's copy is dropped when
-    // this function returns, right after `spawn`.
-    let inherited_master =
-        session_pty_master_fd.and_then(|fd| match pass_pty_master_to_child(&mut cmd, fd) {
-            Ok(duplicate) => Some(duplicate),
+    let mut cmd = paneflow_process::Command::new(exe);
+    // The guard's own copy of the master, at `PTY_GUARD_MASTER_FD`. `cmd`
+    // owns the parent's copy and closes it when this function returns, right
+    // after `start`.
+    let master_passed = session_pty_master_fd.is_some_and(|fd| {
+        match pass_pty_master_to_child(&mut cmd, fd) {
+            Ok(()) => true,
             Err(err) => {
                 log::warn!(
                     "parent_guard: cannot duplicate PTY master for pgid {}: {err}; foreground hard-death guard unavailable",
                     group.pgid
                 );
-                None
+                false
             }
-        });
-    let mode_arg = match &inherited_master {
-        Some(fd) => format!("session:{}", fd.as_raw_fd()),
-        None if session_pty_master_fd.is_some() => "session:none".to_string(),
+        }
+    });
+    let mode_arg = match session_pty_master_fd {
+        Some(_) if master_passed => format!("session:{PTY_GUARD_MASTER_FD}"),
+        Some(_) => "session:none".to_string(),
         None => "frozen".to_string(),
     };
 
+    // The control pipe is made here, as std's `Stdio::piped()` made it: this
+    // runs on the render thread, where `spawn_piped`'s wait for in-flight
+    // spawns could stall a frame. Its ends stay in the parent; the guard,
+    // like every `paneflow_process::Command` child, inherits only what it is
+    // given (issue #1126).
+    let (control_rx, control_tx) = match std::io::pipe() {
+        Ok(pipe) => pipe,
+        Err(err) => {
+            log::warn!(
+                "parent_guard: cannot create the PTY guard control pipe for pgid {}: {err}",
+                group.pgid
+            );
+            return None;
+        }
+    };
     cmd.arg(PTY_GUARD_SUBCOMMAND)
         .arg(std::process::id().to_string())
         .arg(group.pgid.to_string())
         .arg(group.session_id.to_string())
         .arg(serialize_member_pins(&group.members))
-        .arg(mode_arg);
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    use std::os::unix::process::CommandExt;
-    cmd.process_group(0);
+        .arg(mode_arg)
+        .stdin(control_rx)
+        .stdout(paneflow_process::Stdio::Null)
+        .stderr(paneflow_process::Stdio::Null)
+        .process_group(0);
 
-    match paneflow_process::spawn(&mut cmd) {
+    match cmd.start() {
         Ok(mut child) => {
-            let Some(stdin) = child.stdin.take() else {
-                log::warn!(
-                    "parent_guard: PTY guard for pgid {} has no control pipe",
-                    group.pgid
-                );
-                let _ = child.kill();
-                return None;
-            };
             std::thread::spawn(move || {
                 let _ = child.wait();
             });
-            Some(PtyGuardHandle { _stdin: stdin })
+            Some(PtyGuardHandle {
+                _control: control_tx,
+            })
         }
         Err(err) => {
             log::warn!(
@@ -812,43 +827,36 @@ fn spawn_process_group_guard_with_mode(
     }
 }
 
-/// Give the child `cmd` spawns its own copy of `pty_master_fd`, at the
-/// number of the returned descriptor, and give it to no other child
-/// (issue #1123).
+/// Give the child `cmd` starts its own copy of `pty_master_fd`, at
+/// [`PTY_GUARD_MASTER_FD`], and give it to no other child (issues #1123,
+/// #1126).
 ///
 /// The parent's copy is close-on-exec from the moment it exists
-/// (`F_DUPFD_CLOEXEC`), so a child another thread spawns first never
-/// inherits it. Only the forked child clears the flag, in `pre_exec`, just
-/// before its exec. Drop the returned descriptor once `spawn` returns.
-///
-/// A `pre_exec` closure makes std `fork` and `exec` this child instead of
-/// using `posix_spawn`. The closure runs in the fork of a multi-threaded
-/// process, so it must stay async-signal-safe: no allocation, locks, or
-/// logging.
+/// (`F_DUPFD_CLOEXEC`), so no other child inherits it. `cmd` owns it and
+/// hands it to its child with a `posix_spawn` `dup2` file action, so the
+/// guard spawns without a fork. It sits above the guard's number, so that
+/// `dup2` never lands on itself.
 #[cfg(unix)]
-fn pass_pty_master_to_child(cmd: &mut Command, pty_master_fd: i32) -> std::io::Result<OwnedFd> {
-    use std::os::unix::process::CommandExt;
-
+fn pass_pty_master_to_child(
+    cmd: &mut paneflow_process::Command,
+    pty_master_fd: i32,
+) -> std::io::Result<()> {
     // SAFETY: fcntl only reads `pty_master_fd`. F_DUPFD_CLOEXEC returns a
-    // fresh descriptor at 3 or above (never a stdio slot), or -1.
-    let duplicate = unsafe { libc::fcntl(pty_master_fd, libc::F_DUPFD_CLOEXEC, 3) };
+    // fresh descriptor above `PTY_GUARD_MASTER_FD`, or -1.
+    let duplicate = unsafe {
+        libc::fcntl(
+            pty_master_fd,
+            libc::F_DUPFD_CLOEXEC,
+            PTY_GUARD_MASTER_FD + 1,
+        )
+    };
     if duplicate < 0 {
         return Err(std::io::Error::last_os_error());
     }
     // SAFETY: this is the only owner of the fresh duplicate in the parent.
     let duplicate = unsafe { OwnedFd::from_raw_fd(duplicate) };
-    let inherited = duplicate.as_raw_fd();
-    // SAFETY: fcntl is async-signal-safe, and the closure touches only the
-    // child's copy of the descriptor, which stays open until exec.
-    unsafe {
-        cmd.pre_exec(move || {
-            if libc::fcntl(inherited, libc::F_SETFD, 0) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    Ok(duplicate)
+    cmd.pass_fd(duplicate, PTY_GUARD_MASTER_FD);
+    Ok(())
 }
 
 /// A test child that is killed and reaped however the test ends, so a failed
@@ -1092,6 +1100,7 @@ fn control_pipe_closed() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
 
     const SUBPROCESS_GUARD_GROUP_ENV: &str = "PANEFLOW_TEST_GUARD_GROUP";
     const SUBPROCESS_GUARD_MASTER_ENV: &str = "PANEFLOW_TEST_GUARD_MASTER";
@@ -1168,20 +1177,27 @@ mod tests {
                 .stderr(Stdio::null());
             command
         };
-        let mut guard_command = sleeper();
-        let guard_copy = pass_pty_master_to_child(&mut guard_command, master.as_raw_fd())
+        let mut guard_command = paneflow_process::Command::from(&sleeper());
+        guard_command
+            .stdin(paneflow_process::Stdio::Null)
+            .stdout(paneflow_process::Stdio::Null)
+            .stderr(paneflow_process::Stdio::Null);
+        pass_pty_master_to_child(&mut guard_command, master.as_raw_fd())
             .expect("duplicate the master for the guard");
-        let guard_fd = guard_copy.as_raw_fd();
-        // A spawn on another thread lands between the duplicate and the
-        // guard's own spawn.
+        // A std spawn, which inherits every descriptor not marked
+        // close-on-exec, lands between the duplicate and the guard's own
+        // spawn.
         let bystander =
             KillOnDrop(paneflow_process::spawn(&mut sleeper()).expect("spawn bystander"));
-        let guard =
-            KillOnDrop(paneflow_process::spawn(&mut guard_command).expect("spawn guard stand-in"));
-        drop(guard_copy);
+        let mut guard = guard_command.start().expect("spawn guard stand-in");
+        // Closes the parent's copy.
+        drop(guard_command);
 
         let bystander_held = vnode_devices_held_by(bystander.0.id() as i32);
-        let guard_held = vnode_devices_held_by(guard.0.id() as i32);
+        let guard_held = vnode_devices_held_by(guard.id() as i32);
+        let _ = guard.kill();
+        let _ = guard.wait();
+        let own_held = vnode_devices_held_by(std::process::id() as i32);
 
         let leaked: Vec<i32> = bystander_held
             .iter()
@@ -1199,8 +1215,18 @@ mod tests {
             .collect();
         assert_eq!(
             guard_masters,
-            vec![guard_fd],
+            vec![PTY_GUARD_MASTER_FD],
             "the guard holds its master exactly at the number its argument names"
+        );
+        let parent_masters: Vec<i32> = own_held
+            .iter()
+            .filter(|(_, rdev)| *rdev == device)
+            .map(|(fd, _)| *fd)
+            .collect();
+        assert_eq!(
+            parent_masters,
+            vec![master.as_raw_fd()],
+            "the parent's copy for the guard is closed once the guard has started"
         );
     }
 

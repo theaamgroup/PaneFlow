@@ -1,8 +1,9 @@
 //! External URL opening helpers.
 
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus};
 
 use gpui::{AppContext as _, Context};
+use paneflow_process::Stdio;
 
 /// Replaces [`launch_services_open`] for one call. The real opener talks to
 /// Launch Services and can block until the browser accepts the URL; tests hold
@@ -53,7 +54,11 @@ const WORKSPACE_LAUNCH_POLL: std::time::Duration = std::time::Duration::from_mil
 /// pending, never a frame. The status is returned to the caller, which is
 /// what lets a broken `zed .` or a permission-denied `open` produce a toast
 /// instead of vanishing silently.
-pub(crate) async fn run_workspace_command(mut command: Command) -> std::io::Result<ExitStatus> {
+///
+/// `command` contributes its program, arguments, environment changes and
+/// working directory; the child is started with
+/// [`paneflow_process::Command::start`] (issue #1126).
+pub(crate) async fn run_workspace_command(command: Command) -> std::io::Result<ExitStatus> {
     let description = format!(
         "binary={:?} cwd={:?} args={:?}",
         command.get_program(),
@@ -61,11 +66,12 @@ pub(crate) async fn run_workspace_command(mut command: Command) -> std::io::Resu
         command.get_args().collect::<Vec<_>>()
     );
     log::info!("workspace launch: {description}");
+    let mut command = paneflow_process::Command::from(&command);
     command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let result = smol::unblock(move || paneflow_process::spawn(&mut command)).await;
+        .stdin(Stdio::Null)
+        .stdout(Stdio::Null)
+        .stderr(Stdio::Null);
+    let result = smol::unblock(move || command.start()).await;
     let mut child = match result {
         Ok(child) => child,
         Err(error) => {
@@ -281,21 +287,22 @@ fn launch_services_open(url: &str) -> std::io::Result<()> {
     open_with_system_handler(url)
 }
 
-/// `open::that` through the spawn exclusion (issue #1115).
+/// `open::that` through `paneflow_process` (issues #1115, #1126).
 ///
 /// Runs the platform launcher (`/usr/bin/open`) with null stdio, waits for it,
 /// and fails on a non-zero exit, as `open::that` does. `open::that` itself
-/// spawns with a plain `Command`, which could copy an IPC socket that is not
-/// close-on-exec yet. Blocks until the launcher exits; keep it off the GPUI
-/// thread.
+/// spawns with a plain `Command`, whose child inherits every descriptor that
+/// is not close-on-exec yet, such as an IPC socket. Blocks until the
+/// launcher exits; keep it off the GPUI thread.
 pub(crate) fn open_with_system_handler(target: impl AsRef<std::ffi::OsStr>) -> std::io::Result<()> {
     let mut last_err = None;
-    for mut launcher in open::commands(target) {
-        launcher
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        match paneflow_process::spawn(&mut launcher).and_then(|mut child| child.wait()) {
+    for launcher in open::commands(target) {
+        let mut command = paneflow_process::Command::from(&launcher);
+        command
+            .stdin(Stdio::Null)
+            .stdout(Stdio::Null)
+            .stderr(Stdio::Null);
+        match command.start().and_then(|mut child| child.wait()) {
             Ok(status) if status.success() => return Ok(()),
             Ok(status) => {
                 return Err(std::io::Error::other(format!(
