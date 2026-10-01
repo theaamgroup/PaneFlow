@@ -315,6 +315,9 @@ pub(super) struct GhosttyRuntimePending {
 
 pub(super) struct SpawnedGhostty {
     pub(super) child_pid: u32,
+    /// The child's start time, read on the runtime thread so promotion does
+    /// no process-table I/O on the GPUI thread (issue #1129).
+    pub(super) child_proc_start: Option<u64>,
     pub(super) cwd: std::path::PathBuf,
     /// App-owned `dup()` of the PTY master. The runtime thread keeps the
     /// engine's copy and closes it when it exits; `TerminalState` needs its
@@ -2525,6 +2528,7 @@ fn run_runtime(
     if startup_tx
         .send(StartupReport::Started(SpawnedGhostty {
             child_pid,
+            child_proc_start: crate::agents::parent_guard::pid_start_time(child_pid),
             cwd: params.cwd,
             master_fd,
         }))
@@ -5519,6 +5523,7 @@ mod tests {
         let (mut state, pending) = TerminalState::new_pending(80, 24);
         let runtime_pending = pending.ghostty;
         state.promote_ghostty(SpawnedGhostty {
+            child_proc_start: None,
             child_pid: 0,
             cwd: std::env::current_dir().unwrap(),
             master_fd: test_master_fd(),
@@ -6252,6 +6257,7 @@ mod tests {
         ));
 
         state.promote_ghostty(SpawnedGhostty {
+            child_proc_start: None,
             child_pid: 0,
             cwd: std::env::current_dir().unwrap(),
             master_fd: test_master_fd(),
@@ -6278,6 +6284,7 @@ mod tests {
         let runtime_pending = pending.ghostty;
         let session = state.ghostty_session();
         state.promote_ghostty(SpawnedGhostty {
+            child_proc_start: None,
             child_pid: 0,
             cwd: std::env::current_dir().unwrap(),
             master_fd: test_master_fd(),
