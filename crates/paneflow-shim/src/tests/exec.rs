@@ -1,17 +1,20 @@
 use crate::exec::spawn_parent_death_guard;
+use paneflow_process::{Child, Command};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::ExitStatus;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// A long-lived stand-in for the agent the guard watches over.
 ///
-/// Through the spawn exclusion: a plain spawn could copy the pipes another
-/// test holds inheritable on purpose (#1127) and keep them for 30 s.
+/// Through `paneflow_process::Command`: a std spawn could copy the pipes
+/// another test holds inheritable on purpose (#1127) and keep them for 30 s.
 fn spawn_sleeping_child() -> Child {
-    paneflow_process::spawn(Command::new("sleep").arg("30"))
+    Command::new("sleep")
+        .arg("30")
+        .start()
         .expect("spawn `sleep 30` as the stand-in agent")
 }
 
@@ -114,6 +117,33 @@ fn agent_keeps_inherited_descriptors_and_starts_without_a_closed_one() {
     }
 }
 
+/// Issue #1136: `run_real` lists the descriptors the agent keeps before it
+/// starts the SIGINT watcher, the one shim thread that creates pipes (the
+/// interrupt Stop hook's `spawn_piped`). Listed after it, a hook pipe still
+/// waiting for its close-on-exec `fcntl` could be handed to the agent.
+#[test]
+fn agent_descriptors_are_listed_before_any_pipe_creating_thread_starts() {
+    let src = include_str!("../exec.rs");
+    let body = src
+        .split("pub(crate) fn run_real(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("run_real body");
+    let position = |needle: &str| {
+        let found: Vec<usize> = body.match_indices(needle).map(|(at, _)| at).collect();
+        assert_eq!(found.len(), 1, "one `{needle}` in run_real: {found:?}");
+        found[0]
+    };
+    let listed = position("paneflow_process::inheritable_descriptors()");
+    let watcher = position("install_sigint_watcher(tool);");
+    let spawned = position("start_agent(&mut cmd, &inherited)");
+    assert!(
+        listed < watcher,
+        "list the agent's descriptors before the SIGINT watcher starts"
+    );
+    assert!(watcher < spawned, "the watcher starts before the agent");
+}
+
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = std::fs::read_dir(dir).expect("read source dir");
     for path in entries.flatten().map(|entry| entry.path()) {
@@ -156,12 +186,12 @@ fn production_part(path: &Path, src: &str) -> String {
 /// Issue #1127: every child the shim starts goes through `paneflow_process`,
 /// as `production_child_spawns_go_through_paneflow_process` in
 /// `src-app/src/ipc.rs` requires of the app. A direct `Command::spawn`,
-/// `output` or `status` ignores the spawn exclusion, and a `Stdio::piped()`
-/// or hand-made pipe is inheritable for a moment while it is created (#1124).
-/// `paneflow_process::spawn` takes a std command, whose child inherits every
-/// descriptor not marked close-on-exec; production uses
-/// `paneflow_process::Command` (#1126). Test code, under `src/tests/` or a
-/// trailing `mod tests`, may still spawn directly.
+/// `output` or `status` starts a std child, which inherits every descriptor
+/// not marked close-on-exec; `paneflow_process::Command` hands it only what
+/// it is given (#1126). Pipes come from `spawn_piped`, the one pipe source,
+/// because it closes the parent's copy of the child's ends (#1124). Test
+/// code, under `src/tests/` or a trailing `mod tests`, may still spawn
+/// directly.
 #[test]
 fn production_child_spawns_go_through_paneflow_process() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -246,12 +276,10 @@ fn production_child_spawns_go_through_paneflow_process() {
         "::output)",
         "::status)",
         PIPED,
-        // A hand-made pipe outside `spawn_piped`'s window.
+        // A hand-made pipe: `spawn_piped` is the one pipe source, because
+        // it closes the parent's copy of the child's ends.
         "io::pipe()",
         "libc::pipe(",
-        // Issue #1126: a std command, even under the exclusion, inherits
-        // every descriptor not marked close-on-exec.
-        "paneflow_process::spawn(",
     ];
     let mut offenders = Vec::new();
     for (path, src) in &production {
@@ -265,8 +293,8 @@ fn production_child_spawns_go_through_paneflow_process() {
     assert!(
         offenders.is_empty(),
         "spawn shim children through paneflow_process::Command (or its spawn_piped / \
-         run_with_timeout helpers), not directly or through paneflow_process::spawn, and \
-         get pipes from spawn_piped, not {PIPED} (issues #1115, #1124, #1126, #1127):\n{}",
+         run_with_timeout helpers), not directly, and get pipes from spawn_piped, not \
+         {PIPED} (issues #1124, #1126, #1127):\n{}",
         offenders.join("\n")
     );
 }

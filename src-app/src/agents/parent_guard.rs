@@ -791,11 +791,10 @@ impl GuardLauncher {
 /// Start the long-lived session-mode guard for a pane that has just gone
 /// live (issue #1129).
 ///
-/// Never call it on the GPUI thread: it walks the process table, and it
-/// spawns through [`paneflow_process::spawn_piped`], which waits for every
-/// spawn already in flight before it creates the control pipe. The view runs
-/// it on the background executor right after promotion and installs the
-/// handle when it arrives.
+/// Never call it on the GPUI thread: it walks the process table, and the
+/// spawn itself blocks while the kernel loads the guard (a first-exec
+/// Gatekeeper scan can take seconds). The view runs it on the background
+/// executor right after promotion and installs the handle when it arrives.
 #[cfg(target_os = "macos")]
 #[cfg_attr(test, allow(dead_code))]
 pub fn spawn_pty_guard(
@@ -1019,6 +1018,30 @@ pub(crate) fn vnode_devices_held_by(pid: i32) -> Vec<(i32, u32)> {
     }
     const PROC_PIDFDVNODEINFO: i32 = 1;
 
+    let mut devices = Vec::new();
+    for (fd, kind) in descriptor_types_held_by(pid) {
+        if kind != libc::PROX_FDTYPE_VNODE as u32 {
+            continue;
+        }
+        let mut info = std::mem::MaybeUninit::<VnodeFdInfo>::zeroed();
+        let size = std::mem::size_of::<VnodeFdInfo>() as i32;
+        // SAFETY: `info` is a writable buffer of exactly `size` bytes.
+        let got = unsafe {
+            libc::proc_pidfdinfo(pid, fd, PROC_PIDFDVNODEINFO, info.as_mut_ptr().cast(), size)
+        };
+        if got == size {
+            // SAFETY: the kernel filled the whole struct.
+            let info = unsafe { info.assume_init() };
+            devices.push((fd, info.pvi.vi_stat.vst_rdev));
+        }
+    }
+    devices
+}
+
+/// The descriptors `pid` holds, as `(fd, PROX_FDTYPE_*)`, the way `lsof`
+/// lists them.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn descriptor_types_held_by(pid: i32) -> Vec<(i32, u32)> {
     let entry = std::mem::size_of::<libc::proc_fdinfo>();
     // SAFETY: a null buffer asks only for the size of the descriptor table.
     let needed =
@@ -1040,31 +1063,9 @@ pub(crate) fn vnode_devices_held_by(pid: i32) -> Vec<(i32, u32)> {
     assert!(written > 0, "PROC_PIDLISTFDS for pid {pid}");
     // SAFETY: the kernel initialized `written` bytes of whole entries.
     unsafe { fds.set_len(written as usize / entry) };
-
-    let mut devices = Vec::new();
-    for fd in fds {
-        if fd.proc_fdtype != libc::PROX_FDTYPE_VNODE as u32 {
-            continue;
-        }
-        let mut info = std::mem::MaybeUninit::<VnodeFdInfo>::zeroed();
-        let size = std::mem::size_of::<VnodeFdInfo>() as i32;
-        // SAFETY: `info` is a writable buffer of exactly `size` bytes.
-        let got = unsafe {
-            libc::proc_pidfdinfo(
-                pid,
-                fd.proc_fd,
-                PROC_PIDFDVNODEINFO,
-                info.as_mut_ptr().cast(),
-                size,
-            )
-        };
-        if got == size {
-            // SAFETY: the kernel filled the whole struct.
-            let info = unsafe { info.assume_init() };
-            devices.push((fd.proc_fd, info.pvi.vi_stat.vst_rdev));
-        }
-    }
-    devices
+    fds.into_iter()
+        .map(|fd| (fd.proc_fd, fd.proc_fdtype))
+        .collect()
 }
 
 #[cfg(unix)]
@@ -1305,8 +1306,7 @@ mod tests {
         // A std spawn, which inherits every descriptor not marked
         // close-on-exec, lands between the duplicate and the guard's own
         // spawn.
-        let bystander =
-            KillOnDrop(paneflow_process::spawn(&mut sleeper()).expect("spawn bystander"));
+        let bystander = KillOnDrop(sleeper().spawn().expect("spawn bystander"));
         let mut guard = guard_command.start().expect("spawn guard stand-in");
         // Closes the parent's copy.
         drop(guard_command);

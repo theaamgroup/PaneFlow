@@ -108,13 +108,6 @@ const SHUTDOWN_GRACE: Duration = Duration::from_millis(100);
 /// unresponsive volume, say) must not pin a background-executor worker for
 /// the life of the process. (#245)
 const STARTUP_REPORT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Longest pane startup waits for in-flight spawns to return before it opens
-/// the PTY without the spawn exclusion (#1123). One spawn can take seconds
-/// (a first-exec Gatekeeper scan), and the pane must still report startup
-/// well inside [`STARTUP_REPORT_TIMEOUT`].
-const OPEN_PTY_EXCLUSION_WAIT: Duration = Duration::from_millis(250);
-/// How often [`open_pty_pair`] retries the exclusion while a spawn is in flight.
-const OPEN_PTY_EXCLUSION_RETRY: Duration = Duration::from_millis(1);
 /// How long the runtime waits to reap a child the app is killing (see
 /// `reap_child_bounded`); `TerminalState::Drop` SIGKILLs at 100 ms.
 const REAP_BUDGET: Duration = Duration::from_secs(2);
@@ -2391,7 +2384,11 @@ fn run_runtime(
         return;
     }
 
-    let pair = match open_pty_pair(pty_size(initial_size)) {
+    // portable-pty marks both ends close-on-exec only after `openpty()`
+    // returns. No child copies them in between: a `paneflow_process::Command`
+    // child inherits only what it is given, and another pane's shell fork
+    // closes every descriptor above 2 before exec (#1123, #1136).
+    let pair = match native_pty_system().openpty(pty_size(initial_size)) {
         Ok(pair) => pair,
         Err(error) => {
             let _ = startup_tx.send(StartupReport::OpenPtyFailed(
@@ -2451,6 +2448,17 @@ fn run_runtime(
     command.env("TERM_PROGRAM", "ghostty");
     command.env("TERM_PROGRAM_VERSION", ghostty::GHOSTTY_APP_VERSION);
 
+    // The one fork-path child PaneFlow starts (std runs portable-pty's
+    // `pre_exec` after a `fork`). Between the fork and that `pre_exec` the
+    // child holds a copy of every descriptor this process has open,
+    // including a socket the IPC server has just accepted or a pipe that is
+    // not close-on-exec yet. `pre_exec` closes every descriptor above 2
+    // (`close_random_fds`) before exec, so the shell holds none of them, and
+    // the copies live for microseconds (#1136). Accepted gap: that sweep reads
+    // `/dev/fd` and silently does nothing if the read fails, as it would at
+    // the descriptor limit; only then could a descriptor caught mid-creation
+    // survive into the shell. `pane_shell_holds_no_descriptor_the_parent_left_inheritable`
+    // pins the sweep.
     let child = {
         let restore_mask = super::pty_session::apply_thread_signal_mask(signal_mask);
         let child = pair.slave.spawn_command(command);
@@ -4201,32 +4209,6 @@ fn terminate_child(child: &mut dyn portable_pty::Child, process_group_id: ChildT
     let _ = child.wait();
 }
 
-/// Open a pane's PTY pair under the spawn exclusion, waiting at most
-/// [`OPEN_PTY_EXCLUSION_WAIT`] for it (#1123).
-///
-/// portable-pty marks both ends close-on-exec only after `openpty()`
-/// returns, so a child spawned on another thread in between would copy them.
-/// The exclusion keeps `paneflow_process::spawn` out of that window. When a
-/// slow spawn holds it past the bound, the PTY opens without it: a
-/// microsecond-wide leak window is better than a pane that fails to start.
-fn open_pty_pair(size: PtySize) -> anyhow::Result<portable_pty::PtyPair> {
-    let deadline = Instant::now() + OPEN_PTY_EXCLUSION_WAIT;
-    loop {
-        if let Some(pair) =
-            paneflow_process::try_with_spawns_excluded(|| native_pty_system().openpty(size))
-        {
-            return pair;
-        }
-        if Instant::now() >= deadline {
-            log::debug!(
-                "a spawn is still in flight after {OPEN_PTY_EXCLUSION_WAIT:?}; opening the PTY without the spawn exclusion"
-            );
-            return native_pty_system().openpty(size);
-        }
-        std::thread::sleep(OPEN_PTY_EXCLUSION_RETRY);
-    }
-}
-
 fn pty_size(size: TerminalWindowSize) -> PtySize {
     PtySize {
         rows: size.rows.clamp(1, u16::MAX as usize) as u16,
@@ -4797,75 +4779,67 @@ mod tests {
     use super::*;
     use paneflow_config::schema::TerminalSurfaceProfile;
 
-    /// Issue #1123: a pane opens its PTY under the spawn exclusion, but never
-    /// waits on a slow spawn past [`OPEN_PTY_EXCLUSION_WAIT`]. Waiting without
-    /// a bound behind a first-exec Gatekeeper scan (12-20 s) failed every
-    /// pane opened meanwhile with "did not report startup within 10s".
+    /// Issues #1123, #1136: a child PaneFlow spawns outside the PTY holds
+    /// neither end of a PTY this process left inheritable, the state
+    /// portable-pty leaves a pane's pair in between `openpty()` and its
+    /// close-on-exec `fcntl`s. Pane startup opens its PTY without waiting for
+    /// spawns in flight, so this is all that keeps the pair out of them.
+    #[cfg(target_os = "macos")]
     #[test]
-    fn open_pty_pair_waits_for_an_in_flight_spawn_only_up_to_its_bound() {
-        use std::io::{PipeReader, PipeWriter};
-        use std::os::fd::AsRawFd;
-        use std::os::unix::process::CommandExt;
-        use std::process::{Command, Stdio};
+    fn spawned_child_holds_no_pty_the_parent_left_inheritable() {
+        use crate::agents::parent_guard::vnode_devices_held_by;
 
-        // Hold a guarded spawn in flight, as `ipc::spawn_exclusion_tests`
-        // does: the forked child blocks before exec until the release pipe
-        // is written or closed, so `paneflow_process::spawn` has not returned.
-        let (mut ready_rx, ready_tx): (PipeReader, PipeWriter) = std::io::pipe().expect("pipe");
-        let (release_rx, mut release_tx) = std::io::pipe().expect("pipe");
-        let (ready_fd, release_rx_fd, release_tx_fd) = (
-            ready_tx.as_raw_fd(),
-            release_rx.as_raw_fd(),
-            release_tx.as_raw_fd(),
-        );
-        let spawner = std::thread::spawn(move || {
-            let mut command = Command::new("/usr/bin/true");
-            command
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            // SAFETY: `close`, `write`, and `read` are async-signal-safe,
-            // and the closure only touches descriptors it was handed.
+        let mut master_fd = -1;
+        let mut slave_fd = -1;
+        // SAFETY: openpty initializes both fd outputs using default terminal
+        // settings when termios/winsize are null. Both come back without
+        // close-on-exec.
+        assert_eq!(
             unsafe {
-                command.pre_exec(move || {
-                    libc::close(release_tx_fd);
-                    libc::write(ready_fd, b"x".as_ptr().cast(), 1);
-                    let mut byte = 0_u8;
-                    libc::read(release_rx_fd, (&raw mut byte).cast(), 1);
-                    Ok(())
-                });
-            }
-            let mut child = paneflow_process::spawn(&mut command).expect("spawn held child");
-            let _ = child.wait();
-            drop((ready_tx, release_rx));
-        });
-        let mut byte = [0_u8; 1];
-        ready_rx
-            .read_exact(&mut byte)
-            .expect("the held child reports that it has forked");
-        // Release the held spawn after 3 s regardless, so an unbounded wait
-        // fails the timing assertion below instead of hanging the suite.
-        let (opened_tx, opened_rx) = sync_channel::<()>(1);
-        let releaser = std::thread::spawn(move || {
-            let _ = opened_rx.recv_timeout(Duration::from_secs(3));
-            let _ = release_tx.write_all(b"r");
-        });
-
-        let started = Instant::now();
-        let pair = open_pty_pair(pty_size(TerminalWindowSize::new(80, 24, 8, 16)));
-        let elapsed = started.elapsed();
-        let _ = opened_tx.send(());
-        releaser.join().expect("releaser");
-        spawner.join().expect("spawner");
-
-        assert!(pair.is_ok(), "open the PTY: {:?}", pair.err());
-        assert!(
-            elapsed >= OPEN_PTY_EXCLUSION_WAIT,
-            "the PTY opened after {elapsed:?}, before the exclusion wait ran out"
+                libc::openpty(
+                    &mut master_fd,
+                    &mut slave_fd,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
         );
+        // SAFETY: openpty returned two fresh descriptors this test owns.
+        let (master, slave) = unsafe {
+            (
+                OwnedFd::from_raw_fd(master_fd),
+                OwnedFd::from_raw_fd(slave_fd),
+            )
+        };
+        let own = vnode_devices_held_by(std::process::id() as i32);
+        let devices: Vec<u32> = own
+            .iter()
+            .filter(|(fd, _)| *fd == master_fd || *fd == slave_fd)
+            .map(|(_, rdev)| *rdev)
+            .collect();
+        assert_eq!(devices.len(), 2, "both PTY ends are listed: {own:?}");
+
+        let mut command = paneflow_process::Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .stdin(paneflow_process::Stdio::Null)
+            .stdout(paneflow_process::Stdio::Null)
+            .stderr(paneflow_process::Stdio::Null);
+        let mut child = command.start().expect("spawn /bin/sleep");
+        let held = vnode_devices_held_by(child.id() as i32);
+        let _ = child.kill();
+        let _ = child.wait();
+        drop((master, slave));
+
+        let leaked: Vec<&(i32, u32)> = held
+            .iter()
+            .filter(|(_, rdev)| devices.contains(rdev))
+            .collect();
         assert!(
-            elapsed < OPEN_PTY_EXCLUSION_WAIT + Duration::from_millis(1500),
-            "the PTY waited {elapsed:?} for an in-flight spawn"
+            leaked.is_empty(),
+            "a child spawned while the PTY was inheritable holds it at {leaked:?}"
         );
     }
 

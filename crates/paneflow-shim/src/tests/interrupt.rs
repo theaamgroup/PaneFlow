@@ -180,27 +180,28 @@ fn assert_stat_command_names_pipes_like_fstat(dir: &Path) {
     let (reader, _writer) = std::io::pipe().unwrap();
     let expected = fd_identity(reader.as_raw_fd());
     let out = dir.join("stat-control");
-    let mut child = paneflow_process::spawn(
-        std::process::Command::new("/usr/bin/stat")
-            .args(["-f", "%d:%i"])
-            .stdin(reader)
-            .stdout(std::fs::File::create(&out).unwrap()),
-    )
-    .expect("spawn stat");
+    let mut child = paneflow_process::Command::new("/usr/bin/stat")
+        .args(["-f", "%d:%i"])
+        .stdin(reader)
+        .stdout(std::os::fd::OwnedFd::from(
+            std::fs::File::create(&out).unwrap(),
+        ))
+        .start()
+        .expect("spawn stat");
     assert!(child.wait().unwrap().success(), "stat -f failed");
     assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), expected);
 }
 
-/// Issue #1127: the interrupt `Stop` hook and the exit hook never inherit
-/// each other's pipes.
+/// Issues #1127, #1136: the interrupt `Stop` hook and the exit hook never
+/// inherit each other's pipes.
 ///
-/// Each round holds the exit hook's `run_with_timeout` pipe window open for
-/// 300 ms with every new end inheritable, the state macOS leaves a `pipe()`
-/// in until its follow-up `fcntl`, and sends a Ctrl+C `Stop` inside it. A
-/// `Stop` spawn that ignores the window copies the exit hook's pipe ends
-/// into the stub hook, which keeps them until the test releases it after
-/// `run_with_timeout` returns: the stub reports those pipes, and the run
-/// times out instead of returning `hello`.
+/// Each round holds the exit hook's `run_with_timeout` pipe window open,
+/// with every new end inheritable (the state macOS leaves a `pipe()` in
+/// until its follow-up `fcntl`), until a Ctrl+C `Stop` has been spawned
+/// inside it. A `Stop` child that copied the exit hook's pipe ends would
+/// keep them until the test releases it after `run_with_timeout` returns:
+/// the stub reports those pipes, and the run times out instead of
+/// returning `hello`.
 ///
 /// Pipes are matched by `dev:inode`, not counted, so a pipe the test binary
 /// itself inherited (a make jobserver, a pane shell) cannot fail it.
@@ -247,6 +248,7 @@ fn interrupt_stop_and_exit_hook_never_inherit_each_others_pipes() {
         let release_guard = ReleaseOnDrop(release.clone());
 
         let (window_open_tx, window_open_rx) = mpsc::channel();
+        let (stop_spawned_tx, stop_spawned_rx) = mpsc::channel::<()>();
         let window_closed = Arc::new(AtomicBool::new(false));
         // `dev:inode` of each pipe end the exit hook's window created. A
         // pipe's inode on macOS is derived from its kernel address, which a
@@ -278,7 +280,9 @@ fn interrupt_stop_and_exit_hook_never_inherit_each_others_pipes() {
                         set_cloexec(fd, false);
                     }
                     let _ = window_open_tx.send(());
-                    std::thread::sleep(Duration::from_millis(300));
+                    // Open until the Stop spawn has returned; the cap only
+                    // keeps a broken run from hanging.
+                    let _ = stop_spawned_rx.recv_timeout(Duration::from_secs(5));
                     for &fd in fds {
                         set_cloexec(fd, true);
                     }
@@ -298,10 +302,10 @@ fn interrupt_stop_and_exit_hook_never_inherit_each_others_pipes() {
             .recv_timeout(Duration::from_secs(10))
             .expect("run_with_timeout must create its pipes through spawn_piped");
         send_interrupt_stop(&hook, "claude");
-        // Read as soon as the Stop spawn returns, as #1124's
-        // `spawned_after_window` does: a spawn that honors the exclusion
-        // cannot return before the exit hook's window closes.
-        let spawned_after_window = window_closed.load(Ordering::SeqCst);
+        // Read as soon as the Stop spawn returns: the control that it ran
+        // while the exit hook's pipes were inheritable.
+        let spawned_inside_window = !window_closed.load(Ordering::SeqCst);
+        let _ = stop_spawned_tx.send(());
         let result = exit_hook.join().expect("exit hook thread");
 
         assert!(
@@ -324,8 +328,12 @@ fn interrupt_stop_and_exit_hook_never_inherit_each_others_pipes() {
         );
 
         let window_pipes: Vec<String> = window_pipes.lock().unwrap().clone();
-        // Controls: the window created pipes, and the stub sees its own
-        // stdin as a pipe.
+        // Controls: the Stop spawn ran inside the window, the window created
+        // pipes, and the stub sees its own stdin as a pipe.
+        assert!(
+            spawned_inside_window,
+            "round {round}: the Stop spawn must run while the exit hook's pipe window is open"
+        );
         assert!(!window_pipes.is_empty(), "round {round}: no window pipes");
         assert!(
             stub_pipes.iter().any(|(fd, _)| *fd == 0),
@@ -339,8 +347,7 @@ fn interrupt_stop_and_exit_hook_never_inherit_each_others_pipes() {
         assert!(
             leaked.is_empty(),
             "round {round}: the Stop hook holds the exit hook's pipe ends {leaked:?} \
-             (run_with_timeout: {result:?}; Stop spawned after the window closed: \
-             {spawned_after_window})"
+             (run_with_timeout: {result:?})"
         );
         let out = result.unwrap_or_else(|error| {
             panic!(
@@ -349,10 +356,6 @@ fn interrupt_stop_and_exit_hook_never_inherit_each_others_pipes() {
             )
         });
         assert_eq!(out.stdout, b"hello", "round {round}");
-        assert!(
-            spawned_after_window,
-            "round {round}: the Stop spawn must wait until the exit hook's pipe window closes"
-        );
     }
 }
 

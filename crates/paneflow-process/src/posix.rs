@@ -263,12 +263,12 @@ impl Command {
         attributes.configure(self)?;
         let mut actions = FileActions::new()?;
         actions.configure(self, image.cwd.as_ref())?;
-        let pid = crate::with_spawn_shared_side(|| match image.spawn(&actions, &attributes) {
+        let pid = match image.spawn(&actions, &attributes) {
             Err(error) if error.raw_os_error() == Some(libc::ENOEXEC) => {
                 image.through_shell().spawn(&actions, &attributes)
             }
             spawned => spawned,
-        })?;
+        }?;
         Ok(Child::new(pid))
     }
 
@@ -774,11 +774,12 @@ fn is_open(fd: RawFd) -> bool {
 /// inherit by default: the ones not marked close-on-exec.
 ///
 /// A [`Command`] child inherits none of them unless told to with
-/// [`Command::inherit_fd`]. Call this inside
-/// [`with_spawns_excluded`](crate::with_spawns_excluded): no pipe or socket
-/// the exclusion protects is half-created then, so every descriptor listed
-/// was deliberately left inheritable, such as one the process itself
-/// inherited from its parent.
+/// [`Command::inherit_fd`]. Call this before the process starts any thread
+/// that creates pipes or sockets: a descriptor another thread is creating is
+/// inheritable until its follow-up `fcntl`, and would be listed as if it had
+/// been left inheritable on purpose. Listed that early, every descriptor is
+/// one the process deliberately keeps inheritable, such as one it inherited
+/// from its parent (issue #1136).
 pub fn inheritable_descriptors() -> io::Result<Vec<RawFd>> {
     let own = libc::pid_t::try_from(std::process::id())
         .map_err(|_| io::Error::other("pid does not fit pid_t"))?;
