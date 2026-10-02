@@ -377,8 +377,6 @@ pub fn start_server() -> (mpsc::Receiver<IpcRequest>, IpcStatus) {
 
             // Non-blocking accept lets the loop periodically re-verify the
             // socket inode (clobber detection) without starving connections.
-            // It is also required by `accept_uninheritable`: a blocking accept
-            // under the spawn exclusion would stall every spawn in the app.
             #[cfg(unix)]
             if let Err(e) = listener.set_nonblocking(ListenerNonblockingMode::Accept) {
                 thread_status.disable();
@@ -405,7 +403,7 @@ pub fn start_server() -> (mpsc::Receiver<IpcRequest>, IpcStatus) {
             }
 
             loop {
-                match accept_uninheritable(&listener) {
+                match listener.accept() {
                     Ok(stream) => {
                         if active_connections.load(Ordering::Acquire) >= MAX_REQUEST_CONNECTIONS {
                             reject_overloaded(stream);
@@ -528,10 +526,12 @@ fn bind_socket(socket_path: &std::path::Path) -> Option<Listener> {
         }
     };
 
-    // Issue #1115: macOS has no `SOCK_CLOEXEC`, so `interprocess` marks the
-    // new socket close-on-exec in a second call. Keep spawns out of that window.
-    let listener_result =
-        paneflow_process::with_spawns_excluded(|| ListenerOptions::new().name(name).create_sync());
+    // macOS has no `SOCK_CLOEXEC`, so `interprocess` marks the new socket
+    // (and `accept` each connection) close-on-exec in a second call. A
+    // `paneflow_process::Command` child never copies it in between; a pane
+    // shell forked in that window holds a copy only until portable-pty closes
+    // it before exec. See `descriptor_inheritance_tests` (#1115, #1136).
+    let listener_result = ListenerOptions::new().name(name).create_sync();
 
     let listener = match listener_result {
         Ok(l) => l,
@@ -565,22 +565,6 @@ fn bind_socket(socket_path: &std::path::Path) -> Option<Listener> {
     }
     log::info!("IPC server listening on {}", socket_path.display());
     Some(listener)
-}
-
-/// Accept one pending connection, never while a spawn is in flight.
-///
-/// Issue #1115: macOS has no `accept4`, so the accepted descriptor is marked
-/// close-on-exec by a second call. A child spawned between the two keeps the
-/// connection open for its whole life, and the client sees no EOF when the
-/// handler drops its end. An in-flight spawn reads as `WouldBlock`, which the
-/// accept loop already retries on its next tick.
-///
-/// `listener` must be non-blocking (`ListenerNonblockingMode::Accept`): the
-/// accept runs under the spawn exclusion, so a blocking one would stall every
-/// spawn in the app until a client connects.
-fn accept_uninheritable(listener: &Listener) -> std::io::Result<Stream> {
-    paneflow_process::try_with_spawns_excluded(|| listener.accept())
-        .unwrap_or_else(|| Err(std::io::ErrorKind::WouldBlock.into()))
 }
 
 #[cfg(unix)]
@@ -1727,134 +1711,135 @@ mod peer_closed_tests {
     }
 }
 
-/// Issue #1115: the IPC server creates its sockets only while no guarded
-/// spawn is in flight, so a child spawned through `paneflow_process::spawn`
-/// can never copy a socket that is not close-on-exec yet.
+/// Issues #1115, #1126, #1136: no child PaneFlow spawns outside the PTY
+/// holds the IPC server's sockets, even ones created or accepted while it
+/// spawns. macOS marks a new or accepted socket close-on-exec only in a
+/// second call, and nothing keeps spawns out of that window any more; the
+/// child inherits only what it is given (`POSIX_SPAWN_CLOEXEC_DEFAULT`).
 #[cfg(test)]
-mod spawn_exclusion_tests {
-    use super::{accept_uninheritable, bind_socket};
-    use interprocess::local_socket::{ListenerNonblockingMode, prelude::*};
-    use std::io::{PipeReader, PipeWriter, Read, Write};
-    use std::os::fd::AsRawFd;
+mod descriptor_inheritance_tests {
+    use super::bind_socket;
+    use interprocess::local_socket::{Listener, Stream, prelude::*};
+    use std::os::fd::{AsFd, AsRawFd};
     use std::os::unix::net::UnixStream;
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::thread::JoinHandle;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
-    /// Lets the held child continue to exec. Also sent on drop, so a failed
-    /// assertion never leaves the spawn thread blocked.
-    struct Release(PipeWriter);
+    fn set_inheritable(fd: i32, inheritable: bool) {
+        let flags = if inheritable { 0 } else { libc::FD_CLOEXEC };
+        // SAFETY: F_SETFD only changes this test's own descriptor's flags.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, flags) }, 0);
+    }
 
-    impl Drop for Release {
-        fn drop(&mut self) {
-            let _ = self.0.write_all(b"r");
+    /// `(fd, PROX_FDTYPE_*)` pairs, as `descriptor_types_held_by` lists them.
+    type Descriptors = Vec<(i32, u32)>;
+
+    fn sockets(held: Descriptors) -> Descriptors {
+        held.into_iter()
+            .filter(|(_, kind)| *kind == libc::PROX_FDTYPE_SOCKET as u32)
+            .collect()
+    }
+
+    /// The sockets held by two `/bin/sleep` children spawned while `fds`
+    /// are inheritable: one started through `paneflow_process`, and a std
+    /// control that inherits every descriptor not marked close-on-exec.
+    /// Both have `/dev/null` stdio, so any socket either holds was copied
+    /// from this process. Both are killed and reaped before this returns.
+    #[cfg(target_os = "macos")]
+    fn sockets_held_by_children_spawned_while_inheritable(
+        fds: &[i32],
+    ) -> (Descriptors, Descriptors) {
+        use crate::agents::parent_guard::descriptor_types_held_by;
+
+        for &fd in fds {
+            set_inheritable(fd, true);
         }
+        let mut child = paneflow_process::Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(paneflow_process::Stdio::Null)
+            .stdout(paneflow_process::Stdio::Null)
+            .stderr(paneflow_process::Stdio::Null)
+            .start()
+            .expect("spawn /bin/sleep");
+        let mut control = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn the control child");
+        let held = descriptor_types_held_by(child.id() as i32);
+        let control_held = descriptor_types_held_by(control.id() as i32);
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = control.kill();
+        let _ = control.wait();
+        for &fd in fds {
+            set_inheritable(fd, false);
+        }
+        (sockets(held), sockets(control_held))
     }
 
-    /// Start a guarded spawn on another thread and return once it is in
-    /// flight. The forked child blocks before exec until `Release` fires, so
-    /// `paneflow_process::spawn` does not return until then.
-    fn spawn_held_in_flight() -> (Release, JoinHandle<()>) {
-        let (mut ready_rx, ready_tx): (PipeReader, PipeWriter) = std::io::pipe().expect("pipe");
-        let (release_rx, release_tx) = std::io::pipe().expect("pipe");
-        let (ready_fd, release_rx_fd, release_tx_fd) = (
-            ready_tx.as_raw_fd(),
-            release_rx.as_raw_fd(),
-            release_tx.as_raw_fd(),
-        );
-        let spawner = std::thread::spawn(move || {
-            let mut command = Command::new("/usr/bin/true");
-            command
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            // SAFETY: `close`, `write`, and `read` are async-signal-safe,
-            // and the closure only touches descriptors it was handed.
-            // Closing the child's copy of the release writer lets the
-            // test's drop of `Release` reach it as EOF as well.
-            unsafe {
-                command.pre_exec(move || {
-                    libc::close(release_tx_fd);
-                    libc::write(ready_fd, b"x".as_ptr().cast(), 1);
-                    let mut byte = 0_u8;
-                    libc::read(release_rx_fd, (&raw mut byte).cast(), 1);
-                    Ok(())
-                });
-            }
-            let mut child = paneflow_process::spawn(&mut command).expect("spawn held child");
-            let _ = child.wait();
-            drop((ready_tx, release_rx));
-        });
-        let mut byte = [0_u8; 1];
-        ready_rx
-            .read_exact(&mut byte)
-            .expect("the held child reports that it has forked");
-        (Release(release_tx), spawner)
-    }
-
+    /// The listening socket, left inheritable as it is between `socket()`
+    /// and the `fcntl` that follows inside `bind_socket`, reaches no child.
+    #[cfg(target_os = "macos")]
     #[test]
-    fn ipc_accept_waits_for_an_in_flight_spawn() {
+    fn bound_ipc_socket_reaches_no_spawned_child() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bind.sock");
+        let listener = bind_socket(&path).expect("bind");
+        let Listener::UdSocket(inner) = &listener;
+        let fd = inner.as_fd().as_raw_fd();
+
+        let (sockets, control) = sockets_held_by_children_spawned_while_inheritable(&[fd]);
+        assert!(
+            !control.is_empty(),
+            "control: a std child spawned meanwhile holds the listener"
+        );
+        assert!(
+            sockets.is_empty(),
+            "a child spawned while the listener was inheritable holds sockets {sockets:?}"
+        );
+    }
+
+    /// An accepted connection, left inheritable as it is between `accept()`
+    /// and its `fcntl`, reaches no child, so the client sees EOF as soon as
+    /// the server drops its end.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn accepted_ipc_socket_reaches_no_spawned_child() {
+        use std::io::Read;
+
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("accept.sock");
         let listener = bind_socket(&path).expect("bind");
-        listener
-            .set_nonblocking(ListenerNonblockingMode::Accept)
-            .expect("nonblocking accept");
-        let _client = UnixStream::connect(&path).expect("connect");
+        let mut client = UnixStream::connect(&path).expect("connect");
+        // Set while the server's end is open: XNU refuses `SO_RCVTIMEO` on
+        // a socket whose peer is already gone (issue #824).
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let accepted = listener.accept().expect("accept");
+        let Stream::UdSocket(inner) = &accepted;
+        let fd = inner.as_fd().as_raw_fd();
 
-        let (release, spawner) = spawn_held_in_flight();
-        let during = accept_uninheritable(&listener);
+        // Both children are reaped before the server drops its end, so
+        // neither can hold the client's EOF open.
+        let (sockets, control) = sockets_held_by_children_spawned_while_inheritable(&[fd]);
+        drop(accepted);
+        let mut byte = [0_u8; 1];
+        let read = client.read(&mut byte);
         assert!(
-            matches!(&during, Err(err) if err.kind() == std::io::ErrorKind::WouldBlock),
-            "a pending connection must not be accepted while a spawn is in flight: {during:?}"
+            !control.is_empty(),
+            "control: a std child spawned meanwhile holds the connection"
         );
-
-        drop(release);
-        spawner.join().expect("spawner thread");
-        // Other tests in this binary spawn too; retry past their brief holds.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            match accept_uninheritable(&listener) {
-                Ok(_stream) => break,
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline, "accept never resumed");
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(err) => panic!("accept failed: {err}"),
-            }
-        }
-    }
-
-    #[test]
-    fn ipc_bind_waits_for_an_in_flight_spawn() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("bind.sock");
-
-        let (release, spawner) = spawn_held_in_flight();
-        let bound = Arc::new(AtomicBool::new(false));
-        let binder = {
-            let bound = Arc::clone(&bound);
-            std::thread::spawn(move || {
-                let listener = bind_socket(&path);
-                bound.store(true, Ordering::SeqCst);
-                listener.is_some()
-            })
-        };
-        // An unguarded bind finishes in well under a millisecond.
-        std::thread::sleep(Duration::from_millis(300));
-        let bound_during_spawn = bound.load(Ordering::SeqCst);
-        drop(release);
-        spawner.join().expect("spawner thread");
-        let listened = binder.join().expect("binder thread");
-
         assert!(
-            !bound_during_spawn,
-            "the IPC socket must not be created while a spawn is in flight"
+            sockets.is_empty(),
+            "a child spawned while the connection was inheritable holds sockets {sockets:?}"
         );
-        assert!(listened, "bind must succeed once the spawn returns");
+        assert!(
+            matches!(read, Ok(0)),
+            "the client must see EOF once the server drops the connection: {read:?}"
+        );
     }
 
     /// A column-0 attribute that compiles the next item only under test:
@@ -2021,9 +2006,10 @@ mod spawn_exclusion_tests {
     /// Every child PaneFlow spawns outside the PTY goes through
     /// `paneflow_process::Command`, whose `posix_spawn` child inherits only
     /// the descriptors it is given (issue #1126). A direct `Command::spawn`,
-    /// `output`, or `status`, or `paneflow_process::spawn` with a std
-    /// command, could copy a socket that is not close-on-exec yet, and a
-    /// `Stdio::piped()` pipe is inheritable for a moment while std creates it
+    /// `output`, or `status` starts a std child, which could copy a socket
+    /// or pipe that is not close-on-exec yet; nothing keeps spawns out of
+    /// that window since issue #1136. Pipes come from `spawn_piped`, the one
+    /// pipe source, because it closes the parent's copy of the child's ends
     /// (issue #1124). The pane shell is the one fork-path child: portable-pty
     /// starts it, from one place.
     #[test]
@@ -2095,13 +2081,9 @@ mod spawn_exclusion_tests {
             // inheritable for a moment inside `Command::spawn`; ask
             // `paneflow_process::spawn_piped` for pipes instead.
             PIPED,
-            // Issue #1126: a std command spawned under the exclusion still
-            // inherits every descriptor not marked close-on-exec, and a
-            // `pre_exec` puts it on std's fork path.
-            "paneflow_process::spawn(",
-            // A hand-made pipe outside `spawn_piped`'s window. The PTY guard
-            // gets its control pipe from `spawn_piped` too, now that it
-            // spawns off the render thread (#1129).
+            // A hand-made pipe: `spawn_piped` is the one pipe source, because
+            // it closes the parent's copy of the child's ends. The PTY guard
+            // gets its control pipe from it too (#1129).
             "io::pipe()",
             "libc::pipe(",
             // The pane shell's fork-path spawn (portable-pty's `pre_exec`),

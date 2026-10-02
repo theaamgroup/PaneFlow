@@ -5143,15 +5143,16 @@ mod tests {
             .map(|(_, rdev)| *rdev)
             .expect("the app's master copy is listed");
 
+        // A std spawn on purpose: its child inherits every descriptor not
+        // marked close-on-exec, so it shows whether the master is.
         let child = KillOnDrop(
-            paneflow_process::spawn(
-                std::process::Command::new("/bin/sleep")
-                    .arg("30")
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null()),
-            )
-            .expect("spawn /bin/sleep"),
+            std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn /bin/sleep"),
         );
         let held = vnode_devices_held_by(child.0.id() as i32);
 
@@ -5170,6 +5171,113 @@ mod tests {
             0,
             "the app's copy of the PTY master must be close-on-exec"
         );
+    }
+
+    /// Issue #1136: the pane shell, the one child PaneFlow forks, holds no
+    /// socket or pipe this process left inheritable.
+    ///
+    /// A socket and a pipe stay not close-on-exec for the whole pane start,
+    /// the state a connection the IPC server has just accepted (or a pipe
+    /// `spawn_piped` has just made) is in until its follow-up `fcntl`. The
+    /// fork copies both; portable-pty's `pre_exec` must close them before
+    /// the shell execs. A std spawn made in the same state is the control:
+    /// it holds both, so the check below can see them.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pane_shell_holds_no_descriptor_the_parent_left_inheritable() {
+        use crate::agents::parent_guard::{KillOnDrop, descriptor_types_held_by};
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+
+        fn set_inheritable(fd: i32, inheritable: bool) {
+            let flags = if inheritable { 0 } else { libc::FD_CLOEXEC };
+            // SAFETY: F_SETFD only changes this test's own descriptor's flags.
+            assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, flags) }, 0);
+        }
+        fn process_name(pid: i32) -> Option<String> {
+            let mut buffer = [0_u8; 256];
+            // SAFETY: `proc_name` writes at most `buffer.len()` bytes.
+            let written =
+                unsafe { libc::proc_name(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+            (written > 0).then(|| String::from_utf8_lossy(&buffer[..written as usize]).into_owned())
+        }
+        fn sockets_and_pipes(held: &[(i32, u32)]) -> (Vec<i32>, Vec<i32>) {
+            let of = |kind: i32| {
+                held.iter()
+                    .filter(|(_, held_kind)| *held_kind == kind as u32)
+                    .map(|(fd, _)| *fd)
+                    .collect()
+            };
+            (of(libc::PROX_FDTYPE_SOCKET), of(libc::PROX_FDTYPE_PIPE))
+        }
+
+        let (accepted, _client) = UnixStream::pair().expect("socketpair");
+        let (_reader, writer) = std::io::pipe().expect("pipe");
+        let left_inheritable = [accepted.as_raw_fd(), writer.as_raw_fd()];
+        for fd in left_inheritable {
+            set_inheritable(fd, true);
+        }
+
+        let (mut state, pending) = TerminalState::new_pending(80, 24);
+        let params = SpawnParams {
+            shell: "/bin/sleep".into(),
+            shell_quoting: ShellQuoting::Posix,
+            extra_args: vec!["30".into()],
+            env: std::collections::HashMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+            cwd: std::env::temp_dir(),
+            cols: 80,
+            rows: 24,
+            profile: TerminalSurfaceProfile::Normal,
+        };
+        let spawned = state
+            .ghostty_session()
+            .start(pending.ghostty, params, None, 1_000)
+            .expect("spawn a PTY shell");
+        let shell_pid = spawned.child_pid as i32;
+        // Owns the shell from here: dropping the state kills it.
+        state.promote_ghostty(spawned);
+
+        let control = KillOnDrop(
+            std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn the control child"),
+        );
+        let control_held = descriptor_types_held_by(control.0.id() as i32);
+        drop(control);
+        for fd in left_inheritable {
+            set_inheritable(fd, false);
+        }
+
+        // The fork returns before the shell execs; `pre_exec` has run once
+        // the process carries the new image's name.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while process_name(shell_pid).as_deref() != Some("sleep") {
+            assert!(
+                Instant::now() < deadline,
+                "the pane shell (pid {shell_pid}) never exec'd /bin/sleep: {:?}",
+                process_name(shell_pid)
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let shell_held = descriptor_types_held_by(shell_pid);
+
+        let (control_sockets, control_pipes) = sockets_and_pipes(&control_held);
+        assert!(
+            !control_sockets.is_empty() && !control_pipes.is_empty(),
+            "control: a std child spawned meanwhile holds the socket and the pipe: \
+             {control_held:?}"
+        );
+        let (sockets, pipes) = sockets_and_pipes(&shell_held);
+        assert!(
+            sockets.is_empty() && pipes.is_empty(),
+            "the pane shell kept sockets {sockets:?} and pipes {pipes:?} past exec \
+             (all: {shell_held:?})"
+        );
+        drop(state);
     }
 
     /// The fork's teardown contract on the Ghostty host (#184 decision 3):

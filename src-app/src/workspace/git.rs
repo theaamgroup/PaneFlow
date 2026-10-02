@@ -346,10 +346,10 @@ fn read_stdout_prefix(
         stdout: true,
         ..paneflow_process::Pipes::default()
     };
-    // `spawn_piped` first waits for any spawn already in flight on another
-    // thread (#1124). That wait is not charged to `remaining`, which is
-    // measured from `started` below, after the child exists, so a slow
-    // concurrent spawn can push this read past `deadline_at`.
+    // The spawn call itself (the kernel loading git, a first-exec Gatekeeper
+    // scan included) is not charged to `remaining`, which is measured from
+    // `started` below, after the child exists, so a slow spawn can push this
+    // read past `deadline_at`.
     let mut child = paneflow_process::spawn_piped(&mut cmd, stdout_only).ok()?;
     let stdout = child.stdout.take()?;
     let (tx, rx) = std::sync::mpsc::channel();

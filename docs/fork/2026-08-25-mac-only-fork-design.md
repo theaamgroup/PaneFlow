@@ -351,6 +351,33 @@ Found during the inventory. Each one would have cost a debugging session.
       it observed at its last 5 s refresh, so a group created after that
       snapshot is covered only by `Drop`'s in-process SIGKILL timer.
 
+    **Amended 2026-10-01 (#1136): the spawn exclusion is retired.** The
+    `open_pty_pair` bullet above no longer holds: pane startup calls
+    `openpty()` directly, the IPC server binds and accepts without the
+    exclusion (#1115), and `spawn_piped` creates its pipes without it (#1124).
+    - Every non-PTY child starts through `paneflow_process::Command`
+      (`posix_spawn` with `POSIX_SPAWN_CLOEXEC_DEFAULT`, #1126), so it never
+      copies a descriptor that another thread has not marked close-on-exec
+      yet. The exclusion protected nothing beyond that, and it cost latency:
+      accepts were skipped and `spawn_piped` waited behind a slow spawn such
+      as a first-exec Gatekeeper scan.
+    - The pane shell is the one fork-path child (portable-pty's `pre_exec`).
+      Between `fork` and that `pre_exec` it holds a copy of every open
+      descriptor, a just-accepted IPC socket included. `close_random_fds`
+      closes everything above fd 2 before exec, so the shell keeps none of
+      them; `pane_shell_holds_no_descriptor_the_parent_left_inheritable` pins
+      it. The exclusion never covered this fork anyway.
+    - Accepted gap: `close_random_fds` reads `/dev/fd` and silently does
+      nothing if that read fails, as it would at the descriptor limit. Only
+      then could a descriptor caught between creation and its `fcntl`
+      survive into a shell.
+    - The shim lists the descriptors its agent keeps
+      (`inheritable_descriptors`) before it starts the SIGINT watcher, the
+      only shim thread that creates pipes, so no half-made hook pipe is
+      handed to the agent (#1127).
+    - `sentry-contexts` 0.49 reads the OS version with `sysctlbyname`; it
+      does not spawn `sw_vers`.
+
 ## Verification: Ghostty is unreachable on macOS (historical - reversed by #184 Phase 2, 2026-08-31)
 
 This section records the 2026-08-25 finding that justified stage 2a. It is no longer true: upstream v0.10.0 runs macOS on libghostty-vt and this fork does too. Kept because the SearchEngine-lift note under it still explains a shape of the code.

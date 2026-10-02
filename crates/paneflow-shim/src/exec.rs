@@ -87,6 +87,17 @@ pub(crate) fn run_real(tool: &str, path: &Path, args: &[OsString]) -> (ExitCode,
         cmd.default_signal(signal);
     }
 
+    // Issues #1127, #1126, #1136: the agent keeps every descriptor the shim
+    // was handed on purpose, as a plain spawn would: the user's shell may
+    // pass one, such as `claude --mcp-config <(...)`'s `/dev/fd/63`. List
+    // them here, before `install_sigint_watcher` starts the only shim thread
+    // that creates pipes (the interrupt Stop hook's `spawn_piped`), so no
+    // half-made hook pipe, inheritable until its `fcntl`, is among them.
+    let inherited = paneflow_process::inheritable_descriptors().unwrap_or_else(|e| {
+        crate::diagnose(&format!("cannot list inherited descriptors: {e}"));
+        Vec::new()
+    });
+
     // Install signal isolation BEFORE spawn; the spawn attributes above
     // flip it back for the child only. Doing this BEFORE the spawn closes
     // the race window where a Ctrl+C could land between spawn and
@@ -107,18 +118,8 @@ pub(crate) fn run_real(tool: &str, path: &Path, args: &[OsString]) -> (ExitCode,
     #[cfg(target_os = "macos")]
     let child_reaped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // Issues #1127, #1126: through `paneflow_process` like every other shim
-    // child, so the agent never copies a hook pipe another thread is still
-    // marking close-on-exec. It does keep every descriptor the shim was
-    // handed on purpose, as a plain spawn would: the user's shell may pass
-    // one, such as `claude --mcp-config <(...)`'s `/dev/fd/63`. Listing them
-    // inside the spawn exclusion means no half-made hook pipe is among them.
-    let inherited =
-        paneflow_process::with_spawns_excluded(paneflow_process::inheritable_descriptors)
-            .unwrap_or_else(|e| {
-                crate::diagnose(&format!("cannot list inherited descriptors: {e}"));
-                Vec::new()
-            });
+    // Through `paneflow_process` like every other shim child, so the agent
+    // never copies a hook pipe another thread is still marking close-on-exec.
     let mut child = match start_agent(&mut cmd, &inherited) {
         Ok(c) => c,
         Err(e) => {
@@ -332,9 +333,9 @@ static INFLIGHT_REAPERS: std::sync::atomic::AtomicUsize = std::sync::atomic::Ato
 ///
 /// Issue #1127: this runs on the sigwait thread while the main thread may be
 /// running the `Exit` hook through `paneflow_process::run_with_timeout`.
-/// `spawn_piped` creates the stdin pipe inside the spawn exclusion and spawns
-/// under its shared side, so neither hook copies the other's pipe ends. It
-/// waits for any spawn already in flight first, which only delays this stop.
+/// Both start through `paneflow_process::Command`, whose child inherits only
+/// the descriptors it is given, so neither hook copies the other's pipe ends
+/// (issues #1126, #1136).
 #[cfg(unix)]
 pub(crate) fn send_interrupt_stop(hook_path: &Path, tool: &str) {
     use std::sync::atomic::Ordering;

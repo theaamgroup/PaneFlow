@@ -11,9 +11,16 @@
 //! [`Command`] is how PaneFlow starts a non-PTY child: `posix_spawn` with
 //! `POSIX_SPAWN_CLOEXEC_DEFAULT`, so the child inherits only the descriptors
 //! it is given (issue #1126). [`spawn_piped`], [`run_with_timeout`] and
-//! [`spawn_detached`] build on it. The spawn exclusion that kept spawns out of
-//! the windows where the IPC server's sockets (issue #1115) and stdio pipes
-//! (issue #1124) are not close-on-exec yet still applies to every spawn.
+//! [`spawn_detached`] build on it.
+//!
+//! macOS has no `SOCK_CLOEXEC`, no `accept4` and no `pipe2`, so a new socket,
+//! accepted connection, pipe or PTY is inheritable until a second `fcntl`
+//! marks it close-on-exec. A [`Command`] child never copies such a
+//! descriptor, so spawns and descriptor creation need no lock between them
+//! and never wait on each other (issue #1136 retired the spawn exclusion of
+//! issues #1115, #1123 and #1124). The one fork-path child left is the pane
+//! shell, which portable-pty starts with a `pre_exec` that closes every
+//! descriptor above 2 before exec.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -27,7 +34,7 @@ use std::io::{self, PipeReader, PipeWriter, Read, Write};
 use std::os::fd::OwnedFd;
 use std::process::{ChildStderr, ChildStdin, ChildStdout, ExitStatus};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
-use std::sync::{OnceLock, PoisonError, RwLock, TryLockError};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,53 +47,6 @@ const STDERR_CAP: u64 = 64 * 1024;
 /// does not spin the CPU.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Issue #1115: exclusion between spawning a child and creating a descriptor
-/// that is not close-on-exec yet.
-///
-/// macOS has no `SOCK_CLOEXEC`, no `accept4` and no `pipe2`, so `socket()`,
-/// `accept()` and `pipe()` return descriptors that are only marked
-/// `FD_CLOEXEC` by a second `fcntl`.
-/// A `posix_spawn` or `fork` on another thread between the two calls copies
-/// the descriptor into the child, where it survives exec for the child's
-/// whole life. [`Command::start`] and [`spawn`] hold the shared side for the
-/// length of the spawn call, so spawns never wait on each other. A
-/// [`Command`] child can no longer copy such a descriptor (issue #1126); the
-/// exclusion stays for std spawns until every one is gone.
-/// [`with_spawns_excluded`] and [`try_with_spawns_excluded`] hold the
-/// exclusive side across the create-then-mark window. The exclusive side is
-/// only ever tried, never queued for: a queued writer would make every later
-/// spawner, including the render thread, wait behind whichever spawn call is
-/// slowest.
-///
-/// The cost runs the other way: while a spawn call is slow (a first-exec
-/// Gatekeeper scan of a new binary, for example), the IPC server does not
-/// accept, and new connections wait in the listen backlog until it returns.
-/// That delay is the accepted trade-off for never leaking a socket.
-static SPAWN_EXCLUSION: RwLock<()> = RwLock::new(());
-
-/// How often [`with_spawns_excluded`] retries while a spawn is in flight.
-const SPAWN_EXCLUSION_RETRY: Duration = Duration::from_millis(1);
-
-/// Spawn a std `command`, never while a [`with_spawns_excluded`] or
-/// [`try_with_spawns_excluded`] window is open (issue #1115).
-///
-/// Production code starts children with [`Command::start`] instead
-/// (issue #1126). std's child inherits every descriptor that is not
-/// close-on-exec, and a `pre_exec` closure makes std fork and then wait on
-/// an exec-status pipe that a concurrent `posix_spawn` can copy. This stays
-/// for tests that need a `pre_exec` to hold a spawn in flight.
-pub fn spawn(command: &mut std::process::Command) -> io::Result<std::process::Child> {
-    with_spawn_shared_side(|| command.spawn())
-}
-
-/// Run `spawn` under the shared side of [`SPAWN_EXCLUSION`].
-pub(crate) fn with_spawn_shared_side<T>(spawn: impl FnOnce() -> T) -> T {
-    let _shared = SPAWN_EXCLUSION
-        .read()
-        .unwrap_or_else(PoisonError::into_inner);
-    spawn()
-}
-
 /// Which of a child's standard streams [`spawn_piped`] connects to the parent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Pipes {
@@ -98,29 +58,23 @@ pub struct Pipes {
 /// [`Command::start`] with a pipe to the parent for each stream `pipes`
 /// selects (issue #1124).
 ///
+/// This is where PaneFlow gets a child's stdio pipes: the selected streams
+/// on `command` are reset to [`Stdio::Null`] before this returns, which
+/// closes the parent's copy of the child's ends, so a reader sees EOF as
+/// soon as the child and its descendants are gone. The pipes' parent ends
+/// are returned in `Child::stdin`, `stdout` and `stderr`.
+///
 /// On macOS `pipe()` returns ends that are only marked close-on-exec by a
-/// separate `fcntl`. A [`Command`] child never inherits them, but a std
-/// spawn in that window (a test's [`spawn`], or the PTY shell's fork) would.
-///
-/// This creates the pipes inside a [`with_spawns_excluded`] window and spawns
-/// under the shared side as usual. The window lasts a few syscalls, so other
-/// spawners, the render thread included, wait for microseconds at most.
-/// Opening it, though, waits for every spawn already in flight to return:
-/// while another thread's spawn call is slow (a 12-20 s first-exec
-/// Gatekeeper scan, for example), this call waits as long before its own
-/// child starts. Keep it off the render thread. Holding the exclusive side
-/// across the whole spawn instead would make every other spawner wait on
-/// this one as well.
-///
-/// The selected streams on `command` are reset to [`Stdio::Null`] before
-/// this returns, which closes the parent's copy of the child's ends. The
-/// pipes' parent ends are returned in `Child::stdin`, `stdout` and `stderr`.
+/// separate `fcntl`. No other child copies them in that window: a
+/// [`Command`] child inherits only what it is given, and the pane shell's
+/// fork closes every descriptor above 2 before exec. It takes no lock, so it
+/// never waits behind another thread's slow spawn (issue #1136).
 pub fn spawn_piped(command: &mut Command, pipes: Pipes) -> io::Result<Child> {
     let StdioPipes {
         stdin,
         stdout,
         stderr,
-    } = with_spawns_excluded(|| StdioPipes::create(pipes))?;
+    } = StdioPipes::create(pipes)?;
 
     let mut parent_stdin = None;
     let mut parent_stdout = None;
@@ -166,8 +120,8 @@ struct StdioPipes {
 }
 
 impl StdioPipes {
-    /// Only call inside a [`with_spawns_excluded`] window: on macOS each end
-    /// is inheritable until `io::pipe` marks it close-on-exec.
+    /// On macOS each end is inheritable until `io::pipe` marks it
+    /// close-on-exec; see [`spawn_piped`] for why no child copies it.
     fn create(pipes: Pipes) -> io::Result<Self> {
         let pipe_if = |wanted: bool| wanted.then(io::pipe).transpose();
         let created = Self {
@@ -203,8 +157,8 @@ pub mod test_support {
 
     /// Run `hook` inside the next pipe-creation window [`super::spawn_piped`]
     /// opens on the calling thread, with the raw descriptors it created.
-    /// The window stays open, with every other spawner waiting, until the
-    /// hook returns.
+    /// The window stays open, before the call's own child is spawned, until
+    /// the hook returns. Other threads' spawns do not wait for it.
     pub fn set_pipe_window_hook(hook: impl FnOnce(&[i32]) + 'static) {
         PIPE_WINDOW_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
@@ -221,42 +175,6 @@ pub mod test_support {
             .flat_map(|(reader, writer)| [reader.as_raw_fd(), writer.as_raw_fd()])
             .collect();
         hook(&fds);
-    }
-}
-
-/// Run `create` while no [`Command::start`] or [`spawn`] call is in flight,
-/// or return `None` without running it when one is.
-///
-/// For poll loops, such as a non-blocking `accept`: the caller retries on its
-/// next tick instead of waiting.
-pub fn try_with_spawns_excluded<T>(create: impl FnOnce() -> T) -> Option<T> {
-    let _exclusive = match SPAWN_EXCLUSION.try_write() {
-        Ok(guard) => guard,
-        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-        Err(TryLockError::WouldBlock) => return None,
-    };
-    Some(create())
-}
-
-/// Run `create` while no [`Command::start`] or [`spawn`] call is in flight,
-/// waiting for in-flight spawns to return first. Keep `create` short: spawns
-/// wait while it runs. Never call it on the render thread: an in-flight
-/// spawn can take seconds (a first-exec Gatekeeper scan).
-///
-/// `create` must also mark every descriptor it opens close-on-exec before it
-/// returns, as `interprocess` and `std` do. Since issue #1126 only a std
-/// spawn ([`spawn`], or the PTY shell's fork) could still copy one that is
-/// not marked yet.
-pub fn with_spawns_excluded<T>(create: impl FnOnce() -> T) -> T {
-    loop {
-        match SPAWN_EXCLUSION.try_write() {
-            Ok(_exclusive) => return create(),
-            Err(TryLockError::Poisoned(poisoned)) => {
-                let _exclusive = poisoned.into_inner();
-                return create();
-            }
-            Err(TryLockError::WouldBlock) => thread::sleep(SPAWN_EXCLUSION_RETRY),
-        }
     }
 }
 
@@ -358,9 +276,7 @@ impl Error for ProcError {
 ///
 /// The deadline starts after the child is successfully spawned. Process creation
 /// itself is owned by the OS and may still block on platform-level executable
-/// lookup or antivirus hooks. Before that, creating the capture pipes waits
-/// for every other spawn already in flight (see [`spawn_piped`]); that wait
-/// is not counted against the deadline either.
+/// lookup or antivirus hooks.
 ///
 /// - stdin is `/dev/null` so the child can never block waiting on a prompt.
 /// - stdout/stderr are read on dedicated threads; exceeding either cap closes
@@ -925,26 +841,16 @@ mod tests {
 
     use super::test_support::set_pipe_window_hook;
 
-    /// Held by the test that spawns through std and by every test that
-    /// leaves a descriptor inheritable outside the exclusion, so that std
-    /// child never copies it.
-    static STD_SPAWN_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn std_spawn_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        STD_SPAWN_TEST
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Issue #1124: the pipes [`spawn_piped`] creates are never copied into
-    /// a concurrent spawn's child.
+    /// Issues #1124, #1136: the pipes [`spawn_piped`] creates are never
+    /// copied into a concurrent spawn's child, even one that starts inside
+    /// the pipe-creation window.
     ///
-    /// The hook holds the pipe-creation window open for 300 ms with every
-    /// new end inheritable, the state std's macOS `Stdio::piped()` leaves a
-    /// pipe in until its follow-up `fcntl` calls. If the concurrent spawn ran
-    /// inside it, the 30 s `/bin/sleep` would hold the probe's stdout write
-    /// end, the probe would see no EOF after `printf` exits, and the run
-    /// would end in `Timeout` instead of returning `hello`.
+    /// The hook holds the window open, with every new end inheritable (the
+    /// state std's macOS `Stdio::piped()` leaves a pipe in until its
+    /// follow-up `fcntl` calls), until the concurrent spawn has returned. If
+    /// that child copied them, the 30 s `/bin/sleep` would hold the probe's
+    /// stdout write end, the probe would see no EOF after `printf` exits, and
+    /// the run would end in `Timeout` instead of returning `hello`.
     #[cfg(unix)]
     #[test]
     fn piped_spawn_never_leaks_its_pipes_into_a_concurrent_spawn() {
@@ -952,24 +858,30 @@ mod tests {
         use std::sync::Arc;
 
         let (window_open_tx, window_open_rx) = mpsc::channel();
+        let (spawned_tx, spawned_rx) = mpsc::channel::<()>();
         let window_closed = Arc::new(AtomicBool::new(false));
         let prober = {
             let window_closed = Arc::clone(&window_closed);
             thread::spawn(move || {
+                let closed_at = std::rc::Rc::new(std::cell::Cell::new(None));
+                let hook_closed_at = std::rc::Rc::clone(&closed_at);
                 set_pipe_window_hook(move |fds| {
                     for &fd in fds {
                         set_cloexec(fd, false);
                     }
                     let _ = window_open_tx.send(());
-                    thread::sleep(Duration::from_millis(300));
+                    // Open until the concurrent spawn has returned; the cap
+                    // only keeps a broken run from hanging.
+                    let _ = spawned_rx.recv_timeout(Duration::from_secs(5));
                     for &fd in fds {
                         set_cloexec(fd, true);
                     }
                     window_closed.store(true, Ordering::SeqCst);
+                    hook_closed_at.set(Some(Instant::now()));
                 });
-                let started = Instant::now();
                 let result = run_with_timeout(sh("printf hello"), Duration::from_secs(3), 1 << 20);
-                (result, started.elapsed())
+                let since_window = closed_at.get().map(|closed: Instant| closed.elapsed());
+                (result, since_window)
             })
         };
 
@@ -988,11 +900,19 @@ mod tests {
             },
         )
         .expect("spawn /bin/sleep");
-        let spawned_after_window = window_closed.load(Ordering::SeqCst);
+        let spawned_inside_window = !window_closed.load(Ordering::SeqCst);
+        let _ = spawned_tx.send(());
         let (result, elapsed) = prober.join().expect("prober thread");
+        let elapsed = elapsed.expect("the pipe window closed");
         let _ = holder.kill();
         let _ = holder.wait();
 
+        // Control: without it, a spawn that waited out the window would pass
+        // the leak checks below without ever being exposed to the pipes.
+        assert!(
+            spawned_inside_window,
+            "the concurrent spawn must run while the pipe window is open"
+        );
         let out = result.expect(
             "printf exited, so its stdout must reach EOF: the concurrent child must not \
              hold a copy of the write end",
@@ -1000,12 +920,44 @@ mod tests {
         assert_eq!(out.stdout, b"hello");
         assert!(
             elapsed < Duration::from_secs(2),
-            "EOF must follow printf's exit promptly, took {elapsed:?}"
+            "EOF must follow printf's exit promptly, took {elapsed:?} after the window closed"
         );
+    }
+
+    /// Issue #1136: a spawn never waits for another thread's pipe window.
+    ///
+    /// The hook holds `run_with_timeout`'s pipe-creation window open until
+    /// the concurrent spawn returns (or 5 s pass). A spawn that queued
+    /// behind the window, as every spawn did under the old spawn exclusion,
+    /// returns only when the hook gives up.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_never_waits_for_a_pipe_window() {
+        let (window_open_tx, window_open_rx) = mpsc::channel();
+        let (spawned_tx, spawned_rx) = mpsc::channel::<()>();
+        let window = thread::spawn(move || {
+            set_pipe_window_hook(move |_fds| {
+                let _ = window_open_tx.send(());
+                let _ = spawned_rx.recv_timeout(Duration::from_secs(5));
+            });
+            run_with_timeout(sh("printf hello"), Duration::from_secs(10), 1 << 20)
+        });
+
+        window_open_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("run_with_timeout must create its pipes through spawn_piped");
+        let started = Instant::now();
+        let child = sleeper().start().map(KillOnDrop);
+        let elapsed = started.elapsed();
+        let _ = spawned_tx.send(());
+        let out = window.join().expect("window thread");
+        drop(child.expect("spawn /bin/sleep"));
+
         assert!(
-            spawned_after_window,
-            "a concurrent spawn must wait until the pipe window closes"
+            elapsed < Duration::from_secs(2),
+            "the spawn waited {elapsed:?} for another thread's pipe window"
         );
+        assert_eq!(out.expect("printf run").stdout, b"hello");
     }
 
     /// The parent's copy of each child end is closed, so a spawned child's
@@ -1072,73 +1024,45 @@ mod tests {
         assert!(status.expect("wait").success());
     }
 
-    /// Issue #1115: a descriptor created inside a [`with_spawns_excluded`]
-    /// window and marked close-on-exec before the window closes is never
-    /// inherited by a concurrent [`spawn`].
+    /// Issues #1115, #1136: a [`Command`] child holds none of a socket this
+    /// process left inheritable, and the socket's peer sees EOF as soon as
+    /// the parent drops its end.
     ///
-    /// The window is held open for 300 ms with the descriptor inheritable, the
-    /// state macOS leaves a fresh `socket()` or `accept()` descriptor in until
-    /// its follow-up `fcntl`. If the spawn ran inside it, `/bin/sleep` would
-    /// hold the socket for 30 s and the peer would see no EOF.
+    /// The socket stays not close-on-exec for the whole spawn, the state
+    /// macOS leaves a fresh `socket()` or `accept()` descriptor in until its
+    /// follow-up `fcntl`. A std `posix_spawn` child copies it and keeps it for
+    /// its 30 s life, so the peer would see no EOF.
     #[cfg(unix)]
     #[test]
-    fn spawn_never_inherits_a_descriptor_created_in_an_excluded_window() {
+    fn spawned_child_holds_no_socket_the_parent_left_inheritable() {
         use std::os::fd::AsRawFd;
         use std::os::unix::net::UnixStream;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::{Arc, Barrier};
 
-        let _std_spawn = std_spawn_test_lock();
-        let window_open = Arc::new(Barrier::new(2));
-        let window_closed = Arc::new(AtomicBool::new(false));
-        let creator = {
-            let window_open = Arc::clone(&window_open);
-            let window_closed = Arc::clone(&window_closed);
-            thread::spawn(move || {
-                // Create the pair inside the window too: `socketpair` is no
-                // more atomically close-on-exec than `socket`, and another
-                // test's spawn must not copy it either.
-                with_spawns_excluded(|| {
-                    let (held, peer) = UnixStream::pair().expect("socketpair");
-                    // Set before `held` can close: XNU refuses `SO_RCVTIMEO`
-                    // on a socket whose peer is already gone (issue #824).
-                    peer.set_read_timeout(Some(Duration::from_secs(5)))
-                        .expect("read timeout");
-                    set_cloexec(held.as_raw_fd(), false);
-                    window_open.wait();
-                    thread::sleep(Duration::from_millis(300));
-                    set_cloexec(held.as_raw_fd(), true);
-                    window_closed.store(true, Ordering::SeqCst);
-                    (held, peer)
-                })
-            })
-        };
+        let (held, mut peer) = UnixStream::pair().expect("socketpair");
+        // Set before `held` can close: XNU refuses `SO_RCVTIMEO` on a socket
+        // whose peer is already gone (issue #824).
+        peer.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        set_cloexec(held.as_raw_fd(), false);
 
-        window_open.wait();
-        let mut child = spawn(
-            std::process::Command::new("/bin/sleep")
-                .arg("30")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null()),
-        )
-        .expect("spawn /bin/sleep");
-        let spawned_after_window = window_closed.load(Ordering::SeqCst);
-        let (held, mut peer) = creator.join().expect("creator thread");
+        let child = KillOnDrop(sleeper().start().expect("spawn /bin/sleep"));
+        let sockets: Vec<(i32, u32)> = descriptors_of_child(&child.0)
+            .into_iter()
+            .filter(|(_, kind)| *kind == libc::PROX_FDTYPE_SOCKET as u32)
+            .collect();
         drop(held);
 
         let mut byte = [0_u8; 1];
         let read = peer.read(&mut byte);
-        let _ = child.kill();
-        let _ = child.wait();
+        drop(child);
         assert!(
-            matches!(read, Ok(0)),
-            "the peer must see EOF once the creator drops its end, but the \
-             spawned child still holds a copy: {read:?}"
+            sockets.is_empty(),
+            "the child holds socket descriptors it was never given: {sockets:?}"
         );
         assert!(
-            spawned_after_window,
-            "spawn must wait until the excluded window closes"
+            matches!(read, Ok(0)),
+            "the peer must see EOF once the parent drops its end, but the \
+             spawned child still holds a copy: {read:?}"
         );
     }
 
@@ -1337,8 +1261,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn zombie_child_count() -> usize {
         let me = std::process::id().to_string();
-        // Through the spawn exclusion like every other child: a plain
-        // `output()` could copy the socket another test holds inheritable.
+        // Through `Command` like every other child: a plain `output()`
+        // could copy the socket another test holds inheritable.
         let mut ps = std::process::Command::new("ps");
         ps.args(["-A", "-o", "ppid=,stat="]);
         let out = run_with_timeout(ps, Duration::from_secs(10), 4 << 20)
@@ -1422,7 +1346,6 @@ mod tests {
     fn spawned_child_holds_no_descriptor_the_parent_left_inheritable() {
         use std::os::fd::AsRawFd;
 
-        let _std_spawn = std_spawn_test_lock();
         let (mut reader, writer) = io::pipe().expect("pipe");
         set_cloexec(reader.as_raw_fd(), false);
         set_cloexec(writer.as_raw_fd(), false);
@@ -1464,10 +1387,9 @@ mod tests {
     fn inheritable_descriptors_lists_only_descriptors_left_inheritable() {
         use std::os::fd::AsRawFd;
 
-        let _std_spawn = std_spawn_test_lock();
         let (kept, closed) = io::pipe().expect("pipe");
         set_cloexec(kept.as_raw_fd(), false);
-        let listed = with_spawns_excluded(inheritable_descriptors).expect("list descriptors");
+        let listed = inheritable_descriptors().expect("list descriptors");
         assert!(listed.contains(&kept.as_raw_fd()), "{listed:?}");
         assert!(!listed.contains(&closed.as_raw_fd()), "{listed:?}");
         assert!(listed.iter().all(|fd| *fd > 2), "{listed:?}");
